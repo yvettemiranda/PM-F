@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PublicTrade } from "../src/domain/models.js";
 import { ReplayEngine } from "../src/replay/replay-engine.js";
 import { buildCaptureManifest } from "../src/services/capture-manifest.js";
-import { evaluateGoldenExpectations, generateGoldenCandidates } from "../src/services/golden-expectations.js";
+import { evaluateGoldenExpectations, generateGoldenCandidates, renderGoldenCandidatesMarkdown } from "../src/services/golden-expectations.js";
 
 const wallet = "0x0000000000000000000000000000000000000001";
 const trade = (overrides: Partial<PublicTrade>): PublicTrade => ({
@@ -53,6 +53,7 @@ describe("Golden Expectations", () => {
     );
     expect(candidates.every((item) => item.status === "CANDIDATE")).toBe(true);
     expect(evaluateGoldenExpectations(candidates, replay).every((item) => item.resultStatus === "NOT_EVALUATED")).toBe(true);
+    expect(renderGoldenCandidatesMarkdown(candidates)).toContain("用户确认方式");
     const approved = candidates.map((item) => ({ ...item, status: "APPROVED" as const }));
     expect(evaluateGoldenExpectations(approved, replay).every((item) => item.resultStatus === "MATCH")).toBe(true);
   });

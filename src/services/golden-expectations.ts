@@ -168,6 +168,30 @@ export function renderGoldenCandidatesMarkdown(candidates: GoldenExpectation[]):
     item.expectedEventClassification,
     item.status,
   ]);
+  const details = candidates.flatMap((item, index) => {
+    const evidence = (item.evidence.trade ?? item.evidence.activity ?? null) as Record<string, unknown> | null;
+    const timestamp = evidence && typeof evidence.timestamp === "number"
+      ? new Date(evidence.timestamp * 1_000).toISOString()
+      : "—";
+    return [
+      `## ${index + 1}. ${item.caseType}`,
+      "",
+      `- Golden Case ID: \`${item.goldenCaseId}\``,
+      `- Transaction: \`${item.sourceTransactionHash ?? "NONE"}\``,
+      `- Source Event Key: \`${item.sourceEventKey ?? "NONE"}\``,
+      `- Time: \`${timestamp}\``,
+      `- Activity/Side: \`${String(evidence?.type ?? evidence?.side ?? "—")}\``,
+      `- Market: ${String(evidence?.title ?? evidence?.slug ?? evidence?.conditionId ?? "—")}`,
+      `- Outcome: ${String(evidence?.outcome ?? "—")}`,
+      `- Price / Size: \`${String(evidence?.price ?? "—")} / ${String(evidence?.size ?? "—")}\``,
+      `- Expected Signal: \`${item.expectedSignalPresent ? item.expectedSignalType : "NONE"}\``,
+      `- Expected executionEligible: \`${item.expectedExecutionEligible ?? "N/A"}\``,
+      `- Expected Classification: \`${item.expectedEventClassification}\``,
+      `- Expected Reason: \`${item.expectedReason}\``,
+      `- Approval Status: \`${item.status}\``,
+      "",
+    ];
+  });
   return [
     "# Candidate Golden Cases",
     "",
@@ -176,6 +200,11 @@ export function renderGoldenCandidatesMarkdown(candidates: GoldenExpectation[]):
     "| # | Case | Transaction | Expected Signal | executionEligible | Classification | Status |",
     "|---:|---|---|---|---|---|---|",
     ...rows.map((row) => `| ${row.join(" | ")} |`),
+    "",
+    ...details,
+    "## 用户确认方式",
+    "",
+    "请逐项确认或指出需要修改的预期。未经明确确认，系统不会把任何案例改为 `APPROVED`，Golden 状态保持 `NOT_EVALUATED`。",
     "",
   ].join("\n");
 }

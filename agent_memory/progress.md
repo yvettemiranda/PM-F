@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 0.5 已完成核心实现；正在提交干净源码并用同一 commit 重新采集、执行 capture replay 稳定性验证和生成用户审阅报告。
+- Phase 0.5 核心实现和同 commit capture replay 已验证；正在完善用户可审阅的 Candidate Golden 明细并执行最终 clean commit 验证。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -15,6 +15,7 @@
 - Golden candidates 全部保持 `CANDIDATE/NOT_EVALUATED`；未自动批准。
 - 已实现 stale Replay Job → `INTERRUPTED` → 新 Job 重跑；关键事务失败完整回滚。
 - 当前 TypeScript 类型检查通过，11 个测试文件共 37 项测试通过；覆盖 baseline、capital、manifest、Golden、断线、乱序、重复、幂等、事务回滚和 Crash Recovery。
+- commit `376ba80fbfcfe4bceecdac6ddbfcb924a1ad5c2f` 的 clean capture `964354247f7403cfbdf5b7542a19f39b98d3c10652917a3e03bdb0225d8c2dc4` 已从 manifest 重放；stored/new Replay Hash 均为 `af6cdf9c7f81f6311113daf4ce36e3892bf40913f580716d79fbd6ec2e53dfe8`，`stable=true`。
 
 ## Current gate
 - Wallet Identity 已通过。
@@ -24,6 +25,5 @@
 - 未进入 Paper/Live，未接入私钥，未创建订单，未执行交易。
 
 ## Next steps
-- 提交 Phase 0.5 commit，确保工作树 clean。
-- 使用该 commit 重新采集 manifest，随后从同一 capture 重放并验证 stored/new Replay Hash 一致。
+- 提交 Candidate Golden 审阅格式改进，确保工作树 clean 后再做一次最终采集与 manifest 重放。
 - 输出候选 Golden 明细、数据库变更、测试结果和 Paper Gate 结论，等待用户逐项确认候选。
