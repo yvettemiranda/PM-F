@@ -1,0 +1,8 @@
+node_modules/
+data/
+work/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+coverage/
+outputs/

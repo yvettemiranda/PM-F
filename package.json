@@ -1,0 +1,21 @@
+{
+  "name": "ni-k-polymarket-copy-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "phase0:validate": "tsx src/cli/phase0-validate.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.2",
+    "tsx": "4.23.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

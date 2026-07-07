@@ -1,0 +1,92 @@
+export type WalletType = "PROXY_WALLET" | "EOA" | "SAFE" | "DEPOSIT_WALLET" | "UNKNOWN";
+export type IdentityStatus = "IDENTITY_CONFIRMED" | "IDENTITY_UNKNOWN" | "IDENTITY_CONFLICT" | "INACTIVE";
+export type SyncStatus = "SYNCED" | "MINOR_DIFF" | "MAJOR_DESYNC";
+export type RuntimeMode = "OBSERVE_ONLY" | "PAPER" | "LIVE";
+export type SignalType = "TARGET_BUY" | "TARGET_SELL";
+export type SignalStatus = "CREATED" | "VALIDATING" | "READY" | "PUBLISHED" | "REJECTED" | "CANCELLED";
+
+export interface PublicProfile {
+  createdAt?: string | null;
+  proxyWallet?: string | null;
+  name?: string | null;
+  pseudonym?: string | null;
+}
+
+export interface PublicTrade {
+  proxyWallet: string;
+  transactionHash: string;
+  conditionId: string;
+  asset: string;
+  side: "BUY" | "SELL";
+  price: number | string;
+  size: number | string;
+  timestamp: number;
+  outcome?: string;
+  title?: string;
+}
+
+export interface PublicActivity extends PublicTrade {
+  type: string;
+  isCombo?: boolean;
+  usdcSize?: number | string;
+}
+
+export interface PublicPosition {
+  proxyWallet: string;
+  asset: string;
+  conditionId: string;
+  size: number | string;
+  currentValue: number | string;
+  negativeRisk?: boolean;
+  redeemable?: boolean;
+  mergeable?: boolean;
+}
+
+export interface IdentityEvidence {
+  source: string;
+  outcome: "MATCH" | "NO_MATCH" | "UNAVAILABLE" | "CONFLICT";
+  detail: string;
+}
+
+export interface WalletIdentityReport {
+  walletAddress: string;
+  walletType: WalletType;
+  proxyWallet: string | null;
+  chain: "polygon:137";
+  firstSeenTime: string | null;
+  firstSeenSource: string | null;
+  lastActivityTime: string | null;
+  tradeCount: number;
+  tradeCountScope: string;
+  positionCount: number;
+  positionSnapshotTime: string;
+  status: IdentityStatus;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  implementationAddress: string | null;
+  evidence: IdentityEvidence[];
+}
+
+export interface SourceEvent {
+  sourceEventKey: string;
+  trade: PublicTrade;
+  priceUnits: bigint;
+  sizeMicros: bigint;
+  gapEvent: boolean;
+  isCombo: boolean;
+}
+
+export interface Signal {
+  signalId: string;
+  signalIdempotencyKey: string;
+  signalType: SignalType;
+  status: SignalStatus;
+  sourceEventKey: string;
+  walletAddress: string;
+  asset: string;
+  conditionId: string;
+  targetPriceUnits: bigint;
+  targetSizeMicros: bigint;
+  sellRatioNumerator?: bigint;
+  sellRatioDenominator?: bigint;
+  reason: string;
+}
