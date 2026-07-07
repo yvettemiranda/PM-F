@@ -136,6 +136,21 @@ export class PolymarketPublicApi {
     });
   }
 
+  async pUsdBalance(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {
+    const token = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+    const account = address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+    return this.request(this.polygonRpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "eth_call",
+        params: [{ to: token, data: `0x70a08231${account}` }, "latest"],
+      }),
+    });
+  }
+
   async relayerDeployed(address: string, type: "SAFE" | "WALLET"): Promise<ApiCapture<{ deployed: boolean }> | null> {
     try {
       return await this.request(`https://relayer-v2.polymarket.com/deployed?address=${address}&type=${type}`);

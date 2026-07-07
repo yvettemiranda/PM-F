@@ -6,7 +6,7 @@
 
 ## Constraints
 - `ni-k` 与旧版 PolymarketBot 完全独立；不引用、不迁移、不复用旧项目代码、账本、风控、页面或交易逻辑。
-- 当前仅实现 Phase 0 数据验证、Replay 与第一层架构；禁止 Paper/Live、私钥接入、真实订单和链上写操作。
+- 当前实现 Phase 0.5 钱包监控与信号生成层验证；禁止 Paper/Live、私钥接入、模拟/真实订单和链上写操作。
 - 新项目按三层架构设计：钱包监控与信号生成层、模拟交易层、实盘交易层。
 - 第一版只支持一个 Polymarket Profile / Proxy Wallet 地址。
 - 第一阶段优先完成监控、信号、自然语言解释、标准化事件、模拟交易、日志和状态机；不优先开发实盘。
@@ -21,6 +21,10 @@
 - 最小验证集：TypeScript 类型检查、单元/事务测试、真实公开 API 契约采样、Replay Hash 确定性、SQLite `integrity_check` 与 `foreign_key_check`。
 - Replay 只有在身份、数据契约、Golden 样本、资金/仓位基线、幂等、状态机、崩溃恢复和历史复现全部通过后才可标记 `PASSED`。
 - 当前价格采用 18 位、份额采用 6 位定点整数；禁止静默截断外部小数。
+- Signal 只描述目标钱包行为；`executionEligible` 是监控层给未来执行层的硬门禁，不是 Execution 状态。断线期间生成行为 Signal，但必须为 `false` 且原因是 `GAP_EVENT`。
+- Position Baseline 使用历史/跟踪双桶；卖出优先减少启动后跟踪桶，不足部分再减少历史桶，SELL Ratio 只使用跟踪桶。
+- 资金估算同时保存 `capitalEstimateStatus=COMPLETE/INCOMPLETE/FAILED` 和 `capitalConfidence=HIGH/MEDIUM/LOW`；MEDIUM 使用 10 pUSD fallback，LOW 禁止进入执行阶段。
+- Golden Expectations 必须先生成 `CANDIDATE`，只有用户人工确认后才能变更为 `APPROVED` 并参与 Golden Passed。
 
 ## Confirmed defaults
 - 断线交易只记录、不补跟，但用于修正后续目标地址净持仓；同步分为 `SYNCED / MINOR_DIFF / MAJOR_DESYNC`。

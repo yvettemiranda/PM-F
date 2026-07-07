@@ -69,7 +69,7 @@ describe("ReplayEngine", () => {
     expect(report.metrics.finalRecognizedPositions["asset-1"]).toBe("70000000");
   });
 
-  it("records gap trades without publishing signals", () => {
+  it("records a gap behavior signal that is never execution eligible", () => {
     const report = new ReplayEngine().run({
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
@@ -80,8 +80,51 @@ describe("ReplayEngine", () => {
       hasGoldenExpectations: true,
     });
     expect(report.metrics.gapEvents).toBe(1);
-    expect(report.signals).toHaveLength(0);
-    expect(report.metrics.finalRecognizedPositions["asset-1"]).toBe("100000000");
+    expect(report.signals).toHaveLength(1);
+    expect(report.signals[0]?.executionEligible).toBe(false);
+    expect(report.signals[0]?.executionBlockReason).toBe("GAP_EVENT");
+    expect(report.metrics.finalRecognizedPositions["asset-1"]).toBeUndefined();
+    expect(report.metrics.finalHistoricalPositions["asset-1"]).toBe("100000000");
+  });
+
+  it("consumes post-baseline tracked shares before historical baseline shares", () => {
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      positionBaseline: [{ asset: "asset-1", size: "100" }],
+      trades: [
+        trade({ transactionHash: "0xbuy", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xsell", side: "SELL", size: "50", timestamp: 101 }),
+      ],
+      activity: [],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+      hasPositionBaseline: true,
+    });
+    const sell = report.signals.find((signal) => signal.signalType === "TARGET_SELL");
+    expect(sell?.sellRatioNumerator).toBe("10000000");
+    expect(sell?.sellRatioDenominator).toBe("10000000");
+    expect(report.metrics.finalRecognizedPositions["asset-1"]).toBeUndefined();
+    expect(report.metrics.finalHistoricalPositions["asset-1"]).toBe("60000000");
+  });
+
+  it("does not turn a gap buy into a later executable tracked position", () => {
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xgap", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xsell", side: "SELL", size: "5", timestamp: 102 }),
+      ],
+      activity: [],
+      gaps: [{ fromTimestamp: 99, toTimestamp: 101 }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+    expect(report.signals).toHaveLength(1);
+    expect(report.signals[0]?.executionEligible).toBe(false);
+    expect(report.metrics.historicalSells).toBe(1);
+    expect(report.metrics.finalHistoricalPositions["asset-1"]).toBe("5000000");
   });
 
   it("is deterministic", () => {
@@ -94,6 +137,25 @@ describe("ReplayEngine", () => {
       hasGoldenExpectations: true,
     };
     expect(new ReplayEngine().run(input).reportHash).toBe(new ReplayEngine().run(input).reportHash);
+  });
+
+  it("sorts out-of-order 3-1-2 input before projecting positions", () => {
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0x3", side: "SELL", size: "30", timestamp: 3 }),
+        trade({ transactionHash: "0x1", size: "100", timestamp: 1 }),
+        trade({ transactionHash: "0x2", size: "20", timestamp: 2 }),
+      ],
+      activity: [],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+    const sell = report.signals.find((signal) => signal.signalType === "TARGET_SELL");
+    expect(sell?.sellRatioNumerator).toBe("30000000");
+    expect(sell?.sellRatioDenominator).toBe("120000000");
+    expect(report.metrics.finalRecognizedPositions["asset-1"]).toBe("90000000");
   });
 
   it("blocks replay signal generation when identity is unknown", () => {

@@ -63,6 +63,15 @@ function percentile(values: readonly number[], ratio: number): number {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)] ?? 0;
 }
 
+function isTradeActivity(activity: PublicActivity): activity is PublicActivity & PublicTrade {
+  return activity.type === "TRADE"
+    && typeof activity.conditionId === "string"
+    && typeof activity.asset === "string"
+    && (activity.side === "BUY" || activity.side === "SELL")
+    && activity.price !== undefined
+    && activity.size !== undefined;
+}
+
 export function validateApiContract(input: ApiContractInput): ApiContractReport {
   const schemaErrors: string[] = [];
   for (const [index, trade] of input.trades.entries()) {
@@ -103,7 +112,7 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
     maxSizeFractionDigits = Math.max(maxSizeFractionDigits, fractionDigits(trade.size));
   }
   for (const item of input.activity) {
-    if (item.type !== "TRADE") continue;
+    if (!isTradeActivity(item)) continue;
     const key = sourceEventKey(item);
     activityEventCounts.set(key, (activityEventCounts.get(key) ?? 0) + 1);
   }

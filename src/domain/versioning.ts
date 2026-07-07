@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "1.2.0",
-  signalVersion: "1.1.0",
-  strategyVersion: "1.0.0",
+  schemaVersion: "1.4.0",
+  signalVersion: "1.3.0",
+  strategyVersion: "1.1.0",
   riskVersion: "1.0.0",
-  replayVersion: "1.2.0",
+  replayVersion: "1.5.0",
 });
 
 export const RULESET = Object.freeze({

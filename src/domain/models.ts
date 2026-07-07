@@ -4,6 +4,13 @@ export type SyncStatus = "SYNCED" | "MINOR_DIFF" | "MAJOR_DESYNC";
 export type RuntimeMode = "OBSERVE_ONLY" | "PAPER" | "LIVE";
 export type SignalType = "TARGET_BUY" | "TARGET_SELL";
 export type SignalStatus = "CREATED" | "VALIDATING" | "READY" | "PUBLISHED" | "REJECTED" | "CANCELLED";
+export type EventClassification =
+  | "STANDARD_TRADE"
+  | "GAP_TRADE"
+  | "HISTORICAL_POSITION_SELL"
+  | "COMBO_ACTIVITY"
+  | "NON_TRADE_ACTIVITY"
+  | "UNRECOGNIZED";
 
 export interface PublicProfile {
   createdAt?: string | null;
@@ -25,10 +32,20 @@ export interface PublicTrade {
   title?: string;
 }
 
-export interface PublicActivity extends PublicTrade {
+export interface PublicActivity {
+  proxyWallet: string;
+  timestamp: number;
+  conditionId?: string;
+  asset?: string;
+  side?: "BUY" | "SELL";
+  price?: number | string;
+  size?: number | string;
+  transactionHash: string;
   type: string;
   isCombo?: boolean;
   usdcSize?: number | string;
+  outcome?: string;
+  title?: string;
 }
 
 export interface PublicPosition {
@@ -36,7 +53,11 @@ export interface PublicPosition {
   asset: string;
   conditionId: string;
   size: number | string;
+  avgPrice: number | string;
   currentValue: number | string;
+  title?: string;
+  slug?: string;
+  outcome?: string;
   negativeRisk?: boolean;
   redeemable?: boolean;
   mergeable?: boolean;
@@ -89,4 +110,7 @@ export interface Signal {
   sellRatioNumerator?: bigint;
   sellRatioDenominator?: bigint;
   reason: string;
+  eventClassification: EventClassification;
+  executionEligible: boolean;
+  executionBlockReason?: string;
 }
