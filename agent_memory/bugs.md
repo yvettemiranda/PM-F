@@ -1,10 +1,10 @@
 # Bugs And Risks
 
 ## Active blockers
-- Golden Expectations 当前全部是 `CANDIDATE`，必须由用户确认后才能 `APPROVED`；因此 Golden Passed 仍为否。
 - Data API Trades/Activity 在 offset 超过 3000 时返回上限错误；当前历史样本不是完整钱包历史，不能用当前 Positions 倒推历史起点。
 - 141 条 Position Baseline 是当前启动快照，只适用于快照之后的增量监控；不能冒充历史 Replay 窗口开始时的仓位。
 - 历史 BUY 缺少交易时点 pUSD/Positions 快照，只能保存 `INCOMPLETE/MEDIUM` 和 10 pUSD fallback，不能生成历史比例资金结果。
+- Golden 1-5 已 `APPROVED/MATCH/PASSED`；该门禁已解除，但不消除历史数据不完整和前向 baseline 验证不足。
 
 ## Active risks
 - 事件分类依赖 Replay gap/baseline 上下文，已从 raw event 单值字段迁移为 `replay_event_classifications` 版本化投影；raw event 上的旧分类列不应作为权威读取来源。
