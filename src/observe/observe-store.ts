@@ -469,6 +469,20 @@ export class ObserveStore {
     const drift = this.database
       .prepare("SELECT 1 FROM reconciliation_reports WHERE observe_run_id=? AND sync_status!='SYNCED' LIMIT 1")
       .get(observeRunId);
+    const reconciliationCounts = this.database
+      .prepare(
+        `SELECT
+          SUM(CASE WHEN sync_status='MINOR_DIFF' THEN 1 ELSE 0 END) minor_count,
+          SUM(CASE WHEN sync_status='MAJOR_DESYNC' THEN 1 ELSE 0 END) major_count
+         FROM reconciliation_reports WHERE observe_run_id=?`,
+      )
+      .get(observeRunId) as { minor_count: number | null; major_count: number | null };
+    const runTarget = this.database
+      .prepare("SELECT target_id FROM observe_runs WHERE observe_run_id=?")
+      .get(observeRunId) as { target_id: string };
+    const openConnectionWindow = this.database
+      .prepare("SELECT 1 FROM connection_windows WHERE target_id=? AND reconnected_at IS NULL LIMIT 1")
+      .get(runTarget.target_id);
     return {
       observeRunId,
       startedAt: row.started_at,
@@ -482,7 +496,11 @@ export class ObserveStore {
       gapEvents: row.gap_events,
       reconciliationCount: row.reconciliation_count,
       stateDriftDetected: drift !== undefined,
+      minorDiffCount: reconciliationCounts.minor_count ?? 0,
+      majorDesyncCount: reconciliationCounts.major_count ?? 0,
+      unrecoveredConnectionGap: openConnectionWindow !== undefined,
       checkpointRecovered: row.recovered_from_checkpoint !== 0,
+      checkpointProjectionHashMismatch: false,
       lastCheckpointId: checkpoint?.checkpoint_id ?? null,
       finalSyncStatus: reconciliation?.sync_status ?? null,
     };

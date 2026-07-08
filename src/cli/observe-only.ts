@@ -38,8 +38,9 @@ try {
   const metrics = await runner.run(controller.signal);
   const paperGateEligible = metrics.durationMs >= minimumSoakSeconds * 1_000
     && !sourceVersion.dirty
-    && metrics.failedPolls === 0
-    && !metrics.stateDriftDetected
+    && metrics.majorDesyncCount === 0
+    && !metrics.unrecoveredConnectionGap
+    && !metrics.checkpointProjectionHashMismatch
     && metrics.finalSyncStatus === "SYNCED"
     && metrics.successfulPolls > 0;
   const report = {
@@ -55,9 +56,14 @@ try {
       blockers: [
         ...(metrics.durationMs < minimumSoakSeconds * 1_000 ? ["MINIMUM_SOAK_NOT_REACHED"] : []),
         ...(sourceVersion.dirty ? ["SOURCE_CODE_DIRTY"] : []),
-        ...(metrics.failedPolls > 0 ? ["API_FAILURES_OBSERVED"] : []),
-        ...(metrics.stateDriftDetected ? ["STATE_DRIFT_DETECTED"] : []),
+        ...(metrics.majorDesyncCount > 0 ? ["MAJOR_DESYNC_OBSERVED"] : []),
+        ...(metrics.unrecoveredConnectionGap ? ["UNRECOVERED_CONNECTION_GAP"] : []),
+        ...(metrics.checkpointProjectionHashMismatch ? ["CHECKPOINT_PROJECTION_HASH_MISMATCH"] : []),
         ...(metrics.finalSyncStatus !== "SYNCED" ? [`FINAL_SYNC_STATUS:${metrics.finalSyncStatus ?? "NONE"}`] : []),
+      ],
+      warnings: [
+        ...(metrics.failedPolls > 0 && !metrics.unrecoveredConnectionGap ? ["RECOVERED_API_FAILURES_OBSERVED"] : []),
+        ...(metrics.minorDiffCount > 0 && metrics.finalSyncStatus === "SYNCED" ? ["TRANSIENT_MINOR_DIFF_OBSERVED"] : []),
       ],
     },
     safety: {

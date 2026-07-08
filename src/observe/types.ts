@@ -95,7 +95,11 @@ export interface ObserveRunMetrics {
   gapEvents: number;
   reconciliationCount: number;
   stateDriftDetected: boolean;
+  minorDiffCount: number;
+  majorDesyncCount: number;
+  unrecoveredConnectionGap: boolean;
   checkpointRecovered: boolean;
+  checkpointProjectionHashMismatch: boolean;
   lastCheckpointId: string | null;
   finalSyncStatus: SyncStatus | null;
 }

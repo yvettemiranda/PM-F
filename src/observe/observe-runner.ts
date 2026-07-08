@@ -214,7 +214,10 @@ export class ObserveOnlyRunner {
       this.store.stopRun(started.observeRunId, this.now().toISOString(), reason, failed);
     }
     const metrics = this.store.runMetrics(started.observeRunId);
-    if (this.checkpointHashMismatch) metrics.stateDriftDetected = true;
+    if (this.checkpointHashMismatch) {
+      metrics.stateDriftDetected = true;
+      metrics.checkpointProjectionHashMismatch = true;
+    }
     return metrics;
   }
 }

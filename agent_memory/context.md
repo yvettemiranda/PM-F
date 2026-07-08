@@ -25,6 +25,7 @@
 - Position Baseline 使用历史/跟踪双桶；卖出优先减少启动后跟踪桶，不足部分再减少历史桶，SELL Ratio 只使用跟踪桶。
 - Observe Only 使用 Trades 与 Activity 双源归一化交易；Activity 先到、Trades 后到时共享交易幂等键，后到数据只计重复。REDEEM 更新仓位投影但不生成交易 Signal。
 - Observe checkpoint 保存事件游标、replay state、投影 hash 和资金快照；恢复窗口事件仍生成行为 Signal，但固定 `executionEligible=false/GAP_EVENT`。
+- Observe Paper Gate 允许已恢复的 API 失败和最终已恢复的短暂 `MINOR_DIFF`，但会保留 warning；未恢复连接 gap、checkpoint 投影 hash 不一致、任何 `MAJOR_DESYNC` 或最终非 `SYNCED` 都是硬阻断。
 - 资金估算同时保存 `capitalEstimateStatus=COMPLETE/INCOMPLETE/FAILED` 和 `capitalConfidence=HIGH/MEDIUM/LOW`；MEDIUM 使用 10 pUSD fallback，LOW 禁止进入执行阶段。
 - Golden Expectations 必须先生成 `CANDIDATE`，只有用户人工确认后才能变更为 `APPROVED` 并参与 Golden Passed。
 
