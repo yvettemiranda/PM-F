@@ -5,6 +5,7 @@ import { resolveSourceVersion } from "../infra/source-version.js";
 import { ObserveOnlyRunner } from "../observe/observe-runner.js";
 import { ObserveStore } from "../observe/observe-store.js";
 import { PublicObserveDataSource } from "../observe/public-data-source.js";
+import { PublicSignalMarketMetadataProvider } from "../signal-context/public-market-metadata.js";
 
 const args = process.argv.slice(2);
 const address = args.find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
@@ -29,6 +30,7 @@ const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
   walletAddress: address,
   pollIntervalMs: pollSeconds * 1_000,
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
+  signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),
 });
 const controller = new AbortController();
 process.once("SIGINT", () => controller.abort());
@@ -36,7 +38,13 @@ process.once("SIGTERM", () => controller.abort());
 
 try {
   const metrics = await runner.run(controller.signal);
-  const paperGateEligible = metrics.durationMs >= minimumSoakSeconds * 1_000
+  const shortSoakPassed = !sourceVersion.dirty
+    && metrics.majorDesyncCount === 0
+    && !metrics.unrecoveredConnectionGap
+    && !metrics.checkpointProjectionHashMismatch
+    && metrics.finalSyncStatus === "SYNCED"
+    && metrics.successfulPolls > 0;
+  const liveStabilityEligible = metrics.durationMs >= minimumSoakSeconds * 1_000
     && !sourceVersion.dirty
     && metrics.majorDesyncCount === 0
     && !metrics.unrecoveredConnectionGap
@@ -51,9 +59,11 @@ try {
     mode: "OBSERVE_ONLY",
     metrics,
     acceptance: {
+      observeStatus: shortSoakPassed ? "SHORT_SOAK_PASSED" : "SHORT_SOAK_FAILED",
+      paperDevelopmentEligible: shortSoakPassed,
       minimumSoakSeconds,
-      paperGateEligible,
-      blockers: [
+      liveStabilityEligible,
+      liveStabilityBlockers: [
         ...(metrics.durationMs < minimumSoakSeconds * 1_000 ? ["MINIMUM_SOAK_NOT_REACHED"] : []),
         ...(sourceVersion.dirty ? ["SOURCE_CODE_DIRTY"] : []),
         ...(metrics.majorDesyncCount > 0 ? ["MAJOR_DESYNC_OBSERVED"] : []),

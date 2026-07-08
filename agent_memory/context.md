@@ -6,7 +6,7 @@
 
 ## Constraints
 - `ni-k` 与旧版 PolymarketBot 完全独立；不引用、不迁移、不复用旧项目代码、账本、风控、页面或交易逻辑。
-- 当前实现 Phase 0.5 钱包监控与信号生成层验证；禁止 Paper/Live、私钥接入、模拟/真实订单和链上写操作。
+- 当前进入 Phase 1A Paper Executor；允许模拟账户、模拟订单和模拟成交，继续禁止 Live、私钥、真实订单、认证交易接口和链上写操作。
 - 新项目按三层架构设计：钱包监控与信号生成层、模拟交易层、实盘交易层。
 - 第一版只支持一个 Polymarket Profile / Proxy Wallet 地址。
 - 第一阶段优先完成监控、信号、自然语言解释、标准化事件、模拟交易、日志和状态机；不优先开发实盘。
@@ -26,6 +26,8 @@
 - Observe Only 使用 Trades 与 Activity 双源归一化交易；Activity 先到、Trades 后到时共享交易幂等键，后到数据只计重复。REDEEM 更新仓位投影但不生成交易 Signal。
 - Observe checkpoint 保存事件游标、replay state、投影 hash 和资金快照；恢复窗口事件仍生成行为 Signal，但固定 `executionEligible=false/GAP_EVENT`。
 - Observe Paper Gate 允许已恢复的 API 失败和最终已恢复的短暂 `MINOR_DIFF`，但会保留 warning；未恢复连接 gap、checkpoint 投影 hash 不一致、任何 `MAJOR_DESYNC` 或最终非 `SYNCED` 都是硬阻断。
+- 用户已明确将 24 小时 Observe Only soak 从 Paper 硬门禁延期为 Live Gate 前置项；短时 Observe 状态记为 `SHORT_SOAK_PASSED`，延期不代表取消。
+- Paper 只能消费 `PUBLISHED && executionEligible=true` 的 Signal 及其不可变 `signal_execution_context`，禁止读取 `raw_events`。
 - 资金估算同时保存 `capitalEstimateStatus=COMPLETE/INCOMPLETE/FAILED` 和 `capitalConfidence=HIGH/MEDIUM/LOW`；MEDIUM 使用 10 pUSD fallback，LOW 禁止进入执行阶段。
 - Golden Expectations 必须先生成 `CANDIDATE`，只有用户人工确认后才能变更为 `APPROVED` 并参与 Golden Passed。
 
@@ -54,3 +56,4 @@
 - 所有外部请求必须具备 timeout、有限重试、指数退避、jitter 和限流；关键时间使用 UTC 并记录服务器时钟偏移、数据新鲜度和端到端延迟。
 - 优化优先级固定为正确性高于安全性、高于稳定性、高于延迟；不得为了低延迟绕过确认、幂等、状态机或风控。
 - Phase 0、Replay、Observe Only、Paper 仅本机 `127.0.0.1` 运行；Live 部署位置以后单独评估。
+- Paper 盘口只读公开无认证 CLOB market data，必须使用完整深度 VWAP 和 2 秒新鲜度门禁；不得调用认证 user channel 或任何下单端点。

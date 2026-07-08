@@ -7,6 +7,7 @@ import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../domain/version
 import type { SourceVersion } from "../infra/source-version.js";
 import { captureIdentity } from "../services/capture-manifest.js";
 import type { CapitalEstimate } from "../services/capital-estimator.js";
+import type { SignalContextBundle } from "../signal-context/execution-context.js";
 import { OBSERVE_SIGNAL_VERSION } from "./position-projector.js";
 import type {
   ObserveBaseline,
@@ -47,6 +48,7 @@ export interface CommitPollInput {
   projection: ObserveProjectionResult;
   signalsToEmit: ObserveSignal[];
   capitalEstimate: CapitalEstimate;
+  signalContexts: SignalContextBundle[];
   reconciliation: ReconciliationResult;
   replayState: string;
   gapRecovered: boolean;
@@ -301,8 +303,14 @@ export class ObserveStore {
         );
       this.savePollCaptures(pollId, input.snapshot);
       for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
-      this.insertCapitalEstimate(input.baseline.targetId, input.capitalEstimate, input.completedAt);
+      this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
+      for (const bundle of input.signalContexts) {
+        if (bundle.capitalDecision) {
+          this.insertCapitalEstimate(input.baseline.targetId, bundle.signal.sourceEventKey, bundle.capitalDecision, input.completedAt);
+        }
+      }
       for (const signal of input.signalsToEmit) this.insertObserveSignal(input, pollId, signal);
+      for (const bundle of input.signalContexts) this.insertSignalExecutionContext(bundle);
 
       this.database.prepare("DELETE FROM observe_position_projection WHERE baseline_run_id=?").run(input.baseline.baselineRunId);
       const insertProjection = this.database.prepare(
@@ -598,7 +606,12 @@ export class ObserveStore {
       );
   }
 
-  private insertCapitalEstimate(targetId: string, estimate: CapitalEstimate, createdAt: string): void {
+  private insertCapitalEstimate(
+    targetId: string,
+    sourceEventKey: string | null,
+    estimate: CapitalEstimate,
+    createdAt: string,
+  ): void {
     this.database
       .prepare(
         `INSERT OR REPLACE INTO capital_estimates(
@@ -608,11 +621,12 @@ export class ObserveStore {
           wallet_balance_snapshot_time,target_trade_timestamp,fallback_amount_micros,schema_version,
           strategy_version,risk_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
           source_code_dirty,created_at
-        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         estimate.capitalEstimateId,
         targetId,
+        sourceEventKey,
         estimate.positionValueMicros,
         estimate.walletBalanceMicros,
         estimate.targetVisibleCapitalMicros,
@@ -637,6 +651,7 @@ export class ObserveStore {
   }
 
   private insertObserveSignal(input: CommitPollInput, pollId: string, signal: ObserveSignal): void {
+    const bundle = input.signalContexts.find((item) => item.signal.signalId === signal.signalId);
     this.database
       .prepare(
         `INSERT OR IGNORE INTO signals(
@@ -672,7 +687,7 @@ export class ObserveStore {
         signal.executionEligible ? 1 : 0,
         signal.executionBlockReason,
         signal.eventClassification,
-        input.capitalEstimate.capitalEstimateId,
+        bundle?.capitalDecision?.capitalEstimateId ?? null,
         this.sourceVersion.dirty ? 1 : 0,
         input.baseline.baselineRunId,
         input.observeRunId,
@@ -727,5 +742,34 @@ export class ObserveStore {
         this.sourceVersion.dirty ? 1 : 0,
       );
     });
+  }
+
+  private insertSignalExecutionContext(bundle: SignalContextBundle): void {
+    this.database
+      .prepare(
+        `INSERT INTO signal_execution_contexts(
+          context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+          target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
+          market_metadata_hash,ruleset_hash,schema_version,signal_version,
+          strategy_version,source_code_commit,source_code_dirty,created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        bundle.context.contextId,
+        bundle.context.signalId,
+        bundle.context.capitalDecisionId,
+        bundle.context.targetTradeCapitalRatioPpm,
+        bundle.context.targetTradeTimestamp,
+        bundle.context.marketEndTime,
+        JSON.stringify(bundle.context.marketMetadataSnapshot),
+        bundle.context.marketMetadataHash,
+        bundle.context.rulesetHash,
+        VERSIONS.schemaVersion,
+        VERSIONS.signalVersion,
+        VERSIONS.strategyVersion,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        bundle.context.createdAt,
+      );
   }
 }

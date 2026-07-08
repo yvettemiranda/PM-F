@@ -15,6 +15,40 @@ export interface PagedResult<T> {
   stopReason: string;
 }
 
+export interface ClobOrderbook {
+  market: string;
+  asset_id: string;
+  timestamp: string;
+  hash: string;
+  bids: Array<{ price: string; size: string }>;
+  asks: Array<{ price: string; size: string }>;
+  min_order_size?: string;
+  tick_size?: string;
+  neg_risk?: boolean;
+}
+
+export interface ClobMarket {
+  condition_id: string;
+  question?: string;
+  market_slug?: string;
+  end_date_iso?: string;
+  closed: boolean;
+  active?: boolean;
+  accepting_orders?: boolean;
+  taker_base_fee?: number;
+  is_50_50_outcome?: boolean;
+  tokens: Array<{ token_id: string; outcome: string; price?: number; winner?: boolean }>;
+}
+
+export interface ClobMarketInfo {
+  tbf: number;
+  mbf: number;
+  fd?: { r: number | string; e: number | string; to: boolean };
+  t: Array<{ t: string; o: string }>;
+  mts: number;
+  mos: number;
+}
+
 export interface PublicApiOptions {
   timeoutMs?: number;
   maxRetries?: number;
@@ -136,6 +170,22 @@ export class PolymarketPublicApi {
 
   async clobTime(): Promise<ApiCapture<number>> {
     return this.request("https://clob.polymarket.com/time");
+  }
+
+  async orderbook(assetId: string): Promise<ApiCapture<ClobOrderbook>> {
+    return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`);
+  }
+
+  async feeRate(assetId: string): Promise<ApiCapture<{ base_fee: number }>> {
+    return this.request(`https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`);
+  }
+
+  async clobMarket(conditionId: string): Promise<ApiCapture<ClobMarket>> {
+    return this.request(`https://clob.polymarket.com/markets/${encodeURIComponent(conditionId)}`);
+  }
+
+  async clobMarketInfo(conditionId: string): Promise<ApiCapture<ClobMarketInfo>> {
+    return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`);
   }
 
   async contractCode(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {

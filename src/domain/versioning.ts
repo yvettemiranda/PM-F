@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "1.5.0",
-  signalVersion: "1.3.0",
-  strategyVersion: "1.2.0",
+  schemaVersion: "2.0.0",
+  signalVersion: "1.4.0",
+  strategyVersion: "2.0.0",
   riskVersion: "1.0.0",
   replayVersion: "1.5.0",
+  paperVersion: "1.0.0",
 });
 
 export const RULESET = Object.freeze({
@@ -30,6 +31,8 @@ export const RULESET = Object.freeze({
   maxBackoffMs: 30_000,
   clockUnsafeThresholdMs: 1_000,
   orderbookMaxAgeMs: 2_000,
+  paperInitialBalanceMicros: 1_000_000_000,
+  paperFeeRoundingMicros: 10,
 });
 
 function stable(value: unknown): unknown {

@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 0.5 Observe Only Runner 已实现并完成短时真实地址验证；24 小时连续运行门禁尚未满足，因此仍禁止进入 Paper。
+- 用户已授权进入 Phase 1A；严格隔离的 Paper Executor 核心闭环、迁移和自动化测试已完成，正在做最终 clean-commit 验收。24 小时 Observe soak 延期到 Live Gate 前，仍未执行且不得视为通过。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -19,15 +19,21 @@
 - 已新增 Observe Only Runner、1.5.0 SQLite migration、checkpoint、position projection、capital snapshot 关联、reconciliation report、单实例和 stale-run 恢复。
 - 已覆盖正常连续轮询、API 临时失败、断线 gap、重启 checkpoint、重复、3-1-2 乱序、REDEEM 投影、Activity/Trades 先后到达去重和恢复窗口截断保护；当前 12 个测试文件共 44 项测试通过。
 - 真实地址短时运行发现并修正 Activity 比 Trades 更早可见的成交，以及 REDEEM 导致的仓位归零；修正后 25.467 秒运行 3 次成功轮询、0 次失败、3 个 gap 事件、3 个非执行 Signal、3 次对账，最终 `SYNCED` 且未发现漂移。
+- Phase 1A 新增不可变 `signal_execution_context`，逐 BUY 保存时间一致的 capital decision、目标交易时间、市场结束时间和市场元数据；Paper 不读取 `raw_events`。
+- Paper Executor 已实现 1000 pUSD 独立账户、signal cutoff、消费 checkpoint、三级资金决策、reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、10% 普通卖出、15% 止损、止损优先、到期 settlement/redeem 和组合账本。
+- 已接入公开无认证 `GET /book`、`GET /clob-markets/{condition}` 与 `GET /markets/{condition}`；真实采样确认订单簿、费率曲线和未结算状态可读，全程未调用认证/交易端点。
+- 当前 13 个测试文件共 67 项测试通过；新增覆盖比例/兜底/拒绝资金、Gap、历史卖出、零成交重试、部分成交、价格范围、stale、超时释放、多仓位、两类 pending、止损优先、结算、非零费用、重复幂等、并发 reservation、Crash 回滚、restart、Paper runner checkpoint，以及 context 构建失败禁止发布可执行 Signal。
 
 ## Current gate
 - Wallet Identity 已通过。
 - 当前 baseline 和实时资金快照已建立。
 - Golden 1-5 已通过。
 - Data API 历史仍被 offset 3000 上限截断，历史 Replay 保持 `INCOMPLETE`。
-- Observe 短时功能验收已通过，但默认 24 小时 soak 尚未完成；Paper Gate 保持关闭。
-- 未进入 Paper/Live，未接入私钥，未创建订单，未执行交易。
+- Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
+- 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
+- Phase 1A 只完成实现和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
+- Live Gate 明确未通过：24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性和用户再次授权均未完成。
 
 ## Next steps
-- 以 clean commit 启动至少 24 小时 Observe Only soak；要求无失败轮询、无状态漂移、最终 `SYNCED`。
-- 24 小时报告通过后再重新判定 Paper Gate；系统不得自动升级模式。
+- Phase 1B 使用新产生且带 execution context 的实时 Signal 执行持续 Paper 模拟验收。
+- Live Gate 前再统一执行 24 小时 Observe、Paper 稳定性、Crash Recovery 和长时间一致性验证。

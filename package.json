@@ -12,7 +12,8 @@
     "test": "vitest run",
     "phase0:validate": "tsx src/cli/phase0-validate.ts",
     "phase05:replay-capture": "tsx src/cli/replay-capture.ts",
-    "observe:run": "tsx src/cli/observe-only.ts"
+    "observe:run": "tsx src/cli/observe-only.ts",
+    "paper:run": "tsx src/cli/paper-run.ts"
   },
   "devDependencies": {
     "@types/node": "24.13.2",

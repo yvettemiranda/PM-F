@@ -338,4 +338,79 @@ describe("ObserveOnlyRunner", () => {
     expect((check.prepare("SELECT status FROM observe_polls").get() as { status: string }).status).toBe("PROCESSING_FAILED");
     check.close();
   });
+
+  it("emits an immutable execution context and per-BUY capital decision", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({ transactionHash: "0xcontext", timestamp: baselineSecond + 70 });
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      snapshot([buy], [position("110")], "2026-07-08T00:01:10.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      signalMarketMetadataProvider: {
+        async market() {
+          return {
+            sourceUrl: "https://clob.test/markets/condition",
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: "0xcondition",
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [{ token_id: "asset-1", outcome: "Yes" }],
+            },
+          };
+        },
+      },
+    });
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath);
+    const context = check.prepare(
+      `SELECT c.target_trade_capital_ratio_ppm,ce.source_event_key
+       FROM signal_execution_contexts c JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id`,
+    ).get() as { target_trade_capital_ratio_ppm: string; source_event_key: string };
+    expect(BigInt(context.target_trade_capital_ratio_ppm)).toBeGreaterThan(0n);
+    expect(context.source_event_key).toBeTruthy();
+    expect(() => check.prepare("UPDATE signal_execution_contexts SET market_end_time=?").run("2099-01-01T00:00:00Z")).toThrow("immutable");
+    check.close();
+  });
+
+  it("does not publish a Paper-eligible signal when execution context construction fails", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({ transactionHash: "0xcontext-fail", timestamp: baselineSecond + 70 });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([
+        snapshot([], [position("100")], now.toISOString()),
+        snapshot([buy], [position("110")], "2026-07-08T00:01:10.000Z"),
+      ]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+        signalMarketMetadataProvider: { async market() { throw new Error("market metadata unavailable"); } },
+      },
+    );
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:10.000Z");
+    expect(await runner.pollOnce()).toBe(false);
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId).failedPolls).toBe(1);
+    store.close();
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare("SELECT count(*) count FROM signals").get() as { count: number }).count).toBe(0);
+    expect((check.prepare("SELECT status FROM observe_polls WHERE sequence=2").get() as { status: string }).status).toBe("PROCESSING_FAILED");
+    check.close();
+  });
 });

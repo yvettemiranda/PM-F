@@ -5,6 +5,7 @@ import { projectObserveEvents } from "./position-projector.js";
 import { reconcileProjection } from "./reconciliation.js";
 import { ObserveStore, type StartedObserveRun } from "./observe-store.js";
 import type { ObserveDataSource, ObserveEvent, ObserveRunMetrics } from "./types.js";
+import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
 
 export interface ObserveRunnerOptions {
   walletAddress: string;
@@ -13,6 +14,7 @@ export interface ObserveRunnerOptions {
   staleRunAfterMs?: number;
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
+  signalMarketMetadataProvider?: SignalMarketMetadataProvider;
 }
 
 function activityAsTrade(activity: PublicActivity): PublicTrade | null {
@@ -170,6 +172,50 @@ export class ObserveOnlyRunner {
       walletBalanceMicros,
       walletBalanceSnapshotTime: snapshot.pUsdBalance.fetchedAt,
     });
+    const signalContexts: SignalContextBundle[] = [];
+    try {
+      if (this.options.signalMarketMetadataProvider) {
+      const marketCache = new Map<string, Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>();
+      const eventByKey = new Map(newEvents.map((event) => [event.sourceEventKey, event]));
+      for (const signal of signalsToEmit.filter((item) => item.executionEligible)) {
+        const event = eventByKey.get(signal.sourceEventKey);
+        if (!event?.trade) throw new Error(`Signal event missing: ${signal.signalId}`);
+        let market = marketCache.get(signal.conditionId);
+        if (!market) {
+          market = await this.options.signalMarketMetadataProvider.market(signal.conditionId);
+          marketCache.set(signal.conditionId, market);
+        }
+        const capitalDecision = signal.signalType === "TARGET_BUY" ? estimateTargetCapital({
+          walletAddress: this.options.walletAddress,
+          sourceEventKey: signal.sourceEventKey,
+          identityStatus: "IDENTITY_CONFIRMED",
+          syncStatus: reconciliation.syncStatus,
+          positions: snapshot.positions.data,
+          positionSnapshotTime: snapshot.positions.fetchedAt,
+          walletBalanceMicros,
+          walletBalanceSnapshotTime: snapshot.pUsdBalance.fetchedAt,
+          targetTrade: event.trade,
+        }) : null;
+        signalContexts.push({
+          signal,
+          capitalDecision,
+          context: buildSignalExecutionContext({
+            signal,
+            event,
+            market: market.market,
+            marketSourceUrl: market.sourceUrl,
+            marketFetchedAt: market.fetchedAt,
+            capitalDecision,
+            createdAt: completedAt,
+          }),
+        });
+      }
+      }
+    } catch (error) {
+      this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
+      this.gapActive = true;
+      return false;
+    }
     this.store.commitSuccessfulPoll({
       observeRunId: started.observeRunId,
       baseline: started.baseline,
@@ -182,6 +228,7 @@ export class ObserveOnlyRunner {
       projection,
       signalsToEmit,
       capitalEstimate,
+      signalContexts,
       reconciliation,
       replayState: this.gapActive ? "GAP_RECOVERED" : "ONLINE",
       gapRecovered: this.gapActive,

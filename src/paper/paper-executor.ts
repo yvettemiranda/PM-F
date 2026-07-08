@@ -1,0 +1,1248 @@
+import { createHash, randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { PRICE_SCALE_DIGITS } from "../domain/fixed.js";
+import { PAPER_EXECUTION_TRANSITIONS, PAPER_POSITION_TRANSITIONS, transition } from "../domain/state-machine.js";
+import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
+import type { SourceVersion } from "../infra/source-version.js";
+import { resolveSourceVersion } from "../infra/source-version.js";
+import { executableSellVwap, matchPaperBuy, matchPaperSell } from "./matching.js";
+import type {
+  PaperAccountSnapshot,
+  PaperExecutionState,
+  PaperFeeSnapshot,
+  PaperMarketDataProvider,
+  PaperOrderbookSnapshot,
+  PaperResolutionSnapshot,
+  PaperSignalEnvelope,
+} from "./types.js";
+
+const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DIGITS);
+const PPM = 1_000_000n;
+
+type ExecutionType = "TARGET_BUY" | "TARGET_SELL" | "STOP_LOSS" | "SETTLEMENT";
+
+interface ExecutionRow {
+  paper_execution_id: string;
+  paper_account_id: string;
+  signal_id: string | null;
+  execution_type: ExecutionType;
+  state: PaperExecutionState;
+  asset_id: string;
+  condition_id: string;
+  requested_amount_micros: string | null;
+  requested_size_micros: string | null;
+  filled_size_micros: string;
+  filled_notional_micros: string;
+  fee_micros: string;
+  target_price_units: string | null;
+  deadline_at: string | null;
+  attempt_count: number;
+}
+
+interface PositionRow {
+  paper_position_id: string;
+  paper_account_id: string;
+  signal_id: string;
+  asset_id: string;
+  condition_id: string;
+  outcome: string | null;
+  entry_price_units: string;
+  entry_size_micros: string;
+  entry_notional_micros: string;
+  entry_fee_micros: string;
+  current_size_micros: string;
+  remaining_cost_micros: string;
+  stop_loss_price_units: string;
+  status: string;
+  realized_pnl_micros: string;
+  created_at: string;
+}
+
+function hash(parts: Array<string | number>): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex");
+}
+
+function ratio(value: bigint, ppm: number): bigint {
+  return (value * BigInt(ppm)) / PPM;
+}
+
+export class PaperExecutor {
+  private readonly database: DatabaseSync;
+  private readonly sourceVersion: SourceVersion;
+  private readonly now: () => Date;
+
+  constructor(
+    databasePath: string,
+    private readonly marketData: PaperMarketDataProvider,
+    options: { sourceVersion?: SourceVersion; now?: () => Date } = {},
+  ) {
+    this.database = new DatabaseSync(databasePath);
+    this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
+    this.sourceVersion = options.sourceVersion ?? resolveSourceVersion();
+    this.now = options.now ?? (() => new Date());
+  }
+
+  createAccount(name = "Default Paper", initialBalanceMicros = BigInt(RULESET.paperInitialBalanceMicros)): string {
+    if (initialBalanceMicros <= 0n) throw new Error("PAPER_INITIAL_BALANCE_MUST_BE_POSITIVE");
+    const now = this.now().toISOString();
+    const accountId = randomUUID();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        `INSERT INTO paper_accounts(
+          paper_account_id,name,status,initial_balance_micros,cash_balance_micros,
+          reserved_balance_micros,realized_pnl_micros,signal_cutoff_at,schema_version,
+          strategy_version,risk_version,paper_version,ruleset_snapshot_json,ruleset_hash,
+          source_code_commit,source_code_dirty,created_at,updated_at
+        ) VALUES (?, ?, 'ACTIVE', ?, ?, '0', '0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        accountId,
+        name,
+        initialBalanceMicros.toString(),
+        initialBalanceMicros.toString(),
+        now,
+        VERSIONS.schemaVersion,
+        VERSIONS.strategyVersion,
+        VERSIONS.riskVersion,
+        VERSIONS.paperVersion,
+        RULESET_SNAPSHOT_JSON,
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        now,
+        now,
+      );
+      this.database.prepare(
+        `INSERT INTO paper_cash_ledger(
+          cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+          reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, NULL, 'INITIAL_DEPOSIT', ?, '0', ?, '0', ?, ?)`,
+      ).run(hash([accountId, "INITIAL_DEPOSIT"]), accountId, initialBalanceMicros.toString(), initialBalanceMicros.toString(), hash([accountId, "INITIAL_DEPOSIT"]), now);
+      this.database.prepare(
+        "INSERT INTO paper_consumer_checkpoints(paper_account_id,last_signal_created_at,last_signal_id,updated_at) VALUES (?, NULL, NULL, ?)",
+      ).run(accountId, now);
+      this.transition("PAPER_ACCOUNT", accountId, null, "ACTIVE", "ACCOUNT_CREATED", now);
+      this.database.exec("COMMIT");
+      return accountId;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async consumeSignal(accountId: string, signalId: string): Promise<string> {
+    const existing = this.database.prepare(
+      "SELECT paper_execution_id FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id=?",
+    ).get(accountId, signalId) as { paper_execution_id: string | null } | undefined;
+    if (existing?.paper_execution_id) return existing.paper_execution_id;
+    const envelope = this.loadSignal(signalId);
+    const executionId = this.createExecutionForSignal(accountId, envelope);
+    const row = this.execution(executionId);
+    if (["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)) {
+      await this.attemptExecution(executionId);
+    }
+    return executionId;
+  }
+
+  async consumeAvailableSignals(accountId: string): Promise<string[]> {
+    const account = this.accountRow(accountId);
+    const checkpoint = this.database.prepare(
+      "SELECT last_signal_created_at,last_signal_id FROM paper_consumer_checkpoints WHERE paper_account_id=?",
+    ).get(accountId) as { last_signal_created_at: string | null; last_signal_id: string | null };
+    const rows = this.database.prepare(
+      `SELECT signal_id FROM signals
+       WHERE created_at>=? AND status='PUBLISHED'
+         AND created_at<=?
+         AND (? IS NULL OR created_at>? OR (created_at=? AND signal_id>?))
+       ORDER BY created_at,signal_id`,
+    ).all(
+      account.signal_cutoff_at,
+      this.now().toISOString(),
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_id,
+    ) as Array<{ signal_id: string }>;
+    const executions: string[] = [];
+    for (const row of rows) executions.push(await this.consumeSignal(accountId, row.signal_id));
+    return executions;
+  }
+
+  async attemptExecution(executionId: string): Promise<PaperExecutionState> {
+    const execution = this.execution(executionId);
+    if (!["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) return execution.state;
+    if (execution.execution_type === "TARGET_BUY" && execution.deadline_at && this.now().valueOf() > Date.parse(execution.deadline_at)) {
+      this.expireBuy(execution);
+      return "EXPIRED";
+    }
+    const [book, fee] = await Promise.all([
+      this.marketData.orderbook(execution.asset_id, execution.condition_id),
+      this.marketData.fee(execution.asset_id, execution.condition_id),
+    ]);
+    if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null) {
+      if (execution.execution_type === "TARGET_BUY") this.rejectAndRelease(execution, "FEE_MODEL_UNAVAILABLE");
+      else this.updatePendingReason(execution, "FEE_MODEL_UNAVAILABLE");
+      return execution.execution_type === "TARGET_BUY" ? "REJECTED" : execution.state;
+    }
+    const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+    if (age < 0 || age > RULESET.orderbookMaxAgeMs) {
+      this.recordNoFillAttempt(execution, book, fee, "ORDERBOOK_STALE", age);
+      return execution.state;
+    }
+    return execution.execution_type === "TARGET_BUY"
+      ? this.attemptBuy(execution, book, fee, age)
+      : this.attemptSell(execution, book, fee, age);
+  }
+
+  async retryPending(accountId: string): Promise<void> {
+    const rows = this.database.prepare(
+      `SELECT paper_execution_id FROM paper_executions
+       WHERE paper_account_id=? AND state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
+       ORDER BY created_at,paper_execution_id`,
+    ).all(accountId) as Array<{ paper_execution_id: string }>;
+    for (const row of rows) await this.attemptExecution(row.paper_execution_id);
+  }
+
+  async checkStopLosses(accountId: string): Promise<string[]> {
+    const positions = this.openPositions(accountId);
+    const created: string[] = [];
+    for (const position of positions) {
+      const book = await this.marketData.orderbook(position.asset_id, position.condition_id);
+      const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+      if (age < 0 || age > RULESET.orderbookMaxAgeMs) continue;
+      const currentSize = BigInt(position.current_size_micros);
+      const vwap = executableSellVwap(book.bids, currentSize);
+      if (vwap === null || vwap > BigInt(position.stop_loss_price_units)) continue;
+      const idempotency = hash(["PAPER", accountId, "STOP_LOSS", position.paper_position_id]);
+      const prior = this.database.prepare("SELECT paper_execution_id FROM paper_executions WHERE execution_idempotency_key=?")
+        .get(idempotency) as { paper_execution_id: string } | undefined;
+      if (prior) continue;
+      const executionId = hash([idempotency, RULESET_HASH]);
+      const now = this.now().toISOString();
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.supersedePendingTargetExit(position.paper_position_id, now);
+        this.insertExecution({
+          executionId,
+          accountId,
+          signalId: null,
+          idempotency,
+          type: "STOP_LOSS",
+          state: "STOP_EXIT_PENDING",
+          assetId: position.asset_id,
+          conditionId: position.condition_id,
+          requestedAmount: null,
+          requestedSize: currentSize,
+          targetPrice: BigInt(position.stop_loss_price_units),
+          lower: null,
+          upper: null,
+          capitalMode: null,
+          deadline: null,
+          reason: "STOP_LOSS_TRIGGERED",
+          contextId: null,
+          now,
+        });
+        this.database.prepare(
+          `INSERT INTO paper_execution_positions(
+            paper_execution_id,paper_position_id,requested_size_micros,filled_size_micros,created_at
+          ) VALUES (?, ?, ?, '0', ?)`,
+        ).run(executionId, position.paper_position_id, currentSize.toString(), now);
+        this.transition("PAPER_EXECUTION", executionId, null, "STOP_EXIT_PENDING", "STOP_LOSS_TRIGGERED", now);
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+      created.push(executionId);
+      await this.attemptExecution(executionId);
+    }
+    return created;
+  }
+
+  async processSettlements(accountId: string): Promise<string[]> {
+    const positions = this.openPositions(accountId, true);
+    const completed: string[] = [];
+    for (const position of positions) {
+      const signal = this.loadSignal(position.signal_id);
+      if (!signal.context || this.now().valueOf() < Date.parse(signal.context.marketEndTime)) continue;
+      if (position.status !== "SETTLEMENT_PENDING") this.markSettlementPending(position);
+      const resolution = await this.marketData.resolution(position.condition_id, position.asset_id);
+      if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) continue;
+      completed.push(this.settle(position.paper_position_id, resolution));
+    }
+    return completed;
+  }
+
+  async accountSnapshot(accountId: string): Promise<PaperAccountSnapshot> {
+    const account = this.accountRow(accountId);
+    let positionValue = 0n;
+    let remainingCost = 0n;
+    let unpricedPositionCount = 0;
+    for (const position of this.openPositions(accountId, true)) {
+      const size = BigInt(position.current_size_micros);
+      remainingCost += BigInt(position.remaining_cost_micros);
+      if (size === 0n) continue;
+      try {
+        const book = await this.marketData.orderbook(position.asset_id, position.condition_id);
+        const vwap = executableSellVwap(book.bids, size);
+        if (vwap !== null) positionValue += (size * vwap) / PRICE_SCALE;
+        else unpricedPositionCount += 1;
+      } catch {
+        unpricedPositionCount += 1;
+      }
+    }
+    const cash = BigInt(account.cash_balance_micros);
+    const reserved = BigInt(account.reserved_balance_micros);
+    const snapshot: PaperAccountSnapshot = {
+      paperAccountId: accountId,
+      initialBalanceMicros: account.initial_balance_micros,
+      cashBalanceMicros: cash.toString(),
+      reservedBalanceMicros: reserved.toString(),
+      availableBalanceMicros: (cash - reserved).toString(),
+      positionValueMicros: positionValue.toString(),
+      realizedPnlMicros: account.realized_pnl_micros,
+      unrealizedPnlMicros: (positionValue - remainingCost).toString(),
+      totalEquityMicros: (cash + positionValue).toString(),
+      valuationStatus: unpricedPositionCount === 0 ? "COMPLETE" : "INCOMPLETE",
+      unpricedPositionCount,
+    };
+    const createdAt = this.now().toISOString();
+    this.database.prepare(
+      `INSERT OR IGNORE INTO paper_portfolio_snapshots(
+        portfolio_snapshot_id,paper_account_id,cash_balance_micros,reserved_balance_micros,
+        available_balance_micros,position_value_micros,realized_pnl_micros,
+        unrealized_pnl_micros,total_equity_micros,valuation_status,
+        unpriced_position_count,ruleset_hash,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      hash([accountId, createdAt, snapshot.cashBalanceMicros, snapshot.positionValueMicros]),
+      accountId,
+      snapshot.cashBalanceMicros,
+      snapshot.reservedBalanceMicros,
+      snapshot.availableBalanceMicros,
+      snapshot.positionValueMicros,
+      snapshot.realizedPnlMicros,
+      snapshot.unrealizedPnlMicros,
+      snapshot.totalEquityMicros,
+      snapshot.valuationStatus,
+      snapshot.unpricedPositionCount,
+      RULESET_HASH,
+      createdAt,
+    );
+    return snapshot;
+  }
+
+  executionState(executionId: string): PaperExecutionState {
+    return this.execution(executionId).state;
+  }
+
+  close(): void {
+    this.database.close();
+  }
+
+  private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope): string {
+    const account = this.accountRow(accountId);
+    const idempotency = hash(["PAPER", accountId, signal.signalId]);
+    const executionId = hash([idempotency, RULESET_HASH]);
+    const now = this.now().toISOString();
+    let rejectReason: string | null = null;
+    if (account.status !== "ACTIVE") rejectReason = "PAPER_ACCOUNT_NOT_ACTIVE";
+    else if (signal.createdAt < account.signal_cutoff_at) rejectReason = "SIGNAL_BEFORE_CUTOFF";
+    else if (signal.status !== "PUBLISHED") rejectReason = "SIGNAL_NOT_PUBLISHED";
+    else if (!signal.executionEligible) rejectReason = signal.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE";
+    else if (!signal.context) rejectReason = "EXECUTION_CONTEXT_MISSING";
+    else if (signal.context.rulesetHash !== RULESET_HASH) rejectReason = "RULESET_MISMATCH";
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const duplicate = this.database.prepare(
+        "SELECT paper_execution_id FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id=?",
+      ).get(accountId, signal.signalId) as { paper_execution_id: string | null } | undefined;
+      if (duplicate?.paper_execution_id) {
+        this.database.exec("COMMIT");
+        return duplicate.paper_execution_id;
+      }
+      if (rejectReason) {
+        this.insertRejectedExecution(accountId, signal, executionId, idempotency, rejectReason, now);
+        this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", rejectReason, now);
+      } else if (signal.signalType === "TARGET_BUY") {
+        const capital = this.buyCapitalDecision(account, signal);
+        if (capital.rejectReason) {
+          this.insertRejectedExecution(accountId, signal, executionId, idempotency, capital.rejectReason, now);
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", capital.rejectReason, now);
+        } else {
+          const amount = capital.amount!;
+          const deadline = this.buyDeadline(signal);
+          if (this.now().valueOf() >= Date.parse(deadline)) {
+            this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXPIRED", amount, null, capital.mode, deadline, "WAIT_TIMEOUT", now);
+          } else {
+            this.reserve(accountId, executionId, signal, idempotency, amount, capital.mode!, deadline, now);
+          }
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+        }
+      } else {
+        const allocations = this.sellAllocations(accountId, signal);
+        if (allocations.length === 0) {
+          this.insertRejectedExecution(accountId, signal, executionId, idempotency, "NO_TRACKED_PAPER_POSITION", now);
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", "NO_TRACKED_PAPER_POSITION", now);
+        } else {
+          const requested = allocations.reduce((sum, item) => sum + item.size, 0n);
+          this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXIT_PENDING", null, requested, null, null, "TARGET_SELL_RECEIVED", now);
+          const insert = this.database.prepare(
+            `INSERT INTO paper_execution_positions(
+              paper_execution_id,paper_position_id,requested_size_micros,filled_size_micros,created_at
+            ) VALUES (?, ?, ?, '0', ?)`,
+          );
+          for (const item of allocations) insert.run(executionId, item.positionId, item.size.toString(), now);
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+        }
+      }
+      this.updateCheckpoint(accountId, signal, now);
+      this.database.exec("COMMIT");
+      return executionId;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private buyCapitalDecision(account: ReturnType<PaperExecutor["accountRow"]>, signal: PaperSignalEnvelope): {
+    amount: bigint | null;
+    mode: "PROPORTIONAL" | "FIXED_FALLBACK" | null;
+    rejectReason: string | null;
+  } {
+    const capital = signal.capitalDecision;
+    if (!capital || capital.confidence === "LOW" || capital.status === "FAILED") {
+      return { amount: null, mode: null, rejectReason: "CAPITAL_CONFIDENCE_LOW" };
+    }
+    const available = BigInt(account.cash_balance_micros) - BigInt(account.reserved_balance_micros);
+    let amount: bigint;
+    let mode: "PROPORTIONAL" | "FIXED_FALLBACK";
+    if (capital.status === "COMPLETE" && capital.confidence === "HIGH") {
+      const ratioPpm = signal.context?.targetTradeCapitalRatioPpm ?? capital.ratioPpm;
+      if (ratioPpm === null) return { amount: null, mode: null, rejectReason: "CAPITAL_RATIO_UNAVAILABLE" };
+      amount = (available * BigInt(ratioPpm)) / PPM;
+      mode = "PROPORTIONAL";
+    } else if (capital.confidence === "MEDIUM") {
+      amount = BigInt(capital.fallbackAmountMicros);
+      mode = "FIXED_FALLBACK";
+    } else {
+      return { amount: null, mode: null, rejectReason: "CAPITAL_DECISION_UNSUPPORTED" };
+    }
+    if (amount <= 0n) return { amount: null, mode: null, rejectReason: "BUY_AMOUNT_ZERO" };
+    if (amount > available) return { amount: null, mode: null, rejectReason: "INSUFFICIENT_AVAILABLE_CASH" };
+    return { amount, mode, rejectReason: null };
+  }
+
+  private buyDeadline(signal: PaperSignalEnvelope): string {
+    const context = signal.context!;
+    const target = Date.parse(context.targetTradeTimestamp);
+    const end = Date.parse(context.marketEndTime);
+    const remaining = Math.max(0, end - target);
+    const wait = Math.min((remaining * RULESET.waitRatioPpm) / 1_000_000, RULESET.maxWaitMs);
+    return new Date(target + wait).toISOString();
+  }
+
+  private reserve(
+    accountId: string,
+    executionId: string,
+    signal: PaperSignalEnvelope,
+    idempotency: string,
+    amount: bigint,
+    mode: "PROPORTIONAL" | "FIXED_FALLBACK",
+    deadline: string,
+    now: string,
+  ): void {
+    const lower = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMinRatioPpm);
+    const upper = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMaxRatioPpm);
+    this.insertExecution({
+      executionId,
+      accountId,
+      signalId: signal.signalId,
+      idempotency,
+      type: "TARGET_BUY",
+      state: "WAITING_EXECUTION",
+      assetId: signal.assetId,
+      conditionId: signal.conditionId,
+      requestedAmount: amount,
+      requestedSize: null,
+      targetPrice: BigInt(signal.targetPriceUnits),
+      lower,
+      upper,
+      capitalMode: mode,
+      deadline,
+      reason: "BUY_RESERVED",
+      contextId: signal.context!.contextId,
+      now,
+    });
+    const reservationId = hash([executionId, "RESERVATION"]);
+    this.database.prepare(
+      `INSERT INTO paper_reservations(
+        reservation_id,paper_account_id,paper_execution_id,original_amount_micros,
+        remaining_amount_micros,status,created_at,updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+    ).run(reservationId, accountId, executionId, amount.toString(), amount.toString(), now, now);
+    const account = this.accountRow(accountId);
+    const reservedAfter = BigInt(account.reserved_balance_micros) + amount;
+    this.database.prepare("UPDATE paper_accounts SET reserved_balance_micros=?,updated_at=? WHERE paper_account_id=?")
+      .run(reservedAfter.toString(), now, accountId);
+    this.database.prepare(
+      `INSERT INTO paper_cash_ledger(
+        cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'RESERVE', '0', ?, ?, ?, ?, ?)`,
+    ).run(hash([executionId, "CASH_RESERVE"]), accountId, executionId, amount.toString(), account.cash_balance_micros, reservedAfter.toString(), hash([executionId, "CASH_RESERVE"]), now);
+    this.database.prepare(
+      `INSERT INTO paper_reservation_ledger(
+        reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+        remaining_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'RESERVE', ?, ?, ?, ?)`,
+    ).run(hash([reservationId, "RESERVE"]), reservationId, executionId, amount.toString(), amount.toString(), hash([reservationId, "RESERVE"]), now);
+    this.transition("PAPER_EXECUTION", executionId, null, "WAITING_EXECUTION", "BUY_RESERVED", now);
+  }
+
+  private attemptBuy(execution: ExecutionRow, book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): PaperExecutionState {
+    const reservation = this.database.prepare(
+      "SELECT reservation_id,original_amount_micros,remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=? AND status='ACTIVE'",
+    ).get(execution.paper_execution_id) as { reservation_id: string; original_amount_micros: string; remaining_amount_micros: string } | undefined;
+    if (!reservation) throw new Error("ACTIVE_RESERVATION_NOT_FOUND");
+    const bounds = this.database.prepare(
+      "SELECT price_limit_lower_units,price_limit_upper_units FROM paper_executions WHERE paper_execution_id=?",
+    ).get(execution.paper_execution_id) as { price_limit_lower_units: string; price_limit_upper_units: string };
+    const matched = matchPaperBuy({
+      asks: book.asks,
+      reservationMicros: BigInt(reservation.remaining_amount_micros),
+      lowerPriceUnits: BigInt(bounds.price_limit_lower_units),
+      upperPriceUnits: BigInt(bounds.price_limit_upper_units),
+      feeRatePpm: BigInt(fee.feeRatePpm!),
+      feeExponent: fee.exponent!,
+    });
+    if (BigInt(matched.filledSizeMicros) === 0n) {
+      this.recordNoFillAttempt(execution, book, fee, "PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY", age);
+      return "WAITING_EXECUTION";
+    }
+    const now = this.now().toISOString();
+    const finalState: PaperExecutionState = matched.complete ? "EXECUTED" : "PARTIALLY_EXECUTED";
+    const orderId = hash([execution.paper_execution_id, execution.attempt_count + 1, "FAK"]);
+    const bookId = this.orderbookId(book);
+    const feeId = this.feeId(fee);
+    const spent = BigInt(matched.filledNotionalMicros) + BigInt(matched.feeMicros);
+    const original = BigInt(reservation.original_amount_micros);
+    const positionId = hash([execution.paper_execution_id, "POSITION"]);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertOrder(orderId, execution, "BUY", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
+      this.database.prepare(
+        `INSERT INTO paper_positions(
+          paper_position_id,paper_account_id,opening_execution_id,signal_id,asset_id,
+          condition_id,outcome,entry_price_units,entry_size_micros,entry_notional_micros,
+          entry_fee_micros,current_size_micros,remaining_cost_micros,stop_loss_price_units,
+          status,realized_pnl_micros,created_at,updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', '0', ?, ?)`,
+      ).run(
+        positionId,
+        execution.paper_account_id,
+        execution.paper_execution_id,
+        execution.signal_id,
+        execution.asset_id,
+        execution.condition_id,
+        this.signalOutcome(execution.signal_id!, execution.asset_id),
+        matched.vwapPriceUnits,
+        matched.filledSizeMicros,
+        matched.filledNotionalMicros,
+        matched.feeMicros,
+        matched.filledSizeMicros,
+        spent.toString(),
+        ratio(BigInt(matched.vwapPriceUnits!), RULESET.stopTriggerRatioPpm).toString(),
+        now,
+        now,
+      );
+      this.insertFills(orderId, execution.paper_execution_id, positionId, "BUY", matched, now);
+      this.insertFeeLedger(execution.paper_execution_id, orderId, feeId, matched.feeMicros, now);
+      const account = this.accountRow(execution.paper_account_id);
+      const cashAfter = BigInt(account.cash_balance_micros) - spent;
+      const reservedAfter = BigInt(account.reserved_balance_micros) - original;
+      if (cashAfter < 0n || reservedAfter < 0n) throw new Error("PAPER_BALANCE_INVARIANT");
+      this.database.prepare(
+        "UPDATE paper_accounts SET cash_balance_micros=?,reserved_balance_micros=?,updated_at=? WHERE paper_account_id=?",
+      ).run(cashAfter.toString(), reservedAfter.toString(), now, execution.paper_account_id);
+      this.database.prepare(
+        `UPDATE paper_reservations SET remaining_amount_micros='0',status=?,updated_at=? WHERE reservation_id=?`,
+      ).run(matched.complete ? "CONSUMED" : "RELEASED", now, reservation.reservation_id);
+      this.database.prepare(
+        `INSERT INTO paper_cash_ledger(
+          cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+          reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, 'BUY_FILL', ?, ?, ?, ?, ?, ?)`,
+      ).run(hash([execution.paper_execution_id, "BUY_FILL"]), execution.paper_account_id, execution.paper_execution_id, (-spent).toString(), (-original).toString(), cashAfter.toString(), reservedAfter.toString(), hash([execution.paper_execution_id, "BUY_FILL"]), now);
+      this.database.prepare(
+        `INSERT INTO paper_reservation_ledger(
+          reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+          remaining_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, ?, ?, '0', ?, ?)`,
+      ).run(hash([reservation.reservation_id, "FINALIZE"]), reservation.reservation_id, execution.paper_execution_id, matched.complete ? "CONSUME" : "RELEASE", (-original).toString(), hash([reservation.reservation_id, "FINALIZE"]), now);
+      this.database.prepare(
+        `UPDATE paper_executions SET state=?,filled_size_micros=?,filled_notional_micros=?,
+          fee_micros=?,attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?`,
+      ).run(finalState, matched.filledSizeMicros, matched.filledNotionalMicros, matched.feeMicros, matched.complete ? "FAK_FILLED" : "FAK_PARTIAL_CANCEL_REMAINDER", now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, finalState, matched.complete ? "FAK_FILLED" : "FAK_PARTIAL_CANCEL_REMAINDER", now);
+      this.transition("PAPER_POSITION", positionId, null, "OPEN", "BUY_FILL", now);
+      this.database.exec("COMMIT");
+      return finalState;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private attemptSell(execution: ExecutionRow, book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): PaperExecutionState {
+    const requested = BigInt(execution.requested_size_micros ?? "0");
+    const alreadyFilled = BigInt(execution.filled_size_micros);
+    const remaining = requested - alreadyFilled;
+    if (remaining <= 0n) return "EXECUTED";
+    const target = BigInt(execution.target_price_units ?? "0");
+    const slippage = execution.execution_type === "STOP_LOSS" ? RULESET.stopSellMaxSlippagePpm : RULESET.followSellMaxSlippagePpm;
+    const minimum = ratio(target, 1_000_000 - slippage);
+    const matched = matchPaperSell({ bids: book.bids, requestedSizeMicros: remaining, minimumPriceUnits: minimum, feeRatePpm: BigInt(fee.feeRatePpm!), feeExponent: fee.exponent! });
+    if (BigInt(matched.filledSizeMicros) === 0n) {
+      this.recordNoFillAttempt(execution, book, fee, "SLIPPAGE_OR_LIQUIDITY_LIMIT", age);
+      return execution.state;
+    }
+    const now = this.now().toISOString();
+    const finalState: PaperExecutionState = matched.complete ? "EXECUTED"
+      : execution.execution_type === "STOP_LOSS" ? "STOP_EXIT_PENDING" : "EXIT_PENDING";
+    const orderId = hash([execution.paper_execution_id, execution.attempt_count + 1, "FAK"]);
+    const bookId = this.orderbookId(book);
+    const feeId = this.feeId(fee);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertOrder(orderId, execution, "SELL", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
+      this.insertFills(orderId, execution.paper_execution_id, null, "SELL", matched, now);
+      this.insertFeeLedger(execution.paper_execution_id, orderId, feeId, matched.feeMicros, now);
+      this.applySellToPositions(execution, BigInt(matched.filledSizeMicros), BigInt(matched.filledNotionalMicros), BigInt(matched.feeMicros), now);
+      this.database.prepare(
+        `UPDATE paper_executions SET state=?,filled_size_micros=?,filled_notional_micros=?,fee_micros=?,
+          attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?`,
+      ).run(
+        finalState,
+        (alreadyFilled + BigInt(matched.filledSizeMicros)).toString(),
+        (BigInt(execution.filled_notional_micros) + BigInt(matched.filledNotionalMicros)).toString(),
+        (BigInt(execution.fee_micros) + BigInt(matched.feeMicros)).toString(),
+        matched.complete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING",
+        now,
+        execution.paper_execution_id,
+      );
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, finalState, matched.complete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING", now);
+      this.database.exec("COMMIT");
+      return finalState;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private applySellToPositions(execution: ExecutionRow, fillSize: bigint, proceeds: bigint, fee: bigint, now: string): void {
+    const allocations = this.database.prepare(
+      `SELECT ep.paper_position_id,ep.requested_size_micros,ep.filled_size_micros,
+              p.current_size_micros,p.remaining_cost_micros,p.realized_pnl_micros,p.status
+       FROM paper_execution_positions ep JOIN paper_positions p ON p.paper_position_id=ep.paper_position_id
+       WHERE ep.paper_execution_id=? ORDER BY p.created_at,p.paper_position_id`,
+    ).all(execution.paper_execution_id) as Array<{
+      paper_position_id: string;
+      requested_size_micros: string;
+      filled_size_micros: string;
+      current_size_micros: string;
+      remaining_cost_micros: string;
+      realized_pnl_micros: string;
+      status: string;
+    }>;
+    let remainingFill = fillSize;
+    let assignedProceeds = 0n;
+    let assignedFee = 0n;
+    let totalPnl = 0n;
+    for (let index = 0; index < allocations.length && remainingFill > 0n; index += 1) {
+      const item = allocations[index]!;
+      const pending = BigInt(item.requested_size_micros) - BigInt(item.filled_size_micros);
+      const size = pending < remainingFill ? pending : remainingFill;
+      if (size <= 0n) continue;
+      const last = size === remainingFill;
+      const itemProceeds = last ? proceeds - assignedProceeds : (proceeds * size) / fillSize;
+      const itemFee = last ? fee - assignedFee : (fee * size) / fillSize;
+      assignedProceeds += itemProceeds;
+      assignedFee += itemFee;
+      const beforeSize = BigInt(item.current_size_micros);
+      if (size > beforeSize) throw new Error("PAPER_POSITION_OVERSELL");
+      const beforeCost = BigInt(item.remaining_cost_micros);
+      const costBasis = size === beforeSize ? beforeCost : (beforeCost * size) / beforeSize;
+      const pnl = itemProceeds - itemFee - costBasis;
+      totalPnl += pnl;
+      const afterSize = beforeSize - size;
+      const afterCost = beforeCost - costBasis;
+      const status = afterSize === 0n ? "CLOSED" : "PARTIALLY_CLOSED";
+      this.database.prepare(
+        `UPDATE paper_positions SET current_size_micros=?,remaining_cost_micros=?,status=?,
+          realized_pnl_micros=?,updated_at=? WHERE paper_position_id=?`,
+      ).run(afterSize.toString(), afterCost.toString(), status, (BigInt(item.realized_pnl_micros) + pnl).toString(), now, item.paper_position_id);
+      this.database.prepare(
+        "UPDATE paper_execution_positions SET filled_size_micros=? WHERE paper_execution_id=? AND paper_position_id=?",
+      ).run((BigInt(item.filled_size_micros) + size).toString(), execution.paper_execution_id, item.paper_position_id);
+      this.database.prepare(
+        `INSERT INTO paper_pnl_ledger(
+          pnl_ledger_id,paper_account_id,paper_position_id,paper_execution_id,pnl_type,
+          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,created_at
+        ) VALUES (?, ?, ?, ?, 'REALIZED', ?, ?, ?, ?, ?)`,
+      ).run(randomUUID(), execution.paper_account_id, item.paper_position_id, execution.paper_execution_id, itemProceeds.toString(), costBasis.toString(), itemFee.toString(), pnl.toString(), now);
+      this.transition("PAPER_POSITION", item.paper_position_id, item.status, status, execution.execution_type, now);
+      remainingFill -= size;
+    }
+    if (remainingFill !== 0n) throw new Error("SELL_ALLOCATION_INVARIANT");
+    const account = this.accountRow(execution.paper_account_id);
+    const cashDelta = proceeds - fee;
+    const cashAfter = BigInt(account.cash_balance_micros) + cashDelta;
+    const pnlAfter = BigInt(account.realized_pnl_micros) + totalPnl;
+    this.database.prepare(
+      "UPDATE paper_accounts SET cash_balance_micros=?,realized_pnl_micros=?,updated_at=? WHERE paper_account_id=?",
+    ).run(cashAfter.toString(), pnlAfter.toString(), now, execution.paper_account_id);
+    this.database.prepare(
+      `INSERT INTO paper_cash_ledger(
+        cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'SELL_FILL', ?, '0', ?, ?, ?, ?)`,
+    ).run(randomUUID(), execution.paper_account_id, execution.paper_execution_id, cashDelta.toString(), cashAfter.toString(), account.reserved_balance_micros, hash([execution.paper_execution_id, execution.attempt_count + 1, "SELL_CASH"]), now);
+  }
+
+  private settle(positionId: string, resolution: PaperResolutionSnapshot): string {
+    const position = this.position(positionId);
+    const idempotency = hash(["PAPER", position.paper_account_id, "SETTLEMENT", positionId]);
+    const existing = this.database.prepare("SELECT paper_execution_id FROM paper_executions WHERE execution_idempotency_key=?")
+      .get(idempotency) as { paper_execution_id: string } | undefined;
+    if (existing) return existing.paper_execution_id;
+    const executionId = hash([idempotency, RULESET_HASH]);
+    const now = this.now().toISOString();
+    const numerator = BigInt(resolution.payoutNumerator!);
+    const denominator = BigInt(resolution.payoutDenominator!);
+    if (denominator <= 0n || numerator < 0n || numerator > denominator) throw new Error("INVALID_SETTLEMENT_PAYOUT");
+    const redeem = (BigInt(position.current_size_micros) * numerator) / denominator;
+    const cost = BigInt(position.remaining_cost_micros);
+    const pnl = redeem - cost;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.insertExecution({
+        executionId,
+        accountId: position.paper_account_id,
+        signalId: position.signal_id,
+        idempotency,
+        type: "SETTLEMENT",
+        state: "EXECUTED",
+        assetId: position.asset_id,
+        conditionId: position.condition_id,
+        requestedAmount: null,
+        requestedSize: BigInt(position.current_size_micros),
+        targetPrice: null,
+        lower: null,
+        upper: null,
+        capitalMode: null,
+        deadline: null,
+        reason: "SETTLEMENT_CONFIRMED",
+        contextId: null,
+        now,
+      });
+      this.database.prepare(
+        `UPDATE paper_positions SET current_size_micros='0',remaining_cost_micros='0',status='REDEEMED',
+          realized_pnl_micros=?,updated_at=? WHERE paper_position_id=?`,
+      ).run((BigInt(position.realized_pnl_micros) + pnl).toString(), now, positionId);
+      const account = this.accountRow(position.paper_account_id);
+      const cashAfter = BigInt(account.cash_balance_micros) + redeem;
+      const pnlAfter = BigInt(account.realized_pnl_micros) + pnl;
+      this.database.prepare(
+        "UPDATE paper_accounts SET cash_balance_micros=?,realized_pnl_micros=?,updated_at=? WHERE paper_account_id=?",
+      ).run(cashAfter.toString(), pnlAfter.toString(), now, position.paper_account_id);
+      const resolutionJson = stableJson(resolution.raw);
+      const resolutionHash = createHash("sha256").update(resolutionJson).digest("hex");
+      this.database.prepare(
+        `INSERT INTO paper_settlements(
+          paper_settlement_id,paper_position_id,paper_execution_id,condition_id,payout_numerator,
+          payout_denominator,redeem_amount_micros,pnl_micros,resolution_snapshot_json,resolution_hash,created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(randomUUID(), positionId, executionId, position.condition_id, numerator.toString(), denominator.toString(), redeem.toString(), pnl.toString(), resolutionJson, resolutionHash, now);
+      this.database.prepare(
+        `INSERT INTO paper_pnl_ledger(
+          pnl_ledger_id,paper_account_id,paper_position_id,paper_execution_id,pnl_type,
+          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,created_at
+        ) VALUES (?, ?, ?, ?, 'SETTLEMENT', ?, ?, '0', ?, ?)`,
+      ).run(randomUUID(), position.paper_account_id, positionId, executionId, redeem.toString(), cost.toString(), pnl.toString(), now);
+      this.database.prepare(
+        `INSERT INTO paper_cash_ledger(
+          cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+          reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, 'SETTLEMENT', ?, '0', ?, ?, ?, ?)`,
+      ).run(randomUUID(), position.paper_account_id, executionId, redeem.toString(), cashAfter.toString(), account.reserved_balance_micros, hash([executionId, "SETTLEMENT_CASH"]), now);
+      this.transition("PAPER_EXECUTION", executionId, null, "EXECUTED", "SETTLEMENT_CONFIRMED", now);
+      this.transition("PAPER_POSITION", positionId, position.status, "REDEEMED", "SETTLEMENT_CONFIRMED", now);
+      this.database.exec("COMMIT");
+      return executionId;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private markSettlementPending(position: PositionRow): void {
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("UPDATE paper_positions SET status='SETTLEMENT_PENDING',updated_at=? WHERE paper_position_id=?")
+        .run(now, position.paper_position_id);
+      this.transition("PAPER_POSITION", position.paper_position_id, position.status, "SETTLEMENT_PENDING", "MARKET_END_REACHED", now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private expireBuy(execution: ExecutionRow): void {
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.releaseReservation(execution, "WAIT_TIMEOUT", now);
+      this.database.prepare("UPDATE paper_executions SET state='EXPIRED',reason='WAIT_TIMEOUT',updated_at=? WHERE paper_execution_id=?")
+        .run(now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, "EXPIRED", "WAIT_TIMEOUT", now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private rejectAndRelease(execution: ExecutionRow, reason: string): void {
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.releaseReservation(execution, reason, now);
+      this.database.prepare("UPDATE paper_executions SET state='REJECTED',reason=?,updated_at=? WHERE paper_execution_id=?")
+        .run(reason, now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, "REJECTED", reason, now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private releaseReservation(execution: ExecutionRow, reason: string, now: string): void {
+    const reservation = this.database.prepare(
+      "SELECT reservation_id,remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=? AND status='ACTIVE'",
+    ).get(execution.paper_execution_id) as { reservation_id: string; remaining_amount_micros: string } | undefined;
+    if (!reservation) return;
+    const amount = BigInt(reservation.remaining_amount_micros);
+    const account = this.accountRow(execution.paper_account_id);
+    const reservedAfter = BigInt(account.reserved_balance_micros) - amount;
+    if (reservedAfter < 0n) throw new Error("PAPER_RESERVATION_INVARIANT");
+    this.database.prepare("UPDATE paper_accounts SET reserved_balance_micros=?,updated_at=? WHERE paper_account_id=?")
+      .run(reservedAfter.toString(), now, execution.paper_account_id);
+    this.database.prepare("UPDATE paper_reservations SET remaining_amount_micros='0',status='RELEASED',updated_at=? WHERE reservation_id=?")
+      .run(now, reservation.reservation_id);
+    this.database.prepare(
+      `INSERT INTO paper_reservation_ledger(
+        reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+        remaining_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'RELEASE', ?, '0', ?, ?)`,
+    ).run(randomUUID(), reservation.reservation_id, execution.paper_execution_id, (-amount).toString(), hash([reservation.reservation_id, "RELEASE", reason]), now);
+    this.database.prepare(
+      `INSERT INTO paper_cash_ledger(
+        cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'RESERVATION_RELEASE', '0', ?, ?, ?, ?, ?)`,
+    ).run(randomUUID(), execution.paper_account_id, execution.paper_execution_id, (-amount).toString(), account.cash_balance_micros, reservedAfter.toString(), hash([execution.paper_execution_id, "RELEASE", reason]), now);
+  }
+
+  private recordNoFillAttempt(execution: ExecutionRow, book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, reason: string, age: number): void {
+    const now = this.now().toISOString();
+    const bookId = this.orderbookId(book);
+    const feeId = this.feeId(fee);
+    const orderId = hash([execution.paper_execution_id, execution.attempt_count + 1, "FAK"]);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      const empty = { levels: [], filledSizeMicros: "0", filledNotionalMicros: "0", feeMicros: "0", vwapPriceUnits: null, complete: false };
+      this.insertOrder(orderId, execution, execution.execution_type === "TARGET_BUY" ? "BUY" : "SELL", "NO_FILL", empty, bookId, feeId, reason, now);
+      this.database.prepare("UPDATE paper_executions SET attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?")
+        .run(reason, now, execution.paper_execution_id);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private updatePendingReason(execution: ExecutionRow, reason: string): void {
+    this.database.prepare("UPDATE paper_executions SET reason=?,updated_at=? WHERE paper_execution_id=?")
+      .run(reason, this.now().toISOString(), execution.paper_execution_id);
+  }
+
+  private saveMarketSnapshots(book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): void {
+    const payload = { bids: book.bids, asks: book.asks };
+    this.database.prepare(
+      `INSERT OR IGNORE INTO paper_orderbook_snapshots(
+        orderbook_snapshot_id,asset_id,condition_id,market_snapshot_time,received_at,
+        data_age_ms,payload_hash,bids_json,asks_json,source_url,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(this.orderbookId(book), book.assetId, book.conditionId, book.marketSnapshotTime, book.receivedAt, age, createHash("sha256").update(stableJson(payload)).digest("hex"), JSON.stringify(book.bids), JSON.stringify(book.asks), book.sourceUrl, this.now().toISOString());
+    this.database.prepare(
+      `INSERT OR IGNORE INTO paper_fee_snapshots(
+        fee_snapshot_id,asset_id,fee_rate_ppm,base_fee,fee_exponent,status,source_url,snapshot_time,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(this.feeId(fee), fee.assetId, fee.feeRatePpm, fee.baseFee, fee.exponent, fee.status, fee.sourceUrl, fee.snapshotTime, this.now().toISOString());
+  }
+
+  private orderbookId(book: PaperOrderbookSnapshot): string {
+    return hash([book.assetId, book.marketSnapshotTime, stableJson({ bids: book.bids, asks: book.asks })]);
+  }
+
+  private feeId(fee: PaperFeeSnapshot): string {
+    return hash([fee.assetId, fee.snapshotTime, fee.status, fee.feeRatePpm ?? "NONE"]);
+  }
+
+  private insertOrder(
+    orderId: string,
+    execution: ExecutionRow,
+    side: "BUY" | "SELL",
+    state: "NO_FILL" | "PARTIALLY_FILLED" | "FILLED",
+    matched: { filledSizeMicros: string; filledNotionalMicros: string; vwapPriceUnits: string | null; feeMicros: string },
+    bookId: string,
+    feeId: string,
+    rejectReason: string | null,
+    now: string,
+  ): void {
+    this.database.prepare(
+      `INSERT INTO paper_orders(
+        paper_order_id,paper_execution_id,attempt_sequence,side,order_type,state,
+        requested_size_micros,requested_amount_micros,filled_size_micros,
+        filled_notional_micros,vwap_price_units,fee_micros,reject_reason,
+        orderbook_snapshot_id,fee_snapshot_id,created_at
+      ) VALUES (?, ?, ?, ?, 'FAK', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(orderId, execution.paper_execution_id, execution.attempt_count + 1, side, state, execution.requested_size_micros, execution.requested_amount_micros, matched.filledSizeMicros, matched.filledNotionalMicros, matched.vwapPriceUnits, matched.feeMicros, rejectReason, bookId, feeId, now);
+  }
+
+  private insertFills(
+    orderId: string,
+    executionId: string,
+    positionId: string | null,
+    side: "BUY" | "SELL",
+    matched: { levels: Array<{ priceUnits: string; sizeMicros: string; notionalMicros: string }>; feeMicros: string },
+    now: string,
+  ): void {
+    const totalNotional = matched.levels.reduce((sum, level) => sum + BigInt(level.notionalMicros), 0n);
+    let allocatedFee = 0n;
+    matched.levels.forEach((level, index) => {
+      const fee = index === matched.levels.length - 1
+        ? BigInt(matched.feeMicros) - allocatedFee
+        : totalNotional === 0n ? 0n : (BigInt(matched.feeMicros) * BigInt(level.notionalMicros)) / totalNotional;
+      allocatedFee += fee;
+      this.database.prepare(
+        `INSERT INTO paper_fill_ledger(
+          fill_id,paper_order_id,paper_execution_id,paper_position_id,side,price_units,
+          size_micros,notional_micros,fee_micros,level_sequence,created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(hash([orderId, index]), orderId, executionId, positionId, side, level.priceUnits, level.sizeMicros, level.notionalMicros, fee.toString(), index, now);
+    });
+  }
+
+  private insertFeeLedger(executionId: string, orderId: string, feeId: string, feeMicros: string, now: string): void {
+    this.database.prepare(
+      `INSERT INTO paper_fee_ledger(
+        fee_ledger_id,paper_execution_id,paper_order_id,fee_snapshot_id,fee_micros,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(hash([orderId, "FEE"]), executionId, orderId, feeId, feeMicros, now);
+  }
+
+  private insertRejectedExecution(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    executionId: string,
+    idempotency: string,
+    reason: string,
+    now: string,
+  ): void {
+    this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "REJECTED", null, null, null, null, reason, now);
+  }
+
+  private insertExecutionFromSignal(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    executionId: string,
+    idempotency: string,
+    state: PaperExecutionState,
+    requestedAmount: bigint | null,
+    requestedSize: bigint | null,
+    capitalMode: "PROPORTIONAL" | "FIXED_FALLBACK" | null,
+    deadline: string | null,
+    reason: string,
+    now: string,
+  ): void {
+    const target = BigInt(signal.targetPriceUnits);
+    this.insertExecution({
+      executionId,
+      accountId,
+      signalId: signal.signalId,
+      idempotency,
+      type: signal.signalType,
+      state,
+      assetId: signal.assetId,
+      conditionId: signal.conditionId,
+      requestedAmount,
+      requestedSize,
+      targetPrice: target,
+      lower: signal.signalType === "TARGET_BUY" ? ratio(target, RULESET.buyPriceMinRatioPpm) : null,
+      upper: signal.signalType === "TARGET_BUY" ? ratio(target, RULESET.buyPriceMaxRatioPpm) : null,
+      capitalMode,
+      deadline,
+      reason,
+      contextId: signal.context?.contextId ?? null,
+      now,
+    });
+    this.transition("PAPER_EXECUTION", executionId, null, state, reason, now);
+  }
+
+  private insertExecution(input: {
+    executionId: string;
+    accountId: string;
+    signalId: string | null;
+    idempotency: string;
+    type: ExecutionType;
+    state: PaperExecutionState;
+    assetId: string;
+    conditionId: string;
+    requestedAmount: bigint | null;
+    requestedSize: bigint | null;
+    targetPrice: bigint | null;
+    lower: bigint | null;
+    upper: bigint | null;
+    capitalMode: "PROPORTIONAL" | "FIXED_FALLBACK" | null;
+    deadline: string | null;
+    reason: string;
+    contextId: string | null;
+    now: string;
+  }): void {
+    this.database.prepare(
+      `INSERT INTO paper_executions(
+        paper_execution_id,paper_account_id,signal_id,execution_idempotency_key,
+        execution_type,state,asset_id,condition_id,requested_amount_micros,
+        requested_size_micros,filled_size_micros,filled_notional_micros,fee_micros,
+        target_price_units,price_limit_lower_units,price_limit_upper_units,capital_mode,
+        deadline_at,attempt_count,reason,context_id,schema_version,strategy_version,
+        risk_version,paper_version,ruleset_hash,created_at,updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', '0', '0', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.executionId,
+      input.accountId,
+      input.signalId,
+      input.idempotency,
+      input.type,
+      input.state,
+      input.assetId,
+      input.conditionId,
+      input.requestedAmount?.toString() ?? null,
+      input.requestedSize?.toString() ?? null,
+      input.targetPrice?.toString() ?? null,
+      input.lower?.toString() ?? null,
+      input.upper?.toString() ?? null,
+      input.capitalMode,
+      input.deadline,
+      input.reason,
+      input.contextId,
+      VERSIONS.schemaVersion,
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      VERSIONS.paperVersion,
+      RULESET_HASH,
+      input.now,
+      input.now,
+    );
+  }
+
+  private insertConsumption(
+    accountId: string,
+    signalId: string,
+    executionId: string,
+    idempotency: string,
+    result: "ACCEPTED" | "REJECTED",
+    rejectReason: string | null,
+    now: string,
+  ): void {
+    this.database.prepare(
+      `INSERT INTO paper_signal_consumptions(
+        consumption_id,paper_account_id,signal_id,execution_idempotency_key,result,
+        reject_reason,paper_execution_id,consumed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(hash([accountId, signalId, "CONSUMPTION"]), accountId, signalId, idempotency, result, rejectReason, executionId, now);
+  }
+
+  private sellAllocations(accountId: string, signal: PaperSignalEnvelope): Array<{ positionId: string; size: bigint }> {
+    if (!signal.sellRatioNumerator || !signal.sellRatioDenominator) return [];
+    const numerator = BigInt(signal.sellRatioNumerator);
+    const denominator = BigInt(signal.sellRatioDenominator);
+    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return [];
+    return this.openPositions(accountId)
+      .filter((position) => position.asset_id === signal.assetId)
+      .map((position) => ({
+        positionId: position.paper_position_id,
+        size: (BigInt(position.current_size_micros) * numerator) / denominator,
+      }))
+      .filter((item) => item.size > 0n);
+  }
+
+  private updateCheckpoint(accountId: string, signal: PaperSignalEnvelope, now: string): void {
+    this.database.prepare(
+      `UPDATE paper_consumer_checkpoints SET last_signal_created_at=?,last_signal_id=?,updated_at=?
+       WHERE paper_account_id=?`,
+    ).run(signal.createdAt, signal.signalId, now, accountId);
+  }
+
+  private supersedePendingTargetExit(positionId: string, now: string): void {
+    const rows = this.database.prepare(
+      `SELECT e.paper_execution_id,e.requested_size_micros,e.filled_size_micros,
+              ep.requested_size_micros position_requested,ep.filled_size_micros position_filled
+       FROM paper_execution_positions ep
+       JOIN paper_executions e ON e.paper_execution_id=ep.paper_execution_id
+       WHERE ep.paper_position_id=? AND e.execution_type='TARGET_SELL' AND e.state='EXIT_PENDING'`,
+    ).all(positionId) as Array<{
+      paper_execution_id: string;
+      requested_size_micros: string;
+      filled_size_micros: string;
+      position_requested: string;
+      position_filled: string;
+    }>;
+    for (const row of rows) {
+      const removed = BigInt(row.position_requested) - BigInt(row.position_filled);
+      if (removed <= 0n) continue;
+      const newRequested = BigInt(row.requested_size_micros) - removed;
+      this.database.prepare(
+        "UPDATE paper_execution_positions SET requested_size_micros=filled_size_micros WHERE paper_execution_id=? AND paper_position_id=?",
+      ).run(row.paper_execution_id, positionId);
+      if (newRequested <= BigInt(row.filled_size_micros)) {
+        this.database.prepare(
+          "UPDATE paper_executions SET requested_size_micros=?,state='CANCELLED',reason='STOP_LOSS_SUPERSEDED',updated_at=? WHERE paper_execution_id=?",
+        ).run(newRequested.toString(), now, row.paper_execution_id);
+        this.transition("PAPER_EXECUTION", row.paper_execution_id, "EXIT_PENDING", "CANCELLED", "STOP_LOSS_SUPERSEDED", now);
+      } else {
+        this.database.prepare(
+          "UPDATE paper_executions SET requested_size_micros=?,reason='POSITION_SUPERSEDED_BY_STOP',updated_at=? WHERE paper_execution_id=?",
+        ).run(newRequested.toString(), now, row.paper_execution_id);
+      }
+    }
+  }
+
+  private transition(entityType: string, entityId: string, from: string | null, to: string, reason: string, now: string): void {
+    if (from !== null && entityType === "PAPER_EXECUTION") {
+      transition(PAPER_EXECUTION_TRANSITIONS, from as PaperExecutionState, to as PaperExecutionState);
+    }
+    if (from !== null && entityType === "PAPER_POSITION") {
+      transition(PAPER_POSITION_TRANSITIONS, from as keyof typeof PAPER_POSITION_TRANSITIONS, to as keyof typeof PAPER_POSITION_TRANSITIONS);
+    }
+    const row = this.database.prepare(
+      "SELECT COALESCE(MAX(sequence),-1)+1 sequence FROM paper_state_transitions WHERE entity_type=? AND entity_id=?",
+    ).get(entityType, entityId) as { sequence: number };
+    this.database.prepare(
+      `INSERT INTO paper_state_transitions(
+        transition_id,entity_type,entity_id,from_state,to_state,reason,sequence,ruleset_hash,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(hash([entityType, entityId, row.sequence, to]), entityType, entityId, from, to, reason, row.sequence, RULESET_HASH, now);
+  }
+
+  private loadSignal(signalId: string): PaperSignalEnvelope {
+    const row = this.database.prepare(
+      `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
+              s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
+              c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
+              c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,c.created_at context_created_at,
+              ce.capital_estimate_status,ce.capital_confidence,
+              ce.target_trade_capital_ratio_ppm capital_ratio_ppm,ce.fallback_amount_micros
+       FROM signals s
+       LEFT JOIN signal_execution_contexts c ON c.signal_id=s.signal_id
+       LEFT JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id
+       WHERE s.signal_id=?`,
+    ).get(signalId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`SIGNAL_NOT_FOUND:${signalId}`);
+    return {
+      signalId: row.signal_id as string,
+      signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
+      status: row.status as string,
+      executionEligible: (row.execution_eligible as number) !== 0,
+      executionBlockReason: row.execution_block_reason as string | null,
+      assetId: row.asset_id as string,
+      conditionId: row.condition_id as string,
+      targetPriceUnits: row.target_price_units as string,
+      targetSizeMicros: row.target_size_micros as string,
+      sellRatioNumerator: row.sell_ratio_numerator as string | null,
+      sellRatioDenominator: row.sell_ratio_denominator as string | null,
+      createdAt: row.created_at as string,
+      context: row.context_id ? {
+        contextId: row.context_id as string,
+        signalId: row.signal_id as string,
+        capitalDecisionId: row.capital_decision_id as string | null,
+        targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
+        targetTradeTimestamp: row.target_trade_timestamp as string,
+        marketEndTime: row.market_end_time as string,
+        marketMetadataSnapshot: JSON.parse(row.market_metadata_snapshot_json as string),
+        marketMetadataHash: row.market_metadata_hash as string,
+        rulesetHash: row.context_ruleset_hash as string,
+        createdAt: row.context_created_at as string,
+      } : null,
+      capitalDecision: row.capital_estimate_status ? {
+        status: row.capital_estimate_status as "COMPLETE" | "INCOMPLETE" | "FAILED",
+        confidence: row.capital_confidence as "HIGH" | "MEDIUM" | "LOW",
+        ratioPpm: row.capital_ratio_ppm as string | null,
+        fallbackAmountMicros: row.fallback_amount_micros as string,
+      } : null,
+    };
+  }
+
+  private signalOutcome(signalId: string, assetId: string): string | null {
+    const context = this.database.prepare("SELECT market_metadata_snapshot_json FROM signal_execution_contexts WHERE signal_id=?")
+      .get(signalId) as { market_metadata_snapshot_json: string } | undefined;
+    if (!context) return null;
+    const metadata = JSON.parse(context.market_metadata_snapshot_json) as { tokens?: Array<{ token_id: string; outcome: string }> };
+    return metadata.tokens?.find((token) => token.token_id === assetId)?.outcome ?? null;
+  }
+
+  private execution(executionId: string): ExecutionRow {
+    const row = this.database.prepare("SELECT * FROM paper_executions WHERE paper_execution_id=?").get(executionId) as unknown as ExecutionRow | undefined;
+    if (!row) throw new Error(`PAPER_EXECUTION_NOT_FOUND:${executionId}`);
+    return row;
+  }
+
+  private position(positionId: string): PositionRow {
+    const row = this.database.prepare("SELECT * FROM paper_positions WHERE paper_position_id=?").get(positionId) as unknown as PositionRow | undefined;
+    if (!row) throw new Error(`PAPER_POSITION_NOT_FOUND:${positionId}`);
+    return row;
+  }
+
+  private accountRow(accountId: string): {
+    status: string;
+    initial_balance_micros: string;
+    cash_balance_micros: string;
+    reserved_balance_micros: string;
+    realized_pnl_micros: string;
+    signal_cutoff_at: string;
+  } {
+    const row = this.database.prepare(
+      `SELECT status,initial_balance_micros,cash_balance_micros,reserved_balance_micros,
+              realized_pnl_micros,signal_cutoff_at FROM paper_accounts WHERE paper_account_id=?`,
+    ).get(accountId) as ReturnType<PaperExecutor["accountRow"]> | undefined;
+    if (!row) throw new Error(`PAPER_ACCOUNT_NOT_FOUND:${accountId}`);
+    return row;
+  }
+
+  private openPositions(accountId: string, includeSettlementPending = false): PositionRow[] {
+    return this.database.prepare(
+      `SELECT * FROM paper_positions WHERE paper_account_id=? AND status IN (${includeSettlementPending ? "'OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING'" : "'OPEN','PARTIALLY_CLOSED'"})
+       ORDER BY created_at,paper_position_id`,
+    ).all(accountId) as unknown as PositionRow[];
+  }
+}

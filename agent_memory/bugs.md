@@ -5,7 +5,8 @@
 - 141 条 Position Baseline 是当前启动快照，只适用于快照之后的增量监控；不能冒充历史 Replay 窗口开始时的仓位。
 - 历史 BUY 缺少交易时点 pUSD/Positions 快照，只能保存 `INCOMPLETE/MEDIUM` 和 10 pUSD fallback，不能生成历史比例资金结果。
 - Golden 1-5 已 `APPROVED/MATCH/PASSED`；该门禁已解除，但不消除历史数据不完整和前向 baseline 验证不足。
-- Observe Only 只完成短时真实运行，尚未达到默认 24 小时连续运行标准；当前不能证明长期稳定，也不能打开 Paper Gate。
+- Observe Only 只完成短时真实运行，24 小时验证已由用户延期到 Live Gate 前；当前不能证明长期稳定，也绝不能据此打开 Live Gate。
+- Phase 1A 自动化验证不等于 Phase 1B Paper 稳定性验收；在持续新 Signal 模拟运行前不得标记 Paper Passed。
 
 ## Active risks
 - 事件分类依赖 Replay gap/baseline 上下文，已从 raw event 单值字段迁移为 `replay_event_classifications` 版本化投影；raw event 上的旧分类列不应作为权威读取来源。
@@ -17,6 +18,8 @@
 - Activity 的 TRADE 可能早于 Trades 可见；Observe 已用同一交易幂等键融合两源。若两源字段不完整或不一致，必须保留 reconciliation 异常，不得自动改仓。
 - Positions 也可能短暂领先 Trades/Activity；短暂差异先标记 `MINOR_DIFF`，连续 3 次才升级 `MAJOR_DESYNC`。只有最终恢复为 `SYNCED` 时才视为已恢复，不能用自动改仓掩盖。
 - Node.js `node:sqlite` experimental warning 仍存在；24 小时 soak 需同时观察驱动稳定性和 WAL/锁行为。
+- 公开 REST orderbook 的源时间可能因盘口未变化而超过 2 秒；当前严格按需求标记 `ORDERBOOK_STALE` 并拒绝成交，Phase 1B 需观察该门禁对成交率的影响，不能偷偷放宽。
+- CLOB 费率采用公开 `clob-markets/{condition}` 返回的 `fd.r/fd.e` 曲线快照；未知 exponent 或数据缺失时固定 `FEE_MODEL_UNAVAILABLE`，不得默认为零费率。
 
 ## Safety boundary
 - 当前只实现监控层与验证工具，不存在 Paper/Live Executor。

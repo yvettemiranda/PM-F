@@ -1,0 +1,67 @@
+import { createHash } from "node:crypto";
+import type { ClobMarket } from "../adapters/polymarket-public.js";
+import { stableJson, RULESET_HASH } from "../domain/versioning.js";
+import type { ObserveEvent, ObserveSignal } from "../observe/types.js";
+import type { SignalExecutionContext } from "../paper/types.js";
+import type { CapitalEstimate } from "../services/capital-estimator.js";
+
+export interface SignalContextBundle {
+  signal: ObserveSignal;
+  context: SignalExecutionContext;
+  capitalDecision: CapitalEstimate | null;
+}
+
+export interface SignalMarketMetadataProvider {
+  market(conditionId: string): Promise<{ sourceUrl: string; fetchedAt: string; market: ClobMarket }>;
+}
+
+export function buildSignalExecutionContext(input: {
+  signal: ObserveSignal;
+  event: ObserveEvent;
+  market: ClobMarket;
+  marketSourceUrl: string;
+  marketFetchedAt: string;
+  capitalDecision: CapitalEstimate | null;
+  createdAt: string;
+}): SignalExecutionContext {
+  const trade = input.event.trade;
+  if (!trade) throw new Error(`Signal source trade missing: ${input.signal.signalId}`);
+  if (!input.market.end_date_iso) throw new Error(`MARKET_END_TIME_UNAVAILABLE:${input.signal.conditionId}`);
+  const metadata = {
+    sourceUrl: input.marketSourceUrl,
+    fetchedAt: input.marketFetchedAt,
+    conditionId: input.market.condition_id,
+    question: input.market.question ?? null,
+    marketSlug: input.market.market_slug ?? null,
+    endDateIso: input.market.end_date_iso,
+    closed: input.market.closed,
+    active: input.market.active ?? null,
+    acceptingOrders: input.market.accepting_orders ?? null,
+    takerBaseFee: input.market.taker_base_fee ?? null,
+    is5050Outcome: input.market.is_50_50_outcome ?? false,
+    tokens: input.market.tokens,
+  };
+  const metadataHash = createHash("sha256").update(stableJson(metadata)).digest("hex");
+  const identity = [
+    input.signal.signalId,
+    input.capitalDecision?.capitalEstimateId ?? "NONE",
+    String(trade.timestamp),
+    input.market.end_date_iso,
+    metadataHash,
+    RULESET_HASH,
+  ].join("|");
+  return {
+    contextId: createHash("sha256").update(identity).digest("hex"),
+    signalId: input.signal.signalId,
+    capitalDecisionId: input.capitalDecision?.capitalEstimateId ?? null,
+    targetTradeCapitalRatioPpm: input.signal.signalType === "TARGET_BUY"
+      ? input.capitalDecision?.targetTradeCapitalRatioPpm ?? null
+      : null,
+    targetTradeTimestamp: new Date(trade.timestamp * 1_000).toISOString(),
+    marketEndTime: input.market.end_date_iso,
+    marketMetadataSnapshot: metadata,
+    marketMetadataHash: metadataHash,
+    rulesetHash: RULESET_HASH,
+    createdAt: input.createdAt,
+  };
+}
