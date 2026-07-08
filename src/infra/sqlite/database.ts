@@ -69,6 +69,23 @@ export class Phase0Database {
         throw error;
       }
     }
+    const observeOnlyApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("1.5.0");
+    if (!observeOnlyApplied) {
+      const observeSql = readFileSync(new URL("./004_observe_only.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(observeSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("1.5.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

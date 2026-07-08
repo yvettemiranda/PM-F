@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- 用户已确认 Golden 1-5；审批和自动比对已完成，正在收尾 Phase 0.5 Gate 结论。
+- Phase 0.5 Observe Only Runner 已实现并完成短时真实地址验证；24 小时连续运行门禁尚未满足，因此仍禁止进入 Paper。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -16,14 +16,18 @@
 - 已实现 stale Replay Job → `INTERRUPTED` → 新 Job 重跑；关键事务失败完整回滚。
 - 当前 TypeScript 类型检查通过，11 个测试文件共 37 项测试通过；覆盖 baseline、capital、manifest、Golden、断线、乱序、重复、幂等、事务回滚和 Crash Recovery。
 - commit `376ba80fbfcfe4bceecdac6ddbfcb924a1ad5c2f` 的 clean capture `964354247f7403cfbdf5b7542a19f39b98d3c10652917a3e03bdb0225d8c2dc4` 已从 manifest 重放；stored/new Replay Hash 均为 `af6cdf9c7f81f6311113daf4ce36e3892bf40913f580716d79fbd6ec2e53dfe8`，`stable=true`。
+- 已新增 Observe Only Runner、1.5.0 SQLite migration、checkpoint、position projection、capital snapshot 关联、reconciliation report、单实例和 stale-run 恢复。
+- 已覆盖正常连续轮询、API 临时失败、断线 gap、重启 checkpoint、重复、3-1-2 乱序、REDEEM 投影、Activity/Trades 先后到达去重和恢复窗口截断保护；当前 12 个测试文件共 44 项测试通过。
+- 真实地址短时运行发现并修正 Activity 比 Trades 更早可见的成交，以及 REDEEM 导致的仓位归零；修正后 25.467 秒运行 3 次成功轮询、0 次失败、3 个 gap 事件、3 个非执行 Signal、3 次对账，最终 `SYNCED` 且未发现漂移。
 
 ## Current gate
 - Wallet Identity 已通过。
 - 当前 baseline 和实时资金快照已建立。
 - Golden 1-5 已通过。
 - Data API 历史仍被 offset 3000 上限截断，历史 Replay 保持 `INCOMPLETE`。
+- Observe 短时功能验收已通过，但默认 24 小时 soak 尚未完成；Paper Gate 保持关闭。
 - 未进入 Paper/Live，未接入私钥，未创建订单，未执行交易。
 
 ## Next steps
-- 使用启动 baseline 之后的前向增量数据完成一段 Observe Only 验证，避免把截断历史当作完整历史。
-- 完成前向仓位对账和增量 checkpoint 验收后，再重新判定 Paper Gate；当前仍不进入 Paper。
+- 以 clean commit 启动至少 24 小时 Observe Only soak；要求无失败轮询、无状态漂移、最终 `SYNCED`。
+- 24 小时报告通过后再重新判定 Paper Gate；系统不得自动升级模式。

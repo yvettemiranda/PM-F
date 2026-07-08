@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "1.4.0",
+  schemaVersion: "1.5.0",
   signalVersion: "1.3.0",
-  strategyVersion: "1.1.0",
+  strategyVersion: "1.2.0",
   riskVersion: "1.0.0",
   replayVersion: "1.5.0",
 });
@@ -19,7 +19,7 @@ export const RULESET = Object.freeze({
   stopTriggerRatioPpm: 500_000,
   capitalTimeToleranceMs: 5 * 60 * 1_000,
   fallbackAmountMicros: 10_000_000,
-  reconciliationShareAbsToleranceMicros: 10_000,
+  reconciliationShareAbsToleranceMicros: 100_000,
   reconciliationCashAbsToleranceMicros: 10_000,
   reconciliationRelativeTolerancePpm: 1_000,
   reconciliationGraceMs: 120_000,

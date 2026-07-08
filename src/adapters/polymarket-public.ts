@@ -95,11 +95,21 @@ export class PolymarketPublicApi {
     );
   }
 
+  async recentTrades(address: string, limit = 1_000): Promise<ApiCapture<PublicTrade[]>> {
+    return this.request(`https://data-api.polymarket.com/trades?user=${address}&takerOnly=false&limit=${limit}&offset=0`);
+  }
+
   async activity(address: string): Promise<PagedResult<PublicActivity>> {
     return this.paged<PublicActivity>(
       (offset) =>
         `https://data-api.polymarket.com/activity?user=${address}&limit=500&offset=${offset}&sortBy=TIMESTAMP&sortDirection=DESC`,
       500,
+    );
+  }
+
+  async recentActivity(address: string, limit = 500): Promise<ApiCapture<PublicActivity[]>> {
+    return this.request(
+      `https://data-api.polymarket.com/activity?user=${address}&limit=${limit}&offset=0&sortBy=TIMESTAMP&sortDirection=DESC`,
     );
   }
 

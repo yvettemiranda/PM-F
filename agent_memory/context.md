@@ -23,6 +23,8 @@
 - 当前价格采用 18 位、份额采用 6 位定点整数；禁止静默截断外部小数。
 - Signal 只描述目标钱包行为；`executionEligible` 是监控层给未来执行层的硬门禁，不是 Execution 状态。断线期间生成行为 Signal，但必须为 `false` 且原因是 `GAP_EVENT`。
 - Position Baseline 使用历史/跟踪双桶；卖出优先减少启动后跟踪桶，不足部分再减少历史桶，SELL Ratio 只使用跟踪桶。
+- Observe Only 使用 Trades 与 Activity 双源归一化交易；Activity 先到、Trades 后到时共享交易幂等键，后到数据只计重复。REDEEM 更新仓位投影但不生成交易 Signal。
+- Observe checkpoint 保存事件游标、replay state、投影 hash 和资金快照；恢复窗口事件仍生成行为 Signal，但固定 `executionEligible=false/GAP_EVENT`。
 - 资金估算同时保存 `capitalEstimateStatus=COMPLETE/INCOMPLETE/FAILED` 和 `capitalConfidence=HIGH/MEDIUM/LOW`；MEDIUM 使用 10 pUSD fallback，LOW 禁止进入执行阶段。
 - Golden Expectations 必须先生成 `CANDIDATE`，只有用户人工确认后才能变更为 `APPROVED` 并参与 Golden Passed。
 
@@ -41,7 +43,7 @@
 - 模拟交易开发前必须先完成 Phase 0：API 契约验证、第一层数据模型验证、Replay Engine、第一层 SQLite 初始化设计和 Replay Report；Replay 未通过不得进入第二层。
 - Phase 0 增加 Wallet Identity Report；钱包类型无法以充分证据确认时进入 `IDENTITY_UNKNOWN`，不得生成可执行信号。
 - 核心对象必须记录 `schema_version`、`signal_version`、`strategy_version`、`risk_version`、`replay_version`，并保存不可变规则快照，保证历史复现。
-- 同步等级调整为 `SYNCED / MINOR_DIFF / MAJOR_DESYNC`，使用可配置容差和持续时间判断，避免短暂 API/区块延迟误触发重大保护。
+- 同步等级调整为 `SYNCED / MINOR_DIFF / MAJOR_DESYNC`，使用可配置容差和持续次数判断；份额绝对容差当前为 0.1 share，用于覆盖 Positions 不返回的尘埃仓位。
 - 目标资金快照与目标交易时间差不得超过默认 5 分钟；超时标记 `INCOMPLETE` 并使用 10 pUSD 兜底。
 - 实时运行模式为 `OBSERVE_ONLY / PAPER / LIVE`；Replay 是独立验证任务，不属于运行模式。
 - 采用保守同步策略：`MINOR_DIFF` 下 Paper 正常、Live 禁止新增开仓但允许退出和对账；`MAJOR_DESYNC` 停止所有新增交易并继续监控、对账和风险处理。
