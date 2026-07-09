@@ -27,6 +27,15 @@
 
 ## 本机验证
 
+如果不熟悉命令行，优先使用仓库里的 `操作入口/` 文件夹：
+
+1. 双击 `1_先点我_检查环境.command`
+2. 没有报错后，双击 `2_开始Observe_24小时.command`
+3. 运行结束后，双击 `4_打开报告文件夹.command`
+4. 把 `data/observe/` 最新的 `observe-*.json` 和 `data/operator/logs/` 最新日志发给 Codex 分析
+
+`操作入口/` 中没有 Live 入口，不会读取私钥，不会创建真实订单。
+
 ```bash
 pnpm install
 pnpm typecheck

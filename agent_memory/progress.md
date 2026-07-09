@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 5 Operational Validation Framework 已完成实现和自动化验证；当前具备最终验证框架和运行级验证框架，但尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
+- Phase 5 Operational Validation Framework 已完成实现和自动化验证；当前具备最终验证框架和运行级验证框架，并新增面向非技术使用者的 macOS 双击操作入口。尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -46,6 +46,7 @@
 - Phase 5 已新增 SQLite `2.6.0` 迁移、`OperationalRunner`、`operational_runs/locks/heartbeats/checkpoints/anomalies/health_snapshots/consistency_checks/reports/paper_bindings`、`shadow_risk_observations`、单实例锁、健康监控、一致性监控、错误记录、Operational Report 和 `operational:validate` CLI。
 - Phase 5 默认使用 isolated snapshot DB；`observe_only` 只写 shadow risk observation，不写正式 `risk_decisions`；`paper_validation` 使用 dedicated Paper validation account 和 fake market data；`paper_validation/crash_recovery` 禁止 `--no-snapshot`，避免污染源库。
 - 当前验证结果：TypeScript 类型检查通过；17 个测试文件共 117 项测试通过；`pnpm operational:validate -- --mode=health_monitor --duration-seconds=0` 和 `pnpm operational:validate -- --mode=paper_validation --duration-seconds=0` 均通过并输出 `OPERATIONAL_FRAMEWORK_READY`、`liveAllowed=false`；`pnpm validate:final -- --type=all` 仍通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。
+- 已新增 `操作入口/`：`1_先点我_检查环境.command`、`2_开始Observe_24小时.command`、`3_停止当前运行.command`、`4_打开报告文件夹.command`、`5_一键生成诊断报告.command`、`6_开始Paper_24小时_等我确认后再点.command` 和 `README_先看这个.txt`。入口脚本已通过 zsh 语法检查，`1_先点我_检查环境.command`、`3_停止当前运行.command`、`5_一键生成诊断报告.command` 已实际运行通过。
 
 ## Current gate
 - Wallet Identity 已通过。
