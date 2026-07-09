@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 4 Final Validation Framework 已完成实现和自动化验证；当前具备统一验证入口和报告框架，但尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
+- Phase 5 Operational Validation Framework 已完成实现和自动化验证；当前具备最终验证框架和运行级验证框架，但尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -43,6 +43,9 @@
 - Phase 4 已新增 SQLite `2.5.0` 迁移、`ValidationRunner`、`validation_sessions/checks/artifacts/reports`、snapshot database helper、Paper Replay/Consistency/Crash Recovery/Reconciliation/Live Gate/Observe Only validators、JSON/Markdown report generator 和 `validate:final` CLI。
 - Phase 4 验证默认使用 isolated snapshot DB；Live Gate validator 只在验证库中构造 fake allow path，验证结束恢复 `PAPER + LIVE_DISABLED`，不会创建真实订单或真实 signer。
 - 当前验证结果：TypeScript 类型检查通过；16 个测试文件共 111 项测试通过；`pnpm validate:final -- --type=all` 通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。当前报告 warning 为 `REPLAY_INCOMPLETE` 和 `ORDERBOOK_SNAPSHOT_MISSING`，符合已知历史数据限制。
+- Phase 5 已新增 SQLite `2.6.0` 迁移、`OperationalRunner`、`operational_runs/locks/heartbeats/checkpoints/anomalies/health_snapshots/consistency_checks/reports/paper_bindings`、`shadow_risk_observations`、单实例锁、健康监控、一致性监控、错误记录、Operational Report 和 `operational:validate` CLI。
+- Phase 5 默认使用 isolated snapshot DB；`observe_only` 只写 shadow risk observation，不写正式 `risk_decisions`；`paper_validation` 使用 dedicated Paper validation account 和 fake market data；`paper_validation/crash_recovery` 禁止 `--no-snapshot`，避免污染源库。
+- 当前验证结果：TypeScript 类型检查通过；17 个测试文件共 117 项测试通过；`pnpm operational:validate -- --mode=health_monitor --duration-seconds=0` 和 `pnpm operational:validate -- --mode=paper_validation --duration-seconds=0` 均通过并输出 `OPERATIONAL_FRAMEWORK_READY`、`liveAllowed=false`；`pnpm validate:final -- --type=all` 仍通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。
 
 ## Current gate
 - Wallet Identity 已通过。
@@ -52,7 +55,7 @@
 - Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
 - 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
 - Phase 1A 已完成实现、架构优化、主体架构补齐和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
-- Live Executor 架构代码和 Phase 4 验证框架已通过自动化验证，但正式实盘 Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance、真实 signer 授权和用户再次授权均未完成。
+- Live Executor 架构代码、Phase 4 验证框架和 Phase 5 Operational Validation Framework 已通过自动化验证，但正式实盘 Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance、真实 signer 授权和用户再次授权均未完成。
 
 ## Next steps
 - 下一步建议进入最终验证执行阶段：补齐历史/实时 Paper Replay 条件、长周期 Paper Validation、Observe Only 24h soak、Crash Recovery 长测、状态一致性验证、Live Gate 验收、geoblock/compliance 和小额实盘前检查。

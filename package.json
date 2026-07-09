@@ -14,7 +14,8 @@
     "phase05:replay-capture": "tsx src/cli/replay-capture.ts",
     "observe:run": "tsx src/cli/observe-only.ts",
     "paper:run": "tsx src/cli/paper-run.ts",
-    "validate:final": "tsx src/cli/validate-final.ts"
+    "validate:final": "tsx src/cli/validate-final.ts",
+    "operational:validate": "tsx src/cli/operational-validate.ts"
   },
   "devDependencies": {
     "@types/node": "24.13.2",

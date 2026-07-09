@@ -1,0 +1,61 @@
+import { resolve } from "node:path";
+import { OperationalRunner } from "../operational/operational-runner.js";
+import type { OperationalMode, OperationalRunOptions } from "../operational/types.js";
+
+const args = process.argv.slice(2);
+const valueArg = (name: string): string | undefined => args.find((item) => item.startsWith(`--${name}=`))?.split("=")[1];
+const flag = (name: string): boolean => args.includes(`--${name}`);
+
+const modeMap: Record<string, OperationalMode> = {
+  observe_only: "OBSERVE_ONLY_OPERATIONAL",
+  paper_validation: "PAPER_VALIDATION_OPERATIONAL",
+  health_monitor: "HEALTH_MONITOR_ONLY",
+  consistency_monitor: "CONSISTENCY_MONITOR_ONLY",
+  crash_recovery: "CRASH_RECOVERY_OPERATIONAL",
+};
+
+const rawMode = (valueArg("mode") ?? "health_monitor").toLowerCase();
+const mode = modeMap[rawMode];
+if (!mode) {
+  throw new Error(`Invalid --mode: ${rawMode}. Allowed: ${Object.keys(modeMap).join(", ")}`);
+}
+
+const numberArg = (name: string, fallback: number): number => {
+  const raw = valueArg(name);
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid --${name}: ${raw}`);
+  return value;
+};
+
+const databasePath = resolve(valueArg("database") ?? "data/phase0/phase0.sqlite");
+const outputDirectory = resolve(valueArg("output-directory") ?? "data/operational");
+const durationMs = numberArg("duration-seconds", 0) * 1_000;
+const pollIntervalMs = numberArg("poll-seconds", 1) * 1_000;
+
+const runOptions: OperationalRunOptions = {
+  sourceDatabasePath: databasePath,
+  outputDirectory,
+  mode,
+  durationMs,
+  pollIntervalMs,
+  useSnapshot: !flag("no-snapshot"),
+};
+const targetWallet = valueArg("target-wallet");
+const paperAccountId = valueArg("paper-account-id");
+if (targetWallet) runOptions.targetWallet = targetWallet;
+if (paperAccountId) runOptions.paperAccountId = paperAccountId;
+
+const result = await new OperationalRunner().run(runOptions);
+
+console.log(JSON.stringify({
+  status: result.status,
+  finalStatus: result.finalStatus,
+  liveAllowed: result.liveAllowed,
+  blockingFailures: result.blockingFailures,
+  warnings: result.warnings,
+  jsonReportPath: result.jsonReportPath,
+  markdownReportPath: result.markdownReportPath,
+  workingDatabasePath: result.workingDatabasePath,
+  sourceDatabasePath: result.sourceDatabasePath,
+  paperAccountId: result.paperAccountId,
+}, null, 2));
