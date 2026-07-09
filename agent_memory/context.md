@@ -6,7 +6,7 @@
 
 ## Constraints
 - `ni-k` 与旧版 PolymarketBot 完全独立；不引用、不迁移、不复用旧项目代码、账本、风控、页面或交易逻辑。
-- 当前处于 Phase 3 Live Executor 架构代码已实现后的状态；允许 Paper 模拟账户、模拟订单和模拟成交，允许 Live Gate 安全检查/状态机/审计占位，允许 Live Executor 使用 fake/disabled adapters 进行代码正确性测试，继续禁止真实私钥、默认真实订单、默认认证交易接口、approve、真实 redeem 和链上写操作。
+- 当前处于 Phase 4 Final Validation Framework 已实现后的状态；允许 Paper 模拟账户、模拟订单和模拟成交，允许 Live Gate 安全检查/状态机/审计占位，允许 Live Executor 使用 fake/disabled adapters 进行代码正确性测试，允许 Validation 在 isolated snapshot database 中运行 fake path 和故障注入验证；继续禁止真实私钥、默认真实订单、默认认证交易接口、approve、真实 redeem 和链上写操作。
 - 新项目按三层架构设计：钱包监控与信号生成层、模拟交易层、实盘交易层。
 - 第一版只支持一个 Polymarket Profile / Proxy Wallet 地址。
 - 第一阶段优先完成监控、信号、自然语言解释、标准化事件、模拟交易、日志和状态机；不优先开发实盘。
@@ -71,3 +71,4 @@
 - Live Executor 默认依赖 `DisabledSigner`、`DisabledOrderAdapter`、`DisabledWalletProvider`、`DisabledRedeemAdapter`；测试可以使用 fake gate/fake signer/fake wallet/fake order/fake redeem。
 - Live Executor 必须调用 `LiveGateService.checkExecution()` 或等价 gate seam，且只接受 `RiskDecision=ALLOW`；不得自行重算 Risk Decision。
 - Live allowance 当前只读；allowance 不足记录 `ALLOWANCE_INSUFFICIENT` 并阻断，禁止自动 approve 或 increaseAllowance。
+- Phase 4 Validation Framework 默认复制源 SQLite 到 `data/validation/<session-id>/` 后运行；Validation 只允许写 validation 表或 snapshot DB，不能污染业务数据。`validate:final` 的最高状态是 `VALIDATION_FRAMEWORK_READY` 且 `liveAllowed=false`，不等同于 Live Gate 通过。

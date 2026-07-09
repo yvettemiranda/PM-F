@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 3 Live Executor 架构已完成实现和自动化验证；当前尚未进入最终统一验证阶段，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
+- Phase 4 Final Validation Framework 已完成实现和自动化验证；当前具备统一验证入口和报告框架，但尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -40,7 +40,9 @@
 - Phase 3 已实现 `LiveExecutor`，复用既有 `ExecutorInterface`，并保留 `LiveExecutorPlaceholder`；Live Executor 调用 gate seam 的 `checkExecution()`，默认 disabled adapters，不默认真实交易。
 - 已新增 Live 内部 seams：`OrderAdapter`、`PolymarketClobAdapter`、`Signer`、`WalletProvider`、`RedeemAdapter`，以及 fake/disabled 实现。
 - 已实现 Live ledger、幂等键、fake fill/position 更新、Live reconciliation、Crash Recovery、Emergency Stop 和 fake/disabled Redeem。
-- 当前验证结果：TypeScript 类型检查通过；15 个测试文件共 107 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.4.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`，默认仍是 `PAPER + LIVE_DISABLED`。
+- Phase 4 已新增 SQLite `2.5.0` 迁移、`ValidationRunner`、`validation_sessions/checks/artifacts/reports`、snapshot database helper、Paper Replay/Consistency/Crash Recovery/Reconciliation/Live Gate/Observe Only validators、JSON/Markdown report generator 和 `validate:final` CLI。
+- Phase 4 验证默认使用 isolated snapshot DB；Live Gate validator 只在验证库中构造 fake allow path，验证结束恢复 `PAPER + LIVE_DISABLED`，不会创建真实订单或真实 signer。
+- 当前验证结果：TypeScript 类型检查通过；16 个测试文件共 111 项测试通过；`pnpm validate:final -- --type=all` 通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。当前报告 warning 为 `REPLAY_INCOMPLETE` 和 `ORDERBOOK_SNAPSHOT_MISSING`，符合已知历史数据限制。
 
 ## Current gate
 - Wallet Identity 已通过。
@@ -50,8 +52,8 @@
 - Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
 - 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
 - Phase 1A 已完成实现、架构优化、主体架构补齐和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
-- Live Executor 架构代码已通过自动化验证，但正式实盘 Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance、真实 signer 授权和用户再次授权均未完成。
+- Live Executor 架构代码和 Phase 4 验证框架已通过自动化验证，但正式实盘 Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance、真实 signer 授权和用户再次授权均未完成。
 
 ## Next steps
-- 下一步建议进入最终统一验证阶段：Paper Replay、长周期 Paper Validation、Observe Only soak、Crash Recovery、状态一致性验证、Live Gate 验收、geoblock/compliance 和小额实盘前检查。
+- 下一步建议进入最终验证执行阶段：补齐历史/实时 Paper Replay 条件、长周期 Paper Validation、Observe Only 24h soak、Crash Recovery 长测、状态一致性验证、Live Gate 验收、geoblock/compliance 和小额实盘前检查。
 - 在最终验证和再次授权前，禁止接入真实 signer、真实 CLOB client、approve、真实 redeem 或任何真实资金操作。

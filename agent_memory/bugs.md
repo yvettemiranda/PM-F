@@ -9,6 +9,7 @@
 - Phase 1A 自动化验证和架构优化不等于 Phase 1B Paper 稳定性验收；在持续新 Signal 模拟运行前不得标记 Paper Passed。
 - Phase 2 Live Gate Safety Layer 只实现安全门和审计链路，不代表 Live Gate 已通过；所有 `live_gate_prerequisites` 默认 `PENDING`，不得手动绕过长期验收和用户再次授权。
 - Phase 3 Live Executor 代码完成不代表可以实盘；当前仅用 fake/disabled adapters 通过代码正确性测试，最终统一验证和用户再次明确授权仍是硬门禁。
+- Phase 4 Validation Framework 完成不代表最终验证已通过；当前 `validate:final` 只证明框架可运行，长周期 Paper、24 小时 Observe、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次明确授权仍未完成。
 
 ## Active risks
 - 事件分类依赖 Replay gap/baseline 上下文，已从 raw event 单值字段迁移为 `replay_event_classifications` 版本化投影；raw event 上的旧分类列不应作为权威读取来源。
@@ -26,7 +27,7 @@
 - `FROZEN` Position 会阻断新增仓位、自动卖出和自动止损；Phase 1B 需要验证 reconciliation 成功恢复路径不会误解冻仍存在异常的数据。
 - Portfolio Projection 目前已从 ledger/position/PnL 统一计算账户状态；后续 Report/UI 必须读投影服务或投影表，不能重新实现余额、敞口或权益计算。
 - Ruleset Registry 已保存当前规则参数；后续修改买入范围、等待时间、止损或费率模型时必须新增/保留可解释的规则版本，不能覆盖历史 `ruleset_hash`。
-- `schemaVersion` 从 `2.2.0` 升到 `2.3.0`，`RULESET_HASH` 会随版本快照变化；历史对象必须继续按其原始 `ruleset_hash` 解释，不能用当前 hash 覆盖历史行为。
+- `schemaVersion` 已升到 `2.5.0`，`RULESET_HASH` 会随版本快照变化；历史对象必须继续按其原始 `ruleset_hash` 解释，不能用当前 hash 覆盖历史行为。
 - Live Gate 当前只允许 `MOCK` 或 `PAPER` balance provider；后续真实余额接入必须单独设计为只读能力，并继续禁止在同一阶段引入签名或下单能力。
 - `PolymarketClobAdapter` 已存在并可调用官方 SDK `postOrder/cancelOrder`，但不能默认构造或启用；真实 adapter 必须等最终验证、geoblock/compliance 和用户再次授权。
 - Live risk decisions 目前仍复用既有 `risk_decisions.paper_account_id` 外键承载账户引用；后续如果拆出真实 live account 表，需要单独 migration 和兼容策略。
@@ -38,3 +39,4 @@
 - Phase 1B Paper 长期验证未通过且用户未再次明确授权前禁止 Live。
 - `LIVE_ACTIVE` 即使曾被持久化，程序重启后也必须降级回 `LIVE_ARMING`，不得自动恢复真实执行状态。
 - Phase 3 禁止自动 approve/increaseAllowance；allowance 不足只能阻断并记录 `ALLOWANCE_INSUFFICIENT`。
+- Phase 4 Validation 默认使用 snapshot DB；如未来允许 `--no-snapshot`，不得运行 Crash Recovery 或 Live Gate fake path 这类会写业务状态的验证。

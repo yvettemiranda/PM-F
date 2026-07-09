@@ -2,7 +2,7 @@
 
 这是一个全新、独立的 Polymarket Copy Trading System。它不复用旧版 PolymarketBot 的代码、数据库、仓位模型、交易逻辑或页面。
 
-当前实现到 Phase 1A：
+当前实现到 Phase 4 架构阶段：
 
 - Wallet Identity 验证
 - 官方公开 API 数据契约采集
@@ -19,8 +19,10 @@
 - 不可变 `signal_execution_context`：为 Paper 输出交易时间、市场结束时间、市场元数据和逐 BUY 资金决策
 - Paper Executor：独立模拟账户、资金 reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、止损、结算和审计账本
 - Phase 1A 架构优化：统一 Executor Interface、Risk Manager、Risk Decision 全链路关联、Portfolio Projection Service、Ruleset Registry、Live 安全占位、Settlement Service、PnL Model、不可变 Audit Log、Position `FROZEN` 保护态和核心对象版本字段
+- Phase 2/3：Live Gate Safety Layer、Live Executor 架构、Order/CLOB/Signer/Wallet/Redeem adapters、Live Order/Fill/Position/Ledger/Reconciliation/Crash Recovery/Emergency Stop。默认仍使用 disabled/fake adapter，不默认创建真实交易能力
+- Phase 4：Final Validation Framework。统一验证入口会在 isolated snapshot database 上运行 Paper Replay、Consistency、Crash Recovery、Reconciliation、Live Gate fake path 和 Observe Only 检查，并生成可追溯 Validation Report
 
-`Live Executor` 目前只有安全占位，不包含交易逻辑。私钥接入、真实订单、认证交易客户端和链上写操作均不属于当前阶段。Phase 1A 只实现 Paper 模拟闭环和架构准备，尚未代表 Phase 1B 或 Live Gate 通过。
+`Live Executor` 已有完整架构和 fake/disabled adapter 测试路径，但默认不包含真实交易能力。私钥接入、真实订单、认证交易客户端、approve、真实 redeem 和链上写操作均不属于当前默认运行状态。Phase 4 只代表验证框架存在，不代表最终验证通过，也不代表 Live 可用。
 
 ## 本机验证
 
@@ -32,6 +34,7 @@ pnpm phase0:validate -- 0x目标地址
 pnpm phase05:replay-capture -- capture_run_id
 pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=15
 pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
+pnpm validate:final -- --type=all
 ```
 
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。
@@ -41,3 +44,5 @@ pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
 用户已将 24 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认创建一个从启动时间开始消费新 Signal 的 1000 pUSD 模拟账户；传入 `--account-id=<id>` 可从已有 checkpoint 恢复。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
+
+`validate:final` 默认复制 `data/phase0/phase0.sqlite` 到 `data/validation/<session-id>/` 后运行，避免污染业务数据。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；即使所有 fake/snapshot 检查通过，`liveAllowed` 仍固定为 `false`。真实资金前仍必须实际执行长周期 Paper Validation、24 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。
