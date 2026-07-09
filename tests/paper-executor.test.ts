@@ -947,7 +947,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("keeps Paper and Live isolated from private key or real order dependencies", () => {
+  it("keeps Paper isolated from live signer or order dependencies", () => {
     const paperSource = readFileSync(new URL("../src/paper/paper-executor.ts", import.meta.url), "utf8");
     const liveSource = readFileSync(new URL("../src/live/live-executor.ts", import.meta.url), "utf8");
     for (const forbidden of ["privateKey", "secret", "apiKey", "createOrder", "postOrder", "submitOrder", "signOrder"]) {
@@ -955,7 +955,9 @@ describe("PaperExecutor", () => {
     }
     expect(liveSource).toContain("LIVE_EXECUTOR_NOT_IMPLEMENTED");
     expect(liveSource).not.toContain("privateKey");
-    expect(liveSource).not.toContain("createOrder");
+    expect(liveSource).not.toContain("ClobClient");
+    expect(liveSource).not.toContain("postOrder");
+    expect(liveSource).toContain("checkExecution");
   });
 
   it("recovers idempotently after restart without duplicating risk decisions", async () => {

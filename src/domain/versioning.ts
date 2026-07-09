@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.3.0",
+  schemaVersion: "2.4.0",
   signalVersion: "1.4.0",
   strategyVersion: "2.0.0",
   riskVersion: "1.2.0",
   replayVersion: "1.5.0",
   paperVersion: "1.2.0",
+  liveVersion: "1.0.0",
   rulesetVersion: "v1.0.0",
   feeModelVersion: "clob-fd-v1",
   configVersion: "v1.0.0",
