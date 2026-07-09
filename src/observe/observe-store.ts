@@ -751,8 +751,8 @@ export class ObserveStore {
           context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
           target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
           market_metadata_hash,ruleset_hash,schema_version,signal_version,
-          strategy_version,source_code_commit,source_code_dirty,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          strategy_version,source_code_commit,source_code_dirty,config_version,created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         bundle.context.contextId,
@@ -767,8 +767,9 @@ export class ObserveStore {
         VERSIONS.schemaVersion,
         VERSIONS.signalVersion,
         VERSIONS.strategyVersion,
-        this.sourceVersion.commit,
-        this.sourceVersion.dirty ? 1 : 0,
+        bundle.context.sourceCodeCommit,
+        bundle.context.sourceCodeDirty ? 1 : 0,
+        bundle.context.configVersion,
         bundle.context.createdAt,
       );
   }

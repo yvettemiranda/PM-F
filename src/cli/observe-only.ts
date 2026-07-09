@@ -31,6 +31,7 @@ const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
   pollIntervalMs: pollSeconds * 1_000,
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
   signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),
+  sourceVersion,
 });
 const controller = new AbortController();
 process.once("SIGINT", () => controller.abort());

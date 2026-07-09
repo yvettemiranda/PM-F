@@ -27,4 +27,11 @@ describe("state machines", () => {
     expect(transition(PAPER_POSITION_TRANSITIONS, "SETTLEMENT_PENDING", "REDEEMED")).toBe("REDEEMED");
     expect(() => transition(PAPER_POSITION_TRANSITIONS, "OPEN", "REDEEMED")).toThrow("Illegal transition");
   });
+
+  it("allows Paper positions to freeze and recover only to active holding states", () => {
+    expect(transition(PAPER_POSITION_TRANSITIONS, "OPEN", "FROZEN")).toBe("FROZEN");
+    expect(transition(PAPER_POSITION_TRANSITIONS, "PARTIALLY_CLOSED", "FROZEN")).toBe("FROZEN");
+    expect(transition(PAPER_POSITION_TRANSITIONS, "FROZEN", "OPEN")).toBe("OPEN");
+    expect(() => transition(PAPER_POSITION_TRANSITIONS, "FROZEN", "REDEEMED")).toThrow("Illegal transition");
+  });
 });

@@ -10,7 +10,7 @@ export type PaperExecutionState =
   | "EXIT_PENDING"
   | "STOP_EXIT_PENDING";
 
-export type PaperPositionState = "OPEN" | "PARTIALLY_CLOSED" | "SETTLEMENT_PENDING" | "CLOSED" | "REDEEMED";
+export type PaperPositionState = "OPEN" | "PARTIALLY_CLOSED" | "SETTLEMENT_PENDING" | "CLOSED" | "REDEEMED" | "FROZEN";
 
 export interface SignalExecutionContext {
   contextId: string;
@@ -22,6 +22,9 @@ export interface SignalExecutionContext {
   marketMetadataSnapshot: Record<string, unknown>;
   marketMetadataHash: string;
   rulesetHash: string;
+  sourceCodeCommit: string;
+  sourceCodeDirty: boolean;
+  configVersion: string;
   createdAt: string;
 }
 
@@ -116,4 +119,6 @@ export interface PaperAccountSnapshot {
   totalEquityMicros: string;
   valuationStatus: "COMPLETE" | "INCOMPLETE";
   unpricedPositionCount: number;
+  priceSource: "ORDERBOOK_EXIT_VWAP";
+  priceTimestamp: string;
 }

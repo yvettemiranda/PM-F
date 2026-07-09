@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.0.0",
+  schemaVersion: "2.2.0",
   signalVersion: "1.4.0",
   strategyVersion: "2.0.0",
-  riskVersion: "1.0.0",
+  riskVersion: "1.2.0",
   replayVersion: "1.5.0",
-  paperVersion: "1.0.0",
+  paperVersion: "1.2.0",
+  rulesetVersion: "v1.0.0",
+  feeModelVersion: "clob-fd-v1",
+  configVersion: "v1.0.0",
 });
 
 export const RULESET = Object.freeze({
@@ -33,6 +36,10 @@ export const RULESET = Object.freeze({
   orderbookMaxAgeMs: 2_000,
   paperInitialBalanceMicros: 1_000_000_000,
   paperFeeRoundingMicros: 10,
+  paperMaxSingleTradePpm: 1_000_000,
+  paperMaxMarketExposurePpm: 1_000_000,
+  paperMaxPositionExposurePpm: 1_000_000,
+  capitalMode: "PROPORTIONAL_WITH_FIXED_FALLBACK",
 });
 
 function stable(value: unknown): unknown {

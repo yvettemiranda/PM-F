@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- 用户已授权进入 Phase 1A；严格隔离的 Paper Executor 核心闭环、迁移和自动化测试已完成，正在做最终 clean-commit 验收。24 小时 Observe soak 延期到 Live Gate 前，仍未执行且不得视为通过。
+- Phase 1A Paper Executor 核心闭环与主体架构补齐已完成实现和自动化验证；当前尚未进入 Phase 1B 长期 Paper Validation。24 小时 Observe soak 延期到 Live Gate 前，仍未执行且不得视为通过。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -22,7 +22,13 @@
 - Phase 1A 新增不可变 `signal_execution_context`，逐 BUY 保存时间一致的 capital decision、目标交易时间、市场结束时间和市场元数据；Paper 不读取 `raw_events`。
 - Paper Executor 已实现 1000 pUSD 独立账户、signal cutoff、消费 checkpoint、三级资金决策、reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、10% 普通卖出、15% 止损、止损优先、到期 settlement/redeem 和组合账本。
 - 已接入公开无认证 `GET /book`、`GET /clob-markets/{condition}` 与 `GET /markets/{condition}`；真实采样确认订单簿、费率曲线和未结算状态可读，全程未调用认证/交易端点。
-- 当前 13 个测试文件共 67 项测试通过；新增覆盖比例/兜底/拒绝资金、Gap、历史卖出、零成交重试、部分成交、价格范围、stale、超时释放、多仓位、两类 pending、止损优先、结算、非零费用、重复幂等、并发 reservation、Crash 回滚、restart、Paper runner checkpoint，以及 context 构建失败禁止发布可执行 Signal。
+- Phase 1A 初版曾达到 13 个测试文件共 67 项测试通过；覆盖比例/兜底/拒绝资金、Gap、历史卖出、零成交重试、部分成交、价格范围、stale、超时释放、多仓位、两类 pending、止损优先、结算、非零费用、重复幂等、并发 reservation、Crash 回滚、restart、Paper runner checkpoint，以及 context 构建失败禁止发布可执行 Signal。
+- Phase 1A 架构优化已新增 SQLite `2.1.0` 迁移、统一 `ExecutorInterface`、`LiveExecutorPlaceholder`、`RiskManager`、`SettlementService`、`PnL Model`、不可变 `audit_log`、`risk_decisions`、`paper_unrealized_pnl_snapshots` 和 Position `FROZEN` 状态。
+- `signal_execution_context` 已扩展 `sourceCodeCommit/sourceCodeDirty/configVersion`；Paper Execution/Position/Settlement/PnL/State Transition 等核心对象保存 `ruleset_hash/source_code_commit/config_version`。
+- Paper 当前通过 Risk Manager 决定 `ALLOW/REJECT`，拒绝原因写入 `riskRejectReason`；Live 占位只实现接口并固定拒绝交易逻辑。
+- 本轮主体架构补齐已新增 SQLite `2.2.0` 迁移、`ruleset_registry`、`portfolio_projection_runs` 和 `PortfolioProjectionService`；账户状态统一从 ledger/position/PnL 投影生成。
+- 每条新增 Paper Execution 均引用 `risk_decision_id`；止损和结算这类系统触发执行也写入系统级 Risk Decision；标准 `executeBuy/executeSell` 接口会校验并复用传入的已批准 Risk Decision。
+- 当前验证结果：TypeScript 类型检查通过；13 个测试文件共 84 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.2.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`。
 
 ## Current gate
 - Wallet Identity 已通过。
@@ -31,7 +37,7 @@
 - Data API 历史仍被 offset 3000 上限截断，历史 Replay 保持 `INCOMPLETE`。
 - Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
 - 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
-- Phase 1A 只完成实现和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
+- Phase 1A 已完成实现、架构优化、主体架构补齐和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
 - Live Gate 明确未通过：24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性和用户再次授权均未完成。
 
 ## Next steps

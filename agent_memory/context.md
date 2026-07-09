@@ -6,7 +6,7 @@
 
 ## Constraints
 - `ni-k` 与旧版 PolymarketBot 完全独立；不引用、不迁移、不复用旧项目代码、账本、风控、页面或交易逻辑。
-- 当前进入 Phase 1A Paper Executor；允许模拟账户、模拟订单和模拟成交，继续禁止 Live、私钥、真实订单、认证交易接口和链上写操作。
+- 当前处于 Phase 1A 架构优化完成后的状态；允许 Paper 模拟账户、模拟订单和模拟成交，继续禁止 Live 交易逻辑、私钥、真实订单、认证交易接口和链上写操作。
 - 新项目按三层架构设计：钱包监控与信号生成层、模拟交易层、实盘交易层。
 - 第一版只支持一个 Polymarket Profile / Proxy Wallet 地址。
 - 第一阶段优先完成监控、信号、自然语言解释、标准化事件、模拟交易、日志和状态机；不优先开发实盘。
@@ -27,7 +27,14 @@
 - Observe checkpoint 保存事件游标、replay state、投影 hash 和资金快照；恢复窗口事件仍生成行为 Signal，但固定 `executionEligible=false/GAP_EVENT`。
 - Observe Paper Gate 允许已恢复的 API 失败和最终已恢复的短暂 `MINOR_DIFF`，但会保留 warning；未恢复连接 gap、checkpoint 投影 hash 不一致、任何 `MAJOR_DESYNC` 或最终非 `SYNCED` 都是硬阻断。
 - 用户已明确将 24 小时 Observe Only soak 从 Paper 硬门禁延期为 Live Gate 前置项；短时 Observe 状态记为 `SHORT_SOAK_PASSED`，延期不代表取消。
-- Paper 只能消费 `PUBLISHED && executionEligible=true` 的 Signal 及其不可变 `signal_execution_context`，禁止读取 `raw_events`。
+- Paper 只能消费 `PUBLISHED && executionEligible=true` 的 Signal 及其不可变 `signal_execution_context`，禁止读取 `raw_events`。Paper 与未来 Live 必须使用同一份 Signal + Execution Context 输入，并先经过 Risk Manager，再进入 Executor Interface。
+- Live Executor 目前仅有安全占位实现，所有交易入口固定抛出 `LIVE_EXECUTOR_NOT_IMPLEMENTED`，不得放入私钥、认证客户端或真实订单逻辑。
+- Position 支持 `FROZEN` 保护态；冻结期间禁止新增仓位、自动卖出和自动止损，只能在 reconciliation 成功后恢复到冻结前的可持仓状态。
+- Settlement 已拆为 `SettlementService`；结果未确认时只进入/保持 `SETTLEMENT_PENDING`，不得提前计算最终盈亏或 redeem。
+- Unrealized PnL 必须使用完整深度可退出 VWAP 减成本和退出费用，记录 price source、timestamp 与 fee；禁止使用 Last Price 或页面价格。
+- 关键行为必须写入不可变 `audit_log`；Risk 决策必须写入 `risk_decisions`，每条 Paper Execution 必须引用 `risk_decision_id`。系统触发的止损和结算也生成系统级 Risk Decision，Execution/Position/Settlement 等核心对象记录 `ruleset_hash`、`source_code_commit`、`config_version`。
+- 当前规则参数必须写入 `ruleset_registry`，并通过 `ruleset_hash` 关联 Signal Context、Execution、Position 和 Settlement；历史对象不得被当前配置覆盖解释。
+- 账户状态统一通过 `PortfolioProjectionService` 从 ledger/position/PnL 计算并落库到 `portfolio_projection_runs`；Report/UI/其他模块不得绕过该投影层自行计算余额、敞口或权益。
 - 资金估算同时保存 `capitalEstimateStatus=COMPLETE/INCOMPLETE/FAILED` 和 `capitalConfidence=HIGH/MEDIUM/LOW`；MEDIUM 使用 10 pUSD fallback，LOW 禁止进入执行阶段。
 - Golden Expectations 必须先生成 `CANDIDATE`，只有用户人工确认后才能变更为 `APPROVED` 并参与 Golden Passed。
 

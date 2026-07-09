@@ -18,8 +18,9 @@
 - Observe Only Runner：增量轮询、checkpoint 恢复、前向仓位投影和只报告不修正的 reconciliation
 - 不可变 `signal_execution_context`：为 Paper 输出交易时间、市场结束时间、市场元数据和逐 BUY 资金决策
 - Paper Executor：独立模拟账户、资金 reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、止损、结算和审计账本
+- Phase 1A 架构优化：统一 Executor Interface、Risk Manager、Risk Decision 全链路关联、Portfolio Projection Service、Ruleset Registry、Live 安全占位、Settlement Service、PnL Model、不可变 Audit Log、Position `FROZEN` 保护态和核心对象版本字段
 
-`Live Executor`、私钥接入、真实订单、认证交易客户端和链上写操作均不属于当前阶段。Phase 1A 只实现 Paper 模拟闭环，尚未代表 Phase 1B 或 Live Gate 通过。
+`Live Executor` 目前只有安全占位，不包含交易逻辑。私钥接入、真实订单、认证交易客户端和链上写操作均不属于当前阶段。Phase 1A 只实现 Paper 模拟闭环和架构准备，尚未代表 Phase 1B 或 Live Gate 通过。
 
 ## 本机验证
 
@@ -39,4 +40,4 @@ pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
 
 用户已将 24 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认创建一个从启动时间开始消费新 Signal 的 1000 pUSD 模拟账户；传入 `--account-id=<id>` 可从已有 checkpoint 恢复。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
 
-Phase 0.5 只验证监控层输出，不包含任何 Paper/Live 执行器。监控层 Signal 和未来执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。服务端和页面后续仍只允许监听 `127.0.0.1`。
+监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。

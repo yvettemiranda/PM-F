@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ClobMarket } from "../adapters/polymarket-public.js";
-import { stableJson, RULESET_HASH } from "../domain/versioning.js";
+import { stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
+import type { SourceVersion } from "../infra/source-version.js";
 import type { ObserveEvent, ObserveSignal } from "../observe/types.js";
 import type { SignalExecutionContext } from "../paper/types.js";
 import type { CapitalEstimate } from "../services/capital-estimator.js";
@@ -22,6 +23,7 @@ export function buildSignalExecutionContext(input: {
   marketSourceUrl: string;
   marketFetchedAt: string;
   capitalDecision: CapitalEstimate | null;
+  sourceVersion?: SourceVersion;
   createdAt: string;
 }): SignalExecutionContext {
   const trade = input.event.trade;
@@ -62,6 +64,9 @@ export function buildSignalExecutionContext(input: {
     marketMetadataSnapshot: metadata,
     marketMetadataHash: metadataHash,
     rulesetHash: RULESET_HASH,
+    sourceCodeCommit: input.sourceVersion?.commit ?? "UNKNOWN",
+    sourceCodeDirty: input.sourceVersion?.dirty ?? true,
+    configVersion: VERSIONS.configVersion,
     createdAt: input.createdAt,
   };
 }

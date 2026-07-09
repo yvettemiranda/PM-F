@@ -1,10 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { PRICE_SCALE_DIGITS } from "../domain/fixed.js";
 import { PAPER_EXECUTION_TRANSITIONS, PAPER_POSITION_TRANSITIONS, transition } from "../domain/state-machine.js";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
+import type {
+  ExecutorBalanceQuery,
+  ExecutorExecutionResult,
+  ExecutorInterface,
+  ExecutorPositionQuery,
+  ExecutorReconcileInput,
+  ExecutorReconcileResult,
+  ExecutorSignalInput,
+} from "../execution/types.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
+import { calculateRealizedPnl } from "../pnl/pnl-model.js";
+import { PortfolioProjectionService } from "../portfolio/portfolio-projection.js";
+import { RiskManager, type RiskDecision } from "../risk/risk-manager.js";
+import { SettlementService, type SettlementCandidate, type SettlementStore } from "../settlement/settlement-service.js";
 import { executableSellVwap, matchPaperBuy, matchPaperSell } from "./matching.js";
 import type {
   PaperAccountSnapshot,
@@ -12,11 +24,11 @@ import type {
   PaperFeeSnapshot,
   PaperMarketDataProvider,
   PaperOrderbookSnapshot,
+  PaperPositionState,
   PaperResolutionSnapshot,
   PaperSignalEnvelope,
 } from "./types.js";
 
-const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DIGITS);
 const PPM = 1_000_000n;
 
 type ExecutionType = "TARGET_BUY" | "TARGET_SELL" | "STOP_LOSS" | "SETTLEMENT";
@@ -37,6 +49,8 @@ interface ExecutionRow {
   target_price_units: string | null;
   deadline_at: string | null;
   attempt_count: number;
+  risk_decision_id: string | null;
+  risk_reject_reason: string | null;
 }
 
 interface PositionRow {
@@ -53,9 +67,23 @@ interface PositionRow {
   current_size_micros: string;
   remaining_cost_micros: string;
   stop_loss_price_units: string;
-  status: string;
+  status: PaperPositionState;
+  frozen_from_status: PaperPositionState | null;
+  frozen_reason: string | null;
+  frozen_at: string | null;
   realized_pnl_micros: string;
   created_at: string;
+}
+
+interface RiskDecisionRow {
+  risk_decision_id: string;
+  paper_account_id: string | null;
+  signal_id: string | null;
+  context_id: string | null;
+  decision: "ALLOW" | "REJECT";
+  risk_reason: string | null;
+  risk_reject_reason: string | null;
+  checks_json: string;
 }
 
 function hash(parts: Array<string | number>): string {
@@ -66,10 +94,12 @@ function ratio(value: bigint, ppm: number): bigint {
   return (value * BigInt(ppm)) / PPM;
 }
 
-export class PaperExecutor {
+export class PaperExecutor implements ExecutorInterface, SettlementStore {
+  readonly mode = "PAPER" as const;
   private readonly database: DatabaseSync;
   private readonly sourceVersion: SourceVersion;
   private readonly now: () => Date;
+  private readonly riskManager: RiskManager;
 
   constructor(
     databasePath: string,
@@ -80,6 +110,7 @@ export class PaperExecutor {
     this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
     this.sourceVersion = options.sourceVersion ?? resolveSourceVersion();
     this.now = options.now ?? (() => new Date());
+    this.riskManager = new RiskManager(this.database, this.sourceVersion);
   }
 
   createAccount(name = "Default Paper", initialBalanceMicros = BigInt(RULESET.paperInitialBalanceMicros)): string {
@@ -168,6 +199,55 @@ export class PaperExecutor {
     return executions;
   }
 
+  async executeBuy(input: ExecutorSignalInput): Promise<ExecutorExecutionResult> {
+    if (input.signal.signalType !== "TARGET_BUY") throw new Error("EXECUTOR_INPUT_NOT_BUY");
+    const executionId = this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
+    return { mode: this.mode, executionId, state: this.executionState(executionId) };
+  }
+
+  async executeSell(input: ExecutorSignalInput): Promise<ExecutorExecutionResult> {
+    if (input.signal.signalType !== "TARGET_SELL") throw new Error("EXECUTOR_INPUT_NOT_SELL");
+    const executionId = this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
+    return { mode: this.mode, executionId, state: this.executionState(executionId) };
+  }
+
+  async cancelExecution(executionId: string, reason: string): Promise<void> {
+    const execution = this.execution(executionId);
+    if (["EXECUTED", "PARTIALLY_EXECUTED", "EXPIRED", "REJECTED", "CANCELLED"].includes(execution.state)) return;
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (execution.execution_type === "TARGET_BUY") this.releaseReservation(execution, reason, now);
+      this.database.prepare("UPDATE paper_executions SET state='CANCELLED',reason=?,updated_at=? WHERE paper_execution_id=?")
+        .run(reason, now, executionId);
+      this.transition("PAPER_EXECUTION", executionId, execution.state, "CANCELLED", reason, now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async getPosition(query: ExecutorPositionQuery): Promise<unknown> {
+    if (query.positionId) return this.position(query.positionId);
+    return this.database.prepare(
+      `SELECT * FROM paper_positions
+       WHERE paper_account_id=? AND (? IS NULL OR asset_id=?)
+       ORDER BY created_at,paper_position_id`,
+    ).all(query.accountId, query.assetId ?? null, query.assetId ?? null);
+  }
+
+  async getBalance(query: ExecutorBalanceQuery): Promise<PaperAccountSnapshot> {
+    return this.accountSnapshot(query.accountId);
+  }
+
+  async reconcile(input: ExecutorReconcileInput): Promise<ExecutorReconcileResult> {
+    const frozenPositionCount = input.reason === "RECONCILIATION_SUCCESS"
+      ? this.unfreezePositions(input.accountId, input.reason)
+      : this.freezePositions(input.accountId, input.reason);
+    return { mode: this.mode, frozenPositionCount, reason: input.reason };
+  }
+
   async attemptExecution(executionId: string): Promise<PaperExecutionState> {
     const execution = this.execution(executionId);
     if (!["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) return execution.state;
@@ -219,13 +299,27 @@ export class PaperExecutor {
       if (prior) continue;
       const executionId = hash([idempotency, RULESET_HASH]);
       const now = this.now().toISOString();
+      const signal = this.loadSignal(position.signal_id);
       this.database.exec("BEGIN IMMEDIATE");
       try {
+        const risk = this.riskManager.recordSystemDecision({
+          mode: this.mode,
+          accountId,
+          signalId: position.signal_id,
+          contextId: signal.context?.contextId ?? null,
+          entityId: position.paper_position_id,
+          executionType: "STOP_LOSS",
+          decision: "ALLOW",
+          reason: "STOP_LOSS_TRIGGERED",
+          requestedAmountMicros: null,
+          requestedSizeMicros: currentSize,
+          now,
+        });
         this.supersedePendingTargetExit(position.paper_position_id, now);
         this.insertExecution({
           executionId,
           accountId,
-          signalId: null,
+          signalId: position.signal_id,
           idempotency,
           type: "STOP_LOSS",
           state: "STOP_EXIT_PENDING",
@@ -239,7 +333,9 @@ export class PaperExecutor {
           capitalMode: null,
           deadline: null,
           reason: "STOP_LOSS_TRIGGERED",
-          contextId: null,
+          contextId: signal.context?.contextId ?? null,
+          riskDecisionId: risk.riskDecisionId,
+          riskRejectReason: risk.riskRejectReason,
           now,
         });
         this.database.prepare(
@@ -260,76 +356,42 @@ export class PaperExecutor {
   }
 
   async processSettlements(accountId: string): Promise<string[]> {
-    const positions = this.openPositions(accountId, true);
-    const completed: string[] = [];
-    for (const position of positions) {
-      const signal = this.loadSignal(position.signal_id);
-      if (!signal.context || this.now().valueOf() < Date.parse(signal.context.marketEndTime)) continue;
-      if (position.status !== "SETTLEMENT_PENDING") this.markSettlementPending(position);
-      const resolution = await this.marketData.resolution(position.condition_id, position.asset_id);
-      if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) continue;
-      completed.push(this.settle(position.paper_position_id, resolution));
-    }
-    return completed;
+    return new SettlementService(this.marketData, this, this.now).process(accountId);
   }
 
   async accountSnapshot(accountId: string): Promise<PaperAccountSnapshot> {
-    const account = this.accountRow(accountId);
-    let positionValue = 0n;
-    let remainingCost = 0n;
-    let unpricedPositionCount = 0;
-    for (const position of this.openPositions(accountId, true)) {
-      const size = BigInt(position.current_size_micros);
-      remainingCost += BigInt(position.remaining_cost_micros);
-      if (size === 0n) continue;
-      try {
-        const book = await this.marketData.orderbook(position.asset_id, position.condition_id);
-        const vwap = executableSellVwap(book.bids, size);
-        if (vwap !== null) positionValue += (size * vwap) / PRICE_SCALE;
-        else unpricedPositionCount += 1;
-      } catch {
-        unpricedPositionCount += 1;
-      }
-    }
-    const cash = BigInt(account.cash_balance_micros);
-    const reserved = BigInt(account.reserved_balance_micros);
-    const snapshot: PaperAccountSnapshot = {
-      paperAccountId: accountId,
-      initialBalanceMicros: account.initial_balance_micros,
-      cashBalanceMicros: cash.toString(),
-      reservedBalanceMicros: reserved.toString(),
-      availableBalanceMicros: (cash - reserved).toString(),
-      positionValueMicros: positionValue.toString(),
-      realizedPnlMicros: account.realized_pnl_micros,
-      unrealizedPnlMicros: (positionValue - remainingCost).toString(),
-      totalEquityMicros: (cash + positionValue).toString(),
-      valuationStatus: unpricedPositionCount === 0 ? "COMPLETE" : "INCOMPLETE",
-      unpricedPositionCount,
-    };
-    const createdAt = this.now().toISOString();
-    this.database.prepare(
-      `INSERT OR IGNORE INTO paper_portfolio_snapshots(
-        portfolio_snapshot_id,paper_account_id,cash_balance_micros,reserved_balance_micros,
-        available_balance_micros,position_value_micros,realized_pnl_micros,
-        unrealized_pnl_micros,total_equity_micros,valuation_status,
-        unpriced_position_count,ruleset_hash,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      hash([accountId, createdAt, snapshot.cashBalanceMicros, snapshot.positionValueMicros]),
-      accountId,
-      snapshot.cashBalanceMicros,
-      snapshot.reservedBalanceMicros,
-      snapshot.availableBalanceMicros,
-      snapshot.positionValueMicros,
-      snapshot.realizedPnlMicros,
-      snapshot.unrealizedPnlMicros,
-      snapshot.totalEquityMicros,
-      snapshot.valuationStatus,
-      snapshot.unpricedPositionCount,
-      RULESET_HASH,
-      createdAt,
-    );
-    return snapshot;
+    return new PortfolioProjectionService(
+      this.database,
+      this.marketData,
+      this.sourceVersion,
+      this.now,
+    ).projectPaperAccount(accountId);
+  }
+
+  settlementCandidates(accountId: string): SettlementCandidate[] {
+    return this.openPositions(accountId, true)
+      .filter((position) => position.status !== "FROZEN" && BigInt(position.current_size_micros) > 0n)
+      .flatMap((position) => {
+        const signal = this.loadSignal(position.signal_id);
+        if (!signal.context) return [];
+        return [{
+          positionId: position.paper_position_id,
+          accountId: position.paper_account_id,
+          status: position.status,
+          conditionId: position.condition_id,
+          assetId: position.asset_id,
+          marketEndTime: signal.context.marketEndTime,
+        }];
+      });
+  }
+
+  markSettlementPending(positionId: string, reason: string): void {
+    const position = this.position(positionId);
+    this.markPositionSettlementPending(position, reason);
+  }
+
+  redeemSettledPosition(positionId: string, resolution: PaperResolutionSnapshot): string {
+    return this.settle(positionId, resolution);
   }
 
   executionState(executionId: string): PaperExecutionState {
@@ -340,18 +402,11 @@ export class PaperExecutor {
     this.database.close();
   }
 
-  private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope): string {
+  private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope, preapprovedRisk?: RiskDecision): string {
     const account = this.accountRow(accountId);
     const idempotency = hash(["PAPER", accountId, signal.signalId]);
     const executionId = hash([idempotency, RULESET_HASH]);
     const now = this.now().toISOString();
-    let rejectReason: string | null = null;
-    if (account.status !== "ACTIVE") rejectReason = "PAPER_ACCOUNT_NOT_ACTIVE";
-    else if (signal.createdAt < account.signal_cutoff_at) rejectReason = "SIGNAL_BEFORE_CUTOFF";
-    else if (signal.status !== "PUBLISHED") rejectReason = "SIGNAL_NOT_PUBLISHED";
-    else if (!signal.executionEligible) rejectReason = signal.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE";
-    else if (!signal.context) rejectReason = "EXECUTION_CONTEXT_MISSING";
-    else if (signal.context.rulesetHash !== RULESET_HASH) rejectReason = "RULESET_MISMATCH";
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const duplicate = this.database.prepare(
@@ -361,32 +416,55 @@ export class PaperExecutor {
         this.database.exec("COMMIT");
         return duplicate.paper_execution_id;
       }
-      if (rejectReason) {
-        this.insertRejectedExecution(accountId, signal, executionId, idempotency, rejectReason, now);
-        this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", rejectReason, now);
-      } else if (signal.signalType === "TARGET_BUY") {
+      this.audit("SIGNAL", signal.signalId, "RECEIVED", "PAPER_CONSUME_SIGNAL", now, { accountId });
+      if (signal.signalType === "TARGET_BUY") {
         const capital = this.buyCapitalDecision(account, signal);
-        if (capital.rejectReason) {
-          this.insertRejectedExecution(accountId, signal, executionId, idempotency, capital.rejectReason, now);
-          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", capital.rejectReason, now);
+        const risk = preapprovedRisk ?? this.riskManager.evaluate({
+          mode: this.mode,
+          accountId,
+          signal,
+          requestedAmountMicros: capital.amount,
+          requestedSizeMicros: null,
+          now,
+        });
+        if (risk.decision === "REJECT") {
+          const reason = risk.riskRejectReason ?? "RISK_REJECTED";
+          this.insertRejectedExecution(accountId, signal, executionId, idempotency, reason, now, risk);
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", reason, now);
+          this.audit("SIGNAL", signal.signalId, "REJECTED", reason, now, { accountId, riskDecisionId: risk.riskDecisionId });
         } else {
           const amount = capital.amount!;
           const deadline = this.buyDeadline(signal);
           if (this.now().valueOf() >= Date.parse(deadline)) {
-            this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXPIRED", amount, null, capital.mode, deadline, "WAIT_TIMEOUT", now);
+            this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXPIRED", amount, null, capital.mode, deadline, "WAIT_TIMEOUT", now, risk);
           } else {
-            this.reserve(accountId, executionId, signal, idempotency, amount, capital.mode!, deadline, now);
+            this.reserve(accountId, executionId, signal, idempotency, amount, capital.mode!, deadline, now, risk);
           }
           this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+          this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
         }
       } else {
         const allocations = this.sellAllocations(accountId, signal);
-        if (allocations.length === 0) {
-          this.insertRejectedExecution(accountId, signal, executionId, idempotency, "NO_TRACKED_PAPER_POSITION", now);
+        const requested = allocations.reduce((sum, item) => sum + item.size, 0n);
+        const risk = preapprovedRisk ?? this.riskManager.evaluate({
+          mode: this.mode,
+          accountId,
+          signal,
+          requestedAmountMicros: null,
+          requestedSizeMicros: requested > 0n ? requested : null,
+          now,
+        });
+        if (risk.decision === "REJECT") {
+          const reason = risk.riskRejectReason ?? "RISK_REJECTED";
+          this.insertRejectedExecution(accountId, signal, executionId, idempotency, reason, now, risk);
+          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", reason, now);
+          this.audit("SIGNAL", signal.signalId, "REJECTED", reason, now, { accountId, riskDecisionId: risk.riskDecisionId });
+        } else if (allocations.length === 0) {
+          this.insertRejectedExecution(accountId, signal, executionId, idempotency, "NO_TRACKED_PAPER_POSITION", now, risk);
           this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", "NO_TRACKED_PAPER_POSITION", now);
+          this.audit("SIGNAL", signal.signalId, "REJECTED", "NO_TRACKED_PAPER_POSITION", now, { accountId, riskDecisionId: risk.riskDecisionId });
         } else {
-          const requested = allocations.reduce((sum, item) => sum + item.size, 0n);
-          this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXIT_PENDING", null, requested, null, null, "TARGET_SELL_RECEIVED", now);
+          this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXIT_PENDING", null, requested, null, null, "TARGET_SELL_RECEIVED", now, risk);
           const insert = this.database.prepare(
             `INSERT INTO paper_execution_positions(
               paper_execution_id,paper_position_id,requested_size_micros,filled_size_micros,created_at
@@ -394,6 +472,7 @@ export class PaperExecutor {
           );
           for (const item of allocations) insert.run(executionId, item.positionId, item.size.toString(), now);
           this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+          this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
         }
       }
       this.updateCheckpoint(accountId, signal, now);
@@ -451,6 +530,7 @@ export class PaperExecutor {
     mode: "PROPORTIONAL" | "FIXED_FALLBACK",
     deadline: string,
     now: string,
+    risk: RiskDecision,
   ): void {
     const lower = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMinRatioPpm);
     const upper = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMaxRatioPpm);
@@ -472,6 +552,8 @@ export class PaperExecutor {
       deadline,
       reason: "BUY_RESERVED",
       contextId: signal.context!.contextId,
+      riskDecisionId: risk.riskDecisionId,
+      riskRejectReason: risk.riskRejectReason,
       now,
     });
     const reservationId = hash([executionId, "RESERVATION"]);
@@ -537,8 +619,9 @@ export class PaperExecutor {
           paper_position_id,paper_account_id,opening_execution_id,signal_id,asset_id,
           condition_id,outcome,entry_price_units,entry_size_micros,entry_notional_micros,
           entry_fee_micros,current_size_micros,remaining_cost_micros,stop_loss_price_units,
-          status,realized_pnl_micros,created_at,updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', '0', ?, ?)`,
+          status,frozen_from_status,frozen_reason,frozen_at,realized_pnl_micros,
+          ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at,updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, NULL, '0', ?, ?, ?, ?, ?, ?)`,
       ).run(
         positionId,
         execution.paper_account_id,
@@ -554,6 +637,10 @@ export class PaperExecutor {
         matched.filledSizeMicros,
         spent.toString(),
         ratio(BigInt(matched.vwapPriceUnits!), RULESET.stopTriggerRatioPpm).toString(),
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
         now,
         now,
       );
@@ -620,7 +707,7 @@ export class PaperExecutor {
       this.insertOrder(orderId, execution, "SELL", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
       this.insertFills(orderId, execution.paper_execution_id, null, "SELL", matched, now);
       this.insertFeeLedger(execution.paper_execution_id, orderId, feeId, matched.feeMicros, now);
-      this.applySellToPositions(execution, BigInt(matched.filledSizeMicros), BigInt(matched.filledNotionalMicros), BigInt(matched.feeMicros), now);
+      this.applySellToPositions(execution, BigInt(matched.filledSizeMicros), BigInt(matched.filledNotionalMicros), BigInt(matched.feeMicros), feeId, book.marketSnapshotTime, now);
       this.database.prepare(
         `UPDATE paper_executions SET state=?,filled_size_micros=?,filled_notional_micros=?,fee_micros=?,
           attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?`,
@@ -642,7 +729,15 @@ export class PaperExecutor {
     }
   }
 
-  private applySellToPositions(execution: ExecutionRow, fillSize: bigint, proceeds: bigint, fee: bigint, now: string): void {
+  private applySellToPositions(
+    execution: ExecutionRow,
+    fillSize: bigint,
+    proceeds: bigint,
+    fee: bigint,
+    feeSnapshotId: string,
+    priceTimestamp: string,
+    now: string,
+  ): void {
     const allocations = this.database.prepare(
       `SELECT ep.paper_position_id,ep.requested_size_micros,ep.filled_size_micros,
               p.current_size_micros,p.remaining_cost_micros,p.realized_pnl_micros,p.status
@@ -675,7 +770,7 @@ export class PaperExecutor {
       if (size > beforeSize) throw new Error("PAPER_POSITION_OVERSELL");
       const beforeCost = BigInt(item.remaining_cost_micros);
       const costBasis = size === beforeSize ? beforeCost : (beforeCost * size) / beforeSize;
-      const pnl = itemProceeds - itemFee - costBasis;
+      const pnl = calculateRealizedPnl({ proceedsMicros: itemProceeds, feeMicros: itemFee, costBasisMicros: costBasis });
       totalPnl += pnl;
       const afterSize = beforeSize - size;
       const afterCost = beforeCost - costBasis;
@@ -690,9 +785,26 @@ export class PaperExecutor {
       this.database.prepare(
         `INSERT INTO paper_pnl_ledger(
           pnl_ledger_id,paper_account_id,paper_position_id,paper_execution_id,pnl_type,
-          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,created_at
-        ) VALUES (?, ?, ?, ?, 'REALIZED', ?, ?, ?, ?, ?)`,
-      ).run(randomUUID(), execution.paper_account_id, item.paper_position_id, execution.paper_execution_id, itemProceeds.toString(), costBasis.toString(), itemFee.toString(), pnl.toString(), now);
+          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,price_source,price_timestamp,
+          fee_snapshot_id,ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at
+        ) VALUES (?, ?, ?, ?, 'REALIZED', ?, ?, ?, ?, 'EXECUTION_FILL', ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(),
+        execution.paper_account_id,
+        item.paper_position_id,
+        execution.paper_execution_id,
+        itemProceeds.toString(),
+        costBasis.toString(),
+        itemFee.toString(),
+        pnl.toString(),
+        priceTimestamp,
+        feeSnapshotId,
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        now,
+      );
       this.transition("PAPER_POSITION", item.paper_position_id, item.status, status, execution.execution_type, now);
       remainingFill -= size;
     }
@@ -725,9 +837,23 @@ export class PaperExecutor {
     if (denominator <= 0n || numerator < 0n || numerator > denominator) throw new Error("INVALID_SETTLEMENT_PAYOUT");
     const redeem = (BigInt(position.current_size_micros) * numerator) / denominator;
     const cost = BigInt(position.remaining_cost_micros);
-    const pnl = redeem - cost;
+    const pnl = calculateRealizedPnl({ proceedsMicros: redeem, costBasisMicros: cost, feeMicros: 0n });
+    const signal = this.loadSignal(position.signal_id);
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      const risk = this.riskManager.recordSystemDecision({
+        mode: this.mode,
+        accountId: position.paper_account_id,
+        signalId: position.signal_id,
+        contextId: signal.context?.contextId ?? null,
+        entityId: positionId,
+        executionType: "SETTLEMENT",
+        decision: "ALLOW",
+        reason: "SETTLEMENT_CONFIRMED",
+        requestedAmountMicros: null,
+        requestedSizeMicros: BigInt(position.current_size_micros),
+        now,
+      });
       this.insertExecution({
         executionId,
         accountId: position.paper_account_id,
@@ -745,7 +871,9 @@ export class PaperExecutor {
         capitalMode: null,
         deadline: null,
         reason: "SETTLEMENT_CONFIRMED",
-        contextId: null,
+        contextId: signal.context?.contextId ?? null,
+        riskDecisionId: risk.riskDecisionId,
+        riskRejectReason: risk.riskRejectReason,
         now,
       });
       this.database.prepare(
@@ -763,15 +891,47 @@ export class PaperExecutor {
       this.database.prepare(
         `INSERT INTO paper_settlements(
           paper_settlement_id,paper_position_id,paper_execution_id,condition_id,payout_numerator,
-          payout_denominator,redeem_amount_micros,pnl_micros,resolution_snapshot_json,resolution_hash,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(randomUUID(), positionId, executionId, position.condition_id, numerator.toString(), denominator.toString(), redeem.toString(), pnl.toString(), resolutionJson, resolutionHash, now);
+          payout_denominator,redeem_amount_micros,pnl_micros,resolution_snapshot_json,resolution_hash,
+          ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(),
+        positionId,
+        executionId,
+        position.condition_id,
+        numerator.toString(),
+        denominator.toString(),
+        redeem.toString(),
+        pnl.toString(),
+        resolutionJson,
+        resolutionHash,
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        now,
+      );
       this.database.prepare(
         `INSERT INTO paper_pnl_ledger(
           pnl_ledger_id,paper_account_id,paper_position_id,paper_execution_id,pnl_type,
-          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,created_at
-        ) VALUES (?, ?, ?, ?, 'SETTLEMENT', ?, ?, '0', ?, ?)`,
-      ).run(randomUUID(), position.paper_account_id, positionId, executionId, redeem.toString(), cost.toString(), pnl.toString(), now);
+          proceeds_micros,cost_basis_micros,fee_micros,pnl_micros,price_source,price_timestamp,
+          fee_snapshot_id,ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at
+        ) VALUES (?, ?, ?, ?, 'SETTLEMENT', ?, ?, '0', ?, 'SETTLEMENT_RESOLUTION', ?, NULL, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(),
+        position.paper_account_id,
+        positionId,
+        executionId,
+        redeem.toString(),
+        cost.toString(),
+        pnl.toString(),
+        resolution.snapshotTime,
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        now,
+      );
       this.database.prepare(
         `INSERT INTO paper_cash_ledger(
           cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
@@ -788,13 +948,13 @@ export class PaperExecutor {
     }
   }
 
-  private markSettlementPending(position: PositionRow): void {
+  private markPositionSettlementPending(position: PositionRow, reason: string): void {
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE paper_positions SET status='SETTLEMENT_PENDING',updated_at=? WHERE paper_position_id=?")
         .run(now, position.paper_position_id);
-      this.transition("PAPER_POSITION", position.paper_position_id, position.status, "SETTLEMENT_PENDING", "MARKET_END_REACHED", now);
+      this.transition("PAPER_POSITION", position.paper_position_id, position.status, "SETTLEMENT_PENDING", reason, now);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -966,8 +1126,9 @@ export class PaperExecutor {
     idempotency: string,
     reason: string,
     now: string,
+    risk: RiskDecision,
   ): void {
-    this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "REJECTED", null, null, null, null, reason, now);
+    this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "REJECTED", null, null, null, null, reason, now, risk);
   }
 
   private insertExecutionFromSignal(
@@ -982,6 +1143,7 @@ export class PaperExecutor {
     deadline: string | null,
     reason: string,
     now: string,
+    risk: RiskDecision,
   ): void {
     const target = BigInt(signal.targetPriceUnits);
     this.insertExecution({
@@ -1002,6 +1164,8 @@ export class PaperExecutor {
       deadline,
       reason,
       contextId: signal.context?.contextId ?? null,
+      riskDecisionId: risk.riskDecisionId,
+      riskRejectReason: risk.riskRejectReason,
       now,
     });
     this.transition("PAPER_EXECUTION", executionId, null, state, reason, now);
@@ -1025,6 +1189,8 @@ export class PaperExecutor {
     deadline: string | null;
     reason: string;
     contextId: string | null;
+    riskDecisionId: string;
+    riskRejectReason: string | null;
     now: string;
   }): void {
     this.database.prepare(
@@ -1034,8 +1200,9 @@ export class PaperExecutor {
         requested_size_micros,filled_size_micros,filled_notional_micros,fee_micros,
         target_price_units,price_limit_lower_units,price_limit_upper_units,capital_mode,
         deadline_at,attempt_count,reason,context_id,schema_version,strategy_version,
-        risk_version,paper_version,ruleset_hash,created_at,updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', '0', '0', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        risk_version,paper_version,ruleset_hash,risk_decision_id,risk_reject_reason,
+        source_code_commit,source_code_dirty,config_version,created_at,updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0', '0', '0', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.executionId,
       input.accountId,
@@ -1059,9 +1226,19 @@ export class PaperExecutor {
       VERSIONS.riskVersion,
       VERSIONS.paperVersion,
       RULESET_HASH,
+      input.riskDecisionId,
+      input.riskRejectReason,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      VERSIONS.configVersion,
       input.now,
       input.now,
     );
+    this.audit("EXECUTION", input.executionId, "CREATED", input.reason, input.now, {
+      executionType: input.type,
+      signalId: input.signalId,
+      riskDecisionId: input.riskDecisionId,
+    });
   }
 
   private insertConsumption(
@@ -1148,9 +1325,94 @@ export class PaperExecutor {
     ).get(entityType, entityId) as { sequence: number };
     this.database.prepare(
       `INSERT INTO paper_state_transitions(
-        transition_id,entity_type,entity_id,from_state,to_state,reason,sequence,ruleset_hash,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(hash([entityType, entityId, row.sequence, to]), entityType, entityId, from, to, reason, row.sequence, RULESET_HASH, now);
+        transition_id,entity_type,entity_id,from_state,to_state,reason,sequence,ruleset_hash,
+        source_code_commit,source_code_dirty,config_version,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      hash([entityType, entityId, row.sequence, to]),
+      entityType,
+      entityId,
+      from,
+      to,
+      reason,
+      row.sequence,
+      RULESET_HASH,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      VERSIONS.configVersion,
+      now,
+    );
+    this.audit(entityType, entityId, this.auditAction(entityType, from, to), reason, now, { from, to, sequence: row.sequence });
+  }
+
+  private auditAction(entityType: string, from: string | null, to: string): string {
+    if (entityType === "PAPER_EXECUTION") {
+      if (from === null) return "CREATED";
+      if (to === "EXECUTED" || to === "PARTIALLY_EXECUTED") return "FILLED";
+      if (to === "CANCELLED") return "CANCELLED";
+      if (to === "EXPIRED") return "EXPIRED";
+      if (to === "REJECTED") return "REJECTED";
+    }
+    if (entityType === "PAPER_POSITION") {
+      if (from === null && to === "OPEN") return "OPENED";
+      if (to === "FROZEN") return "FROZEN";
+      if (to === "CLOSED") return "CLOSED";
+      if (to === "SETTLEMENT_PENDING") return "SETTLEMENT_PENDING";
+      if (to === "REDEEMED") return "REDEEMED";
+    }
+    if (entityType === "PAPER_ACCOUNT" && to === "ACTIVE") return "CREATED";
+    return "STATE_CHANGED";
+  }
+
+  private audit(
+    entityType: string,
+    entityId: string,
+    action: string,
+    reason: string | null,
+    now: string,
+    metadata: Record<string, unknown> = {},
+  ): void {
+    this.database.prepare(
+      `INSERT OR IGNORE INTO audit_log(
+        audit_id,timestamp,entity_type,entity_id,action,reason,ruleset_hash,
+        source_code_commit,source_code_dirty,config_version,metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      hash(["AUDIT", entityType, entityId, action, reason ?? "NONE", now]),
+      now,
+      entityType,
+      entityId,
+      action,
+      reason,
+      RULESET_HASH,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      VERSIONS.configVersion,
+      stableJson(metadata),
+    );
+  }
+
+  private approvedRisk(input: ExecutorSignalInput): RiskDecision {
+    if (input.signal.context?.contextId !== input.context.contextId) {
+      throw new Error("EXECUTOR_CONTEXT_MISMATCH");
+    }
+    const row = this.database.prepare(
+      `SELECT risk_decision_id,paper_account_id,signal_id,context_id,decision,risk_reason,
+              risk_reject_reason,checks_json
+       FROM risk_decisions WHERE risk_decision_id=?`,
+    ).get(input.riskDecisionId) as RiskDecisionRow | undefined;
+    if (!row) throw new Error(`RISK_DECISION_NOT_FOUND:${input.riskDecisionId}`);
+    if (row.decision !== "ALLOW") throw new Error(`RISK_DECISION_NOT_ALLOW:${input.riskDecisionId}`);
+    if (row.paper_account_id !== input.accountId) throw new Error("RISK_DECISION_ACCOUNT_MISMATCH");
+    if (row.signal_id !== input.signal.signalId) throw new Error("RISK_DECISION_SIGNAL_MISMATCH");
+    if (row.context_id !== input.context.contextId) throw new Error("RISK_DECISION_CONTEXT_MISMATCH");
+    return {
+      riskDecisionId: row.risk_decision_id,
+      decision: row.decision,
+      riskReason: row.risk_reason ?? "ALLOW",
+      riskRejectReason: row.risk_reject_reason,
+      checks: JSON.parse(row.checks_json) as RiskDecision["checks"],
+    };
   }
 
   private loadSignal(signalId: string): PaperSignalEnvelope {
@@ -1160,7 +1422,11 @@ export class PaperExecutor {
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
-              c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,c.created_at context_created_at,
+              c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
+              c.source_code_commit context_source_code_commit,
+              c.source_code_dirty context_source_code_dirty,
+              c.config_version context_config_version,
+              c.created_at context_created_at,
               ce.capital_estimate_status,ce.capital_confidence,
               ce.target_trade_capital_ratio_ppm capital_ratio_ppm,ce.fallback_amount_micros
        FROM signals s
@@ -1192,6 +1458,9 @@ export class PaperExecutor {
         marketMetadataSnapshot: JSON.parse(row.market_metadata_snapshot_json as string),
         marketMetadataHash: row.market_metadata_hash as string,
         rulesetHash: row.context_ruleset_hash as string,
+        sourceCodeCommit: row.context_source_code_commit as string,
+        sourceCodeDirty: (row.context_source_code_dirty as number) !== 0,
+        configVersion: row.context_config_version as string,
         createdAt: row.context_created_at as string,
       } : null,
       capitalDecision: row.capital_estimate_status ? {
@@ -1237,6 +1506,53 @@ export class PaperExecutor {
     ).get(accountId) as ReturnType<PaperExecutor["accountRow"]> | undefined;
     if (!row) throw new Error(`PAPER_ACCOUNT_NOT_FOUND:${accountId}`);
     return row;
+  }
+
+  private freezePositions(accountId: string, reason: string): number {
+    const positions = this.openPositions(accountId, true);
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const position of positions) {
+        this.database.prepare(
+          `UPDATE paper_positions
+           SET status='FROZEN',frozen_from_status=?,frozen_reason=?,frozen_at=?,updated_at=?
+           WHERE paper_position_id=? AND status!='FROZEN'`,
+        ).run(position.status, reason, now, now, position.paper_position_id);
+        this.transition("PAPER_POSITION", position.paper_position_id, position.status, "FROZEN", reason, now);
+      }
+      this.database.exec("COMMIT");
+      return positions.length;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private unfreezePositions(accountId: string, reason: string): number {
+    const positions = this.database.prepare(
+      `SELECT * FROM paper_positions
+       WHERE paper_account_id=? AND status='FROZEN'
+       ORDER BY created_at,paper_position_id`,
+    ).all(accountId) as unknown as PositionRow[];
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const position of positions) {
+        const next = position.frozen_from_status ?? "OPEN";
+        this.database.prepare(
+          `UPDATE paper_positions
+           SET status=?,frozen_from_status=NULL,frozen_reason=NULL,frozen_at=NULL,updated_at=?
+           WHERE paper_position_id=? AND status='FROZEN'`,
+        ).run(next, now, position.paper_position_id);
+        this.transition("PAPER_POSITION", position.paper_position_id, "FROZEN", next, reason, now);
+      }
+      this.database.exec("COMMIT");
+      return positions.length;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private openPositions(accountId: string, includeSettlementPending = false): PositionRow[] {

@@ -6,6 +6,7 @@ import { reconcileProjection } from "./reconciliation.js";
 import { ObserveStore, type StartedObserveRun } from "./observe-store.js";
 import type { ObserveDataSource, ObserveEvent, ObserveRunMetrics } from "./types.js";
 import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
+import type { SourceVersion } from "../infra/source-version.js";
 
 export interface ObserveRunnerOptions {
   walletAddress: string;
@@ -15,6 +16,7 @@ export interface ObserveRunnerOptions {
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
+  sourceVersion?: SourceVersion;
 }
 
 function activityAsTrade(activity: PublicActivity): PublicTrade | null {
@@ -206,6 +208,7 @@ export class ObserveOnlyRunner {
             marketSourceUrl: market.sourceUrl,
             marketFetchedAt: market.fetchedAt,
             capitalDecision,
+            ...(this.options.sourceVersion ? { sourceVersion: this.options.sourceVersion } : {}),
             createdAt: completedAt,
           }),
         });

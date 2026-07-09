@@ -6,6 +6,7 @@ import { activityEventKey, SOURCE_IDENTITY_VERSION, sourceEventKey } from "../..
 import type { PublicActivity, PublicTrade, WalletIdentityReport } from "../../domain/models.js";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../../domain/fixed.js";
 import {
+  RULESET,
   RULESET_HASH,
   RULESET_SNAPSHOT_JSON,
   VERSIONS,
@@ -103,12 +104,46 @@ export class Phase0Database {
         throw error;
       }
     }
+    const phase1ArchitectureApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.1.0");
+    if (!phase1ArchitectureApplied) {
+      const phase1ArchitectureSql = readFileSync(new URL("./006_phase1a_architecture.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(phase1ArchitectureSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.1.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const rulesetProjectionApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.2.0");
+    if (!rulesetProjectionApplied) {
+      const rulesetProjectionSql = readFileSync(new URL("./007_ruleset_portfolio_projection.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(rulesetProjectionSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.2.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
           ruleset_hash, schema_version, signal_version, strategy_version, risk_version,
-          replay_version, ruleset_snapshot_json, source_code_commit, source_code_dirty, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          replay_version, ruleset_snapshot_json, source_code_commit, source_code_dirty, config_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         RULESET_HASH,
@@ -120,6 +155,32 @@ export class Phase0Database {
         RULESET_SNAPSHOT_JSON,
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        new Date().toISOString(),
+      );
+    this.database
+      .prepare(
+        `INSERT OR IGNORE INTO ruleset_registry(
+          ruleset_hash, ruleset_version, buy_price_lower_ratio_ppm, buy_price_upper_ratio_ppm,
+          stop_loss_ratio_ppm, wait_ratio_ppm, max_wait_time_ms, capital_mode,
+          fee_model_version, ruleset_snapshot_json, source_code_commit, source_code_dirty,
+          config_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        RULESET_HASH,
+        VERSIONS.rulesetVersion,
+        RULESET.buyPriceMinRatioPpm,
+        RULESET.buyPriceMaxRatioPpm,
+        RULESET.stopTriggerRatioPpm,
+        RULESET.waitRatioPpm,
+        RULESET.maxWaitMs,
+        RULESET.capitalMode,
+        VERSIONS.feeModelVersion,
+        RULESET_SNAPSHOT_JSON,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
         new Date().toISOString(),
       );
   }
