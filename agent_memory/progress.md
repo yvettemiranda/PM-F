@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- Phase 1A Paper Executor 核心闭环与主体架构补齐已完成实现和自动化验证；当前尚未进入 Phase 1B 长期 Paper Validation。24 小时 Observe soak 延期到 Live Gate 前，仍未执行且不得视为通过。
+- Phase 2 Live Gate Safety Layer 已完成实现和自动化验证；当前尚未进入 Phase 3，也未进入 Live Executor。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性和用户再次授权仍未执行。
 
 ## Completed
 - 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
@@ -29,6 +29,12 @@
 - 本轮主体架构补齐已新增 SQLite `2.2.0` 迁移、`ruleset_registry`、`portfolio_projection_runs` 和 `PortfolioProjectionService`；账户状态统一从 ledger/position/PnL 投影生成。
 - 每条新增 Paper Execution 均引用 `risk_decision_id`；止损和结算这类系统触发执行也写入系统级 Risk Decision；标准 `executeBuy/executeSell` 接口会校验并复用传入的已批准 Risk Decision。
 - 当前验证结果：TypeScript 类型检查通过；13 个测试文件共 84 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.2.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`。
+- Phase 2 已新增 SQLite `2.3.0` 迁移、`LiveGateService`、`LiveGateStore`、`LiveGateReconciliation`、`BalanceProvider`、`MockBalanceProvider`、`PaperBalanceProvider` 和 Live Gate 类型定义；默认状态为 `PAPER + LIVE_DISABLED`。
+- Live Gate 启动流程为：request live → preflight → `LIVE_ARMING` → 人工确认 → `LIVE_ACTIVE`；若重启时发现持久化 `LIVE_ACTIVE`，会自动降级为 `PAPER + LIVE_ARMING` 并要求重新检查和确认。
+- Live Gate preflight 覆盖 mode、钱包元数据、仅 mock/paper balance provider、配置、风险参数、数据库完整性、reconciliation 和 Live 前置验收项；前置项默认 `PENDING`。
+- `checkExecution()` 只读取 Signal、Execution Context 和既有 `risk_decision_id`，要求 Signal 已发布且可执行、Risk Decision 为 `ALLOW`、ruleset 已注册且匹配、市场未结束、无 FROZEN/MAJOR_DESYNC。
+- 新增 `risk_snapshots` 与 `live_gate_runs` 审计链路；`live_wallets` 仅保存元数据，不包含私钥、seed、signer 或交易能力字段。
+- 当前验证结果：TypeScript 类型检查通过；14 个测试文件共 96 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.3.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`。
 
 ## Current gate
 - Wallet Identity 已通过。
@@ -38,8 +44,8 @@
 - Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
 - 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
 - Phase 1A 已完成实现、架构优化、主体架构补齐和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
-- Live Gate 明确未通过：24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性和用户再次授权均未完成。
+- Live Gate Safety Layer 代码已通过自动化验证，但 Live Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权均未完成。
 
 ## Next steps
-- Phase 1B 使用新产生且带 execution context 的实时 Signal 执行持续 Paper 模拟验收。
-- Live Gate 前再统一执行 24 小时 Observe、Paper 稳定性、Crash Recovery 和长时间一致性验证。
+- 下一步建议进入 Phase 1B：使用新产生且带 execution context 的实时 Signal 执行持续 Paper 模拟验收。
+- Live Gate 前再统一执行 24 小时 Observe、Paper 稳定性、Crash Recovery、长时间一致性、geoblock/compliance 和用户再次授权。

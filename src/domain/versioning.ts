@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.2.0",
+  schemaVersion: "2.3.0",
   signalVersion: "1.4.0",
   strategyVersion: "2.0.0",
   riskVersion: "1.2.0",
@@ -40,6 +40,12 @@ export const RULESET = Object.freeze({
   paperMaxMarketExposurePpm: 1_000_000,
   paperMaxPositionExposurePpm: 1_000_000,
   capitalMode: "PROPORTIONAL_WITH_FIXED_FALLBACK",
+  liveBankrollMicros: 1_000_000_000,
+  liveMaxTradeSizeMicros: 200_000_000,
+  liveMaxExposureMicros: 500_000_000,
+  liveMaxDailyLossMicros: 50_000_000,
+  liveStopLossRatioPpm: 500_000,
+  liveKellyEnabled: false,
 });
 
 function stable(value: unknown): unknown {

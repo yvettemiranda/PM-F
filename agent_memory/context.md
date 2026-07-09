@@ -6,7 +6,7 @@
 
 ## Constraints
 - `ni-k` 与旧版 PolymarketBot 完全独立；不引用、不迁移、不复用旧项目代码、账本、风控、页面或交易逻辑。
-- 当前处于 Phase 1A 架构优化完成后的状态；允许 Paper 模拟账户、模拟订单和模拟成交，继续禁止 Live 交易逻辑、私钥、真实订单、认证交易接口和链上写操作。
+- 当前处于 Phase 2 Live Gate Safety Layer 已实现后的状态；允许 Paper 模拟账户、模拟订单和模拟成交，允许 Live Gate 安全检查/状态机/审计占位，继续禁止 Live 交易逻辑、私钥、真实订单、认证交易接口和链上写操作。
 - 新项目按三层架构设计：钱包监控与信号生成层、模拟交易层、实盘交易层。
 - 第一版只支持一个 Polymarket Profile / Proxy Wallet 地址。
 - 第一阶段优先完成监控、信号、自然语言解释、标准化事件、模拟交易、日志和状态机；不优先开发实盘。
@@ -64,3 +64,6 @@
 - 优化优先级固定为正确性高于安全性、高于稳定性、高于延迟；不得为了低延迟绕过确认、幂等、状态机或风控。
 - Phase 0、Replay、Observe Only、Paper 仅本机 `127.0.0.1` 运行；Live 部署位置以后单独评估。
 - Paper 盘口只读公开无认证 CLOB market data，必须使用完整深度 VWAP 和 2 秒新鲜度门禁；不得调用认证 user channel 或任何下单端点。
+- Live Gate 默认状态必须保持 `execution_mode=PAPER` 且 `live_gate_state=LIVE_DISABLED`；`LIVE_ACTIVE` 重启后必须降级为 `LIVE_ARMING` 并重新 preflight + 人工确认。
+- Live Gate 只接受已有 `RiskDecision=ALLOW`，不得重新计算或替代 Risk Manager 决策；`RiskManager` 仍只输出 `ALLOW/REJECT`。
+- `live_wallets` 只保存钱包元数据，不保存 private key、seed phrase、signer 或真实交易能力字段。

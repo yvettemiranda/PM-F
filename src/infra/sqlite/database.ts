@@ -138,6 +138,23 @@ export class Phase0Database {
         throw error;
       }
     }
+    const liveGateApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.3.0");
+    if (!liveGateApplied) {
+      const liveGateSql = readFileSync(new URL("./008_live_gate_safety.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveGateSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.3.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
@@ -158,6 +175,7 @@ export class Phase0Database {
         VERSIONS.configVersion,
         new Date().toISOString(),
       );
+    const now = new Date().toISOString();
     this.database
       .prepare(
         `INSERT OR IGNORE INTO ruleset_registry(
@@ -181,7 +199,21 @@ export class Phase0Database {
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
         VERSIONS.configVersion,
-        new Date().toISOString(),
+        now,
+      );
+    this.database
+      .prepare(
+        `INSERT OR IGNORE INTO live_gate_state(
+          state_id, execution_mode, live_gate_state, requested_execution_mode, last_preflight_id,
+          state_reason, source_code_commit, source_code_dirty, config_version, created_at, updated_at
+        ) VALUES ('default', 'PAPER', 'LIVE_DISABLED', NULL, NULL, 'DEFAULT_DISABLED', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        now,
+        now,
       );
   }
 
