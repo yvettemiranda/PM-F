@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Phase0Database } from "../infra/sqlite/database.js";
+import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { ObserveOnlyRunner } from "../observe/observe-runner.js";
 import { ObserveStore } from "../observe/observe-store.js";
@@ -19,11 +19,11 @@ const numberArg = (name: string, fallback: number): number => {
 const durationSeconds = numberArg("duration-seconds", 0);
 const pollSeconds = numberArg("poll-seconds", 15);
 const minimumSoakSeconds = numberArg("minimum-soak-seconds", 24 * 60 * 60);
+if (pollSeconds <= 0) throw new Error("Invalid --poll-seconds: value must be greater than 0");
 const databasePath = resolve("data/phase0/phase0.sqlite");
 const sourceVersion = resolveSourceVersion();
-const migrations = new Phase0Database(databasePath, sourceVersion);
-migrations.initialize();
-migrations.close();
+const databasePreparation = await prepareRuntimeDatabase({ databasePath, sourceVersion });
+console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePreparation }));
 
 const store = new ObserveStore(databasePath, sourceVersion);
 const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
@@ -45,7 +45,8 @@ try {
     && !metrics.checkpointProjectionHashMismatch
     && metrics.finalSyncStatus === "SYNCED"
     && metrics.successfulPolls > 0;
-  const liveStabilityEligible = metrics.durationMs >= minimumSoakSeconds * 1_000
+  const liveStabilityEligible = metrics.activeRuntimeMs >= minimumSoakSeconds * 1_000
+    && metrics.schedulingGapCount === 0
     && !sourceVersion.dirty
     && metrics.majorDesyncCount === 0
     && !metrics.unrecoveredConnectionGap
@@ -57,6 +58,7 @@ try {
     target: address,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
+    databasePreparation,
     mode: "OBSERVE_ONLY",
     metrics,
     acceptance: {
@@ -65,7 +67,8 @@ try {
       minimumSoakSeconds,
       liveStabilityEligible,
       liveStabilityBlockers: [
-        ...(metrics.durationMs < minimumSoakSeconds * 1_000 ? ["MINIMUM_SOAK_NOT_REACHED"] : []),
+        ...(metrics.activeRuntimeMs < minimumSoakSeconds * 1_000 ? ["MINIMUM_SOAK_NOT_REACHED"] : []),
+        ...(metrics.schedulingGapCount > 0 ? ["SCHEDULING_GAP_OBSERVED"] : []),
         ...(sourceVersion.dirty ? ["SOURCE_CODE_DIRTY"] : []),
         ...(metrics.majorDesyncCount > 0 ? ["MAJOR_DESYNC_OBSERVED"] : []),
         ...(metrics.unrecoveredConnectionGap ? ["UNRECOVERED_CONNECTION_GAP"] : []),

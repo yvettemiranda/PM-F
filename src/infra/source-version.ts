@@ -5,20 +5,24 @@ export interface SourceVersion {
   dirty: boolean;
 }
 
-export function resolveSourceVersion(cwd = process.cwd()): SourceVersion {
-  const environmentCommit = process.env.SOURCE_CODE_COMMIT?.trim();
-  if (environmentCommit) {
-    return {
-      commit: environmentCommit,
-      dirty: process.env.SOURCE_CODE_DIRTY !== "0",
-    };
-  }
-
+export function resolveSourceVersion(
+  cwd = process.cwd(),
+  environment: NodeJS.ProcessEnv = process.env,
+): SourceVersion {
+  const environmentCommit = environment.SOURCE_CODE_COMMIT?.trim();
   try {
     const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
     const status = execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).trim();
-    return { commit, dirty: status.length > 0 };
+    const environmentMismatch = environmentCommit !== undefined && environmentCommit !== commit;
+    const environmentMarksDirty = environment.SOURCE_CODE_DIRTY !== undefined
+      && environment.SOURCE_CODE_DIRTY !== "0";
+    return {
+      commit,
+      dirty: status.length > 0 || environmentMismatch || environmentMarksDirty,
+    };
   } catch {
-    return { commit: "UNCOMMITTED", dirty: true };
+    // An environment value is useful provenance when Git metadata was omitted
+    // from a packaged artifact, but it is never proof of a clean build.
+    return { commit: environmentCommit || "UNCOMMITTED", dirty: true };
   }
 }

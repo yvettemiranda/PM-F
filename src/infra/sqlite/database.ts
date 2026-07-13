@@ -13,10 +13,11 @@ import {
 } from "../../domain/versioning.js";
 import type { ReplayReport } from "../../replay/replay-engine.js";
 import { resolveSourceVersion, type SourceVersion } from "../source-version.js";
-import { captureIdentity, type CaptureManifest } from "../../services/capture-manifest.js";
+import { captureIdentityFromResponseJson, type CaptureManifest } from "../../services/capture-manifest.js";
 import type { PositionBaseline } from "../../services/position-baseline.js";
 import type { CapitalEstimate } from "../../services/capital-estimator.js";
 import type { GoldenExpectation, GoldenResult } from "../../services/golden-expectations.js";
+import { decodeCapturePayload, storeCompressedCapturePayload, type CapturePayloadRow } from "./capture-payload.js";
 
 export class Phase0Database {
   private readonly database: DatabaseSync;
@@ -24,6 +25,7 @@ export class Phase0Database {
 
   constructor(path: string, sourceVersion = resolveSourceVersion()) {
     this.database = new DatabaseSync(path);
+    this.database.exec("PRAGMA recursive_triggers=ON;");
     this.sourceVersion = sourceVersion;
   }
 
@@ -206,6 +208,210 @@ export class Phase0Database {
         throw error;
       }
     }
+    const capturePayloadStorageApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.7.0");
+    if (!capturePayloadStorageApplied) {
+      const capturePayloadStorageSql = readFileSync(new URL("./012_capture_payload_storage.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(capturePayloadStorageSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.7.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveAccountRiskIsolationApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.8.0");
+    if (!liveAccountRiskIsolationApplied) {
+      const liveAccountRiskIsolationSql = readFileSync(new URL("./013_live_account_risk_isolation.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveAccountRiskIsolationSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.8.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const observeActivityConfirmationApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.9.0");
+    if (!observeActivityConfirmationApplied) {
+      const observeActivityConfirmationSql = readFileSync(new URL("./014_observe_activity_confirmation.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(observeActivityConfirmationSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.9.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const appendOnlyEvidenceApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.10.0");
+    if (!appendOnlyEvidenceApplied) {
+      const appendOnlyEvidenceSql = readFileSync(new URL("./015_append_only_evidence.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(appendOnlyEvidenceSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.10.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveAssetReservationsApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.11.0");
+    if (!liveAssetReservationsApplied) {
+      const liveAssetReservationsSql = readFileSync(new URL("./016_live_asset_reservations.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveAssetReservationsSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.11.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveMarketExecutionSafetyApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.12.0");
+    if (!liveMarketExecutionSafetyApplied) {
+      const liveMarketExecutionSafetySql = readFileSync(new URL("./017_live_market_execution_safety.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveMarketExecutionSafetySql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.12.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveSignalCursorSafetyApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.13.0");
+    if (!liveSignalCursorSafetyApplied) {
+      const liveSignalCursorSafetySql = readFileSync(new URL("./018_live_signal_cursor_safety.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveSignalCursorSafetySql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.13.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveBuyBudgetCompletenessApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.14.0");
+    if (!liveBuyBudgetCompletenessApplied) {
+      const liveBuyBudgetCompletenessSql = readFileSync(new URL("./019_live_buy_budget_completeness.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveBuyBudgetCompletenessSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.14.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveAuthorizedSignerApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.15.0");
+    if (!liveAuthorizedSignerApplied) {
+      const liveAuthorizedSignerSql = readFileSync(new URL("./020_live_authorized_signer.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveAuthorizedSignerSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.15.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveOrderIntentEvidenceApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.16.0");
+    if (!liveOrderIntentEvidenceApplied) {
+      const liveOrderIntentEvidenceSql = readFileSync(new URL("./021_live_order_intent_evidence.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveOrderIntentEvidenceSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.16.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveGateTransitionImmutabilityApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.17.0");
+    if (!liveGateTransitionImmutabilityApplied) {
+      const liveGateTransitionImmutabilitySql = readFileSync(new URL("./022_live_gate_transition_immutability.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveGateTransitionImmutabilitySql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.17.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const liveSettlementEventsApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.18.0");
+    if (!liveSettlementEventsApplied) {
+      const liveSettlementEventsSql = readFileSync(new URL("./023_live_settlement_events.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(liveSettlementEventsSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.18.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
@@ -303,13 +509,14 @@ export class Phase0Database {
 
   saveCapture<T>(endpoint: string, capture: ApiCapture<T>): string {
     const responseJson = JSON.stringify(capture.data);
-    const { captureId, payloadSha256: payloadHash } = captureIdentity(capture as ApiCapture<unknown>);
+    const { captureId, payloadSha256: payloadHash } = captureIdentityFromResponseJson(capture.url, capture.fetchedAt, responseJson);
+    storeCompressedCapturePayload(this.database, payloadHash, responseJson, capture.fetchedAt);
     this.database
       .prepare(
         `INSERT OR IGNORE INTO api_captures(
           capture_id, endpoint, request_url, fetched_at, latency_ms, http_status,
-          payload_sha256, response_json, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payload_sha256, response_json, schema_version, response_encoding
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 'GZIP_SHA256')`,
       )
       .run(
         captureId,
@@ -319,7 +526,6 @@ export class Phase0Database {
         capture.latencyMs,
         capture.status,
         payloadHash,
-        responseJson,
         VERSIONS.schemaVersion,
       );
     const serverTimestamp = endpoint === "clob-time" && typeof capture.data === "number"
@@ -352,7 +558,7 @@ export class Phase0Database {
     try {
       this.database
         .prepare(
-          `INSERT OR REPLACE INTO capture_runs(
+          `INSERT OR IGNORE INTO capture_runs(
             capture_run_id, target_id, wallet_address, sample_role, purpose, status,
             started_at, completed_at, manifest_hash, item_count,
             schema_version, signal_version, strategy_version, risk_version, replay_version,
@@ -381,8 +587,33 @@ export class Phase0Database {
           manifest.sourceCodeDirty ? 1 : 0,
           manifest.completedAt,
         );
+      const existingRun = this.database.prepare(
+        `SELECT wallet_address,sample_role,purpose,status,started_at,completed_at,manifest_hash,item_count
+         FROM capture_runs WHERE capture_run_id=?`,
+      ).get(manifest.captureRunId) as {
+        wallet_address: string;
+        sample_role: string;
+        purpose: string;
+        status: string;
+        started_at: string;
+        completed_at: string | null;
+        manifest_hash: string | null;
+        item_count: number;
+      };
+      if (
+        existingRun.wallet_address !== manifest.walletAddress
+        || existingRun.sample_role !== manifest.sampleRole
+        || existingRun.purpose !== manifest.purpose
+        || existingRun.status !== manifest.status
+        || existingRun.started_at !== manifest.startedAt
+        || existingRun.completed_at !== manifest.completedAt
+        || existingRun.manifest_hash !== manifest.manifestHash
+        || existingRun.item_count !== manifest.items.length
+      ) {
+        throw new Error("CAPTURE_RUN_CONFLICT");
+      }
       const insertItem = this.database.prepare(
-        `INSERT OR REPLACE INTO capture_manifest_items(
+        `INSERT OR IGNORE INTO capture_manifest_items(
           manifest_item_id, capture_run_id, capture_id, source_endpoint, request_url,
           page_index, fetched_at, source_time_from, source_time_to, row_count,
           pagination_status, payload_sha256, created_at
@@ -404,6 +635,36 @@ export class Phase0Database {
           item.payloadSha256,
           manifest.completedAt,
         );
+        const existingItem = this.database.prepare(
+          `SELECT capture_id,source_endpoint,request_url,page_index,fetched_at,source_time_from,
+                  source_time_to,row_count,pagination_status,payload_sha256
+           FROM capture_manifest_items WHERE manifest_item_id=?`,
+        ).get(item.manifestItemId) as {
+          capture_id: string;
+          source_endpoint: string;
+          request_url: string;
+          page_index: number | null;
+          fetched_at: string;
+          source_time_from: number | null;
+          source_time_to: number | null;
+          row_count: number;
+          pagination_status: string;
+          payload_sha256: string;
+        };
+        if (
+          existingItem.capture_id !== item.captureId
+          || existingItem.source_endpoint !== item.endpoint
+          || existingItem.request_url !== item.requestUrl
+          || existingItem.page_index !== item.pageIndex
+          || existingItem.fetched_at !== item.fetchedAt
+          || existingItem.source_time_from !== item.sourceTimeFrom
+          || existingItem.source_time_to !== item.sourceTimeTo
+          || existingItem.row_count !== item.rowCount
+          || existingItem.pagination_status !== item.paginationStatus
+          || existingItem.payload_sha256 !== item.payloadSha256
+        ) {
+          throw new Error("CAPTURE_MANIFEST_ITEM_CONFLICT");
+        }
       }
       this.database.exec("COMMIT");
     } catch (error) {
@@ -431,7 +692,7 @@ export class Phase0Database {
     try {
       this.database
         .prepare(
-          `INSERT OR REPLACE INTO position_baseline_runs(
+          `INSERT OR IGNORE INTO position_baseline_runs(
             baseline_run_id, capture_run_id, target_id, wallet_address, status,
             cutoff_from, cutoff_to, snapshot_time, position_capture_id, item_count,
             schema_version, strategy_version, ruleset_hash, source_code_commit,
@@ -456,8 +717,34 @@ export class Phase0Database {
           this.sourceVersion.dirty ? 1 : 0,
           baseline.snapshotTime,
         );
+      const existingRun = this.database.prepare(
+        `SELECT capture_run_id,target_id,wallet_address,status,cutoff_from,cutoff_to,snapshot_time,
+                position_capture_id,item_count
+         FROM position_baseline_runs WHERE baseline_run_id=?`,
+      ).get(baseline.baselineRunId) as {
+        capture_run_id: string;
+        target_id: string;
+        wallet_address: string;
+        status: string;
+        cutoff_from: string;
+        cutoff_to: string;
+        snapshot_time: string;
+        position_capture_id: string;
+        item_count: number;
+      };
+      if (
+        existingRun.capture_run_id !== baseline.captureRunId
+        || existingRun.target_id !== baseline.targetId
+        || existingRun.wallet_address !== baseline.walletAddress
+        || existingRun.status !== baseline.status
+        || existingRun.cutoff_from !== baseline.cutoffFrom
+        || existingRun.cutoff_to !== baseline.cutoffTo
+        || existingRun.snapshot_time !== baseline.snapshotTime
+        || existingRun.position_capture_id !== baseline.positionCaptureId
+        || existingRun.item_count !== baseline.items.length
+      ) throw new Error("POSITION_BASELINE_RUN_CONFLICT");
       const insertItem = this.database.prepare(
-        `INSERT OR REPLACE INTO position_baseline_items(
+        `INSERT OR IGNORE INTO position_baseline_items(
           baseline_item_id, baseline_run_id, condition_id, asset_id, market_slug,
           market_title, outcome, size_micros, average_price_units, snapshot_time
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -475,6 +762,32 @@ export class Phase0Database {
           item.averagePriceUnits,
           item.snapshotTime,
         );
+        const existingItem = this.database.prepare(
+          `SELECT baseline_run_id,condition_id,asset_id,market_slug,market_title,outcome,
+                  size_micros,average_price_units,snapshot_time
+           FROM position_baseline_items WHERE baseline_item_id=?`,
+        ).get(item.baselineItemId) as {
+          baseline_run_id: string;
+          condition_id: string;
+          asset_id: string;
+          market_slug: string;
+          market_title: string;
+          outcome: string;
+          size_micros: string;
+          average_price_units: string;
+          snapshot_time: string;
+        };
+        if (
+          existingItem.baseline_run_id !== baseline.baselineRunId
+          || existingItem.condition_id !== item.conditionId
+          || existingItem.asset_id !== item.asset
+          || existingItem.market_slug !== item.marketSlug
+          || existingItem.market_title !== item.marketTitle
+          || existingItem.outcome !== item.outcome
+          || existingItem.size_micros !== item.sizeMicros
+          || existingItem.average_price_units !== item.averagePriceUnits
+          || existingItem.snapshot_time !== item.snapshotTime
+        ) throw new Error("POSITION_BASELINE_ITEM_CONFLICT");
       }
       this.database
         .prepare("UPDATE monitor_targets SET baseline_at=?, updated_at=? WHERE target_id=?")
@@ -489,7 +802,7 @@ export class Phase0Database {
   saveCapitalEstimate(targetId: string, sourceEventKeyValue: string | null, estimate: CapitalEstimate): void {
     this.database
       .prepare(
-        `INSERT OR REPLACE INTO capital_estimates(
+        `INSERT OR IGNORE INTO capital_estimates(
           capital_estimate_id, target_id, source_event_key, position_value_micros,
           wallet_balance_micros, target_visible_capital_micros, target_trade_amount_micros,
           target_trade_capital_ratio_ppm, capital_estimate_status, capital_confidence,
@@ -524,6 +837,33 @@ export class Phase0Database {
         this.sourceVersion.dirty ? 1 : 0,
         new Date().toISOString(),
       );
+    const existing = this.database.prepare(
+      `SELECT target_id,source_event_key,position_value_micros,wallet_balance_micros,
+              target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+              capital_estimate_status,capital_confidence,capital_estimate_reason,
+              position_snapshot_time,wallet_balance_snapshot_time,target_trade_timestamp,
+              fallback_amount_micros
+       FROM capital_estimates WHERE capital_estimate_id=?`,
+    ).get(estimate.capitalEstimateId) as Record<string, string | null>;
+    const expected: Record<string, string | null> = {
+      target_id: targetId,
+      source_event_key: sourceEventKeyValue,
+      position_value_micros: estimate.positionValueMicros,
+      wallet_balance_micros: estimate.walletBalanceMicros,
+      target_visible_capital_micros: estimate.targetVisibleCapitalMicros,
+      target_trade_amount_micros: estimate.targetTradeAmountMicros,
+      target_trade_capital_ratio_ppm: estimate.targetTradeCapitalRatioPpm,
+      capital_estimate_status: estimate.capitalEstimateStatus,
+      capital_confidence: estimate.capitalConfidence,
+      capital_estimate_reason: estimate.capitalEstimateReason,
+      position_snapshot_time: estimate.positionSnapshotTime,
+      wallet_balance_snapshot_time: estimate.walletBalanceSnapshotTime,
+      target_trade_timestamp: estimate.targetTradeTimestamp,
+      fallback_amount_micros: estimate.fallbackAmountMicros,
+    };
+    if (Object.entries(expected).some(([key, value]) => existing[key] !== value)) {
+      throw new Error("CAPITAL_ESTIMATE_CONFLICT");
+    }
   }
 
   saveGoldenCandidates(candidates: GoldenExpectation[]): void {
@@ -573,7 +913,7 @@ export class Phase0Database {
 
   saveGoldenResults(replayRunId: string, results: GoldenResult[]): void {
     const insert = this.database.prepare(
-      `INSERT OR REPLACE INTO golden_results(
+      `INSERT OR IGNORE INTO golden_results(
         golden_result_id, replay_run_id, golden_case_id, result_status,
         actual_signal_type, actual_signal_present, actual_execution_eligible,
         actual_event_classification, diff_json, created_at
@@ -596,6 +936,28 @@ export class Phase0Database {
           JSON.stringify(item.diff),
           now,
         );
+        const existing = this.database.prepare(
+          `SELECT result_status,actual_signal_type,actual_signal_present,actual_execution_eligible,
+                  actual_event_classification,diff_json
+           FROM golden_results WHERE golden_result_id=?`,
+        ).get(resultId) as {
+          result_status: string;
+          actual_signal_type: string | null;
+          actual_signal_present: number;
+          actual_execution_eligible: number | null;
+          actual_event_classification: string;
+          diff_json: string;
+        };
+        if (
+          existing.result_status !== item.resultStatus
+          || existing.actual_signal_type !== item.actualSignalType
+          || existing.actual_signal_present !== (item.actualSignalPresent ? 1 : 0)
+          || existing.actual_execution_eligible !== (item.actualExecutionEligible === null ? null : item.actualExecutionEligible ? 1 : 0)
+          || existing.actual_event_classification !== item.actualEventClassification
+          || existing.diff_json !== JSON.stringify(item.diff)
+        ) {
+          throw new Error("GOLDEN_RESULT_CONFLICT");
+        }
       }
       this.database.exec("COMMIT");
     } catch (error) {
@@ -708,14 +1070,16 @@ export class Phase0Database {
   loadCapturePayloads(captureRunId: string, endpoint: string): unknown[] {
     const rows = this.database
       .prepare(
-        `SELECT c.response_json
+        `SELECT c.payload_sha256,c.response_json,c.response_encoding,
+                p.payload_blob,p.uncompressed_bytes
          FROM capture_manifest_items i
          JOIN api_captures c ON c.capture_id=i.capture_id
+         LEFT JOIN api_capture_payloads p ON p.payload_sha256=c.payload_sha256
          WHERE i.capture_run_id=? AND i.source_endpoint=?
          ORDER BY COALESCE(i.page_index, 0), i.fetched_at`,
       )
-      .all(captureRunId, endpoint) as Array<{ response_json: string }>;
-    return rows.map((row) => JSON.parse(row.response_json) as unknown);
+      .all(captureRunId, endpoint) as unknown as CapturePayloadRow[];
+    return rows.map(decodeCapturePayload);
   }
 
   captureEndpointWasComplete(captureRunId: string, endpoint: string): boolean {

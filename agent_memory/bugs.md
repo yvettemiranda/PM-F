@@ -1,45 +1,31 @@
 # Bugs And Risks
 
 ## Active blockers
-- Data API Trades/Activity 在 offset 超过 3000 时返回上限错误；当前历史样本不是完整钱包历史，不能用当前 Positions 倒推历史起点。
-- 141 条 Position Baseline 是当前启动快照，只适用于快照之后的增量监控；不能冒充历史 Replay 窗口开始时的仓位。
-- 历史 BUY 缺少交易时点 pUSD/Positions 快照，只能保存 `INCOMPLETE/MEDIUM` 和 10 pUSD fallback，不能生成历史比例资金结果。
-- Golden 1-5 已 `APPROVED/MATCH/PASSED`；该门禁已解除，但不消除历史数据不完整和前向 baseline 验证不足。
-- Observe Only 只完成短时真实运行，24 小时验证已由用户延期到 Live Gate 前；当前不能证明长期稳定，也绝不能据此打开 Live Gate。
-- Phase 1A 自动化验证和架构优化不等于 Phase 1B Paper 稳定性验收；在持续新 Signal 模拟运行前不得标记 Paper Passed。
-- Phase 2 Live Gate Safety Layer 只实现安全门和审计链路，不代表 Live Gate 已通过；所有 `live_gate_prerequisites` 默认 `PENDING`，不得手动绕过长期验收和用户再次授权。
-- Phase 3 Live Executor 代码完成不代表可以实盘；当前仅用 fake/disabled adapters 通过代码正确性测试，最终统一验证和用户再次明确授权仍是硬门禁。
-- Phase 4 Validation Framework 完成不代表最终验证已通过；当前 `validate:final` 只证明框架可运行，长周期 Paper、24 小时 Observe、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次明确授权仍未完成。
-- Phase 5 Operational Validation Framework 完成不代表长期运行已通过；当前 `operational:validate` 只证明运行级验证框架、snapshot 隔离、health/paper smoke、shadow risk 和报告生成可运行，24 小时/7 天 soak、长周期 Paper 和 Live Gate 前最终验收仍未完成。
+- 24 小时 Observe、长周期 Paper、Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
+- Data API 历史 offset 上限导致完整钱包历史不可得，历史 Replay 仍为 `INCOMPLETE`；缺历史 orderbook snapshot，不能声称历史 Paper execution/PnL 已验证。
+- 真实 geoblock/compliance、隔离钱包、安全凭据存储、真实只读余额/订单/成交/仓位 provider、人工授权和小额实盘前检查尚未完成。
+- 2026-07-13 最终只读复测官方 geoblock 返回 `BLOCKED (US/CA)`，CLOB clock offset 约 `1733ms` 且为 `UNSAFE`；当前环境明确不能用于 Live，必须在合法部署环境重新验证，禁止绕过。
 
 ## Active risks
-- 事件分类依赖 Replay gap/baseline 上下文，已从 raw event 单值字段迁移为 `replay_event_classifications` 版本化投影；raw event 上的旧分类列不应作为权威读取来源。
-- 生产 Trades 偶发完全相同重复行；仅 Activity 第二来源唯一对应时确认去重，否则 `AMBIGUOUS_DUPLICATE_EVENTS`。
-- 同一 transaction hash 可包含多条真实 fill；交易 source key 包含 wallet、tx、condition、asset、side、price、size、timestamp 和 identity version。
-- 非 TRADE Activity 的数值字段可能出现 JSON number 浮点展开；其身份键保存原始字符串，normalized price/size 不参与交易仓位计算，完整 payload 保存在 capture/raw JSON。
-- 当前使用 Node.js 内置 `node:sqlite`，仍有 experimental warning；进入长期运行前需锁定 Node 版本或切换成熟驱动。
-- `操作入口/` 依赖本机 Codex runtime 或系统 Node/pnpm；已把当前 Mac 的 Codex runtime 路径加入脚本。若未来换机器，双击入口可能需要重新检查 Node/pnpm 路径。
-- 公开钱包交易仍依赖 Data API 增量轮询，Market WebSocket 只用于盘口；不得描述为钱包成交推送。
-- Activity 的 TRADE 可能早于 Trades 可见；Observe 已用同一交易幂等键融合两源。若两源字段不完整或不一致，必须保留 reconciliation 异常，不得自动改仓。
-- Positions 也可能短暂领先 Trades/Activity；短暂差异先标记 `MINOR_DIFF`，连续 3 次才升级 `MAJOR_DESYNC`。只有最终恢复为 `SYNCED` 时才视为已恢复，不能用自动改仓掩盖。
-- Node.js `node:sqlite` experimental warning 仍存在；24 小时 soak 需同时观察驱动稳定性和 WAL/锁行为。
-- 公开 REST orderbook 的源时间可能因盘口未变化而超过 2 秒；当前严格按需求标记 `ORDERBOOK_STALE` 并拒绝成交，Phase 1B 需观察该门禁对成交率的影响，不能偷偷放宽。
-- CLOB 费率采用公开 `clob-markets/{condition}` 返回的 `fd.r/fd.e` 曲线快照；未知 exponent 或数据缺失时固定 `FEE_MODEL_UNAVAILABLE`，不得默认为零费率。
-- Live Executor 目前只有安全占位；后续不得复制 Paper 成交实现直接接入真实下单，必须复用统一输入、Risk Manager、Executor Interface、Audit Log 和版本快照。
-- `FROZEN` Position 会阻断新增仓位、自动卖出和自动止损；Phase 1B 需要验证 reconciliation 成功恢复路径不会误解冻仍存在异常的数据。
-- Portfolio Projection 目前已从 ledger/position/PnL 统一计算账户状态；后续 Report/UI 必须读投影服务或投影表，不能重新实现余额、敞口或权益计算。
-- Ruleset Registry 已保存当前规则参数；后续修改买入范围、等待时间、止损或费率模型时必须新增/保留可解释的规则版本，不能覆盖历史 `ruleset_hash`。
-- `schemaVersion` 已升到 `2.5.0`，`RULESET_HASH` 会随版本快照变化；历史对象必须继续按其原始 `ruleset_hash` 解释，不能用当前 hash 覆盖历史行为。
-- `schemaVersion` 已升到 `2.6.0`，`RULESET_HASH` 会随版本快照变化；历史对象必须继续按其原始 `ruleset_hash` 解释，不能用当前 hash 覆盖历史行为。
-- Live Gate 当前只允许 `MOCK` 或 `PAPER` balance provider；后续真实余额接入必须单独设计为只读能力，并继续禁止在同一阶段引入签名或下单能力。
-- `PolymarketClobAdapter` 已存在并可调用官方 SDK `postOrder/cancelOrder`，但不能默认构造或启用；真实 adapter 必须等最终验证、geoblock/compliance 和用户再次授权。
-- Live risk decisions 目前仍复用既有 `risk_decisions.paper_account_id` 外键承载账户引用；后续如果拆出真实 live account 表，需要单独 migration 和兼容策略。
+- `@polymarket/clob-client-v2@1.0.8` 间接依赖 `elliptic@6.6.1`，`pnpm audit --prod` 报 1 个 LOW；公告所列修复版 6.6.2 尚未在 npm 发布，当前无法安全覆盖。官方 SDK 已是最新版，需持续关注上游更新。
+- Node 内置 `node:sqlite` 在 Node 24.14.0 仍输出 experimental warning；已锁定 Node 版本并有 Online Backup、事务、恢复和完整性测试，但长时间运行稳定性仍需 soak 证明。
+- 公开钱包成交依赖 Data API 增量轮询而非钱包 WebSocket；Activity/Trades/Positions 可短暂先后不一致。系统会保留 gap、MINOR_DIFF/MAJOR_DESYNC 和 reconciliation evidence，不得自动改仓掩盖差异。
+- CLOB orderbook 超过 2 秒会严格拒绝成交；这提高安全性但可能降低 Paper/未来 Live 成交率，必须用长期报告评估，不能为了成交率私自放宽。
+- 外部余额、订单、成交和仓位 provider 的生产实现仍需在真实部署环境接线与验收；当前 fake/disabled 测试只证明接口和状态机，不证明真实网络可用性。
+- 业务源库当前仍为 schema 2.4.0，未在本轮审计中原地修改。运行时准备会自动 backup-first，再迁移至 2.18.0，并做 integrity/FK/Live Gate 安全状态检查；第一次正式启动仍应观察迁移日志并保留自动备份。
+
+## Resolved in current hardening
+- WAL snapshot 漏数据、capture payload 不可复现、BUY 向下舍入、Observe 组合误识别、Live/Paper 历史规则串用、Live 信号激活空窗、坏 Signal 阻塞队列、Live fill/recovery 校验不一致、外部仓位/现金漂移缺失、Live 账户资金口径未绑定均已修复并有回归测试。
+- Live Runner 原先先消费新 Signal、后检查止损且长期报告数组无限增长；现已改为风险退出优先，止损健康异常时本周期阻断新增 BUY，并对错误/结算明细实施有界去重和累计计数。
+- Activity 的 MAKER_REBATE/YIELD 等空字符串占位曾导致真实采集失败，且高频钱包每轮首屏都会饱和；现已按非交易语义归一化，并使用时间游标分页/Trades overlap 检查防漏。
+- Live Executor 曾可接收内存篡改的 Signal、信任 signer 改写经济参数、缺完整 Order Intent 恢复证据，以及与 emergency/cancel 发生并发竞态；现已逐项 fail closed 并有回归测试。
+- Live BUY 曾只信任 signer 自报费用上限，且另一进程可在 submit 调用窗口触发 emergency；现已用独立最坏费用计算、持久化 submit claim、Gate generation 和成交后冻结/对账路径修复，相关类型检查及 104 项聚焦测试通过。
+- Validation/Operational 曾允许部分 `--no-snapshot` 路径迁移并写业务库，Live Gate transition 可被改删，Execution 状态与审计存在非原子窗口，Settlement 表名与证据语义混淆；现已统一强制 snapshot、保护 Gate transition、原子化 Execution，并用 2.18.0 append-only Settlement Events 分离投影与证据。
+- 批量仓位冻结曾可能在中途故障时只冻结一部分，Redeem `FAILED` 的 event 曾与 projection/transition 状态分叉；现已用嵌套事务全部回滚，并统一 lifecycle 为 `REDEEM_PENDING -> RESOLVED`，失败详情保留在 reason/evidence。
+- 高危/中危 `ws` 间接依赖已通过 workspace override 固定到 8.21.0；剩余 audit 只有上述 LOW `elliptic`。
 
 ## Safety boundary
-- 当前已存在 Paper Executor，但只允许模拟账户、模拟订单和模拟成交；Live Executor 仍未实现交易逻辑。
-- `executionEligible=false` 是 Paper/Live 必须同步检查的硬门禁；断线、组合、未识别事件不得进入执行层。
-- 当前地址和可选第二地址仅授权读取公开数据；不读取私钥、不创建真实订单、不做链上写操作。
-- Phase 1B Paper 长期验证未通过且用户未再次明确授权前禁止 Live。
-- `LIVE_ACTIVE` 即使曾被持久化，程序重启后也必须降级回 `LIVE_ARMING`，不得自动恢复真实执行状态。
-- Phase 3 禁止自动 approve/increaseAllowance；allowance 不足只能阻断并记录 `ALLOWANCE_INSUFFICIENT`。
-- Phase 4 Validation 默认使用 snapshot DB；如未来允许 `--no-snapshot`，不得运行 Crash Recovery 或 Live Gate fake path 这类会写业务状态的验证。
+- 当前状态必须保持 `PAPER + LIVE_DISABLED`；不存在自动升级或用户双击 Live 的路径。
+- 未再次明确授权前禁止接入 private key/seed、真实 signer、认证 CLOB client、submit/cancel、approve、真实 redeem 和链上写操作。
+- `executionEligible=false`、Risk REJECT、Gate failure、stale orderbook、未知 fill、reconciliation drift 或冻结状态都必须 fail closed；不得手工改数据库绕过。
+- 只有完成所有长周期/合规/人工 Gate 后，才能把技术候选评估为可进行小额真实资金试运行。

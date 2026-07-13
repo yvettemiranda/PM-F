@@ -20,6 +20,8 @@ export interface ObserveEvent {
   sourceType: "DATA_API_TRADE" | "DATA_API_ACTIVITY";
   sourceTimestamp: number;
   isGap: boolean;
+  isCombo: boolean;
+  activityConfirmed: boolean;
   trade?: PublicTrade;
   activity?: PublicActivity;
 }
@@ -66,7 +68,11 @@ export interface ObservePollSnapshot {
 }
 
 export interface ObserveDataSource {
-  poll(walletAddress: string, recoveryFromTimestamp?: number): Promise<ObservePollSnapshot>;
+  poll(
+    walletAddress: string,
+    recoveryFromTimestamp?: number,
+    activityFromTimestamp?: number,
+  ): Promise<ObservePollSnapshot>;
 }
 
 export interface ReconciliationResult {
@@ -87,6 +93,9 @@ export interface ObserveRunMetrics {
   startedAt: string;
   stoppedAt: string;
   durationMs: number;
+  activeRuntimeMs: number;
+  schedulingGapCount: number;
+  maxSchedulingGapMs: number;
   successfulPolls: number;
   failedPolls: number;
   processedEvents: number;

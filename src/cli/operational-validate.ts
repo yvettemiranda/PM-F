@@ -31,6 +31,7 @@ const databasePath = resolve(valueArg("database") ?? "data/phase0/phase0.sqlite"
 const outputDirectory = resolve(valueArg("output-directory") ?? "data/operational");
 const durationMs = numberArg("duration-seconds", 0) * 1_000;
 const pollIntervalMs = numberArg("poll-seconds", 1) * 1_000;
+if (pollIntervalMs <= 0) throw new Error("Invalid --poll-seconds: value must be greater than 0");
 
 const runOptions: OperationalRunOptions = {
   sourceDatabasePath: databasePath,
@@ -48,7 +49,8 @@ if (paperAccountId) runOptions.paperAccountId = paperAccountId;
 const result = await new OperationalRunner().run(runOptions);
 
 console.log(JSON.stringify({
-  status: result.status,
+  status: result.resultStatus,
+  runStatus: result.status,
   finalStatus: result.finalStatus,
   liveAllowed: result.liveAllowed,
   blockingFailures: result.blockingFailures,
@@ -59,3 +61,5 @@ console.log(JSON.stringify({
   sourceDatabasePath: result.sourceDatabasePath,
   paperAccountId: result.paperAccountId,
 }, null, 2));
+
+if (result.status === "FAILED" || result.blockingFailures.length > 0) process.exitCode = 1;

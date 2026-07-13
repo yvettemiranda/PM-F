@@ -51,6 +51,66 @@ describe("ReplayEngine", () => {
     expect(report.metrics.ambiguousEvents).toBe(0);
   });
 
+  it("replays an Activity-only TRADE instead of silently dropping it", () => {
+    const activityTrade = { ...trade({ transactionHash: "0xactivity-only" }), type: "TRADE" };
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [],
+      activity: [activityTrade],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.metrics.inputRows).toBe(1);
+    expect(report.metrics.uniqueEvents).toBe(1);
+    expect(report.metrics.buySignals).toBe(1);
+    expect(report.signals[0]).toMatchObject({
+      sourceEventKey: expect.any(String),
+      executionEligible: true,
+      signalType: "TARGET_BUY",
+    });
+  });
+
+  it("marks an Activity-only duplicate as ambiguous instead of silently hiding it", () => {
+    const activityTrade = { ...trade({ transactionHash: "0xactivity-duplicate" }), type: "TRADE" };
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [],
+      activity: [activityTrade, { ...activityTrade }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.metrics.inputRows).toBe(2);
+    expect(report.metrics.uniqueEvents).toBe(1);
+    expect(report.metrics.duplicateRows).toBe(1);
+    expect(report.metrics.confirmedDuplicateRows).toBe(0);
+    expect(report.metrics.ambiguousEvents).toBe(1);
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
+  });
+
+  it("uses one Trades row to confirm a duplicated Activity row", () => {
+    const first = trade({ transactionHash: "0xactivity-confirmed-duplicate" });
+    const activityTrade = { ...first, type: "TRADE" };
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [first],
+      activity: [activityTrade, { ...activityTrade }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.metrics.duplicateRows).toBe(1);
+    expect(report.metrics.confirmedDuplicateRows).toBe(1);
+    expect(report.metrics.ambiguousEvents).toBe(0);
+    expect(report.status).toBe("PASSED");
+  });
+
   it("computes sell ratio before applying the sell", () => {
     const report = new ReplayEngine().run({
       walletAddress: wallet,

@@ -27,17 +27,18 @@ await mkdir(outputDirectory, { recursive: true });
 const sourceVersion = resolveSourceVersion();
 
 const api = new PolymarketPublicApi();
-const [profile, trades, activity, positions, code, pUsdBalance, safe, wallet, clobTime] = await Promise.all([
+const [profile, trades, activity, positionHistory, code, pUsdBalance, safe, wallet, clobTime] = await Promise.all([
   api.profile(address),
   api.trades(address),
   api.activity(address),
-  api.positions(address),
+  api.allPositions(address),
   api.contractCode(address),
   api.pUsdBalance(address),
   api.relayerDeployed(address, "SAFE"),
   api.relayerDeployed(address, "WALLET"),
   api.clobTime(),
 ]);
+const positions = positionHistory.merged;
 
 const identity = buildWalletIdentityReport({
   address,
@@ -52,7 +53,7 @@ const identity = buildWalletIdentityReport({
 
 const contractCaptures: ApiCapture<unknown>[] = [
   profile,
-  positions,
+  ...positionHistory.captures,
   code,
   pUsdBalance,
   clobTime,
@@ -79,7 +80,14 @@ const finalPaginationStatus = (historyComplete: boolean, stopReason: string): st
 
 const manifestSources: CaptureManifestSource[] = [
   { endpoint: "gamma-public-profile", capture: profile, paginationStatus: "NOT_PAGED" },
-  { endpoint: "data-positions", capture: positions, paginationStatus: positions.data.length < 500 ? "END_OF_DATA" : "PAGE_FULL" },
+  ...positionHistory.captures.map((capture, pageIndex): CaptureManifestSource => ({
+    endpoint: "data-positions",
+    capture,
+    pageIndex,
+    paginationStatus: pageIndex === positionHistory.captures.length - 1
+      ? finalPaginationStatus(positionHistory.historyComplete, positionHistory.stopReason)
+      : "PAGE_FULL",
+  })),
   { endpoint: "polygon-eth-get-code", capture: code, paginationStatus: "NOT_PAGED" },
   { endpoint: "polygon-pusd-balance", capture: pUsdBalance, paginationStatus: "NOT_PAGED" },
   { endpoint: "clob-time", capture: clobTime, paginationStatus: "NOT_PAGED" },
@@ -116,12 +124,13 @@ database.saveIdentity(identity);
 
 const captures: Array<[string, ApiCapture<unknown>]> = [
   ["gamma-public-profile", profile],
-  ["data-positions", positions],
+  ["data-positions-merged", positions],
   ["polygon-eth-get-code", code],
   ["polygon-pusd-balance", pUsdBalance],
   ["clob-time", clobTime],
   ...trades.captures.map((capture): [string, ApiCapture<unknown>] => ["data-trades", capture]),
   ...activity.captures.map((capture): [string, ApiCapture<unknown>] => ["data-activity", capture]),
+  ...positionHistory.captures.map((capture): [string, ApiCapture<unknown>] => ["data-positions", capture]),
 ];
 if (safe) captures.push(["relayer-safe", safe]);
 if (wallet) captures.push(["relayer-wallet", wallet]);

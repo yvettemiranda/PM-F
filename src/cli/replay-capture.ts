@@ -28,7 +28,7 @@ try {
   };
   const trades = flatten<PublicTrade>("data-trades");
   const activity = flatten<PublicActivity>("data-activity");
-  const positions = single<PublicPosition[]>("data-positions");
+  const positions = flatten<PublicPosition>("data-positions");
   const profile = single<PublicProfile>("gamma-public-profile");
   const code = single<{ result?: string }>("polygon-eth-get-code");
   const safePayloads = database.loadCapturePayloads(captureRunId, "relayer-safe");

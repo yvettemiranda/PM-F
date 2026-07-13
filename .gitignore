@@ -7,3 +7,11 @@ work/
 coverage/
 outputs/
 .DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.keystore
+secrets/

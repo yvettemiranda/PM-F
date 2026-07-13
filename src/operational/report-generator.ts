@@ -50,6 +50,24 @@ export function buildOperationalReport(input: {
     const shadowRiskCount = countRows(database, "SELECT count(*) count FROM shadow_risk_observations WHERE operational_run_id=?", input.operationalRunId);
     const paperBindings = database.prepare("SELECT paper_account_id,binding_reason FROM operational_paper_bindings WHERE operational_run_id=?")
       .all(input.operationalRunId) as unknown[];
+    const paperConsumptionCount = countRows(
+      database,
+      "SELECT count(*) count FROM paper_signal_consumptions WHERE consumed_at>=? AND consumed_at<=?",
+      input.startedAt,
+      input.stoppedAt,
+    );
+    const paperOrderCount = countRows(
+      database,
+      "SELECT count(*) count FROM paper_orders WHERE created_at>=? AND created_at<=?",
+      input.startedAt,
+      input.stoppedAt,
+    );
+    const paperFillCount = countRows(
+      database,
+      "SELECT count(*) count FROM paper_fill_ledger WHERE created_at>=? AND created_at<=?",
+      input.startedAt,
+      input.stoppedAt,
+    );
     const formalRiskDecisionCount = countRows(
       database,
       "SELECT count(*) count FROM risk_decisions WHERE created_at>=? AND created_at<=?",
@@ -66,6 +84,7 @@ export function buildOperationalReport(input: {
       .map((check) => `${check.checkType}:${check.checkName}:${check.reason}`);
     if (input.runtimeDurationMs < 24 * 60 * 60 * 1_000) warnings.push("OPERATIONAL:LONG_SOAK_NOT_RUN");
     const finalStatus = blockingFailures.length === 0 ? "OPERATIONAL_FRAMEWORK_READY" : "OPERATIONAL_FAILED";
+    const resultStatus = blockingFailures.length > 0 ? "FAIL" : warnings.length > 0 ? "INCOMPLETE" : "PASS";
     const reportWithoutHash = {
       run: {
         id: input.operationalRunId,
@@ -99,6 +118,9 @@ export function buildOperationalReport(input: {
       },
       execution: {
         paperBindings,
+        paperConsumptionCount,
+        paperOrderCount,
+        paperFillCount,
       },
       risk: {
         shadowRiskObservationCount: shadowRiskCount,
@@ -112,7 +134,7 @@ export function buildOperationalReport(input: {
         crashRecoveryChecks: input.checks.filter((check) => check.checkType === "CRASH_RECOVERY").length,
       },
       finalResult: {
-        status: blockingFailures.length === 0 ? "PASS" : "FAIL",
+        status: resultStatus,
         finalStatus,
         liveAllowed: false,
         blockingFailures,

@@ -10,7 +10,9 @@ import type {
   PaperResolutionSnapshot,
 } from "../paper/types.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
+import { pruneCompletedRunSnapshots } from "../infra/run-snapshot-retention.js";
 import { prepareValidationDatabaseSnapshot } from "../validation/database-snapshot.js";
+import { check } from "../validation/checks.js";
 import type { ValidationCheckResult } from "../validation/types.js";
 import { OperationalConsistencyMonitor } from "./consistency-monitor.js";
 import { recordOperationalError } from "./error-monitor.js";
@@ -90,14 +92,12 @@ export class OperationalRunner {
     const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolveWait) => setTimeout(resolveWait, milliseconds)));
     const mode = options.mode ?? "HEALTH_MONITOR_ONLY";
     const useSnapshot = options.useSnapshot ?? true;
-    if (!useSnapshot && ["PAPER_VALIDATION_OPERATIONAL", "CRASH_RECOVERY_OPERATIONAL"].includes(mode)) {
-      throw new Error("OPERATIONAL_MUTATING_MODE_REQUIRES_SNAPSHOT");
-    }
+    if (!useSnapshot) throw new Error("OPERATIONAL_SNAPSHOT_REQUIRED");
     const outputDirectory = resolve(options.outputDirectory ?? "data/operational");
     const operationalRunId = `operational-${randomUUID()}`;
     const validationSessionId = `operational-validation-${randomUUID()}`;
     const startedAt = now().toISOString();
-    const snapshot = prepareValidationDatabaseSnapshot({
+    const snapshot = await prepareValidationDatabaseSnapshot({
       sourceDatabasePath: options.sourceDatabasePath,
       outputDirectory,
       sessionId: operationalRunId,
@@ -105,13 +105,14 @@ export class OperationalRunner {
       sourceVersion: this.sourceVersion,
     });
     const store = new OperationalStore(snapshot.workingDatabasePath);
-    const lock = new OperationalLock(store, now);
-    let status: OperationalRunStatus = "COMPLETED";
-    let finalStatus: OperationalFinalStatus = "OPERATIONAL_FRAMEWORK_READY";
-    let paperAccountId: string | null = options.paperAccountId ?? null;
-    const checks: ValidationCheckResult[] = [];
     try {
-      store.startRun({
+      const lock = new OperationalLock(store, now);
+      let status: OperationalRunStatus = "COMPLETED";
+      let finalStatus: OperationalFinalStatus = "OPERATIONAL_FRAMEWORK_READY";
+      let paperAccountId: string | null = options.paperAccountId ?? null;
+      const checks: ValidationCheckResult[] = [];
+      try {
+        store.startRun({
         operationalRunId,
         validationSessionId,
         mode,
@@ -122,8 +123,8 @@ export class OperationalRunner {
         paperAccountId,
         targetWallet: options.targetWallet ?? null,
       });
-      lock.acquire(`operational:${mode}`, operationalRunId);
-      await this.runLoop({
+        lock.acquire(`operational:${mode}`, operationalRunId);
+        await this.runLoop({
         mode,
         operationalRunId,
         startedAt,
@@ -139,42 +140,50 @@ export class OperationalRunner {
           paperAccountId = value;
         },
       });
-      if (mode === "CRASH_RECOVERY_OPERATIONAL") {
-        checks.push(...await new OperationalConsistencyMonitor(snapshot.workingDatabasePath, this.sourceVersion, now).run({
+        if (mode === "CRASH_RECOVERY_OPERATIONAL") {
+          checks.push(...await new OperationalConsistencyMonitor(snapshot.workingDatabasePath, this.sourceVersion, now).run({
           operationalRunId,
           mode,
           store,
           includeCrashRecovery: true,
         }));
-      } else if (mode !== "HEALTH_MONITOR_ONLY" && mode !== "CONSISTENCY_MONITOR_ONLY") {
-        checks.push(...await new OperationalConsistencyMonitor(snapshot.workingDatabasePath, this.sourceVersion, now).run({
+        } else if (mode !== "HEALTH_MONITOR_ONLY" && mode !== "CONSISTENCY_MONITOR_ONLY") {
+          checks.push(...await new OperationalConsistencyMonitor(snapshot.workingDatabasePath, this.sourceVersion, now).run({
           operationalRunId,
           mode,
           store,
           includeCrashRecovery: false,
         }));
+        }
+        checks.push(...this.coverageChecks({
+          databasePath: snapshot.workingDatabasePath,
+          mode,
+          startedAt,
+          paperAccountId,
+          usedSnapshot: snapshot.usedSnapshot,
+          now,
+        }));
+      } catch (error) {
+        status = "FAILED";
+        finalStatus = "OPERATIONAL_FAILED";
+        recordOperationalError({
+          store,
+          operationalRunId,
+          module: mode,
+          error,
+          severity: "ERROR",
+          now,
+        });
+      } finally {
+        try {
+          lock.release(`operational:${mode}`, operationalRunId);
+        } catch {
+          // Lock release failure is reported through the final consistency/anomaly counts.
+        }
       }
-    } catch (error) {
-      status = "FAILED";
-      finalStatus = "OPERATIONAL_FAILED";
-      recordOperationalError({
-        store,
-        operationalRunId,
-        module: mode,
-        error,
-        severity: "ERROR",
-        now,
-      });
-    } finally {
-      try {
-        lock.release(`operational:${mode}`, operationalRunId);
-      } catch {
-        // Lock release failure is reported through the final consistency/anomaly counts.
-      }
-    }
-    const stoppedAt = now().toISOString();
-    const runtimeDurationMs = Math.max(0, Date.parse(stoppedAt) - Date.parse(startedAt));
-    const report = buildOperationalReport({
+      const stoppedAt = now().toISOString();
+      const runtimeDurationMs = Math.max(0, Date.parse(stoppedAt) - Date.parse(startedAt));
+      const report = buildOperationalReport({
       databasePath: snapshot.workingDatabasePath,
       operationalRunId,
       validationSessionId,
@@ -188,8 +197,8 @@ export class OperationalRunner {
       workingDatabasePath: snapshot.workingDatabasePath,
       checks,
     });
-    if (finalStatus !== "OPERATIONAL_FAILED") finalStatus = report.finalResult.finalStatus;
-    store.finishRun({
+      if (finalStatus !== "OPERATIONAL_FAILED") finalStatus = report.finalResult.finalStatus;
+      store.finishRun({
       operationalRunId,
       status,
       stoppedAt,
@@ -197,8 +206,8 @@ export class OperationalRunner {
       finalStatus,
       result: report.finalResult,
     });
-    const written = writeOperationalReports({ outputDirectory, operationalRunId, report });
-    store.recordReport({
+      const written = writeOperationalReports({ outputDirectory, operationalRunId, report });
+      store.recordReport({
       operationalRunId,
       reportFormat: "JSON",
       reportPath: written.jsonPath,
@@ -206,7 +215,7 @@ export class OperationalRunner {
       summary: report.finalResult,
       now: stoppedAt,
     });
-    store.recordReport({
+      store.recordReport({
       operationalRunId,
       reportFormat: "MARKDOWN",
       reportPath: written.markdownPath,
@@ -214,23 +223,35 @@ export class OperationalRunner {
       summary: report.finalResult,
       now: stoppedAt,
     });
-    store.close();
-    return {
-      operationalRunId,
-      validationSessionId,
-      mode,
-      status,
-      finalStatus,
-      liveAllowed: false,
-      jsonReportPath: written.jsonPath,
-      markdownReportPath: written.markdownPath,
-      workingDatabasePath: snapshot.workingDatabasePath,
-      sourceDatabasePath: snapshot.sourceDatabasePath,
-      paperAccountId,
-      reportHash: report.system.reportHash,
-      blockingFailures: report.finalResult.blockingFailures,
-      warnings: report.finalResult.warnings,
-    };
+      if (snapshot.usedSnapshot) {
+        pruneCompletedRunSnapshots({
+          outputDirectory,
+          currentRunId: operationalRunId,
+          currentWorkingDatabasePath: snapshot.workingDatabasePath,
+          runPrefix: "operational-",
+          reportFileName: "operational-report.json",
+        });
+      }
+      return {
+        operationalRunId,
+        validationSessionId,
+        mode,
+        status,
+        finalStatus,
+        resultStatus: report.finalResult.status,
+        liveAllowed: false,
+        jsonReportPath: written.jsonPath,
+        markdownReportPath: written.markdownPath,
+        workingDatabasePath: snapshot.workingDatabasePath,
+        sourceDatabasePath: snapshot.sourceDatabasePath,
+        paperAccountId,
+        reportHash: report.system.reportHash,
+        blockingFailures: report.finalResult.blockingFailures,
+        warnings: report.finalResult.warnings,
+      };
+    } finally {
+      store.close();
+    }
   }
 
   private async runLoop(input: {
@@ -248,7 +269,6 @@ export class OperationalRunner {
     setPaperAccountId: (value: string) => void;
   }): Promise<void> {
     const deadline = Date.now() + Math.max(0, input.durationMs);
-    let cycle = 0;
     do {
       const timestamp = input.now().toISOString();
       const uptimeMs = Math.max(0, Date.parse(timestamp) - Date.parse(input.startedAt));
@@ -258,10 +278,52 @@ export class OperationalRunner {
         uptimeMs,
       });
       await this.runCycle(input);
-      cycle += 1;
       if (input.durationMs <= 0 || Date.now() >= deadline) break;
       await input.wait(Math.min(input.pollIntervalMs, Math.max(0, deadline - Date.now())));
-    } while (cycle < 1_000_000);
+    } while (true);
+  }
+
+  private coverageChecks(input: {
+    databasePath: string;
+    mode: OperationalMode;
+    startedAt: string;
+    paperAccountId: string | null;
+    usedSnapshot: boolean;
+    now: () => Date;
+  }): ValidationCheckResult[] {
+    if (input.mode === "OBSERVE_ONLY_OPERATIONAL") {
+      return [check({
+        checkType: "OBSERVE_ONLY",
+        checkName: "operational_observe_realtime_coverage",
+        status: "NOT_RUN",
+        blocking: false,
+        reason: input.usedSnapshot
+          ? "STATIC_SNAPSHOT_IS_NOT_REALTIME_OBSERVE_SOAK"
+          : "OPERATIONAL_OBSERVER_DOES_NOT_INGEST_WALLET_EVENTS",
+        metrics: { usedSnapshot: input.usedSnapshot },
+        now: input.now,
+      })];
+    }
+    if (input.mode !== "PAPER_VALIDATION_OPERATIONAL") return [];
+    const database = new DatabaseSync(input.databasePath, { readOnly: true });
+    try {
+      const consumed = input.paperAccountId
+        ? (database.prepare(
+          "SELECT count(*) count FROM paper_signal_consumptions WHERE paper_account_id=? AND consumed_at>=?",
+        ).get(input.paperAccountId, input.startedAt) as { count: number }).count
+        : 0;
+      return [check({
+        checkType: "PAPER_REPLAY",
+        checkName: "operational_paper_signal_coverage",
+        status: consumed > 0 ? "PASS" : "NOT_RUN",
+        blocking: false,
+        reason: consumed > 0 ? "OK" : "NO_NEW_PAPER_SIGNAL_CONSUMED",
+        metrics: { consumed, paperAccountId: input.paperAccountId, usedSnapshot: input.usedSnapshot },
+        now: input.now,
+      })];
+    } finally {
+      database.close();
+    }
   }
 
   private async runCycle(input: {
@@ -313,6 +375,7 @@ export class OperationalRunner {
         now: input.now,
         setPaperAccountId: input.setPaperAccountId,
       });
+      input.paperAccountId = accountId;
       this.recordPaperCheckpoint(input.snapshotDatabasePath, input.operationalRunId, input.store, input.mode, accountId, nowIso);
     }
     if (input.mode === "CONSISTENCY_MONITOR_ONLY") {
@@ -322,7 +385,7 @@ export class OperationalRunner {
         store: input.store,
         includeCrashRecovery: false,
       });
-      input.checks.push(...checks);
+      input.checks.splice(0, input.checks.length, ...checks);
       input.store.recordCheckpoint({
         operationalRunId: input.operationalRunId,
         mode: input.mode,

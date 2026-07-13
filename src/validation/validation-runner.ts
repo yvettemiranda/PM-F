@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
+import { pruneCompletedRunSnapshots } from "../infra/run-snapshot-retention.js";
 import { prepareValidationDatabaseSnapshot } from "./database-snapshot.js";
 import { buildValidationReport, writeValidationReports } from "./report-generator.js";
 import { CrashRecoveryValidation } from "./crash-recovery-validation.js";
@@ -44,14 +45,16 @@ export class ValidationRunner {
 
   async run(options: ValidationRunOptions): Promise<ValidationRunnerResult> {
     const validationType = options.validationType ?? "ALL";
+    const useSnapshot = options.useSnapshot ?? true;
+    if (!useSnapshot) throw new Error("VALIDATION_SNAPSHOT_REQUIRED");
     const outputDirectory = resolve(options.outputDirectory ?? "data/validation");
     const sessionId = `validation-${randomUUID()}`;
     const startedAt = this.now().toISOString();
-    const snapshot = prepareValidationDatabaseSnapshot({
+    const snapshot = await prepareValidationDatabaseSnapshot({
       sourceDatabasePath: options.sourceDatabasePath,
       outputDirectory,
       sessionId,
-      useSnapshot: options.useSnapshot ?? true,
+      useSnapshot,
       sourceVersion: this.sourceVersion,
     });
     const store = new ValidationStore(snapshot.workingDatabasePath);
@@ -67,31 +70,14 @@ export class ValidationRunner {
         dbSnapshotHash: snapshot.dbSnapshotHash,
         now: startedAt,
       });
-      if (!snapshot.usedSnapshot && ["ALL", "CRASH_RECOVERY", "LIVE_GATE"].includes(validationType)) {
-        const timestamp = this.now().toISOString();
-        checks.push({
-          checkType: validationType,
-          checkName: "snapshot_required",
-          status: "FAIL",
-          blocking: true,
-          reason: "MUTATING_VALIDATION_REQUIRES_SNAPSHOT",
-          metrics: {},
-          startedAt: timestamp,
-          finishedAt: timestamp,
+      for (const validator of selectedValidators(validationType)) {
+        const validatorChecks = await validator.run({
+          databasePath: snapshot.workingDatabasePath,
+          sourceVersion: this.sourceVersion,
+          now: this.now,
         });
-      } else {
-        for (const validator of selectedValidators(validationType)) {
-          const validatorChecks = await validator.run({
-            databasePath: snapshot.workingDatabasePath,
-            sourceVersion: this.sourceVersion,
-            now: this.now,
-          });
-          checks.push(...validatorChecks);
-          for (const item of validatorChecks) store.recordCheck(sessionId, item, this.now().toISOString());
-        }
-      }
-      for (const item of checks) {
-        if (item.checkName === "snapshot_required") store.recordCheck(sessionId, item, this.now().toISOString());
+        checks.push(...validatorChecks);
+        for (const item of validatorChecks) store.recordCheck(sessionId, item, this.now().toISOString());
       }
       const finishedAt = this.now().toISOString();
       const report = buildValidationReport({
@@ -132,6 +118,15 @@ export class ValidationRunner {
         result: report.finalResult,
         finishedAt,
       });
+      if (snapshot.usedSnapshot) {
+        pruneCompletedRunSnapshots({
+          outputDirectory,
+          currentRunId: sessionId,
+          currentWorkingDatabasePath: snapshot.workingDatabasePath,
+          runPrefix: "validation-",
+          reportFileName: "validation-report.json",
+        });
+      }
       return {
         report,
         jsonReportPath: written.jsonPath,

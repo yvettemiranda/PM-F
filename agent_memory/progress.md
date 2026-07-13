@@ -1,63 +1,44 @@
 # Progress
 
 ## Current task
-- Phase 5 Operational Validation Framework 已完成实现和自动化验证；当前具备最终验证框架和运行级验证框架，并新增面向非技术使用者的 macOS 双击操作入口。尚未执行长周期最终验收，也未开启真实交易。Phase 1B 长期 Paper Validation、24 小时 Observe soak、Crash Recovery 长测、长期一致性、geoblock/compliance 和用户再次授权仍未执行。
+- 全仓库 Production Readiness Hardening 已完成：代码、独立复核、提交、clean-commit 全量回归、真实只读 API 契约采样、业务库隔离迁移和五类 Operational smoke 均已有证据。
 
 ## Completed
-- 本地 Git 已初始化；Phase 0 基线 commit：`36ed3dc64e9cbe3657e7d6968b86f6fa51b1fd6a`。
-- SQLite 已从 1.2 原地迁移至 1.3/1.4；新增 capture manifest、baseline、双桶 ledger、capital estimate、Golden、Replay job 与按 Replay 版本化事件分类。
-- Capture Manifest 保存 wallet、接口/分页、时间范围、数量、payload SHA-256、规则版本、commit 与 dirty 状态；dirty capture 禁止确定性验收。
-- Position Baseline 保存 condition/asset/slug/title/outcome/size/avgPrice/snapshot cutoff；真实目标当前 141 条 baseline。
-- 资金模块读取官方 Polygon pUSD ERC-20 balance 和 Positions `currentValue`；当前快照为 `COMPLETE/HIGH`。历史 BUY 因快照超出 ±5 分钟保存为 `INCOMPLETE/MEDIUM`，ratio 为 null，fallback 为 10 pUSD。
-- Replay 使用历史/跟踪双桶，tracked-first sell；断线 BUY 进入历史桶，断线 SELL 更新双桶，同时生成 `executionEligible=false/GAP_EVENT` 行为 Signal。
-- 非 TRADE Activity 分类：SPLIT/MERGE/CONVERSION 为 `COMBO_ACTIVITY`，官方其他非交易活动为 `NON_TRADE_ACTIVITY`，未识别类型为 `UNRECOGNIZED`；均不生成跟单 Signal。
-- 已从目标钱包真实数据自动筛出 5 类 Golden candidates：NORMAL_BUY、NORMAL_SELL、HISTORICAL_SELL、COMBO(MERGE)、UNRECOGNIZED(YIELD)。因此暂未使用第二公开钱包。
-- Golden 1-5 已按用户明确指令从 `CANDIDATE` 更新为 `APPROVED`；五项自动比对均为 `MATCH`，`golden_evaluation_status=PASSED`，并保存 5 条审批状态迁移。
-- 已实现 stale Replay Job → `INTERRUPTED` → 新 Job 重跑；关键事务失败完整回滚。
-- 当前 TypeScript 类型检查通过，11 个测试文件共 37 项测试通过；覆盖 baseline、capital、manifest、Golden、断线、乱序、重复、幂等、事务回滚和 Crash Recovery。
-- commit `376ba80fbfcfe4bceecdac6ddbfcb924a1ad5c2f` 的 clean capture `964354247f7403cfbdf5b7542a19f39b98d3c10652917a3e03bdb0225d8c2dc4` 已从 manifest 重放；stored/new Replay Hash 均为 `af6cdf9c7f81f6311113daf4ce36e3892bf40913f580716d79fbd6ec2e53dfe8`，`stable=true`。
-- 已新增 Observe Only Runner、1.5.0 SQLite migration、checkpoint、position projection、capital snapshot 关联、reconciliation report、单实例和 stale-run 恢复。
-- 已覆盖正常连续轮询、API 临时失败、断线 gap、重启 checkpoint、重复、3-1-2 乱序、REDEEM 投影、Activity/Trades 先后到达去重和恢复窗口截断保护；当前 12 个测试文件共 44 项测试通过。
-- 真实地址短时运行发现并修正 Activity 比 Trades 更早可见的成交，以及 REDEEM 导致的仓位归零；修正后 25.467 秒运行 3 次成功轮询、0 次失败、3 个 gap 事件、3 个非执行 Signal、3 次对账，最终 `SYNCED` 且未发现漂移。
-- Phase 1A 新增不可变 `signal_execution_context`，逐 BUY 保存时间一致的 capital decision、目标交易时间、市场结束时间和市场元数据；Paper 不读取 `raw_events`。
-- Paper Executor 已实现 1000 pUSD 独立账户、signal cutoff、消费 checkpoint、三级资金决策、reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、10% 普通卖出、15% 止损、止损优先、到期 settlement/redeem 和组合账本。
-- 已接入公开无认证 `GET /book`、`GET /clob-markets/{condition}` 与 `GET /markets/{condition}`；真实采样确认订单簿、费率曲线和未结算状态可读，全程未调用认证/交易端点。
-- Phase 1A 初版曾达到 13 个测试文件共 67 项测试通过；覆盖比例/兜底/拒绝资金、Gap、历史卖出、零成交重试、部分成交、价格范围、stale、超时释放、多仓位、两类 pending、止损优先、结算、非零费用、重复幂等、并发 reservation、Crash 回滚、restart、Paper runner checkpoint，以及 context 构建失败禁止发布可执行 Signal。
-- Phase 1A 架构优化已新增 SQLite `2.1.0` 迁移、统一 `ExecutorInterface`、`LiveExecutorPlaceholder`、`RiskManager`、`SettlementService`、`PnL Model`、不可变 `audit_log`、`risk_decisions`、`paper_unrealized_pnl_snapshots` 和 Position `FROZEN` 状态。
-- `signal_execution_context` 已扩展 `sourceCodeCommit/sourceCodeDirty/configVersion`；Paper Execution/Position/Settlement/PnL/State Transition 等核心对象保存 `ruleset_hash/source_code_commit/config_version`。
-- Paper 当前通过 Risk Manager 决定 `ALLOW/REJECT`，拒绝原因写入 `riskRejectReason`；Live 占位只实现接口并固定拒绝交易逻辑。
-- 本轮主体架构补齐已新增 SQLite `2.2.0` 迁移、`ruleset_registry`、`portfolio_projection_runs` 和 `PortfolioProjectionService`；账户状态统一从 ledger/position/PnL 投影生成。
-- 每条新增 Paper Execution 均引用 `risk_decision_id`；止损和结算这类系统触发执行也写入系统级 Risk Decision；标准 `executeBuy/executeSell` 接口会校验并复用传入的已批准 Risk Decision。
-- 当前验证结果：TypeScript 类型检查通过；13 个测试文件共 84 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.2.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`。
-- Phase 2 已新增 SQLite `2.3.0` 迁移、`LiveGateService`、`LiveGateStore`、`LiveGateReconciliation`、`BalanceProvider`、`MockBalanceProvider`、`PaperBalanceProvider` 和 Live Gate 类型定义；默认状态为 `PAPER + LIVE_DISABLED`。
-- Live Gate 启动流程为：request live → preflight → `LIVE_ARMING` → 人工确认 → `LIVE_ACTIVE`；若重启时发现持久化 `LIVE_ACTIVE`，会自动降级为 `PAPER + LIVE_ARMING` 并要求重新检查和确认。
-- Live Gate preflight 覆盖 mode、钱包元数据、仅 mock/paper balance provider、配置、风险参数、数据库完整性、reconciliation 和 Live 前置验收项；前置项默认 `PENDING`。
-- `checkExecution()` 只读取 Signal、Execution Context 和既有 `risk_decision_id`，要求 Signal 已发布且可执行、Risk Decision 为 `ALLOW`、ruleset 已注册且匹配、市场未结束、无 FROZEN/MAJOR_DESYNC。
-- 新增 `risk_snapshots` 与 `live_gate_runs` 审计链路；`live_wallets` 仅保存元数据，不包含私钥、seed、signer 或交易能力字段。
-- 当前验证结果：TypeScript 类型检查通过；14 个测试文件共 96 项测试通过；当前本地 `data/phase0/phase0.sqlite` 已迁移至 schema `2.3.0`，`PRAGMA integrity_check=ok`，`foreign_key_check=[]`。
-- Phase 3 已引入官方依赖 `@polymarket/clob-client-v2@1.0.8` 与 `viem@2.54.6`；当前只用于 adapter seam/type/API contract 对接，默认不实例化真实 signer 或真实 CLOB client。
-- Phase 3 已新增 SQLite `2.4.0` 迁移和完整 Live 表：`live_executions/live_orders/live_fills/live_positions/live_*_ledger/live_reconciliation_runs/live_recovery_runs/live_execution_checkpoints` 等。
-- Phase 3 已实现 `LiveExecutor`，复用既有 `ExecutorInterface`，并保留 `LiveExecutorPlaceholder`；Live Executor 调用 gate seam 的 `checkExecution()`，默认 disabled adapters，不默认真实交易。
-- 已新增 Live 内部 seams：`OrderAdapter`、`PolymarketClobAdapter`、`Signer`、`WalletProvider`、`RedeemAdapter`，以及 fake/disabled 实现。
-- 已实现 Live ledger、幂等键、fake fill/position 更新、Live reconciliation、Crash Recovery、Emergency Stop 和 fake/disabled Redeem。
-- Phase 4 已新增 SQLite `2.5.0` 迁移、`ValidationRunner`、`validation_sessions/checks/artifacts/reports`、snapshot database helper、Paper Replay/Consistency/Crash Recovery/Reconciliation/Live Gate/Observe Only validators、JSON/Markdown report generator 和 `validate:final` CLI。
-- Phase 4 验证默认使用 isolated snapshot DB；Live Gate validator 只在验证库中构造 fake allow path，验证结束恢复 `PAPER + LIVE_DISABLED`，不会创建真实订单或真实 signer。
-- 当前验证结果：TypeScript 类型检查通过；16 个测试文件共 111 项测试通过；`pnpm validate:final -- --type=all` 通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。当前报告 warning 为 `REPLAY_INCOMPLETE` 和 `ORDERBOOK_SNAPSHOT_MISSING`，符合已知历史数据限制。
-- Phase 5 已新增 SQLite `2.6.0` 迁移、`OperationalRunner`、`operational_runs/locks/heartbeats/checkpoints/anomalies/health_snapshots/consistency_checks/reports/paper_bindings`、`shadow_risk_observations`、单实例锁、健康监控、一致性监控、错误记录、Operational Report 和 `operational:validate` CLI。
-- Phase 5 默认使用 isolated snapshot DB；`observe_only` 只写 shadow risk observation，不写正式 `risk_decisions`；`paper_validation` 使用 dedicated Paper validation account 和 fake market data；`paper_validation/crash_recovery` 禁止 `--no-snapshot`，避免污染源库。
-- 当前验证结果：TypeScript 类型检查通过；17 个测试文件共 117 项测试通过；`pnpm operational:validate -- --mode=health_monitor --duration-seconds=0` 和 `pnpm operational:validate -- --mode=paper_validation --duration-seconds=0` 均通过并输出 `OPERATIONAL_FRAMEWORK_READY`、`liveAllowed=false`；`pnpm validate:final -- --type=all` 仍通过并输出 `VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`。
-- 已新增 `操作入口/`：`1_先点我_检查环境.command`、`2_开始Observe_24小时.command`、`3_停止当前运行.command`、`4_打开报告文件夹.command`、`5_一键生成诊断报告.command`、`6_开始Paper_24小时_等我确认后再点.command` 和 `README_先看这个.txt`。入口脚本已通过 zsh 语法检查，`1_先点我_检查环境.command`、`3_停止当前运行.command`、`5_一键生成诊断报告.command` 已实际运行通过。
+- 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
+- 公开 API 增加分页完整性、运行时 schema、超时/有限重试/jitter；capture payload 使用内容寻址压缩存储并校验 hash。
+- Observe 增强 Activity/Trades 双源确认、组合/非交易隔离、checkpoint/reconciliation、乱序/重复/gap/restart 恢复。
+- Paper 增强保守金额舍入、Reservation、stale orderbook、历史 ruleset 的等待/价格/止损/滑点/版本审计。
+- Live 增加独立 Live Account 风险域、资产 reservation、完整市场数据执行计划、正式状态机、外部 timeout、订单/成交/仓位/现金恢复与对账。
+- 官方 CLOB adapter 按当前 SDK 对接 post/cancel/status/open orders/trades/fee exponent；真实提交结果与 Crash Recovery 共用严格 fill 校验，校验 CLOB finality、经济字段、风险预算、限价、fee evidence 和重复 fill。
+- 修复历史 ruleset 被当前止损/滑点覆盖；Paper/Live 的历史 Position、Risk Decision、Execution、PnL、Settlement 和 Audit 保留原版本。
+- 修复 Live 激活时 Signal cutoff 时间空窗：改为同事务单调 `signal_sequence` 边界；坏 Signal 可不可变 quarantine，缺 context 走明确 Risk REJECT，不再阻塞后续队列。
+- Live Gate 增强 production provider 类型、clean commit、geoblock、clock、prerequisite evidence、原子 CAS、精确人工确认、账户/钱包绑定、配置/账本/外部现金一致性、单笔/敞口/日亏/连续亏损检查。
+- Live Runner 执行顺序收敛为止损检查、待退出、待买入、再消费新 Signal；止损行情失败、过期、深度不足或历史规则异常时，本周期 fail closed 阻断所有新增 BUY 并保留账户级 Audit。长期报告的错误与结算明细已改为有界去重，同时保留累计计数。
+- 数据库增加 2.7.0—2.18.0 migrations、关键证据 append-only triggers、ruleset/registry/Live Gate transition immutability、Live signal cursor/quarantine、authorized signer、完整 Live Order Intent evidence 和 append-only Live Settlement Events。
+- Executor 入口新增 Signal/Execution Context/capital decision 逐字段不可变校验；Paper/Live 不能用相同 ID 搭配内存篡改的价格、资产、比例或元数据重用 ALLOW Risk Decision。
+- Live signer 输出不再被信任：重新绑定注册钱包和 authorized signer，限制 signed 数量/价格/预算，校验 maker/signer/fee rate/exponent/model，启动恢复未完成或紧急停止竞态时禁止 submit。
+- BUY 费用预算改为执行器与官方 CLOB adapter 双重独立推导：按完整签名数量、限价、费率和指数计算，并覆盖价格改善可能经过的 `p=0.5` 费用峰值；signer 自报的 `maxTotalCostMicros` 不能再低报或突破 Risk Decision 预算。
+- 多进程紧急停止与 submit 竞态增加同事务持久化 `SUBMIT/STARTED` claim 和 Gate transition generation 检查；紧急停止遇到在途 submit 会保持 Gate disabled、冻结执行并明确报告 incomplete，后到成交只入账为可对账的 FROZEN 状态。
+- Cancel/Reconcile/Recovery/Redeem 纳入账户级串行化，取消 intent 使用 SQLite CAS；紧急停止先同步设置内存 halt 并持久化 Gate disabled，再清理订单。
+- Observe Activity 适配官方非交易空字段，增量路径使用官方 `start` 游标完整分页；Trades 满页必须跨过上次 cursor，防止同秒高频截断。
+- Activity 游标由持久事件独立推导：存在未确认 Trade 时回看到最老事件前 1 秒，否则对最新确认 Activity 保守重叠 5 分钟；recovery/Trades 水位不会推进 Activity。
+- Observe/Paper CLI 新增 backup-first runtime database preparation：迁移前 Online Backup、按数据库前缀最多保留 3 份、迁移后 integrity/FK/Live Gate 表与 `PAPER + LIVE_DISABLED` 强校验。
+- Final/Operational 所有模式强制隔离 snapshot；`--no-snapshot` 在任何数据库迁移或证据写入前直接拒绝，防止验证污染业务源库。
+- Live Execution row/transition/audit 使用可嵌套 SAVEPOINT 原子提交；Settlement current projection 的每次变化与 append-only event、transition、audit 同事务，故障注入验证会完整回滚。
+- 批量冻结仓位也自持事务；任一仓位 transition 失败会全部回滚。Redeem 失败后的 projection/event/transition 统一回到 `RESOLVED`，失败原因只作为不可变 evidence 保存。
+- 依赖锁定 `@polymarket/clob-client-v2@1.0.8`、`viem@2.55.0`，并覆盖 `ws@8.21.0`；官方 CLOB SDK 当前已是 npm 最新版。
+- 双击 Observe/Paper/停止/报告入口已加单实例、精确 PID、frozen install、caffeinate、安全停止和自动报告；没有 Live 入口。
+- 最新验证：TypeScript 通过；28 个测试文件、323 项测试全部通过；`git diff --check` 与全部 `.command/.sh` zsh 语法通过。
+- 业务库 Online Backup 隔离验证保持源文件 SHA-256 `008a7a76...f8fbb55` 不变；2.18.0 迁移快照 `integrity_check=ok`、`foreign_key_check=[]`，仍为 `PAPER + LIVE_DISABLED`。
+- `validate:final --type=all` framework session 通过，但顶层正确报告 `INCOMPLETE`、`VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`；未把 Replay/历史 orderbook 数据不足冒充 PASS。
+- clean commit 上的 Final Validation 记录 `sourceDirty=false`，2.18.0 snapshot 完整性和外键检查通过；业务源库 hash 在验证前后保持不变。
+- 2.18.0 下五种 `operational:validate` 零时长 smoke 全部无 blocking failure、`liveAllowed=false`，并因 long soak/实时覆盖/新 Paper 消费未执行而正确报告 `INCOMPLETE`；所有运行均使用 Online Backup，源库 hash 未变。
+- 真实公开接口采样成功：Profile、4000 Trades、3500 Activity、127 Positions、CLOB Time/Market/Orderbook 均通过 runtime parser；全程只读、无认证、无订单。
 
 ## Current gate
-- Wallet Identity 已通过。
-- 当前 baseline 和实时资金快照已建立。
-- Golden 1-5 已通过。
-- Data API 历史仍被 offset 3000 上限截断，历史 Replay 保持 `INCOMPLETE`。
-- Observe 短时功能验收已通过；用户明确把 24 小时 soak 从 Paper Gate 移至 Live Gate 前，因此允许 Phase 1A 开发。
-- 已进入 Paper 开发但未标记 Paper Passed；未进入 Live，未接入私钥，未创建真实订单，未执行真实交易或链上写入。
-- Phase 1A 已完成实现、架构优化、主体架构补齐和自动化验证，尚未执行 Phase 1B 的持续 Paper 模拟验收；不得标记 Paper Passed。
-- Live Executor 架构代码、Phase 4 验证框架和 Phase 5 Operational Validation Framework 已通过自动化验证，但正式实盘 Gate 明确未通过：Phase 1B Paper Validation、24 小时 Observe、Paper 稳定性、Crash Recovery 长测、长期一致性、geoblock/compliance、真实 signer 授权和用户再次授权均未完成。
+- 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
+- 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 下一步建议进入最终验证执行阶段：补齐历史/实时 Paper Replay 条件、长周期 Paper Validation、Observe Only 24h soak、Crash Recovery 长测、状态一致性验证、Live Gate 验收、geoblock/compliance 和小额实盘前检查。
-- 在最终验证和再次授权前，禁止接入真实 signer、真实 CLOB client、approve、真实 redeem 或任何真实资金操作。
+- 由用户通过双击入口完成 24 小时 Observe，把报告交给 Codex 分析后再执行长周期 Paper。
+- 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。

@@ -37,6 +37,7 @@ export interface OperationalRunResult {
   mode: OperationalMode;
   status: OperationalRunStatus;
   finalStatus: OperationalFinalStatus;
+  resultStatus: "PASS" | "FAIL" | "INCOMPLETE";
   liveAllowed: false;
   jsonReportPath: string;
   markdownReportPath: string;
@@ -96,11 +97,10 @@ export interface OperationalReport {
   };
   recovery: Record<string, unknown>;
   finalResult: {
-    status: "PASS" | "FAIL";
+    status: "PASS" | "FAIL" | "INCOMPLETE";
     finalStatus: OperationalFinalStatus;
     liveAllowed: false;
     blockingFailures: string[];
     warnings: string[];
   };
 }
-

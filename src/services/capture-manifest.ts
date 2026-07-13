@@ -51,9 +51,17 @@ export interface CaptureManifest {
 
 export function captureIdentity(capture: ApiCapture<unknown>): { captureId: string; payloadSha256: string } {
   const responseJson = JSON.stringify(capture.data);
+  return captureIdentityFromResponseJson(capture.url, capture.fetchedAt, responseJson);
+}
+
+export function captureIdentityFromResponseJson(
+  url: string,
+  fetchedAt: string,
+  responseJson: string,
+): { captureId: string; payloadSha256: string } {
   const payloadSha256 = createHash("sha256").update(responseJson).digest("hex");
   const captureId = createHash("sha256")
-    .update(`${capture.url}|${capture.fetchedAt}|${payloadSha256}`)
+    .update(`${url}|${fetchedAt}|${payloadSha256}`)
     .digest("hex");
   return { captureId, payloadSha256 };
 }

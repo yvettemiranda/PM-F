@@ -58,4 +58,26 @@ describe("capital estimator", () => {
     expect(estimate.capitalEstimateStatus).toBe("FAILED");
     expect(estimate.capitalConfidence).toBe("LOW");
   });
+
+  it("uses the complete calculation content in the estimate identity", () => {
+    const input = {
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED" as const,
+      syncStatus: "SYNCED" as const,
+      positions,
+      positionSnapshotTime: "2026-07-07T00:00:00.000Z",
+      walletBalanceMicros: 50_000_000n,
+      walletBalanceSnapshotTime: "2026-07-07T00:00:00.000Z",
+    };
+    const first = estimateTargetCapital(input);
+    const repeated = estimateTargetCapital(input);
+    const changed = estimateTargetCapital({
+      ...input,
+      positions: [{ ...positions[0]!, currentValue: "51" }],
+    });
+
+    expect(repeated.capitalEstimateId).toBe(first.capitalEstimateId);
+    expect(changed.capitalEstimateId).not.toBe(first.capitalEstimateId);
+    expect(changed.targetVisibleCapitalMicros).not.toBe(first.targetVisibleCapitalMicros);
+  });
 });

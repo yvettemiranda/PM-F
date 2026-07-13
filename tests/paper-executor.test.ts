@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../src/domain/versioning.js";
+import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
 import { EXECUTOR_REQUIRED_CONTEXT_FIELDS } from "../src/execution/types.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
@@ -25,6 +26,65 @@ const wallet = "0x0000000000000000000000000000000000000001";
 const conditionId = `0x${"1".repeat(64)}`;
 const assetId = "asset-1";
 const directories: string[] = [];
+
+interface TestRuleset {
+  hash: string;
+  snapshotJson: string;
+  configVersion: string;
+}
+
+function installHistoricalPaperRuleset(databasePath: string): TestRuleset {
+  const snapshot = JSON.parse(RULESET_SNAPSHOT_JSON) as {
+    versions: Record<string, unknown>;
+    rules: Record<string, unknown>;
+  };
+  snapshot.versions.rulesetVersion = "test-paper-historical-v1";
+  snapshot.versions.configVersion = "test-paper-historical-config-v1";
+  snapshot.rules.stopTriggerRatioPpm = 600_000;
+  snapshot.rules.stopSellMaxSlippagePpm = 200_000;
+  const snapshotJson = stableJson(snapshot);
+  const hash = createHash("sha256").update(snapshotJson).digest("hex");
+  const configVersion = "test-paper-historical-config-v1";
+  const db = new DatabaseSync(databasePath);
+  db.prepare(
+    `INSERT INTO rulesets(
+      ruleset_hash,schema_version,signal_version,strategy_version,risk_version,replay_version,
+      ruleset_snapshot_json,source_code_commit,source_code_dirty,config_version,created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+  ).run(
+    hash,
+    VERSIONS.schemaVersion,
+    VERSIONS.signalVersion,
+    VERSIONS.strategyVersion,
+    VERSIONS.riskVersion,
+    VERSIONS.replayVersion,
+    snapshotJson,
+    sourceVersion.commit,
+    configVersion,
+    "2026-07-08T00:00:00.000Z",
+  );
+  db.prepare(
+    `INSERT INTO ruleset_registry(
+      ruleset_hash,ruleset_version,buy_price_lower_ratio_ppm,buy_price_upper_ratio_ppm,
+      stop_loss_ratio_ppm,wait_ratio_ppm,max_wait_time_ms,capital_mode,fee_model_version,
+      ruleset_snapshot_json,source_code_commit,source_code_dirty,config_version,created_at
+    ) VALUES (?, 'test-paper-historical-v1', ?, ?, 600000, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+  ).run(
+    hash,
+    RULESET.buyPriceMinRatioPpm,
+    RULESET.buyPriceMaxRatioPpm,
+    RULESET.waitRatioPpm,
+    RULESET.maxWaitMs,
+    RULESET.capitalMode,
+    VERSIONS.feeModelVersion,
+    snapshotJson,
+    sourceVersion.commit,
+    configVersion,
+    "2026-07-08T00:00:00.000Z",
+  );
+  db.close();
+  return { hash, snapshotJson, configVersion };
+}
 
 class FakeMarketData implements PaperMarketDataProvider {
   book: PaperOrderbookSnapshot;
@@ -118,12 +178,18 @@ function insertSignal(input: {
   sellDenominator?: string | null;
   targetPriceUnits?: string;
   marketEndTime?: string;
+  ruleset?: TestRuleset;
 }): void {
   const db = new DatabaseSync(input.databasePath);
   db.exec("PRAGMA foreign_keys=ON");
   const sourceKey = `source-${input.signalId}`;
   const contextId = `context-${input.signalId}`;
   const capitalId = input.signalType === "TARGET_SELL" ? null : `capital-${input.signalId}`;
+  const rulesetHash = input.ruleset?.hash ?? RULESET_HASH;
+  const rulesetSnapshotJson = input.ruleset?.snapshotJson ?? RULESET_SNAPSHOT_JSON;
+  const configVersion = input.ruleset?.configVersion ?? VERSIONS.configVersion;
+  const metadataJson = stableJson({ tokens: [{ token_id: assetId, outcome: "Yes" }] });
+  const metadataHash = createHash("sha256").update(metadataJson).digest("hex");
   db.prepare(
     `INSERT INTO raw_events(
       source_event_key,target_id,identity_version,source_type,source_transaction_hash,
@@ -155,8 +221,8 @@ function insertSignal(input: {
       VERSIONS.schemaVersion,
       VERSIONS.strategyVersion,
       VERSIONS.riskVersion,
-      RULESET_SNAPSHOT_JSON,
-      RULESET_HASH,
+      rulesetSnapshotJson,
+      rulesetHash,
       sourceVersion.commit,
       input.createdAt,
     );
@@ -186,8 +252,8 @@ function insertSignal(input: {
     VERSIONS.strategyVersion,
     VERSIONS.riskVersion,
     VERSIONS.replayVersion,
-    RULESET_SNAPSHOT_JSON,
-    RULESET_HASH,
+    rulesetSnapshotJson,
+    rulesetHash,
     sourceVersion.commit,
     input.createdAt,
     (input.executionEligible ?? true) ? 1 : 0,
@@ -199,8 +265,8 @@ function insertSignal(input: {
       context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
-      source_code_commit,source_code_dirty,created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      source_code_commit,source_code_dirty,config_version,created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
     input.signalId,
@@ -208,16 +274,110 @@ function insertSignal(input: {
     input.signalType === "TARGET_SELL" ? null : input.ratioPpm ?? "100000",
     input.createdAt,
     input.marketEndTime ?? new Date(Date.parse(input.createdAt) + 60 * 60 * 1_000).toISOString(),
-    JSON.stringify({ tokens: [{ token_id: assetId, outcome: "Yes" }] }),
-    `metadata-${input.signalId}`,
-    RULESET_HASH,
+    metadataJson,
+    metadataHash,
+    rulesetHash,
     VERSIONS.schemaVersion,
     VERSIONS.signalVersion,
     VERSIONS.strategyVersion,
     sourceVersion.commit,
+    configVersion,
     input.createdAt,
   );
   db.close();
+}
+
+function seedHistoricalPaperPosition(input: {
+  databasePath: string;
+  accountId: string;
+  signalId: string;
+  ruleset: TestRuleset;
+}): string {
+  const db = new DatabaseSync(input.databasePath);
+  db.exec("PRAGMA foreign_keys=ON");
+  const executionId = `historical-opening-${input.signalId}`;
+  const positionId = `historical-position-${input.signalId}`;
+  const riskDecisionId = `historical-risk-${input.signalId}`;
+  const createdAt = "2026-07-08T00:00:01.000Z";
+  db.prepare(
+    `INSERT INTO risk_decisions(
+      risk_decision_id,executor_mode,paper_account_id,account_id,signal_id,context_id,decision,
+      risk_reject_reason,requested_amount_micros,requested_size_micros,checks_json,
+      schema_version,strategy_version,risk_version,ruleset_hash,source_code_commit,
+      source_code_dirty,config_version,created_at,risk_reason
+    ) VALUES (?, 'PAPER', ?, ?, ?, ?, 'ALLOW', NULL, '5000000', NULL, '[]',
+      ?, ?, ?, ?, ?, 0, ?, ?, 'ALLOW')`,
+  ).run(
+    riskDecisionId,
+    input.accountId,
+    input.accountId,
+    input.signalId,
+    `context-${input.signalId}`,
+    VERSIONS.schemaVersion,
+    VERSIONS.strategyVersion,
+    VERSIONS.riskVersion,
+    input.ruleset.hash,
+    sourceVersion.commit,
+    input.ruleset.configVersion,
+    createdAt,
+  );
+  db.prepare(
+    `INSERT INTO paper_executions(
+      paper_execution_id,paper_account_id,signal_id,execution_idempotency_key,
+      execution_type,state,asset_id,condition_id,requested_amount_micros,
+      requested_size_micros,filled_size_micros,filled_notional_micros,fee_micros,
+      target_price_units,price_limit_lower_units,price_limit_upper_units,capital_mode,
+      deadline_at,attempt_count,reason,context_id,schema_version,strategy_version,
+      risk_version,paper_version,ruleset_hash,risk_decision_id,risk_reject_reason,
+      source_code_commit,source_code_dirty,config_version,created_at,updated_at
+    ) VALUES (?, ?, ?, ?, 'TARGET_BUY', 'EXECUTED', ?, ?, '5000000', NULL,
+      '10000000', '5000000', '0', '500000000000000000', '490000000000000000',
+      '510000000000000000', 'PROPORTIONAL', NULL, 1, 'HISTORICAL_FIXTURE', ?,
+      ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?)`,
+  ).run(
+    executionId,
+    input.accountId,
+    input.signalId,
+    `historical-execution-key-${input.signalId}`,
+    assetId,
+    conditionId,
+    `context-${input.signalId}`,
+    VERSIONS.schemaVersion,
+    VERSIONS.strategyVersion,
+    VERSIONS.riskVersion,
+    VERSIONS.paperVersion,
+    input.ruleset.hash,
+    riskDecisionId,
+    sourceVersion.commit,
+    input.ruleset.configVersion,
+    createdAt,
+    createdAt,
+  );
+  db.prepare(
+    `INSERT INTO paper_positions(
+      paper_position_id,paper_account_id,opening_execution_id,signal_id,asset_id,
+      condition_id,outcome,entry_price_units,entry_size_micros,entry_notional_micros,
+      entry_fee_micros,current_size_micros,remaining_cost_micros,stop_loss_price_units,
+      status,frozen_from_status,frozen_reason,frozen_at,realized_pnl_micros,
+      ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at,updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'Yes', '500000000000000000', '10000000',
+      '5000000', '0', '10000000', '5000000', '300000000000000000', 'OPEN',
+      NULL, NULL, NULL, '0', ?, ?, 0, ?, ?, ?)`,
+  ).run(
+    positionId,
+    input.accountId,
+    executionId,
+    input.signalId,
+    assetId,
+    conditionId,
+    input.ruleset.hash,
+    sourceVersion.commit,
+    input.ruleset.configVersion,
+    createdAt,
+    createdAt,
+  );
+  db.close();
+  return positionId;
 }
 
 function count(databasePath: string, table: string): number {
@@ -342,6 +502,18 @@ describe("PaperExecutor", () => {
     const snapshot = await env.executor.accountSnapshot(env.accountId);
     expect(snapshot.cashBalanceMicros).toBe("950000000");
     expect(snapshot.reservedBalanceMicros).toBe("0");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    const reservationEntries = database.prepare(
+      `SELECT entry_type,delta_micros,remaining_after_micros
+       FROM paper_reservation_ledger
+       WHERE paper_execution_id=? ORDER BY rowid`,
+    ).all(executionId);
+    expect(reservationEntries).toEqual([
+      { entry_type: "RESERVE", delta_micros: "100000000", remaining_after_micros: "100000000" },
+      { entry_type: "CONSUME", delta_micros: "-50000000", remaining_after_micros: "50000000" },
+      { entry_type: "RELEASE", delta_micros: "-50000000", remaining_after_micros: "0" },
+    ]);
+    database.close();
     expect(await env.executor.attemptExecution(executionId)).toBe("PARTIALLY_EXECUTED");
     env.executor.close();
   });
@@ -427,6 +599,106 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(executionId!)).toBe("STOP_EXIT_PENDING");
     env.market.book = env.market.makeBook([], [{ price: "0.24", size: "1000" }]);
     expect(await env.executor.attemptExecution(executionId!)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("keeps historical Paper Position stop and slippage rules after the process ruleset changes", async () => {
+    const env = setup(new Date("2026-07-08T00:00:03.000Z"));
+    const historical = installHistoricalPaperRuleset(env.databasePath);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "paper-historical-stop",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      ruleset: historical,
+    });
+    const positionId = seedHistoricalPaperPosition({
+      databasePath: env.databasePath,
+      accountId: env.accountId,
+      signalId: "paper-historical-stop",
+      ruleset: historical,
+    });
+    env.market.book = env.market.makeBook([], [{ price: "0.29", size: "100" }]);
+
+    const executions = await env.executor.checkStopLosses(env.accountId);
+
+    expect(executions).toHaveLength(1);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const execution = db.prepare(
+      `SELECT e.state,e.target_price_units,e.ruleset_hash,e.config_version,
+              r.ruleset_hash risk_ruleset,r.config_version risk_config
+       FROM paper_executions e
+       JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(executions[0]!) as Record<string, string>;
+    expect(execution).toMatchObject({
+      state: "EXECUTED",
+      target_price_units: "300000000000000000",
+      ruleset_hash: historical.hash,
+      config_version: historical.configVersion,
+      risk_ruleset: historical.hash,
+      risk_config: historical.configVersion,
+    });
+    expect((db.prepare(
+      "SELECT status FROM paper_positions WHERE paper_position_id=?",
+    ).get(positionId) as { status: string }).status).toBe("CLOSED");
+    const audit = db.prepare(
+      `SELECT ruleset_hash,config_version FROM audit_log
+       WHERE entity_type='PAPER_EXECUTION' AND entity_id=?
+       ORDER BY timestamp DESC LIMIT 1`,
+    ).get(executions[0]!) as Record<string, string>;
+    expect(audit).toEqual({ ruleset_hash: historical.hash, config_version: historical.configVersion });
+    expect((db.prepare(
+      "SELECT ruleset_hash,config_version FROM paper_pnl_ledger WHERE paper_position_id=?",
+    ).get(positionId) as Record<string, string>)).toEqual({
+      ruleset_hash: historical.hash,
+      config_version: historical.configVersion,
+    });
+    db.close();
+    env.executor.close();
+  });
+
+  it("derives a historical Position settlement execution from that Position ruleset", async () => {
+    const env = setup(new Date("2026-07-08T00:00:03.000Z"));
+    const historical = installHistoricalPaperRuleset(env.databasePath);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "paper-historical-settlement",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:02.000Z",
+      ruleset: historical,
+    });
+    const positionId = seedHistoricalPaperPosition({
+      databasePath: env.databasePath,
+      accountId: env.accountId,
+      signalId: "paper-historical-settlement",
+      ruleset: historical,
+    });
+    env.market.resolutionSnapshot = {
+      ...env.market.resolutionSnapshot,
+      resolved: true,
+      payoutNumerator: "1",
+      payoutDenominator: "1",
+      raw: { closed: true, winner: assetId },
+    };
+
+    const idempotency = createHash("sha256")
+      .update(["PAPER", env.accountId, "SETTLEMENT", positionId].join("|"))
+      .digest("hex");
+    const expectedExecutionId = createHash("sha256")
+      .update([idempotency, historical.hash].join("|"))
+      .digest("hex");
+
+    expect(await env.executor.processSettlements(env.accountId)).toEqual([expectedExecutionId]);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT ruleset_hash,config_version FROM paper_executions WHERE paper_execution_id=?",
+    ).get(expectedExecutionId)).toEqual({
+      ruleset_hash: historical.hash,
+      config_version: historical.configVersion,
+    });
+    db.close();
     env.executor.close();
   });
 
@@ -542,6 +814,72 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("advances a reused account cutoff before Observe starts without backfilling downtime signals", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "pending-before-restart",
+      createdAt: "2026-07-08T00:00:30.000Z",
+    });
+    env.setClock(new Date("2026-07-08T00:00:30.000Z"));
+    const pendingExecutionId = await env.executor.consumeSignal(env.accountId, "pending-before-restart");
+    expect(env.executor.executionState(pendingExecutionId)).toBe("WAITING_EXECUTION");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "paper-was-offline",
+      createdAt: "2026-07-08T00:01:00.000Z",
+    });
+
+    env.setClock(new Date("2026-07-08T00:02:00.000Z"));
+    const advanced = env.executor.advanceConsumerCutoff(
+      env.accountId,
+      "2026-07-08T00:02:00.000Z",
+      "PAPER_SESSION_START",
+    );
+    expect(advanced).toMatchObject({
+      advanced: true,
+      previousCreatedAt: "2026-07-08T00:00:30.000Z",
+      cutoffAt: "2026-07-08T00:02:00.000Z",
+      skippedSignalCount: 1,
+    });
+    expect(env.executor.executionState(pendingExecutionId)).toBe("WAITING_EXECUTION");
+
+    env.setClock(new Date("2026-07-08T00:03:00.000Z"));
+    expect(await env.executor.consumeAvailableSignals(env.accountId)).toEqual([]);
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "after-paper-ready",
+      createdAt: "2026-07-08T00:02:01.000Z",
+    });
+    expect(await env.executor.consumeAvailableSignals(env.accountId)).toHaveLength(1);
+
+    const retained = env.executor.advanceConsumerCutoff(
+      env.accountId,
+      "2026-07-08T00:01:30.000Z",
+      "PAPER_SESSION_RETRY",
+    );
+    expect(retained.advanced).toBe(false);
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    const checkpoint = database.prepare(
+      "SELECT last_signal_created_at FROM paper_consumer_checkpoints WHERE paper_account_id=?",
+    ).get(env.accountId) as { last_signal_created_at: string };
+    const audit = database.prepare(
+      `SELECT action,reason FROM audit_log
+       WHERE entity_type='PAPER_CONSUMER_CHECKPOINT' AND entity_id=?
+       ORDER BY timestamp,audit_id`,
+    ).all(env.accountId) as Array<{ action: string; reason: string }>;
+    expect(checkpoint.last_signal_created_at).toBe("2026-07-08T00:02:01.000Z");
+    expect(audit.map((row) => row.action)).toEqual(["CHECKPOINT_ADVANCED", "CHECKPOINT_RETAINED"]);
+    database.close();
+    env.executor.close();
+  });
+
   it("uses one executor input contract for Paper and the Live placeholder", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "contract", createdAt: "2026-07-08T00:00:01.000Z" });
@@ -649,6 +987,35 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("does not let an in-memory Signal mutation reuse a pre-approved Paper Risk Decision", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "interface-risk-mutation",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const signal = loadPaperSignal(env.databasePath, "interface-risk-mutation");
+    const riskDb = new DatabaseSync(env.databasePath);
+    const risk = new RiskManager(riskDb, sourceVersion).evaluate({
+      mode: "PAPER",
+      accountId: env.accountId,
+      signal,
+      requestedAmountMicros: 100_000_000n,
+      requestedSizeMicros: null,
+      now: "2026-07-08T00:00:00.000Z",
+    });
+    riskDb.close();
+    await expect(env.executor.executeBuy({
+      accountId: env.accountId,
+      signal: { ...signal, targetPriceUnits: "490000000000000000" },
+      context: signal.context!,
+      riskDecisionId: risk.riskDecisionId,
+    })).rejects.toThrow("SIGNAL_IMMUTABLE_FIELDS_MISMATCH");
+    expect(count(env.databasePath, "paper_executions")).toBe(0);
+    env.executor.close();
+  });
+
   it("records Risk Manager ALLOW decisions before execution", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "risk-allow", createdAt: "2026-07-08T00:00:01.000Z" });
@@ -752,6 +1119,25 @@ describe("PaperExecutor", () => {
     expect(row.price_timestamp).toBe("2026-07-08T00:00:00.000Z");
     expect(row.unrealized_pnl_micros).toBe("-30000000");
     db.close();
+    env.executor.close();
+  });
+
+  it("marks portfolio valuation incomplete when the exit orderbook is stale", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stale-pnl-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "stale-pnl-buy");
+    env.market.book = env.market.makeBook(
+      [],
+      [{ price: "0.4", size: "1000" }],
+      "2026-07-07T23:59:55.000Z",
+    );
+
+    const snapshot = await env.executor.accountSnapshot(env.accountId);
+
+    expect(snapshot.valuationStatus).toBe("INCOMPLETE");
+    expect(snapshot.unpricedPositionCount).toBe(1);
+    expect(snapshot.positionValueMicros).toBe("0");
+    expect(snapshot.unrealizedPnlMicros).toBe("0");
     env.executor.close();
   });
 

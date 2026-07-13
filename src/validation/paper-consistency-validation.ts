@@ -29,6 +29,11 @@ function count(database: DatabaseSync, sql: string): number {
   return row.count;
 }
 
+function negativeTextCount(database: DatabaseSync, table: string, columns: string[]): number {
+  const rows = database.prepare(`SELECT ${columns.join(",")} FROM ${table}`).all() as unknown as Array<Record<string, string>>;
+  return rows.filter((row) => columns.some((column) => BigInt(row[column]!) < 0n)).length;
+}
+
 export class PaperConsistencyValidation implements ValidationValidator {
   readonly type = "PAPER_CONSISTENCY" as const;
 
@@ -38,6 +43,10 @@ export class PaperConsistencyValidation implements ValidationValidator {
       return [
         this.sqliteIntegrity(database, context.now),
         this.paperLedgerConsistency(database, context.now),
+        this.paperReservationConsistency(database, context.now),
+        this.paperExecutionFillConsistency(database, context.now),
+        this.paperFeeFillConsistency(database, context.now),
+        this.paperPositionLedgerConsistency(database, context.now),
         this.paperPortfolioProjection(database, context.now),
         this.orphanRecordCheck(database, context.now),
         this.idempotencyCheck(database, context.now),
@@ -87,6 +96,212 @@ export class PaperConsistencyValidation implements ValidationValidator {
       status: mismatches.length === 0 ? "PASS" : "FAIL",
       reason: mismatches.length === 0 ? "OK" : "LEDGER_ACCOUNT_MISMATCH",
       metrics: { accountCount: accounts.length, mismatches },
+      now,
+    });
+  }
+
+  private paperReservationConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+    const accounts = database.prepare(
+      "SELECT paper_account_id,reserved_balance_micros FROM paper_accounts",
+    ).all() as unknown as Array<{ paper_account_id: string; reserved_balance_micros: string }>;
+    const reservations = database.prepare(
+      `SELECT reservation_id,paper_account_id,remaining_amount_micros,status
+       FROM paper_reservations`,
+    ).all() as unknown as Array<{
+      reservation_id: string;
+      paper_account_id: string;
+      remaining_amount_micros: string;
+      status: "ACTIVE" | "CONSUMED" | "RELEASED";
+    }>;
+    const reservationLedger = database.prepare(
+      "SELECT reservation_id,delta_micros FROM paper_reservation_ledger",
+    ).all() as unknown as Array<{ reservation_id: string; delta_micros: string }>;
+    const cashLedger = database.prepare(
+      "SELECT paper_account_id,reserved_delta_micros FROM paper_cash_ledger",
+    ).all() as unknown as Array<{ paper_account_id: string; reserved_delta_micros: string }>;
+    const ledgerByReservation = new Map<string, bigint>();
+    for (const row of reservationLedger) {
+      ledgerByReservation.set(row.reservation_id, (ledgerByReservation.get(row.reservation_id) ?? 0n) + BigInt(row.delta_micros));
+    }
+    const activeByAccount = new Map<string, bigint>();
+    const reservationMismatches: string[] = [];
+    for (const reservation of reservations) {
+      const remaining = BigInt(reservation.remaining_amount_micros);
+      const ledgerRemaining = ledgerByReservation.get(reservation.reservation_id) ?? 0n;
+      if (remaining !== ledgerRemaining) reservationMismatches.push(`LEDGER:${reservation.reservation_id}`);
+      if ((reservation.status === "ACTIVE") !== (remaining > 0n)) {
+        reservationMismatches.push(`STATUS:${reservation.reservation_id}`);
+      }
+      if (reservation.status === "ACTIVE") {
+        activeByAccount.set(
+          reservation.paper_account_id,
+          (activeByAccount.get(reservation.paper_account_id) ?? 0n) + remaining,
+        );
+      }
+    }
+    const cashReservedByAccount = new Map<string, bigint>();
+    for (const row of cashLedger) {
+      cashReservedByAccount.set(
+        row.paper_account_id,
+        (cashReservedByAccount.get(row.paper_account_id) ?? 0n) + BigInt(row.reserved_delta_micros),
+      );
+    }
+    const accountMismatches: string[] = [];
+    for (const account of accounts) {
+      const recorded = BigInt(account.reserved_balance_micros);
+      if (recorded !== (activeByAccount.get(account.paper_account_id) ?? 0n)) {
+        accountMismatches.push(`ACTIVE_RESERVATIONS:${account.paper_account_id}`);
+      }
+      if (recorded !== (cashReservedByAccount.get(account.paper_account_id) ?? 0n)) {
+        accountMismatches.push(`CASH_LEDGER:${account.paper_account_id}`);
+      }
+    }
+    const passed = reservationMismatches.length === 0 && accountMismatches.length === 0;
+    return check({
+      checkType: this.type,
+      checkName: "paper_reservation_consistency",
+      status: passed ? "PASS" : "FAIL",
+      reason: passed ? "OK" : "RESERVATION_LEDGER_MISMATCH",
+      metrics: { reservationMismatches, accountMismatches },
+      now,
+    });
+  }
+
+  private paperExecutionFillConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+    const executions = database.prepare(
+      `SELECT paper_execution_id,filled_size_micros,filled_notional_micros
+       FROM paper_executions`,
+    ).all() as unknown as Array<{
+      paper_execution_id: string;
+      filled_size_micros: string;
+      filled_notional_micros: string;
+    }>;
+    const fills = database.prepare(
+      "SELECT paper_execution_id,size_micros,notional_micros FROM paper_fill_ledger",
+    ).all() as unknown as Array<{ paper_execution_id: string; size_micros: string; notional_micros: string }>;
+    const sizeByExecution = new Map<string, bigint>();
+    const notionalByExecution = new Map<string, bigint>();
+    for (const fill of fills) {
+      sizeByExecution.set(fill.paper_execution_id, (sizeByExecution.get(fill.paper_execution_id) ?? 0n) + BigInt(fill.size_micros));
+      notionalByExecution.set(fill.paper_execution_id, (notionalByExecution.get(fill.paper_execution_id) ?? 0n) + BigInt(fill.notional_micros));
+    }
+    const mismatches = executions
+      .filter((execution) => (
+        BigInt(execution.filled_size_micros) !== (sizeByExecution.get(execution.paper_execution_id) ?? 0n)
+        || BigInt(execution.filled_notional_micros) !== (notionalByExecution.get(execution.paper_execution_id) ?? 0n)
+      ))
+      .map((execution) => execution.paper_execution_id);
+    return check({
+      checkType: this.type,
+      checkName: "paper_execution_fill_consistency",
+      status: mismatches.length === 0 ? "PASS" : "FAIL",
+      reason: mismatches.length === 0 ? "OK" : "EXECUTION_FILL_TOTAL_MISMATCH",
+      metrics: { mismatches },
+      now,
+    });
+  }
+
+  private paperFeeFillConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+    const orders = database.prepare(
+      "SELECT paper_order_id,fee_micros FROM paper_orders",
+    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+    const fills = database.prepare(
+      "SELECT paper_order_id,fee_micros FROM paper_fill_ledger",
+    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+    const fees = database.prepare(
+      "SELECT paper_order_id,fee_micros FROM paper_fee_ledger",
+    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+    const fillFeeByOrder = new Map<string, bigint>();
+    const ledgerFeeByOrder = new Map<string, bigint>();
+    for (const fill of fills) {
+      fillFeeByOrder.set(fill.paper_order_id, (fillFeeByOrder.get(fill.paper_order_id) ?? 0n) + BigInt(fill.fee_micros));
+    }
+    for (const fee of fees) {
+      ledgerFeeByOrder.set(fee.paper_order_id, (ledgerFeeByOrder.get(fee.paper_order_id) ?? 0n) + BigInt(fee.fee_micros));
+    }
+    const mismatches = orders
+      .filter((order) => {
+        const recorded = BigInt(order.fee_micros);
+        return recorded !== (fillFeeByOrder.get(order.paper_order_id) ?? 0n)
+          || recorded !== (ledgerFeeByOrder.get(order.paper_order_id) ?? 0n);
+      })
+      .map((order) => order.paper_order_id);
+    return check({
+      checkType: this.type,
+      checkName: "paper_fee_fill_consistency",
+      status: mismatches.length === 0 ? "PASS" : "FAIL",
+      reason: mismatches.length === 0 ? "OK" : "FEE_LEDGER_FILL_MISMATCH",
+      metrics: { mismatches },
+      now,
+    });
+  }
+
+  private paperPositionLedgerConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+    const positions = database.prepare(
+      `SELECT paper_position_id,opening_execution_id,entry_size_micros,entry_notional_micros,
+              entry_fee_micros,current_size_micros,remaining_cost_micros,
+              realized_pnl_micros,status
+       FROM paper_positions`,
+    ).all() as unknown as Array<{
+      paper_position_id: string;
+      opening_execution_id: string;
+      entry_size_micros: string;
+      entry_notional_micros: string;
+      entry_fee_micros: string;
+      current_size_micros: string;
+      remaining_cost_micros: string;
+      realized_pnl_micros: string;
+      status: string;
+    }>;
+    const issues: string[] = [];
+    for (const position of positions) {
+      const buyFills = database.prepare(
+        `SELECT size_micros,notional_micros FROM paper_fill_ledger
+         WHERE paper_position_id=? AND paper_execution_id=? AND side='BUY'`,
+      ).all(position.paper_position_id, position.opening_execution_id) as unknown as Array<{
+        size_micros: string;
+        notional_micros: string;
+      }>;
+      const allocationRows = database.prepare(
+        "SELECT filled_size_micros FROM paper_execution_positions WHERE paper_position_id=?",
+      ).all(position.paper_position_id) as unknown as Array<{ filled_size_micros: string }>;
+      const pnlRows = database.prepare(
+        "SELECT cost_basis_micros,pnl_micros FROM paper_pnl_ledger WHERE paper_position_id=?",
+      ).all(position.paper_position_id) as unknown as Array<{ cost_basis_micros: string; pnl_micros: string }>;
+      const settlementCount = (database.prepare(
+        "SELECT count(*) count FROM paper_settlements WHERE paper_position_id=?",
+      ).get(position.paper_position_id) as { count: number }).count;
+      const entrySize = BigInt(position.entry_size_micros);
+      const entryCost = BigInt(position.entry_notional_micros) + BigInt(position.entry_fee_micros);
+      const buySize = sum(buyFills.map((row) => row.size_micros));
+      const buyNotional = sum(buyFills.map((row) => row.notional_micros));
+      const soldSize = sum(allocationRows.map((row) => row.filled_size_micros));
+      const realizedCost = sum(pnlRows.map((row) => row.cost_basis_micros));
+      const realizedPnl = sum(pnlRows.map((row) => row.pnl_micros));
+      const expectedSize = position.status === "REDEEMED" ? 0n : entrySize - soldSize;
+      const expectedCost = entryCost - realizedCost;
+      if (buySize !== entrySize) issues.push(`ENTRY_SIZE:${position.paper_position_id}`);
+      if (buyNotional !== BigInt(position.entry_notional_micros)) issues.push(`ENTRY_NOTIONAL:${position.paper_position_id}`);
+      if (soldSize < 0n || soldSize > entrySize) issues.push(`SOLD_SIZE:${position.paper_position_id}`);
+      if (expectedSize !== BigInt(position.current_size_micros)) issues.push(`CURRENT_SIZE:${position.paper_position_id}`);
+      if (expectedCost !== BigInt(position.remaining_cost_micros)) issues.push(`REMAINING_COST:${position.paper_position_id}`);
+      if (realizedPnl !== BigInt(position.realized_pnl_micros)) issues.push(`REALIZED_PNL:${position.paper_position_id}`);
+      const currentSize = BigInt(position.current_size_micros);
+      const statusValid = position.status === "OPEN" ? currentSize > 0n && soldSize === 0n && settlementCount === 0
+        : position.status === "PARTIALLY_CLOSED" ? currentSize > 0n && soldSize > 0n && settlementCount === 0
+          : position.status === "SETTLEMENT_PENDING" ? currentSize > 0n && settlementCount === 0
+            : position.status === "CLOSED" ? currentSize === 0n && settlementCount === 0
+              : position.status === "REDEEMED" ? currentSize === 0n && settlementCount === 1
+                : position.status === "FROZEN" ? currentSize > 0n
+                  : false;
+      if (!statusValid) issues.push(`STATUS:${position.paper_position_id}`);
+    }
+    return check({
+      checkType: this.type,
+      checkName: "paper_position_ledger_consistency",
+      status: issues.length === 0 ? "PASS" : "FAIL",
+      reason: issues.length === 0 ? "OK" : "POSITION_LEDGER_MISMATCH",
+      metrics: { positionCount: positions.length, issues },
       now,
     });
   }
@@ -169,9 +384,9 @@ export class PaperConsistencyValidation implements ValidationValidator {
 
   private negativeStateCheck(database: DatabaseSync, now: () => Date): ValidationCheckResult {
     const metrics = {
-      negativePaperAccounts: count(database, "SELECT count(*) count FROM paper_accounts WHERE CAST(cash_balance_micros AS INTEGER)<0 OR CAST(reserved_balance_micros AS INTEGER)<0"),
-      negativePaperPositions: count(database, "SELECT count(*) count FROM paper_positions WHERE CAST(current_size_micros AS INTEGER)<0 OR CAST(remaining_cost_micros AS INTEGER)<0"),
-      negativeLivePositions: count(database, "SELECT count(*) count FROM live_positions WHERE CAST(current_size_micros AS INTEGER)<0 OR CAST(remaining_cost_micros AS INTEGER)<0"),
+      negativePaperAccounts: negativeTextCount(database, "paper_accounts", ["cash_balance_micros", "reserved_balance_micros"]),
+      negativePaperPositions: negativeTextCount(database, "paper_positions", ["current_size_micros", "remaining_cost_micros"]),
+      negativeLivePositions: negativeTextCount(database, "live_positions", ["current_size_micros", "remaining_cost_micros"]),
     };
     const failures = Object.values(metrics).reduce((total, value) => total + value, 0);
     return check({

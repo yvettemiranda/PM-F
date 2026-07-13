@@ -16,8 +16,10 @@ export class OperationalHealthMonitor {
   snapshot(): OperationalHealthSnapshot {
     const database = new DatabaseSync(this.databasePath, { readOnly: true });
     try {
-      const integrity = (database.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check;
-      const foreignKeys = database.prepare("PRAGMA foreign_key_check").all() as unknown[];
+      // The 1-second health path uses SQLite's bounded quick check. Full
+      // integrity_check remains in startup/final consistency validation; doing
+      // a full database scan every heartbeat would itself create soak drift.
+      const integrity = (database.prepare("PRAGMA quick_check(1)").get() as { quick_check: string }).quick_check;
       const migration = database.prepare("SELECT version FROM schema_migrations ORDER BY applied_at DESC,version DESC LIMIT 1")
         .get() as { version: string } | undefined;
       const observe = database.prepare(
@@ -32,7 +34,10 @@ export class OperationalHealthMonitor {
         uptimeMs: Math.max(0, this.now().valueOf() - Date.parse(this.startedAt)),
         databaseSizeBytes: existsSync(this.databasePath) ? statSync(this.databasePath).size : 0,
         migrationVersion: migration?.version ?? null,
-        databaseIntegrityStatus: integrity === "ok" && foreignKeys.length === 0 ? "OK" : "FAILED",
+        // Foreign-key validation remains part of the full consistency pass.
+        // Running foreign_key_check on every heartbeat would scan all child
+        // tables and reintroduce the same soak-time cost as integrity_check.
+        databaseIntegrityStatus: integrity === "ok" ? "OK" : "FAILED",
         apiFailureCount: Number(observe.api_failure_count ?? 0),
         reconnectCount,
         duplicateEventCount: Number(observe.duplicate_event_count ?? 0),

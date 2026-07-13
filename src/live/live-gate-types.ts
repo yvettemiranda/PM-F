@@ -3,6 +3,7 @@ export type RequestedExecutionMode = "LIVE";
 export type LiveGateState = "LIVE_DISABLED" | "LIVE_ARMING" | "LIVE_ACTIVE";
 export type LiveGateRunType = "PREFLIGHT" | "EXECUTION_CHECK" | "STARTUP_RECOVERY";
 export type LiveGateRiskStatus = "SAFE" | "BLOCKED" | "UNKNOWN";
+export type LiveGateRuntimeEnvironment = "PRODUCTION" | "TEST";
 
 export interface LiveGateCheck {
   name: string;
@@ -26,6 +27,10 @@ export interface LiveGateConfig {
   kellyEnabled?: boolean;
   kellyMaxFractionPpm?: number;
   expectedSchemaVersion?: string;
+  runtimeEnvironment?: LiveGateRuntimeEnvironment;
+  preflightMaxAgeMs?: number;
+  prerequisiteMaxAgeMs?: number;
+  externalEvidenceMaxAgeMs?: number;
 }
 
 export interface LiveGateStateRow {
@@ -68,6 +73,26 @@ export interface LiveExecutionGateInput {
   signalId: string;
   riskDecisionId: string;
   rulesetHash: string;
+  accountId?: string;
+  contextId?: string;
+  side?: "BUY" | "SELL";
+  assetId?: string;
+  conditionId?: string;
+  targetPriceUnits?: string;
+  targetSizeMicros?: string;
+  executionType?: "TARGET_BUY" | "TARGET_SELL" | "STOP_LOSS";
+  positionId?: string;
+}
+
+export interface LiveAccountActionGateInput {
+  action: "REDEEM";
+  accountId: string;
+  riskDecisionId: string;
+  rulesetHash: string;
+  assetId: string;
+  conditionId: string;
+  requestedAmountMicros: string;
+  requestedSizeMicros: string;
 }
 
 export interface EmergencyDisableInput {
@@ -76,10 +101,13 @@ export interface EmergencyDisableInput {
 }
 
 export interface LiveGate {
+  readonly gateType: "PRODUCTION";
+  readonly runtimeEnvironment: LiveGateRuntimeEnvironment;
   preflight(input: LiveGatePreflightInput): Promise<LiveGateResult>;
   requestLiveActivation(input: LiveActivationInput): Promise<LiveGateResult>;
   confirmLiveActivation(input: LiveActivationConfirmation): Promise<LiveGateResult>;
   checkExecution(input: LiveExecutionGateInput): Promise<LiveGateResult>;
+  checkAccountAction(input: LiveAccountActionGateInput): Promise<LiveGateResult>;
   recoverOnStartup(): Promise<LiveGateResult>;
   emergencyDisable(input: EmergencyDisableInput): Promise<void>;
 }

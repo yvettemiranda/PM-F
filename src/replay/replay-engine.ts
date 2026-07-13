@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { activityEventKey, signalIdempotencyKey, sourceEventKey } from "../domain/idempotency.js";
 import type { EventClassification, IdentityStatus, PublicActivity, PublicTrade, Signal, SourceEvent } from "../domain/models.js";
+import { activityAsTrade } from "../domain/activity-trade.js";
 import { VERSIONS, stableJson } from "../domain/versioning.js";
 
 export interface ReplayGap {
@@ -96,25 +97,21 @@ function activityKey(activity: PublicActivity): string {
 }
 
 function isTradeActivity(activity: PublicActivity): activity is PublicActivity & PublicTrade {
-  return activity.type === "TRADE"
-    && typeof activity.conditionId === "string"
-    && typeof activity.asset === "string"
-    && (activity.side === "BUY" || activity.side === "SELL")
-    && activity.price !== undefined
-    && activity.size !== undefined;
+  return activityAsTrade(activity) !== null;
 }
 
 export class ReplayEngine {
   run(input: ReplayInput): ReplayReport {
     if (input.identityStatus !== "IDENTITY_CONFIRMED") {
-      return this.finish("FAILED", input.trades.length, [], {}, [], 0, 0, 0, 0, 0, 0, 0, 0, {}, {}, ["WALLET_IDENTITY_NOT_CONFIRMED"]);
+      return this.finish("FAILED", input.trades.length + input.activity.length, [], {}, [], 0, 0, 0, 0, 0, 0, 0, 0, {}, {}, ["WALLET_IDENTITY_NOT_CONFIRMED"]);
     }
 
     const comboKeys = new Set(
       input.activity.filter((item) => isTradeActivity(item) && item.isCombo).map(activityKey),
     );
     const seen = new Set<string>();
-    const duplicateRowsByKey = new Map<string, number>();
+    const duplicateTradeRowsByKey = new Map<string, number>();
+    const duplicateActivityRowsByKey = new Map<string, number>();
     const events: SourceEvent[] = [];
     let duplicateRows = 0;
 
@@ -122,7 +119,7 @@ export class ReplayEngine {
       const key = sourceEventKey(trade);
       if (seen.has(key)) {
         duplicateRows += 1;
-        duplicateRowsByKey.set(key, (duplicateRowsByKey.get(key) ?? 0) + 1);
+        duplicateTradeRowsByKey.set(key, (duplicateTradeRowsByKey.get(key) ?? 0) + 1);
         continue;
       }
       seen.add(key);
@@ -134,6 +131,40 @@ export class ReplayEngine {
         gapEvent: insideGap(trade.timestamp, input.gaps ?? []),
         isCombo: comboKeys.has([trade.transactionHash.toLowerCase(), trade.asset, trade.side, trade.timestamp].join("|")),
       });
+    }
+    const eventByKey = new Map(events.map((event) => [event.sourceEventKey, event]));
+
+    // Activity can lead Trades or remain the only available source when the
+    // historical Trades endpoint is truncated. Merge both sources by the same
+    // source_event_key instead of silently discarding Activity-only trades.
+    const seenActivityTradeKeys = new Set<string>();
+    for (const activity of input.activity) {
+      const trade = activityAsTrade(activity);
+      if (!trade) continue;
+      const key = sourceEventKey(trade);
+      if (seenActivityTradeKeys.has(key)) {
+        duplicateRows += 1;
+        duplicateActivityRowsByKey.set(key, (duplicateActivityRowsByKey.get(key) ?? 0) + 1);
+        const existing = eventByKey.get(key);
+        if (existing) existing.isCombo = existing.isCombo || activity.isCombo === true;
+        continue;
+      }
+      seenActivityTradeKeys.add(key);
+      const existing = eventByKey.get(key);
+      if (existing) {
+        existing.isCombo = existing.isCombo || activity.isCombo === true;
+        continue;
+      }
+      seen.add(key);
+      events.push({
+        sourceEventKey: key,
+        trade,
+        priceUnits: decimalToScaled(trade.price, PRICE_SCALE_DIGITS),
+        sizeMicros: decimalToScaled(trade.size, SHARE_SCALE_DIGITS),
+        gapEvent: insideGap(trade.timestamp, input.gaps ?? []),
+        isCombo: activity.isCombo === true,
+      });
+      eventByKey.set(key, events.at(-1)!);
     }
 
     events.sort((a, b) => a.trade.timestamp - b.trade.timestamp || a.sourceEventKey.localeCompare(b.sourceEventKey));
@@ -260,7 +291,6 @@ export class ReplayEngine {
     }
 
     const buySignals = signals.filter((signal) => signal.signalType === "TARGET_BUY").length;
-    const sellSignals = signals.length - buySignals;
     const activityEventCounts = new Map<string, number>();
     for (const item of input.activity) {
       if (!isTradeActivity(item)) continue;
@@ -269,8 +299,17 @@ export class ReplayEngine {
     }
     let confirmedDuplicateRows = 0;
     let ambiguousEvents = 0;
-    for (const [key, count] of duplicateRowsByKey) {
+    const tradeEventCounts = new Map<string, number>();
+    for (const item of input.trades) {
+      const key = sourceEventKey(item);
+      tradeEventCounts.set(key, (tradeEventCounts.get(key) ?? 0) + 1);
+    }
+    for (const [key, count] of duplicateTradeRowsByKey) {
       if (activityEventCounts.get(key) === 1) confirmedDuplicateRows += count;
+      else ambiguousEvents += count;
+    }
+    for (const [key, count] of duplicateActivityRowsByKey) {
+      if (tradeEventCounts.get(key) === 1) confirmedDuplicateRows += count;
       else ambiguousEvents += count;
     }
     const incompleteReasons: string[] = [];
@@ -292,7 +331,7 @@ export class ReplayEngine {
 
     return this.finish(
       status,
-      input.trades.length,
+      input.trades.length + input.activity.length,
       signals,
       eventOutcomes,
       positionLedger,

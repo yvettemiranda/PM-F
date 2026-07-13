@@ -20,7 +20,17 @@ export interface LiveGateRunRecord {
   live_gate_run_id: string;
   run_type: LiveGateRunType;
   allowed: number;
+  execution_mode: ExecutionMode | null;
+  live_gate_state: LiveGateState | null;
+  source_code_commit: string;
+  source_code_dirty: number;
   created_at: string;
+}
+
+export interface LiveGateStateGuard {
+  state: LiveGateStateRow;
+  transitionCount: number;
+  dataVersion: number;
 }
 
 export interface RiskSnapshotInput {
@@ -64,6 +74,13 @@ export class LiveGateStore {
     return row;
   }
 
+  stateGuard(): LiveGateStateGuard {
+    const count = this.database.prepare("SELECT count(*) count FROM live_gate_state_transitions")
+      .get() as { count: number };
+    const dataVersion = this.database.prepare("PRAGMA data_version").get() as { data_version: number };
+    return { state: this.state(), transitionCount: count.count, dataVersion: dataVersion.data_version };
+  }
+
   setState(input: {
     executionMode: ExecutionMode;
     liveGateState: LiveGateState;
@@ -74,42 +91,24 @@ export class LiveGateStore {
     metadata: Record<string, unknown>;
     now: string;
   }): void {
-    const previous = this.state();
-    this.database.prepare(
-      `UPDATE live_gate_state
-       SET execution_mode=?,live_gate_state=?,requested_execution_mode=?,last_preflight_id=?,
-           state_reason=?,source_code_commit=?,source_code_dirty=?,config_version=?,updated_at=?
-       WHERE state_id='default'`,
-    ).run(
-      input.executionMode,
-      input.liveGateState,
-      input.requestedExecutionMode,
-      input.lastPreflightId,
-      input.reason,
-      this.sourceVersion.commit,
-      this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
-      input.now,
-    );
-    this.database.prepare(
-      `INSERT INTO live_gate_state_transitions(
-        transition_id,from_execution_mode,to_execution_mode,from_live_gate_state,to_live_gate_state,
-        reason,actor,metadata_json,source_code_commit,source_code_dirty,config_version,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      hash(["LIVE_GATE_TRANSITION", input.now, previous.execution_mode, input.executionMode, previous.live_gate_state, input.liveGateState, input.reason]),
-      previous.execution_mode,
-      input.executionMode,
-      previous.live_gate_state,
-      input.liveGateState,
-      input.reason,
-      input.actor,
-      stableJson(input.metadata),
-      this.sourceVersion.commit,
-      this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
-      input.now,
-    );
+    this.writeState(input, null);
+  }
+
+  /**
+   * Atomically moves the gate only if no state transition (including a
+   * same-value emergency disable) occurred since the caller captured guard.
+   */
+  setStateIfUnchanged(input: {
+    executionMode: ExecutionMode;
+    liveGateState: LiveGateState;
+    requestedExecutionMode: RequestedExecutionMode | null;
+    lastPreflightId: string | null;
+    reason: string;
+    actor: string;
+    metadata: Record<string, unknown>;
+    now: string;
+  }, guard: LiveGateStateGuard): boolean {
+    return this.writeState(input, guard);
   }
 
   activeWallet(): LiveWalletMetadata | null {
@@ -205,40 +204,158 @@ export class LiveGateStore {
     reason: string | null;
     metadata: Record<string, unknown>;
     now: string;
+    rulesetHash?: string;
   }): void {
+    const rulesetHash = input.rulesetHash ?? RULESET_HASH;
+    const registered = this.database.prepare(
+      "SELECT config_version FROM ruleset_registry WHERE ruleset_hash=?",
+    ).get(rulesetHash) as { config_version: string } | undefined;
+    if (!registered) throw new Error(`LIVE_GATE_AUDIT_RULESET_NOT_REGISTERED:${rulesetHash}`);
     this.database.prepare(
-      `INSERT OR IGNORE INTO audit_log(
+      `INSERT INTO audit_log(
         audit_id,timestamp,entity_type,entity_id,action,reason,ruleset_hash,
         source_code_commit,source_code_dirty,config_version,metadata_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      hash(["AUDIT", input.entityType, input.entityId, input.action, input.reason ?? "NONE", input.now]),
+      hash(["AUDIT", input.entityType, input.entityId, input.action, input.reason ?? "NONE", input.now, randomUUID()]),
       input.now,
       input.entityType,
       input.entityId,
       input.action,
       input.reason,
-      RULESET_HASH,
+      rulesetHash,
       this.sourceVersion.commit,
       this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
+      registered.config_version,
       stableJson(input.metadata),
     );
   }
 
   latestAllowedPreflight(): LiveGateRunRecord | null {
     const row = this.database.prepare(
-      `SELECT live_gate_run_id,run_type,allowed,created_at
+      `SELECT live_gate_run_id,run_type,allowed,execution_mode,live_gate_state,
+              source_code_commit,source_code_dirty,created_at
        FROM live_gate_runs
        WHERE run_type='PREFLIGHT' AND allowed=1
-       ORDER BY created_at DESC LIMIT 1`,
+       ORDER BY created_at DESC,rowid DESC LIMIT 1`,
     ).get() as LiveGateRunRecord | undefined;
     return row ?? null;
   }
 
-  prerequisites(): Array<{ prerequisite_key: string; status: string; evidence_json: string }> {
+  run(runId: string): LiveGateRunRecord | null {
+    const row = this.database.prepare(
+      `SELECT live_gate_run_id,run_type,allowed,execution_mode,live_gate_state,
+              source_code_commit,source_code_dirty,created_at
+       FROM live_gate_runs WHERE live_gate_run_id=?`,
+    ).get(runId) as LiveGateRunRecord | undefined;
+    return row ?? null;
+  }
+
+  prerequisites(): Array<{ prerequisite_key: string; status: string; evidence_json: string; updated_at: string }> {
     return this.database.prepare(
-      "SELECT prerequisite_key,status,evidence_json FROM live_gate_prerequisites ORDER BY prerequisite_key",
-    ).all() as unknown as Array<{ prerequisite_key: string; status: string; evidence_json: string }>;
+      "SELECT prerequisite_key,status,evidence_json,updated_at FROM live_gate_prerequisites ORDER BY prerequisite_key",
+    ).all() as unknown as Array<{ prerequisite_key: string; status: string; evidence_json: string; updated_at: string }>;
+  }
+
+  private writeState(input: {
+    executionMode: ExecutionMode;
+    liveGateState: LiveGateState;
+    requestedExecutionMode: RequestedExecutionMode | null;
+    lastPreflightId: string | null;
+    reason: string;
+    actor: string;
+    metadata: Record<string, unknown>;
+    now: string;
+  }, guard: LiveGateStateGuard | null): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.state();
+      const transitionCount = (this.database.prepare("SELECT count(*) count FROM live_gate_state_transitions")
+        .get() as { count: number }).count;
+      const dataVersion = (this.database.prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+      if (guard && (
+        !this.sameState(previous, guard.state)
+        || transitionCount !== guard.transitionCount
+        || dataVersion !== guard.dataVersion
+      )) {
+        this.database.exec("ROLLBACK");
+        return false;
+      }
+      // Capture the exact local Signal-ingest boundary in the same transaction
+      // that activates Live. The Runner must never substitute its later poll
+      // timestamp, otherwise signals created after activation but before the
+      // next poll can be skipped permanently.
+      const signalBoundarySequence = input.executionMode === "LIVE" && input.liveGateState === "LIVE_ACTIVE"
+        ? (this.database.prepare(
+          "SELECT COALESCE(MAX(signal_sequence),0) value FROM signal_ingest_sequences",
+        ).get() as { value: number }).value
+        : null;
+      this.database.prepare(
+        `UPDATE live_gate_state
+         SET execution_mode=?,live_gate_state=?,requested_execution_mode=?,last_preflight_id=?,
+             state_reason=?,source_code_commit=?,source_code_dirty=?,config_version=?,updated_at=?
+         WHERE state_id='default'`,
+      ).run(
+        input.executionMode,
+        input.liveGateState,
+        input.requestedExecutionMode,
+        input.lastPreflightId,
+        input.reason,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        input.now,
+      );
+      this.database.prepare(
+        `INSERT INTO live_gate_state_transitions(
+          transition_id,from_execution_mode,to_execution_mode,from_live_gate_state,to_live_gate_state,
+          reason,actor,metadata_json,source_code_commit,source_code_dirty,config_version,created_at,
+          signal_boundary_sequence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        hash([
+          "LIVE_GATE_TRANSITION",
+          transitionCount,
+          input.now,
+          previous.execution_mode,
+          input.executionMode,
+          previous.live_gate_state,
+          input.liveGateState,
+          input.reason,
+          signalBoundarySequence ?? "NO_SIGNAL_BOUNDARY",
+        ]),
+        previous.execution_mode,
+        input.executionMode,
+        previous.live_gate_state,
+        input.liveGateState,
+        input.reason,
+        input.actor,
+        stableJson(input.metadata),
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        input.now,
+        signalBoundarySequence,
+      );
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private sameState(left: LiveGateStateRow, right: LiveGateStateRow): boolean {
+    return left.state_id === right.state_id
+      && left.execution_mode === right.execution_mode
+      && left.live_gate_state === right.live_gate_state
+      && left.requested_execution_mode === right.requested_execution_mode
+      && left.last_preflight_id === right.last_preflight_id
+      && left.state_reason === right.state_reason
+      && left.source_code_commit === right.source_code_commit
+      && left.source_code_dirty === right.source_code_dirty
+      && left.config_version === right.config_version
+      && left.created_at === right.created_at
+      && left.updated_at === right.updated_at;
   }
 }

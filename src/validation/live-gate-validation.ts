@@ -1,6 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
 import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../domain/versioning.js";
-import { LiveGateService, defaultLiveGateConfig } from "../live/live-gate-service.js";
+import {
+  LIVE_ACTIVATION_CONFIRMATION_TEXT,
+  LiveGateService,
+  defaultLiveGateConfig,
+} from "../live/live-gate-service.js";
+import { FakeClockSafetyProvider, FakeGeoblockProvider } from "../live/live-safety-provider.js";
 import { MockBalanceProvider } from "../live/mock-balance-provider.js";
 import { check, errorCheck } from "./checks.js";
 import type { ValidationCheckResult, ValidationValidator, ValidationValidatorContext } from "./types.js";
@@ -8,7 +13,23 @@ import type { ValidationCheckResult, ValidationValidator, ValidationValidatorCon
 const WALLET = "0x0000000000000000000000000000000000000001";
 const CONDITION_ID = `0x${"4".repeat(64)}`;
 const ASSET_ID = "validation-live-asset";
-const ACCOUNT_ID = "validation-live-account";
+const LIVE_ACCOUNT_ID = "validation-live-account";
+const BAD_PAPER_ACCOUNT_ID = "validation-bad-paper-account";
+
+function executionInput(signalId: string, riskDecisionId: string) {
+  return {
+    signalId,
+    riskDecisionId,
+    rulesetHash: RULESET_HASH,
+    accountId: LIVE_ACCOUNT_ID,
+    contextId: `context-${signalId}`,
+    side: "BUY" as const,
+    assetId: ASSET_ID,
+    conditionId: CONDITION_ID,
+    targetPriceUnits: "500000000000000000",
+    targetSizeMicros: "10000000",
+  };
+}
 
 export class LiveGateValidation implements ValidationValidator {
   readonly type = "LIVE_GATE" as const;
@@ -16,18 +37,43 @@ export class LiveGateValidation implements ValidationValidator {
   async run(context: ValidationValidatorContext): Promise<ValidationCheckResult[]> {
     const database = new DatabaseSync(context.databasePath);
     database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
+    const checkedAt = context.now().toISOString();
     const gate = new LiveGateService(
       context.databasePath,
-      new MockBalanceProvider({ status: "AVAILABLE", balanceMicros: "1000000000", reason: null }),
-      defaultLiveGateConfig(),
-      { sourceVersion: context.sourceVersion, now: context.now },
+      new MockBalanceProvider({
+        status: "AVAILABLE",
+        balanceMicros: "1000000000",
+        reason: null,
+        checkedAt,
+        source: "VALIDATION_TEST_FIXTURE",
+      }),
+      { ...defaultLiveGateConfig(), runtimeEnvironment: "TEST" },
+      {
+        sourceVersion: context.sourceVersion,
+        now: context.now,
+        geoblockProvider: new FakeGeoblockProvider({
+          status: "ALLOWED",
+          checkedAt,
+          source: "VALIDATION_TEST_FIXTURE",
+          reason: null,
+        }),
+        clockProvider: new FakeClockSafetyProvider({
+          status: "SAFE",
+          offsetMs: 0,
+          checkedAt,
+          source: "VALIDATION_TEST_FIXTURE",
+          reason: null,
+        }),
+      },
     );
     try {
       const results: ValidationCheckResult[] = [];
+      this.insertWallet(database, checkedAt);
+      this.insertLiveAccount(database, context, checkedAt);
       this.ensureSignal(database, context, "validation-allow", "validation-risk-allow", "ALLOW");
       this.ensureSignal(database, context, "validation-reject", "validation-risk-reject", "REJECT");
 
-      const defaultReject = await gate.checkExecution({ signalId: "validation-allow", riskDecisionId: "validation-risk-allow", rulesetHash: RULESET_HASH });
+      const defaultReject = await gate.checkExecution(executionInput("validation-allow", "validation-risk-allow"));
       results.push(check({
         checkType: this.type,
         checkName: "default_live_disabled_rejects",
@@ -47,13 +93,12 @@ export class LiveGateValidation implements ValidationValidator {
         now: context.now,
       }));
 
-      this.passPrerequisites(database, context.now().toISOString());
-      this.insertWallet(database, context.now().toISOString());
+      this.passPrerequisites(database, context);
       const request = await gate.requestLiveActivation({ actor: "validation", reason: "fake live path validation" });
       const confirm = request.allowed
-        ? await gate.confirmLiveActivation({ actor: "validation", confirmationText: "fake validation confirmation" })
+        ? await gate.confirmLiveActivation({ actor: "validation", confirmationText: LIVE_ACTIVATION_CONFIRMATION_TEXT })
         : request;
-      const fakeAllow = await gate.checkExecution({ signalId: "validation-allow", riskDecisionId: "validation-risk-allow", rulesetHash: RULESET_HASH });
+      const fakeAllow = await gate.checkExecution(executionInput("validation-allow", "validation-risk-allow"));
       results.push(check({
         checkType: this.type,
         checkName: "fake_live_path_allows_only_in_validation_db",
@@ -63,7 +108,7 @@ export class LiveGateValidation implements ValidationValidator {
         now: context.now,
       }));
 
-      const riskReject = await gate.checkExecution({ signalId: "validation-reject", riskDecisionId: "validation-risk-reject", rulesetHash: RULESET_HASH });
+      const riskReject = await gate.checkExecution(executionInput("validation-reject", "validation-risk-reject"));
       results.push(check({
         checkType: this.type,
         checkName: "risk_reject_blocks_live",
@@ -75,7 +120,7 @@ export class LiveGateValidation implements ValidationValidator {
 
       this.insertBadPaperAccount(database, context);
       const reconciliationReject = await gate.preflight({ requestedExecutionMode: "LIVE" });
-      database.prepare("DELETE FROM paper_accounts WHERE paper_account_id=?").run(ACCOUNT_ID);
+      database.prepare("DELETE FROM paper_accounts WHERE paper_account_id=?").run(BAD_PAPER_ACCOUNT_ID);
       results.push(check({
         checkType: this.type,
         checkName: "reconciliation_failure_blocks_live",
@@ -105,8 +150,17 @@ export class LiveGateValidation implements ValidationValidator {
     }
   }
 
-  private passPrerequisites(database: DatabaseSync, now: string): void {
-    database.prepare("UPDATE live_gate_prerequisites SET status='PASSED',evidence_json='{\"validation\":true}',updated_at=?").run(now);
+  private passPrerequisites(database: DatabaseSync, context: ValidationValidatorContext): void {
+    const now = context.now().toISOString();
+    const evidence = JSON.stringify({
+      evidenceType: "VALIDATION_TEST_FIXTURE",
+      checkedAt: now,
+      sourceCodeCommit: context.sourceVersion.commit,
+      environment: "TEST",
+      testOnly: true,
+    });
+    database.prepare("UPDATE live_gate_prerequisites SET status='PASSED',evidence_json=?,updated_at=?")
+      .run(evidence, now);
   }
 
   private insertWallet(database: DatabaseSync, now: string): void {
@@ -115,6 +169,33 @@ export class LiveGateValidation implements ValidationValidator {
         live_wallet_id,wallet_address,wallet_type,network,status,created_at,updated_at
       ) VALUES ('validation-live-wallet', ?, 'EOA', 'POLYGON', 'ACTIVE', ?, ?)`,
     ).run(WALLET, now, now);
+  }
+
+  private insertLiveAccount(database: DatabaseSync, context: ValidationValidatorContext, now: string): void {
+    database.prepare(
+      `INSERT OR IGNORE INTO live_accounts(
+        live_account_id,live_wallet_id,name,status,initial_bankroll_micros,risk_budget_micros,
+        signal_cutoff_at,schema_version,strategy_version,risk_version,live_version,ruleset_hash,
+        source_code_commit,source_code_dirty,config_version,activated_at,created_at,updated_at,
+        authorized_signer_address
+      ) VALUES (?, 'validation-live-wallet', 'Validation Live Account', 'ACTIVE',
+        '1000000000', '500000000', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      LIVE_ACCOUNT_ID,
+      now,
+      VERSIONS.schemaVersion,
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      VERSIONS.liveVersion,
+      RULESET_HASH,
+      context.sourceVersion.commit,
+      context.sourceVersion.dirty ? 1 : 0,
+      VERSIONS.configVersion,
+      now,
+      now,
+      now,
+      WALLET,
+    );
   }
 
   private ensureTarget(database: DatabaseSync, now: string): string {
@@ -135,6 +216,7 @@ export class LiveGateValidation implements ValidationValidator {
     decision: "ALLOW" | "REJECT",
   ): void {
     const now = context.now().toISOString();
+    const marketEndTime = new Date(context.now().valueOf() + 24 * 60 * 60 * 1_000).toISOString();
     const targetId = this.ensureTarget(database, now);
     const sourceKey = `source-${signalId}`;
     database.prepare(
@@ -185,7 +267,7 @@ export class LiveGateValidation implements ValidationValidator {
       contextId,
       signalId,
       now,
-      "2026-07-10T00:00:00.000Z",
+      marketEndTime,
       `metadata-${signalId}`,
       RULESET_HASH,
       VERSIONS.schemaVersion,
@@ -198,13 +280,14 @@ export class LiveGateValidation implements ValidationValidator {
     );
     database.prepare(
       `INSERT OR IGNORE INTO risk_decisions(
-        risk_decision_id,executor_mode,paper_account_id,signal_id,context_id,decision,
+        risk_decision_id,executor_mode,paper_account_id,account_id,signal_id,context_id,decision,
         risk_reject_reason,requested_amount_micros,requested_size_micros,checks_json,
         schema_version,strategy_version,risk_version,ruleset_hash,source_code_commit,
         source_code_dirty,config_version,created_at,risk_reason
-      ) VALUES (?, 'LIVE', NULL, ?, ?, ?, ?, '5000000', '10000000', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, 'LIVE', NULL, ?, ?, ?, ?, ?, '5000000', '10000000', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       riskDecisionId,
+      LIVE_ACCOUNT_ID,
       signalId,
       contextId,
       decision,
@@ -231,7 +314,7 @@ export class LiveGateValidation implements ValidationValidator {
         source_code_commit,source_code_dirty,created_at,updated_at
       ) VALUES (?, 'Validation Bad Account', 'ACTIVE', '1000', '1000', '0', '0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      ACCOUNT_ID,
+      BAD_PAPER_ACCOUNT_ID,
       now,
       VERSIONS.schemaVersion,
       VERSIONS.strategyVersion,

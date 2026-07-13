@@ -50,6 +50,7 @@ export function buildValidationReport(input: {
   const warnings = input.checks
     .filter((check) => check.status === "WARN" || check.status === "SKIPPED" || check.status === "NOT_RUN")
     .map((check) => `${check.checkType}:${check.checkName}:${check.reason}`);
+  const resultStatus = state.status === "FAILED" ? "FAIL" : warnings.length > 0 ? "INCOMPLETE" : "PASS";
   const reportWithoutHash = {
     session: {
       id: input.sessionId,
@@ -77,7 +78,7 @@ export function buildValidationReport(input: {
     recovery: counts(input.checks.filter((check) => check.checkType === "CRASH_RECOVERY")),
     liveGate: counts(input.checks.filter((check) => check.checkType === "LIVE_GATE")),
     finalResult: {
-      status: state.status === "PASSED" ? "PASS" : "FAIL",
+      status: resultStatus,
       finalReadinessStatus: state.finalReadinessStatus,
       liveAllowed: false,
       blockingFailures,

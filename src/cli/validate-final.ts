@@ -32,7 +32,8 @@ const result = await new ValidationRunner().run({
 });
 
 console.log(JSON.stringify({
-  status: result.report.session.status,
+  status: result.report.finalResult.status,
+  frameworkSessionStatus: result.report.session.status,
   finalReadinessStatus: result.report.finalResult.finalReadinessStatus,
   liveAllowed: result.report.finalResult.liveAllowed,
   blockingFailures: result.report.finalResult.blockingFailures,
@@ -41,3 +42,7 @@ console.log(JSON.stringify({
   markdownReportPath: result.markdownReportPath,
   workingDatabasePath: result.workingDatabasePath,
 }, null, 2));
+
+if (result.report.session.status === "FAILED" || result.report.finalResult.blockingFailures.length > 0) {
+  process.exitCode = 1;
+}

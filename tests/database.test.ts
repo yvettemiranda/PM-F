@@ -174,4 +174,34 @@ describe("Phase0Database", () => {
       .toBe("MEDIUM");
     check.close();
   });
+
+  it("deduplicates identical capital estimates and rejects a conflicting reused identity", () => {
+    const { databasePath } = workspace();
+    const database = new Phase0Database(databasePath);
+    database.initialize();
+    const targetId = database.ensureTarget(wallet, "IDENTITY_CONFIRMED");
+    const estimate = estimateTargetCapital({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      syncStatus: "SYNCED",
+      positions: null,
+      positionSnapshotTime: null,
+      walletBalanceMicros: null,
+      walletBalanceSnapshotTime: null,
+    });
+
+    database.saveCapitalEstimate(targetId, null, estimate);
+    database.saveCapitalEstimate(targetId, null, estimate);
+    expect(() => database.saveCapitalEstimate(targetId, null, {
+      ...estimate,
+      targetVisibleCapitalMicros: "1",
+    })).toThrow("CAPITAL_ESTIMATE_CONFLICT");
+    database.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare("SELECT count(*) count FROM capital_estimates").get() as { count: number }).count).toBe(1);
+    expect(check.prepare("SELECT target_visible_capital_micros FROM capital_estimates").get())
+      .toEqual({ target_visible_capital_micros: null });
+    check.close();
+  });
 });

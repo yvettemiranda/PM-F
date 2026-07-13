@@ -54,7 +54,11 @@ function trade(overrides: Partial<PublicTrade>): PublicTrade {
 function snapshot(trades: PublicTrade[], positions: PublicPosition[], fetchedAt: string): ObservePollSnapshot {
   return {
     trades: capture("trades", trades, fetchedAt),
-    activity: capture<PublicActivity[]>("activity", [], fetchedAt),
+    activity: capture<PublicActivity[]>("activity", trades.map((item) => ({
+      ...item,
+      type: "TRADE",
+      isCombo: false,
+    })), fetchedAt),
     positions: capture("positions", positions, fetchedAt),
     pUsdBalance: capture("balance", { jsonrpc: "2.0", id: 2, result: "0x0" }, fetchedAt),
   };
@@ -83,8 +87,17 @@ function snapshotWithActivity(
 }
 
 class QueueSource implements ObserveDataSource {
+  readonly recoveryFromTimestamps: Array<number | undefined> = [];
+  readonly activityFromTimestamps: Array<number | undefined> = [];
+
   constructor(private readonly queue: Array<ObservePollSnapshot | Error>) {}
-  async poll(): Promise<ObservePollSnapshot> {
+  async poll(
+    _walletAddress: string,
+    recoveryFromTimestamp?: number,
+    activityFromTimestamp?: number,
+  ): Promise<ObservePollSnapshot> {
+    this.recoveryFromTimestamps.push(recoveryFromTimestamp);
+    this.activityFromTimestamps.push(activityFromTimestamp);
     const item = this.queue.shift();
     if (!item) throw new Error("Fake queue exhausted");
     if (item instanceof Error) throw item;
@@ -123,6 +136,34 @@ function setup(baselinePositions: PublicPosition[] = [position("100")]): { datab
   return { databasePath, targetId };
 }
 
+function addBaseline(databasePath: string, snapshotTime: string, positions: PublicPosition[]): string {
+  const database = new Phase0Database(databasePath, sourceVersion);
+  database.initialize();
+  const targetId = database.ensureTarget(wallet, "IDENTITY_CONFIRMED");
+  const positionsCapture = capture("positions", positions, snapshotTime);
+  database.saveCapture("data-positions", positionsCapture);
+  const manifest = buildCaptureManifest({
+    walletAddress: wallet,
+    sampleRole: "TARGET",
+    purpose: "OBSERVE_TEST_BASELINE",
+    sourceVersion,
+    sources: [{ endpoint: "data-positions", capture: positionsCapture, paginationStatus: "END_OF_DATA" }],
+  });
+  database.saveCaptureManifest(targetId, manifest);
+  const baseline = buildPositionBaseline({
+    captureRunId: manifest.captureRunId,
+    targetId,
+    walletAddress: wallet,
+    positionCaptureId: captureIdentity(positionsCapture).captureId,
+    fetchedAt: positionsCapture.fetchedAt,
+    latencyMs: positionsCapture.latencyMs,
+    positions,
+  });
+  database.savePositionBaseline(baseline);
+  database.close();
+  return baseline.baselineRunId;
+}
+
 afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -151,7 +192,7 @@ describe("ObserveOnlyRunner", () => {
     await runner.pollOnce();
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
     const metrics = store.runMetrics(runner.start().observeRunId);
-    expect(metrics).toMatchObject({ successfulPolls: 3, failedPolls: 0, processedEvents: 1, emittedSignals: 1, duplicateEvents: 1 });
+    expect(metrics).toMatchObject({ successfulPolls: 3, failedPolls: 0, processedEvents: 1, emittedSignals: 1, duplicateEvents: 3 });
     expect(metrics.finalSyncStatus).toBe("SYNCED");
     store.close();
 
@@ -177,6 +218,7 @@ describe("ObserveOnlyRunner", () => {
     expect(await runner.pollOnce()).toBe(false);
     now = new Date("2026-07-08T00:01:20.000Z");
     expect(await runner.pollOnce()).toBe(true);
+    expect(source.recoveryFromTimestamps).toEqual([baselineSecond, undefined, baselineSecond + 60]);
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
     const metrics = store.runMetrics(runner.start().observeRunId);
     expect(metrics.failedPolls).toBe(1);
@@ -189,6 +231,107 @@ describe("ObserveOnlyRunner", () => {
     ).get() as { execution_eligible: number; execution_block_reason: string; event_classification: string };
     expect(signal).toEqual({ execution_eligible: 0, execution_block_reason: "GAP_EVENT", event_classification: "GAP_TRADE" });
     check.close();
+  });
+
+  it("treats a long scheduling pause as a recovery gap and excludes it from active runtime", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const delayedBuy = trade({ transactionHash: "0xsleep-gap", timestamp: baselineSecond + 90 });
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      snapshot([delayedBuy], [position("110")], "2026-07-08T00:01:40.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:40.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+
+    expect(source.recoveryFromTimestamps).toEqual([baselineSecond, baselineSecond + 60]);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      schedulingGapCount: 1,
+      maxSchedulingGapMs: 39_000,
+      activeRuntimeMs: 1_000,
+      gapEvents: 1,
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT execution_eligible,execution_block_reason FROM signals WHERE producer_mode='OBSERVE_ONLY'",
+    ).get()).toEqual({ execution_eligible: 0, execution_block_reason: "GAP_EVENT" });
+    check.close();
+  });
+
+  it("treats a long in-flight poll pause as a gap before emitting its events", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    let pollCount = 0;
+    const delayedBuy = trade({ transactionHash: "0xinflight-sleep", timestamp: baselineSecond + 90 });
+    const source: ObserveDataSource = {
+      async poll() {
+        pollCount += 1;
+        if (pollCount === 1) return snapshot([], [position("100")], now.toISOString());
+        now = new Date("2026-07-08T00:01:40.000Z");
+        return snapshot([delayedBuy], [position("110")], now.toISOString());
+      },
+    };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      schedulingGapCount: 1,
+      maxSchedulingGapMs: 10_000,
+      activeRuntimeMs: 30_000,
+      gapEvents: 1,
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT execution_eligible,execution_block_reason FROM signals WHERE producer_mode='OBSERVE_ONLY'",
+    ).get()).toEqual({ execution_eligible: 0, execution_block_reason: "GAP_EVENT" });
+    check.close();
+  });
+
+  it("detects a trailing scheduling gap when sleep carries the run past its deadline", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([snapshot([], [position("100")], now.toISOString())]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        durationMs: 40_000,
+        now: () => now,
+        wait: async () => {
+          now = new Date("2026-07-08T00:01:40.000Z");
+        },
+      },
+    );
+
+    await expect(runner.run()).resolves.toMatchObject({
+      schedulingGapCount: 1,
+      maxSchedulingGapMs: 39_000,
+      activeRuntimeMs: 1_000,
+    });
+    store.close();
   });
 
   it("recovers a checkpoint after restart and marks downtime events as gaps", async () => {
@@ -216,6 +359,82 @@ describe("ObserveOnlyRunner", () => {
     await secondRunner.pollOnce();
     secondStore.stopRun(started.observeRunId, now.toISOString(), "TEST_COMPLETE");
     expect(secondStore.runMetrics(started.observeRunId)).toMatchObject({ checkpointRecovered: true, gapEvents: 1 });
+    secondStore.close();
+  });
+
+  it("fails closed and marks MAJOR_DESYNC when a recovered checkpoint projection hash is corrupt", async () => {
+    const { databasePath, targetId } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const firstStore = new ObserveStore(databasePath, sourceVersion);
+    const firstRunner = new ObserveOnlyRunner(
+      firstStore,
+      new QueueSource([snapshot([], [position("100")], now.toISOString())]),
+      { walletAddress: wallet, pollIntervalMs: 1_000, staleRunAfterMs: 1_000, now: () => now },
+    );
+    await firstRunner.pollOnce();
+    firstStore.close();
+
+    const corrupt = new DatabaseSync(databasePath);
+    corrupt.prepare("UPDATE observe_checkpoints SET position_projection_hash='corrupt'").run();
+    corrupt.close();
+
+    now = new Date("2026-07-08T00:02:00.000Z");
+    const source = new QueueSource([snapshot([], [position("100")], now.toISOString())]);
+    const secondStore = new ObserveStore(databasePath, sourceVersion);
+    const secondRunner = new ObserveOnlyRunner(
+      secondStore,
+      source,
+      { walletAddress: wallet, pollIntervalMs: 1_000, staleRunAfterMs: 1_000, now: () => now },
+    );
+
+    expect(() => secondRunner.start()).toThrow("CHECKPOINT_PROJECTION_HASH_MISMATCH");
+    expect(source.recoveryFromTimestamps).toEqual([]);
+    secondStore.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT sync_status FROM monitor_targets WHERE target_id=?").get(targetId))
+      .toEqual({ sync_status: "MAJOR_DESYNC" });
+    expect(check.prepare(
+      `SELECT issue_type,sync_status,status FROM reconciliation_issues
+       WHERE target_id=? AND issue_type='CHECKPOINT_PROJECTION_HASH_MISMATCH'`,
+    ).get(targetId)).toEqual({
+      issue_type: "CHECKPOINT_PROJECTION_HASH_MISMATCH",
+      sync_status: "MAJOR_DESYNC",
+      status: "OPEN",
+    });
+    expect(check.prepare("SELECT state,stop_reason FROM observe_runs ORDER BY started_at DESC LIMIT 1").get())
+      .toEqual({ state: "FAILED", stop_reason: "CHECKPOINT_PROJECTION_HASH_MISMATCH" });
+    check.close();
+  });
+
+  it("does not recover a checkpoint created for an older position baseline", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const firstStore = new ObserveStore(databasePath, sourceVersion);
+    const firstRunner = new ObserveOnlyRunner(
+      firstStore,
+      new QueueSource([snapshot([], [position("100")], now.toISOString())]),
+      { walletAddress: wallet, pollIntervalMs: 1_000, staleRunAfterMs: 1_000, now: () => now },
+    );
+    await firstRunner.pollOnce();
+    firstStore.close();
+
+    const newBaselineTime = "2026-07-08T00:01:30.000Z";
+    const newBaselineRunId = addBaseline(databasePath, newBaselineTime, [position("100")]);
+    now = new Date("2026-07-08T00:02:00.000Z");
+    const secondStore = new ObserveStore(databasePath, sourceVersion);
+    const secondRunner = new ObserveOnlyRunner(
+      secondStore,
+      new QueueSource([snapshot([], [position("100")], now.toISOString())]),
+      { walletAddress: wallet, pollIntervalMs: 1_000, staleRunAfterMs: 1_000, now: () => now },
+    );
+    const started = secondRunner.start();
+
+    expect(started.baseline.baselineRunId).toBe(newBaselineRunId);
+    expect(started.recoveredFromCheckpoint).toBe(false);
+    expect(started.checkpoint).toBeNull();
+    expect(started.gapFrom).toBe(newBaselineTime);
+    secondStore.stopRun(started.observeRunId, now.toISOString(), "TEST_COMPLETE");
     secondStore.close();
   });
 
@@ -293,6 +512,7 @@ describe("ObserveOnlyRunner", () => {
     });
     const first = snapshotWithActivity([activityTrade], [position("110")], now.toISOString());
     const second = snapshot([normalizedTrade], [position("110")], "2026-07-08T00:01:10.000Z");
+    second.activity = capture("activity", [], second.activity.fetchedAt);
     const store = new ObserveStore(databasePath, sourceVersion);
     const runner = new ObserveOnlyRunner(store, new QueueSource([first, second]), {
       walletAddress: wallet,
@@ -310,6 +530,156 @@ describe("ObserveOnlyRunner", () => {
       finalSyncStatus: "SYNCED",
     });
     store.close();
+  });
+
+  it("records a combo trade from Activity without projecting it or emitting a signal", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const comboActivity = activity({
+      type: "TRADE",
+      transactionHash: "0xcombo-trade",
+      asset: "asset-1",
+      side: "BUY",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+      isCombo: true,
+    });
+    const matchingTrade = trade({
+      transactionHash: comboActivity.transactionHash,
+      price: comboActivity.price!,
+      size: comboActivity.size!,
+      timestamp: comboActivity.timestamp,
+    });
+    const second = snapshot([matchingTrade], [position("100")], "2026-07-08T00:01:10.000Z");
+    second.activity = capture("activity", [comboActivity], second.activity.fetchedAt);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      second,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT is_combo,event_classification FROM raw_events WHERE source_transaction_hash='0xcombo-trade'",
+    ).get()).toEqual({ is_combo: 1, event_classification: "COMBO_ACTIVITY" });
+    expect((check.prepare("SELECT count(*) count FROM observe_signal_emissions").get() as { count: number }).count).toBe(0);
+    check.close();
+  });
+
+  it("waits for Activity confirmation before publishing a Trades-only event", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const pendingTrade = trade({ transactionHash: "0xactivity-delayed", timestamp: baselineSecond + 70 });
+    const tradeOnly = snapshot([pendingTrade], [position("110")], "2026-07-08T00:01:10.000Z");
+    tradeOnly.activity = capture("activity", [], tradeOnly.activity.fetchedAt);
+    const confirmed = snapshotWithActivity([activity({
+      ...pendingTrade,
+      type: "TRADE",
+      isCombo: false,
+    })], [position("110")], "2026-07-08T00:01:20.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      tradeOnly,
+      confirmed,
+    ]);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      sourceVersion,
+      signalMarketMetadataProvider: {
+        async market() {
+          return {
+            sourceUrl: "https://clob.test/markets/condition",
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: "0xcondition",
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [{ token_id: "asset-1", outcome: "Yes" }],
+            },
+          };
+        },
+      },
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    let check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare("SELECT count(*) count FROM signals WHERE producer_mode='OBSERVE_ONLY'").get() as { count: number }).count).toBe(0);
+    check.close();
+
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+    check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare("SELECT count(*) count FROM signals WHERE producer_mode='OBSERVE_ONLY'").get() as { count: number }).count).toBe(1);
+    expect(check.prepare(
+      "SELECT activity_confirmed FROM observe_events WHERE source_event_key=(SELECT source_event_key FROM signals WHERE producer_mode='OBSERVE_ONLY')",
+    ).get()).toEqual({ activity_confirmed: 1 });
+    expect((check.prepare("SELECT count(*) count FROM signal_execution_contexts").get() as { count: number }).count).toBe(1);
+    expect(source.activityFromTimestamps).toEqual([
+      undefined,
+      undefined,
+      pendingTrade.timestamp - 1,
+    ]);
+    check.close();
+  });
+
+  it("reclassifies a delayed combo confirmation without ever publishing a signal", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const pendingTrade = trade({ transactionHash: "0xcombo-delayed", timestamp: baselineSecond + 70 });
+    const tradeOnly = snapshot([pendingTrade], [position("110")], "2026-07-08T00:01:10.000Z");
+    tradeOnly.activity = capture("activity", [], tradeOnly.activity.fetchedAt);
+    const comboConfirmation = snapshotWithActivity([activity({
+      ...pendingTrade,
+      type: "TRADE",
+      isCombo: true,
+    })], [position("100")], "2026-07-08T00:01:20.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      tradeOnly,
+      comboConfirmation,
+    ]), { walletAddress: wallet, pollIntervalMs: 1_000, now: () => now });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      emittedSignals: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT is_combo,event_classification FROM raw_events WHERE source_transaction_hash='0xcombo-delayed'",
+    ).get()).toEqual({ is_combo: 1, event_classification: "COMBO_ACTIVITY" });
+    check.close();
   });
 
   it("does not advance the checkpoint when the recovery window is truncated", async () => {

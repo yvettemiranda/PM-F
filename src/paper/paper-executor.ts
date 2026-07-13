@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { PAPER_EXECUTION_TRANSITIONS, PAPER_POSITION_TRANSITIONS, transition } from "../domain/state-machine.js";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
+import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import type {
   ExecutorBalanceQuery,
   ExecutorExecutionResult,
@@ -11,6 +12,7 @@ import type {
   ExecutorReconcileResult,
   ExecutorSignalInput,
 } from "../execution/types.js";
+import { assertExecutionEnvelopeIntegrity } from "../execution/signal-integrity.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { calculateRealizedPnl } from "../pnl/pnl-model.js";
@@ -51,6 +53,8 @@ interface ExecutionRow {
   attempt_count: number;
   risk_decision_id: string | null;
   risk_reject_reason: string | null;
+  ruleset_hash: string;
+  config_version: string;
 }
 
 interface PositionRow {
@@ -73,6 +77,8 @@ interface PositionRow {
   frozen_at: string | null;
   realized_pnl_micros: string;
   created_at: string;
+  ruleset_hash: string;
+  config_version: string;
 }
 
 interface RiskDecisionRow {
@@ -84,6 +90,15 @@ interface RiskDecisionRow {
   risk_reason: string | null;
   risk_reject_reason: string | null;
   checks_json: string;
+}
+
+export interface ConsumerCutoffResult {
+  accountId: string;
+  cutoffAt: string;
+  previousCreatedAt: string | null;
+  previousSignalId: string | null;
+  advanced: boolean;
+  skippedSignalCount: number;
 }
 
 function hash(parts: Array<string | number>): string {
@@ -199,6 +214,83 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return executions;
   }
 
+  /**
+   * Starts a new Paper consumer session without replaying Signals that arrived
+   * while the consumer was offline. Pending executions are intentionally left
+   * untouched and will still be recovered by retryPending().
+   */
+  advanceConsumerCutoff(accountId: string, cutoffAt: string, reason: string): ConsumerCutoffResult {
+    const cutoffTime = new Date(cutoffAt);
+    if (!Number.isFinite(cutoffTime.valueOf())) throw new Error(`INVALID_PAPER_CONSUMER_CUTOFF:${cutoffAt}`);
+    const normalizedCutoff = cutoffTime.toISOString();
+    const normalizedReason = reason.trim();
+    if (!normalizedReason) throw new Error("PAPER_CONSUMER_CUTOFF_REASON_REQUIRED");
+    const account = this.accountRow(accountId);
+    if (account.status !== "ACTIVE") throw new Error(`PAPER_ACCOUNT_NOT_ACTIVE:${accountId}`);
+    const checkpointSignalSentinel = "\u{10FFFF}";
+    const auditedAt = this.now().toISOString();
+
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const checkpoint = this.database.prepare(
+        `SELECT last_signal_created_at,last_signal_id
+         FROM paper_consumer_checkpoints WHERE paper_account_id=?`,
+      ).get(accountId) as { last_signal_created_at: string | null; last_signal_id: string | null } | undefined;
+      if (!checkpoint) throw new Error(`PAPER_CONSUMER_CHECKPOINT_NOT_FOUND:${accountId}`);
+      const previousCreatedAt = checkpoint.last_signal_created_at;
+      const previousSignalId = checkpoint.last_signal_id;
+      const advanced = previousCreatedAt === null
+        || previousCreatedAt < normalizedCutoff
+        || (previousCreatedAt === normalizedCutoff && (previousSignalId ?? "") < checkpointSignalSentinel);
+      const skippedSignalCount = advanced
+        ? Number((this.database.prepare(
+          `SELECT count(*) count FROM signals
+           WHERE status='PUBLISHED' AND created_at<=?
+             AND (? IS NULL OR created_at>? OR (created_at=? AND signal_id>?))`,
+        ).get(
+          normalizedCutoff,
+          previousCreatedAt,
+          previousCreatedAt,
+          previousCreatedAt,
+          previousSignalId ?? "",
+        ) as { count: number | bigint }).count)
+        : 0;
+
+      if (advanced) {
+        this.database.prepare(
+          `UPDATE paper_consumer_checkpoints
+           SET last_signal_created_at=?,last_signal_id=?,updated_at=?
+           WHERE paper_account_id=?`,
+        ).run(normalizedCutoff, checkpointSignalSentinel, auditedAt, accountId);
+      }
+      this.audit(
+        "PAPER_CONSUMER_CHECKPOINT",
+        accountId,
+        advanced ? "CHECKPOINT_ADVANCED" : "CHECKPOINT_RETAINED",
+        normalizedReason,
+        auditedAt,
+        {
+          cutoffAt: normalizedCutoff,
+          previousCreatedAt,
+          previousSignalId,
+          skippedSignalCount,
+        },
+      );
+      this.database.exec("COMMIT");
+      return {
+        accountId,
+        cutoffAt: normalizedCutoff,
+        previousCreatedAt,
+        previousSignalId,
+        advanced,
+        skippedSignalCount,
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   async executeBuy(input: ExecutorSignalInput): Promise<ExecutorExecutionResult> {
     if (input.signal.signalType !== "TARGET_BUY") throw new Error("EXECUTOR_INPUT_NOT_BUY");
     const executionId = this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
@@ -297,7 +389,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       const prior = this.database.prepare("SELECT paper_execution_id FROM paper_executions WHERE execution_idempotency_key=?")
         .get(idempotency) as { paper_execution_id: string } | undefined;
       if (prior) continue;
-      const executionId = hash([idempotency, RULESET_HASH]);
+      const executionId = hash([idempotency, position.ruleset_hash]);
       const now = this.now().toISOString();
       const signal = this.loadSignal(position.signal_id);
       this.database.exec("BEGIN IMMEDIATE");
@@ -313,6 +405,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           reason: "STOP_LOSS_TRIGGERED",
           requestedAmountMicros: null,
           requestedSizeMicros: currentSize,
+          rulesetHash: position.ruleset_hash,
           now,
         });
         this.supersedePendingTargetExit(position.paper_position_id, now);
@@ -336,6 +429,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           contextId: signal.context?.contextId ?? null,
           riskDecisionId: risk.riskDecisionId,
           riskRejectReason: risk.riskRejectReason,
+          rulesetHash: position.ruleset_hash,
+          configVersion: position.config_version,
           now,
         });
         this.database.prepare(
@@ -405,7 +500,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope, preapprovedRisk?: RiskDecision): string {
     const account = this.accountRow(accountId);
     const idempotency = hash(["PAPER", accountId, signal.signalId]);
-    const executionId = hash([idempotency, RULESET_HASH]);
+    const executionId = hash([idempotency, signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId)]);
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -516,8 +611,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const context = signal.context!;
     const target = Date.parse(context.targetTradeTimestamp);
     const end = Date.parse(context.marketEndTime);
+    const rules = registeredExecutionRules(this.database, context.rulesetHash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${context.rulesetHash}`);
     const remaining = Math.max(0, end - target);
-    const wait = Math.min((remaining * RULESET.waitRatioPpm) / 1_000_000, RULESET.maxWaitMs);
+    const wait = Math.min((remaining * rules.waitRatioPpm) / 1_000_000, rules.maxWaitMs);
     return new Date(target + wait).toISOString();
   }
 
@@ -532,8 +629,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     now: string,
     risk: RiskDecision,
   ): void {
-    const lower = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMinRatioPpm);
-    const upper = ratio(BigInt(signal.targetPriceUnits), RULESET.buyPriceMaxRatioPpm);
+    const rules = registeredExecutionRules(this.database, signal.context!.rulesetHash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${signal.context!.rulesetHash}`);
+    const lower = ratio(BigInt(signal.targetPriceUnits), rules.buyPriceMinRatioPpm);
+    const upper = ratio(BigInt(signal.targetPriceUnits), rules.buyPriceMaxRatioPpm);
     this.insertExecution({
       executionId,
       accountId,
@@ -554,6 +653,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       contextId: signal.context!.contextId,
       riskDecisionId: risk.riskDecisionId,
       riskRejectReason: risk.riskRejectReason,
+      rulesetHash: rules.rulesetHash,
+      configVersion: rules.configVersion,
       now,
     });
     const reservationId = hash([executionId, "RESERVATION"]);
@@ -608,6 +709,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const bookId = this.orderbookId(book);
     const feeId = this.feeId(fee);
     const spent = BigInt(matched.filledNotionalMicros) + BigInt(matched.feeMicros);
+    const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
     const original = BigInt(reservation.original_amount_micros);
     const positionId = hash([execution.paper_execution_id, "POSITION"]);
     this.database.exec("BEGIN IMMEDIATE");
@@ -636,11 +739,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         matched.feeMicros,
         matched.filledSizeMicros,
         spent.toString(),
-        ratio(BigInt(matched.vwapPriceUnits!), RULESET.stopTriggerRatioPpm).toString(),
-        RULESET_HASH,
+        ratio(BigInt(matched.vwapPriceUnits!), rules.triggerRatioPpm).toString(),
+        execution.ruleset_hash,
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
-        VERSIONS.configVersion,
+        execution.config_version,
         now,
         now,
       );
@@ -649,13 +752,15 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       const account = this.accountRow(execution.paper_account_id);
       const cashAfter = BigInt(account.cash_balance_micros) - spent;
       const reservedAfter = BigInt(account.reserved_balance_micros) - original;
+      const released = original - spent;
       if (cashAfter < 0n || reservedAfter < 0n) throw new Error("PAPER_BALANCE_INVARIANT");
+      if (released < 0n) throw new Error("PAPER_RESERVATION_OVERSPENT");
       this.database.prepare(
         "UPDATE paper_accounts SET cash_balance_micros=?,reserved_balance_micros=?,updated_at=? WHERE paper_account_id=?",
       ).run(cashAfter.toString(), reservedAfter.toString(), now, execution.paper_account_id);
       this.database.prepare(
         `UPDATE paper_reservations SET remaining_amount_micros='0',status=?,updated_at=? WHERE reservation_id=?`,
-      ).run(matched.complete ? "CONSUMED" : "RELEASED", now, reservation.reservation_id);
+      ).run(released === 0n ? "CONSUMED" : "RELEASED", now, reservation.reservation_id);
       this.database.prepare(
         `INSERT INTO paper_cash_ledger(
           cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
@@ -666,8 +771,31 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         `INSERT INTO paper_reservation_ledger(
           reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
           remaining_after_micros,idempotency_key,created_at
-        ) VALUES (?, ?, ?, ?, ?, '0', ?, ?)`,
-      ).run(hash([reservation.reservation_id, "FINALIZE"]), reservation.reservation_id, execution.paper_execution_id, matched.complete ? "CONSUME" : "RELEASE", (-original).toString(), hash([reservation.reservation_id, "FINALIZE"]), now);
+        ) VALUES (?, ?, ?, 'CONSUME', ?, ?, ?, ?)`,
+      ).run(
+        hash([reservation.reservation_id, "CONSUME"]),
+        reservation.reservation_id,
+        execution.paper_execution_id,
+        (-spent).toString(),
+        released.toString(),
+        hash([reservation.reservation_id, "CONSUME"]),
+        now,
+      );
+      if (released > 0n) {
+        this.database.prepare(
+          `INSERT INTO paper_reservation_ledger(
+            reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+            remaining_after_micros,idempotency_key,created_at
+          ) VALUES (?, ?, ?, 'RELEASE', ?, '0', ?, ?)`,
+        ).run(
+          hash([reservation.reservation_id, "RELEASE_REMAINDER"]),
+          reservation.reservation_id,
+          execution.paper_execution_id,
+          (-released).toString(),
+          hash([reservation.reservation_id, "RELEASE_REMAINDER"]),
+          now,
+        );
+      }
       this.database.prepare(
         `UPDATE paper_executions SET state=?,filled_size_micros=?,filled_notional_micros=?,
           fee_micros=?,attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?`,
@@ -688,7 +816,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const remaining = requested - alreadyFilled;
     if (remaining <= 0n) return "EXECUTED";
     const target = BigInt(execution.target_price_units ?? "0");
-    const slippage = execution.execution_type === "STOP_LOSS" ? RULESET.stopSellMaxSlippagePpm : RULESET.followSellMaxSlippagePpm;
+    const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
+    const slippage = execution.execution_type === "STOP_LOSS"
+      ? rules.maxSlippagePpm
+      : rules.followSellMaxSlippagePpm;
     const minimum = ratio(target, 1_000_000 - slippage);
     const matched = matchPaperSell({ bids: book.bids, requestedSizeMicros: remaining, minimumPriceUnits: minimum, feeRatePpm: BigInt(fee.feeRatePpm!), feeExponent: fee.exponent! });
     if (BigInt(matched.filledSizeMicros) === 0n) {
@@ -799,10 +931,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         pnl.toString(),
         priceTimestamp,
         feeSnapshotId,
-        RULESET_HASH,
+        execution.ruleset_hash,
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
-        VERSIONS.configVersion,
+        execution.config_version,
         now,
       );
       this.transition("PAPER_POSITION", item.paper_position_id, item.status, status, execution.execution_type, now);
@@ -830,7 +962,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const existing = this.database.prepare("SELECT paper_execution_id FROM paper_executions WHERE execution_idempotency_key=?")
       .get(idempotency) as { paper_execution_id: string } | undefined;
     if (existing) return existing.paper_execution_id;
-    const executionId = hash([idempotency, RULESET_HASH]);
+    const executionId = hash([idempotency, position.ruleset_hash]);
     const now = this.now().toISOString();
     const numerator = BigInt(resolution.payoutNumerator!);
     const denominator = BigInt(resolution.payoutDenominator!);
@@ -852,6 +984,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         reason: "SETTLEMENT_CONFIRMED",
         requestedAmountMicros: null,
         requestedSizeMicros: BigInt(position.current_size_micros),
+        rulesetHash: position.ruleset_hash,
         now,
       });
       this.insertExecution({
@@ -874,6 +1007,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         contextId: signal.context?.contextId ?? null,
         riskDecisionId: risk.riskDecisionId,
         riskRejectReason: risk.riskRejectReason,
+        rulesetHash: position.ruleset_hash,
+        configVersion: position.config_version,
         now,
       });
       this.database.prepare(
@@ -905,10 +1040,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         pnl.toString(),
         resolutionJson,
         resolutionHash,
-        RULESET_HASH,
+        position.ruleset_hash,
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
-        VERSIONS.configVersion,
+        position.config_version,
         now,
       );
       this.database.prepare(
@@ -926,10 +1061,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         cost.toString(),
         pnl.toString(),
         resolution.snapshotTime,
-        RULESET_HASH,
+        position.ruleset_hash,
         this.sourceVersion.commit,
         this.sourceVersion.dirty ? 1 : 0,
-        VERSIONS.configVersion,
+        position.config_version,
         now,
       );
       this.database.prepare(
@@ -1146,6 +1281,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     risk: RiskDecision,
   ): void {
     const target = BigInt(signal.targetPriceUnits);
+    const rulesetHash = signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId);
+    const rules = registeredExecutionRules(this.database, rulesetHash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${rulesetHash}`);
     this.insertExecution({
       executionId,
       accountId,
@@ -1158,14 +1296,16 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       requestedAmount,
       requestedSize,
       targetPrice: target,
-      lower: signal.signalType === "TARGET_BUY" ? ratio(target, RULESET.buyPriceMinRatioPpm) : null,
-      upper: signal.signalType === "TARGET_BUY" ? ratio(target, RULESET.buyPriceMaxRatioPpm) : null,
+      lower: signal.signalType === "TARGET_BUY" ? ratio(target, rules.buyPriceMinRatioPpm) : null,
+      upper: signal.signalType === "TARGET_BUY" ? ratio(target, rules.buyPriceMaxRatioPpm) : null,
       capitalMode,
       deadline,
       reason,
       contextId: signal.context?.contextId ?? null,
       riskDecisionId: risk.riskDecisionId,
       riskRejectReason: risk.riskRejectReason,
+      rulesetHash: rules.rulesetHash,
+      configVersion: rules.configVersion,
       now,
     });
     this.transition("PAPER_EXECUTION", executionId, null, state, reason, now);
@@ -1191,6 +1331,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     contextId: string | null;
     riskDecisionId: string;
     riskRejectReason: string | null;
+    rulesetHash: string;
+    configVersion: string;
     now: string;
   }): void {
     this.database.prepare(
@@ -1225,12 +1367,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       VERSIONS.strategyVersion,
       VERSIONS.riskVersion,
       VERSIONS.paperVersion,
-      RULESET_HASH,
+      input.rulesetHash,
       input.riskDecisionId,
       input.riskRejectReason,
       this.sourceVersion.commit,
       this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
+      input.configVersion,
       input.now,
       input.now,
     );
@@ -1323,6 +1465,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const row = this.database.prepare(
       "SELECT COALESCE(MAX(sequence),-1)+1 sequence FROM paper_state_transitions WHERE entity_type=? AND entity_id=?",
     ).get(entityType, entityId) as { sequence: number };
+    const version = this.entityRuleset(entityType, entityId);
     this.database.prepare(
       `INSERT INTO paper_state_transitions(
         transition_id,entity_type,entity_id,from_state,to_state,reason,sequence,ruleset_hash,
@@ -1336,10 +1479,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       to,
       reason,
       row.sequence,
-      RULESET_HASH,
+      version.rulesetHash,
       this.sourceVersion.commit,
       this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
+      version.configVersion,
       now,
     );
     this.audit(entityType, entityId, this.auditAction(entityType, from, to), reason, now, { from, to, sequence: row.sequence });
@@ -1372,30 +1515,69 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     now: string,
     metadata: Record<string, unknown> = {},
   ): void {
+    const version = this.entityRuleset(entityType, entityId);
     this.database.prepare(
-      `INSERT OR IGNORE INTO audit_log(
+      `INSERT INTO audit_log(
         audit_id,timestamp,entity_type,entity_id,action,reason,ruleset_hash,
         source_code_commit,source_code_dirty,config_version,metadata_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      hash(["AUDIT", entityType, entityId, action, reason ?? "NONE", now]),
+      hash(["AUDIT", entityType, entityId, action, reason ?? "NONE", now, randomUUID()]),
       now,
       entityType,
       entityId,
       action,
       reason,
-      RULESET_HASH,
+      version.rulesetHash,
       this.sourceVersion.commit,
       this.sourceVersion.dirty ? 1 : 0,
-      VERSIONS.configVersion,
+      version.configVersion,
       stableJson(metadata),
     );
   }
 
+  private entityRuleset(entityType: string, entityId: string): {
+    rulesetHash: string;
+    configVersion: string;
+  } {
+    let row: { ruleset_hash: string; config_version: string } | undefined;
+    if (entityType === "PAPER_EXECUTION" || entityType === "EXECUTION") {
+      row = this.database.prepare(
+        "SELECT ruleset_hash,config_version FROM paper_executions WHERE paper_execution_id=?",
+      ).get(entityId) as { ruleset_hash: string; config_version: string } | undefined;
+    } else if (entityType === "PAPER_POSITION" || entityType === "POSITION") {
+      row = this.database.prepare(
+        "SELECT ruleset_hash,config_version FROM paper_positions WHERE paper_position_id=?",
+      ).get(entityId) as { ruleset_hash: string; config_version: string } | undefined;
+    } else if (entityType === "SIGNAL") {
+      row = this.database.prepare(
+        `SELECT s.ruleset_hash,r.config_version
+         FROM signals s
+         JOIN ruleset_registry r ON r.ruleset_hash=s.ruleset_hash
+         WHERE s.signal_id=?`,
+      ).get(entityId) as { ruleset_hash: string; config_version: string } | undefined;
+    }
+    return row
+      ? { rulesetHash: row.ruleset_hash, configVersion: row.config_version }
+      : { rulesetHash: RULESET_HASH, configVersion: VERSIONS.configVersion };
+  }
+
+  private signalRulesetHash(signalId: string): string {
+    const row = this.database.prepare(
+      "SELECT ruleset_hash FROM signals WHERE signal_id=?",
+    ).get(signalId) as { ruleset_hash: string } | undefined;
+    return row?.ruleset_hash ?? RULESET_HASH;
+  }
+
   private approvedRisk(input: ExecutorSignalInput): RiskDecision {
+    if (input.signal.status !== "PUBLISHED") throw new Error("SIGNAL_NOT_PUBLISHED");
+    if (!input.signal.executionEligible) {
+      throw new Error(input.signal.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE");
+    }
     if (input.signal.context?.contextId !== input.context.contextId) {
       throw new Error("EXECUTOR_CONTEXT_MISMATCH");
     }
+    assertExecutionEnvelopeIntegrity(this.database, input.signal, input.context);
     const row = this.database.prepare(
       `SELECT risk_decision_id,paper_account_id,signal_id,context_id,decision,risk_reason,
               risk_reject_reason,checks_json

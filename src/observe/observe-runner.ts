@@ -1,5 +1,5 @@
 import { activityEventKey, sourceEventKey } from "../domain/idempotency.js";
-import type { PublicActivity, PublicTrade } from "../domain/models.js";
+import { activityAsTrade } from "../domain/activity-trade.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
 import { reconcileProjection } from "./reconciliation.js";
@@ -7,6 +7,9 @@ import { ObserveStore, type StartedObserveRun } from "./observe-store.js";
 import type { ObserveDataSource, ObserveEvent, ObserveRunMetrics } from "./types.js";
 import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
 import type { SourceVersion } from "../infra/source-version.js";
+import { observeSchedulingGapThresholdMs } from "./scheduling.js";
+
+const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
 export interface ObserveRunnerOptions {
   walletAddress: string;
@@ -17,29 +20,6 @@ export interface ObserveRunnerOptions {
   wait?: (milliseconds: number) => Promise<void>;
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
   sourceVersion?: SourceVersion;
-}
-
-function activityAsTrade(activity: PublicActivity): PublicTrade | null {
-  if (
-    activity.type !== "TRADE"
-    || !activity.conditionId
-    || !activity.asset
-    || (activity.side !== "BUY" && activity.side !== "SELL")
-    || activity.price === undefined
-    || activity.size === undefined
-  ) return null;
-  return {
-    proxyWallet: activity.proxyWallet,
-    transactionHash: activity.transactionHash,
-    conditionId: activity.conditionId,
-    asset: activity.asset,
-    side: activity.side,
-    price: activity.price,
-    size: activity.size,
-    timestamp: activity.timestamp,
-    ...(activity.outcome !== undefined ? { outcome: activity.outcome } : {}),
-    ...(activity.title !== undefined ? { title: activity.title } : {}),
-  };
 }
 
 function assertRecoveryCoverage(snapshot: Awaited<ReturnType<ObserveDataSource["poll"]>>, gapFrom: string): void {
@@ -63,6 +43,8 @@ export class ObserveOnlyRunner {
   private started: StartedObserveRun | null = null;
   private gapActive = true;
   private checkpointHashMismatch = false;
+  private lastSuccessfulAt: string | null = null;
+  private lastPollCompletedAt: string | null = null;
 
   constructor(
     private readonly store: ObserveStore,
@@ -74,7 +56,10 @@ export class ObserveOnlyRunner {
   }
 
   start(): StartedObserveRun {
-    if (this.started) return this.started;
+    if (this.started) {
+      if (this.checkpointHashMismatch) throw new Error("CHECKPOINT_PROJECTION_HASH_MISMATCH");
+      return this.started;
+    }
     const now = this.now().toISOString();
     this.started = this.store.startRun(
       this.options.walletAddress,
@@ -86,38 +71,83 @@ export class ObserveOnlyRunner {
     if (this.started.checkpoint) {
       const projection = projectObserveEvents(this.started.baseline, existing);
       this.checkpointHashMismatch = projection.projectionHash !== this.started.checkpoint.positionProjectionHash;
+      if (this.checkpointHashMismatch) {
+        this.store.failCheckpointProjectionMismatch({
+          observeRunId: this.started.observeRunId,
+          baseline: this.started.baseline,
+          checkpoint: this.started.checkpoint,
+          calculatedProjectionHash: projection.projectionHash,
+          detectedAt: now,
+        });
+        throw new Error("CHECKPOINT_PROJECTION_HASH_MISMATCH");
+      }
     }
+    this.lastSuccessfulAt = this.started.checkpoint?.createdAt ?? this.started.baseline.snapshotTime;
     this.gapActive = true;
     return this.started;
   }
 
   async pollOnce(): Promise<boolean> {
     const started = this.start();
+    const storedEvents = this.store.loadObservedEvents(started.baseline.baselineRunId);
+    const oldestUnconfirmedTradeTimestamp = storedEvents
+      .filter((event) => event.trade && !event.activityConfirmed)
+      .reduce<number | null>((oldest, event) => (
+        oldest === null || event.sourceTimestamp < oldest ? event.sourceTimestamp : oldest
+      ), null);
+    const latestConfirmedActivityTimestamp = storedEvents
+      .filter((event) => event.activityConfirmed)
+      .reduce<number | null>((latest, event) => (
+        latest === null || event.sourceTimestamp > latest ? event.sourceTimestamp : latest
+      ), null);
+    const activityFromTimestamp = oldestUnconfirmedTradeTimestamp !== null
+      ? Math.max(1, oldestUnconfirmedTradeTimestamp - 1)
+      : latestConfirmedActivityTimestamp !== null
+        ? Math.max(1, latestConfirmedActivityTimestamp - ACTIVITY_CURSOR_OVERLAP_SECONDS)
+        : undefined;
     const sequence = this.store.nextPollSequence(started.observeRunId);
     const pollStartedAt = this.now().toISOString();
+    if (
+      this.lastPollCompletedAt
+      && Date.parse(pollStartedAt) - Date.parse(this.lastPollCompletedAt)
+        > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
+    ) {
+      this.gapActive = true;
+    }
+    let recoveryFrom = this.gapActive ? (this.lastSuccessfulAt ?? started.gapFrom) : null;
     let snapshot;
     try {
       snapshot = await this.source.poll(
         this.options.walletAddress,
-        this.gapActive ? Math.floor(Date.parse(started.gapFrom) / 1_000) : undefined,
+        recoveryFrom ? Math.floor(Date.parse(recoveryFrom) / 1_000) : undefined,
+        activityFromTimestamp,
       );
     } catch (error) {
       const failedAt = this.now().toISOString();
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
-      this.gapActive = true;
-      return false;
-    }
-
-    try {
-      if (this.gapActive) assertRecoveryCoverage(snapshot, started.gapFrom);
-    } catch (error) {
-      const failedAt = this.now().toISOString();
-      this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error, "PROCESSING_FAILED");
+      this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
       return false;
     }
 
     const completedAt = this.now().toISOString();
+    if (
+      Date.parse(completedAt) - Date.parse(pollStartedAt)
+        > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
+    ) {
+      this.gapActive = true;
+      recoveryFrom = this.lastSuccessfulAt ?? started.gapFrom;
+    }
+    try {
+      if (recoveryFrom) assertRecoveryCoverage(snapshot, recoveryFrom);
+    } catch (error) {
+      const failedAt = this.now().toISOString();
+      this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error, "PROCESSING_FAILED");
+      this.lastPollCompletedAt = failedAt;
+      this.gapActive = true;
+      return false;
+    }
+
     const baselineSecond = Math.floor(Date.parse(started.baseline.snapshotTime) / 1_000);
     const incoming: ObserveEvent[] = [
       ...snapshot.trades.data
@@ -127,6 +157,8 @@ export class ObserveOnlyRunner {
           sourceType: "DATA_API_TRADE",
           sourceTimestamp: trade.timestamp,
           isGap: this.gapActive,
+          isCombo: false,
+          activityConfirmed: false,
           trade,
         })),
       ...snapshot.activity.data
@@ -138,12 +170,16 @@ export class ObserveOnlyRunner {
             sourceType: "DATA_API_TRADE",
             sourceTimestamp: normalizedTrade.timestamp,
             isGap: this.gapActive,
+            isCombo: activity.isCombo === true,
+            activityConfirmed: true,
             trade: normalizedTrade,
           } : {
             sourceEventKey: activityEventKey(activity),
             sourceType: "DATA_API_ACTIVITY",
             sourceTimestamp: activity.timestamp,
             isGap: this.gapActive,
+            isCombo: ["SPLIT", "MERGE", "CONVERSION"].includes(activity.type),
+            activityConfirmed: true,
             activity,
           };
         }),
@@ -151,16 +187,41 @@ export class ObserveOnlyRunner {
     const unique = new Map<string, ObserveEvent>();
     let duplicateEvents = 0;
     for (const event of incoming) {
-      if (unique.has(event.sourceEventKey)) duplicateEvents += 1;
-      else unique.set(event.sourceEventKey, event);
+      const prior = unique.get(event.sourceEventKey);
+      if (prior) {
+        duplicateEvents += 1;
+        if (event.activityConfirmed || event.isCombo) {
+          unique.set(event.sourceEventKey, {
+            ...prior,
+            isCombo: prior.isCombo || event.isCombo,
+            activityConfirmed: prior.activityConfirmed || event.activityConfirmed,
+          });
+        }
+      } else unique.set(event.sourceEventKey, event);
     }
     const existingKeys = this.store.existingEventKeys(started.baseline.baselineRunId, [...unique.keys()]);
     duplicateEvents += existingKeys.size;
     const newEvents = [...unique.values()].filter((event) => !existingKeys.has(event.sourceEventKey));
-    const storedEvents = this.store.loadObservedEvents(started.baseline.baselineRunId);
+    const storedByKey = new Map(storedEvents.map((event) => [event.sourceEventKey, event]));
+    const eventConfirmations = [...unique.values()]
+      .filter((event) => {
+        if (!existingKeys.has(event.sourceEventKey) || !event.activityConfirmed) return false;
+        const stored = storedByKey.get(event.sourceEventKey);
+        return stored !== undefined && (!stored.activityConfirmed || (event.isCombo && !stored.isCombo));
+      })
+      .map((event) => ({ sourceEventKey: event.sourceEventKey, isCombo: event.isCombo }));
+    for (const confirmation of eventConfirmations) {
+      const stored = storedByKey.get(confirmation.sourceEventKey);
+      if (!stored) throw new Error(`Observed event missing during confirmation: ${confirmation.sourceEventKey}`);
+      stored.activityConfirmed = true;
+      stored.isCombo = stored.isCombo || confirmation.isCombo;
+    }
     const projection = projectObserveEvents(started.baseline, [...storedEvents, ...newEvents]);
-    const newKeys = new Set(newEvents.map((event) => event.sourceEventKey));
-    const signalsToEmit = projection.signals.filter((signal) => newKeys.has(signal.sourceEventKey));
+    const signalCandidateKeys = new Set([
+      ...newEvents.filter((event) => event.activityConfirmed).map((event) => event.sourceEventKey),
+      ...eventConfirmations.map((event) => event.sourceEventKey),
+    ]);
+    const signalsToEmit = projection.signals.filter((signal) => signalCandidateKeys.has(signal.sourceEventKey));
     const previousDiffs = this.store.consecutiveDiffCount(started.baseline.baselineRunId);
     const reconciliation = reconcileProjection(projection.projection, snapshot.positions.data, previousDiffs);
     const balanceResult = snapshot.pUsdBalance.data.result;
@@ -178,7 +239,9 @@ export class ObserveOnlyRunner {
     try {
       if (this.options.signalMarketMetadataProvider) {
       const marketCache = new Map<string, Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>();
-      const eventByKey = new Map(newEvents.map((event) => [event.sourceEventKey, event]));
+      const eventByKey = new Map(
+        [...storedEvents, ...newEvents].map((event) => [event.sourceEventKey, event]),
+      );
       for (const signal of signalsToEmit.filter((item) => item.executionEligible)) {
         const event = eventByKey.get(signal.sourceEventKey);
         if (!event?.trade) throw new Error(`Signal event missing: ${signal.signalId}`);
@@ -216,6 +279,7 @@ export class ObserveOnlyRunner {
       }
     } catch (error) {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
+      this.lastPollCompletedAt = completedAt;
       this.gapActive = true;
       return false;
     }
@@ -227,6 +291,7 @@ export class ObserveOnlyRunner {
       completedAt,
       snapshot,
       newEvents,
+      eventConfirmations,
       duplicateEvents,
       projection,
       signalsToEmit,
@@ -236,6 +301,8 @@ export class ObserveOnlyRunner {
       replayState: this.gapActive ? "GAP_RECOVERED" : "ONLINE",
       gapRecovered: this.gapActive,
     });
+    this.lastSuccessfulAt = completedAt;
+    this.lastPollCompletedAt = completedAt;
     this.gapActive = false;
     return true;
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
+import { RULESET, stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { calculateUnrealizedPnl } from "../pnl/pnl-model.js";
 import { matchPaperSell } from "../paper/matching.js";
@@ -68,6 +68,11 @@ export class PortfolioProjectionService {
           unpricedPositionCount += 1;
           continue;
         }
+        const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+        if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+          unpricedPositionCount += 1;
+          continue;
+        }
         const matched = matchPaperSell({
           bids: book.bids,
           requestedSizeMicros: size,
@@ -79,7 +84,6 @@ export class PortfolioProjectionService {
           unpricedPositionCount += 1;
           continue;
         }
-        const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
         const bookId = this.orderbookId(book);
         const feeId = this.feeId(fee);
         this.saveMarketSnapshots(book, fee, age);

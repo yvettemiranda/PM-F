@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.6.0",
+  schemaVersion: "2.18.0",
   signalVersion: "1.4.0",
   strategyVersion: "2.0.0",
-  riskVersion: "1.2.0",
+  riskVersion: "1.4.0",
   replayVersion: "1.5.0",
   paperVersion: "1.2.0",
-  liveVersion: "1.0.0",
+  liveVersion: "1.2.0",
   validationVersion: "1.0.0",
   operationalVersion: "1.0.0",
-  rulesetVersion: "v1.0.0",
+  rulesetVersion: "v1.2.0",
   feeModelVersion: "clob-fd-v1",
   configVersion: "v1.0.0",
 });
@@ -44,6 +44,12 @@ export const RULESET = Object.freeze({
   paperMaxPositionExposurePpm: 1_000_000,
   capitalMode: "PROPORTIONAL_WITH_FIXED_FALLBACK",
   liveBankrollMicros: 1_000_000_000,
+  liveMaxSingleTradePpm: 200_000,
+  liveMaxMarketExposurePpm: 200_000,
+  liveMaxPositionExposurePpm: 200_000,
+  liveMaxTotalExposurePpm: 500_000,
+  liveMaxDailyLossPpm: 50_000,
+  liveMaxConsecutiveLosses: 5,
   liveMaxTradeSizeMicros: 200_000_000,
   liveMaxExposureMicros: 500_000_000,
   liveMaxDailyLossMicros: 50_000_000,

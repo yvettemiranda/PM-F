@@ -3,12 +3,14 @@ import { DatabaseSync } from "node:sqlite";
 import type { ApiCapture } from "../adapters/polymarket-public.js";
 import { ACTIVITY_IDENTITY_VERSION, SOURCE_IDENTITY_VERSION } from "../domain/idempotency.js";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
-import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../domain/versioning.js";
+import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS, stableJson } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
-import { captureIdentity } from "../services/capture-manifest.js";
+import { captureIdentityFromResponseJson } from "../services/capture-manifest.js";
 import type { CapitalEstimate } from "../services/capital-estimator.js";
 import type { SignalContextBundle } from "../signal-context/execution-context.js";
 import { OBSERVE_SIGNAL_VERSION } from "./position-projector.js";
+import { deriveObserveSchedulingMetrics } from "./scheduling.js";
+import { storeCompressedCapturePayload } from "../infra/sqlite/capture-payload.js";
 import type {
   ObserveBaseline,
   ObserveEvent,
@@ -44,6 +46,7 @@ export interface CommitPollInput {
   completedAt: string;
   snapshot: ObservePollSnapshot;
   newEvents: ObserveEvent[];
+  eventConfirmations: Array<{ sourceEventKey: string; isCombo: boolean }>;
   duplicateEvents: number;
   projection: ObserveProjectionResult;
   signalsToEmit: ObserveSignal[];
@@ -54,48 +57,48 @@ export interface CommitPollInput {
   gapRecovered: boolean;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 export class ObserveStore {
   private readonly database: DatabaseSync;
 
   constructor(path: string, private readonly sourceVersion: SourceVersion) {
     this.database = new DatabaseSync(path);
-    this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
+    this.database.exec("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
   }
 
   startRun(walletAddress: string, pollIntervalMs: number, now: string, staleAfterMs: number): StartedObserveRun {
-    const baseline = this.loadBaseline(walletAddress);
-    const target = this.database
-      .prepare("SELECT target_id FROM monitor_targets WHERE wallet_address=?")
-      .get(walletAddress.toLowerCase()) as { target_id: string } | undefined;
-    if (!target) throw new Error(`Monitor target not found: ${walletAddress}`);
-    const latestRunning = this.database
-      .prepare("SELECT observe_run_id,last_heartbeat_at FROM observe_runs WHERE target_id=? AND state='RUNNING' ORDER BY started_at DESC LIMIT 1")
-      .get(target.target_id) as { observe_run_id: string; last_heartbeat_at: string } | undefined;
-    const staleBefore = Date.parse(now) - staleAfterMs;
-    if (latestRunning && Date.parse(latestRunning.last_heartbeat_at) >= staleBefore) {
-      throw new Error(`OBSERVE_INSTANCE_ACTIVE:${latestRunning.observe_run_id}`);
-    }
-    const checkpointRow = this.database
-      .prepare(
-        `SELECT checkpoint_id,created_at,position_projection_hash,replay_state,
-                last_processed_timestamp,last_processed_event_id
-         FROM observe_checkpoints WHERE target_id=? ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(target.target_id) as {
-        checkpoint_id: string;
-        created_at: string;
-        position_projection_hash: string;
-        replay_state: string;
-        last_processed_timestamp: number | null;
-        last_processed_event_id: string | null;
-      } | undefined;
+    let baseline: ObserveBaseline;
+    let checkpointRow: {
+      checkpoint_id: string;
+      created_at: string;
+      position_projection_hash: string;
+      replay_state: string;
+      last_processed_timestamp: number | null;
+      last_processed_event_id: string | null;
+    } | undefined;
     const observeRunId = randomUUID();
+    const staleBefore = Date.parse(now) - staleAfterMs;
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      baseline = this.loadBaseline(walletAddress);
+      const target = this.database
+        .prepare("SELECT target_id FROM monitor_targets WHERE wallet_address=?")
+        .get(walletAddress.toLowerCase()) as { target_id: string } | undefined;
+      if (!target) throw new Error(`Monitor target not found: ${walletAddress}`);
+      const latestRunning = this.database
+        .prepare("SELECT observe_run_id,last_heartbeat_at FROM observe_runs WHERE target_id=? AND state='RUNNING' ORDER BY started_at DESC LIMIT 1")
+        .get(target.target_id) as { observe_run_id: string; last_heartbeat_at: string } | undefined;
+      if (latestRunning && Date.parse(latestRunning.last_heartbeat_at) >= staleBefore) {
+        throw new Error(`OBSERVE_INSTANCE_ACTIVE:${latestRunning.observe_run_id}`);
+      }
+      checkpointRow = this.database
+        .prepare(
+          `SELECT checkpoint_id,created_at,position_projection_hash,replay_state,
+                  last_processed_timestamp,last_processed_event_id
+           FROM observe_checkpoints
+           WHERE target_id=? AND baseline_run_id=?
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(target.target_id, baseline.baselineRunId) as typeof checkpointRow;
       if (latestRunning) {
         this.database
           .prepare("UPDATE observe_runs SET state='INTERRUPTED',stopped_at=?,stop_reason='STALE_RUN_RECOVERED' WHERE observe_run_id=?")
@@ -177,7 +180,8 @@ export class ObserveStore {
   loadObservedEvents(baselineRunId: string): ObserveEvent[] {
     const rows = this.database
       .prepare(
-        `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,r.raw_json
+        `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,
+                o.activity_confirmed,r.is_combo,r.raw_json
          FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
          WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,
       )
@@ -186,6 +190,8 @@ export class ObserveStore {
         source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY";
         source_timestamp: number;
         is_gap: number;
+        activity_confirmed: number;
+        is_combo: number;
         raw_json: string;
       }>;
     return rows.map((row) => ({
@@ -193,6 +199,8 @@ export class ObserveStore {
       sourceType: row.source_type,
       sourceTimestamp: row.source_timestamp,
       isGap: row.is_gap !== 0,
+      isCombo: row.is_combo !== 0,
+      activityConfirmed: row.activity_confirmed !== 0,
       ...(row.source_type === "DATA_API_TRADE" ? { trade: JSON.parse(row.raw_json) } : { activity: JSON.parse(row.raw_json) }),
     }));
   }
@@ -222,6 +230,56 @@ export class ObserveStore {
       .prepare("SELECT sync_status FROM monitor_targets WHERE target_id=?")
       .get(targetId) as { sync_status: "SYNCED" | "MINOR_DIFF" | "MAJOR_DESYNC" };
     return row.sync_status;
+  }
+
+  failCheckpointProjectionMismatch(input: {
+    observeRunId: string;
+    baseline: ObserveBaseline;
+    checkpoint: ObserveCheckpoint;
+    calculatedProjectionHash: string;
+    detectedAt: string;
+  }): void {
+    const issueId = createHash("sha256").update(stableJson({
+      issueType: "CHECKPOINT_PROJECTION_HASH_MISMATCH",
+      targetId: input.baseline.targetId,
+      baselineRunId: input.baseline.baselineRunId,
+      checkpointId: input.checkpoint.checkpointId,
+      expected: input.checkpoint.positionProjectionHash,
+      observed: input.calculatedProjectionHash,
+    })).digest("hex");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        `INSERT OR IGNORE INTO reconciliation_issues(
+          issue_id,target_id,asset_id,issue_type,expected_value,observed_value,
+          sync_status,status,detail_json,created_at,resolved_at
+        ) VALUES (?, ?, NULL, 'CHECKPOINT_PROJECTION_HASH_MISMATCH', ?, ?,
+          'MAJOR_DESYNC', 'OPEN', ?, ?, NULL)`,
+      ).run(
+        issueId,
+        input.baseline.targetId,
+        input.checkpoint.positionProjectionHash,
+        input.calculatedProjectionHash,
+        stableJson({
+          observeRunId: input.observeRunId,
+          baselineRunId: input.baseline.baselineRunId,
+          checkpointId: input.checkpoint.checkpointId,
+        }),
+        input.detectedAt,
+      );
+      this.database.prepare(
+        "UPDATE monitor_targets SET sync_status='MAJOR_DESYNC',updated_at=? WHERE target_id=?",
+      ).run(input.detectedAt, input.baseline.targetId);
+      this.database.prepare(
+        `UPDATE observe_runs
+         SET state='FAILED',stopped_at=?,stop_reason='CHECKPOINT_PROJECTION_HASH_MISMATCH',last_heartbeat_at=?
+         WHERE observe_run_id=? AND state='RUNNING'`,
+      ).run(input.detectedAt, input.detectedAt, input.observeRunId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   nextPollSequence(observeRunId: string): number {
@@ -303,6 +361,20 @@ export class ObserveStore {
         );
       this.savePollCaptures(pollId, input.snapshot);
       for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
+      for (const confirmation of input.eventConfirmations) {
+        if (confirmation.isCombo) {
+          const existingSignal = this.database.prepare(
+            "SELECT signal_id FROM signals WHERE source_event_key=? AND producer_mode='OBSERVE_ONLY' LIMIT 1",
+          ).get(confirmation.sourceEventKey) as { signal_id: string } | undefined;
+          if (existingSignal) throw new Error(`COMBO_SIGNAL_CONFLICT:${existingSignal.signal_id}`);
+          this.database.prepare(
+            "UPDATE raw_events SET is_combo=1,event_classification='COMBO_ACTIVITY' WHERE source_event_key=?",
+          ).run(confirmation.sourceEventKey);
+        }
+        this.database.prepare(
+          "UPDATE observe_events SET activity_confirmed=1 WHERE baseline_run_id=? AND source_event_key=?",
+        ).run(input.baseline.baselineRunId, confirmation.sourceEventKey);
+      }
       this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
       for (const bundle of input.signalContexts) {
         if (bundle.capitalDecision) {
@@ -451,7 +523,7 @@ export class ObserveStore {
   runMetrics(observeRunId: string): ObserveRunMetrics {
     const row = this.database
       .prepare(
-        `SELECT started_at,COALESCE(stopped_at,last_heartbeat_at) stopped_at,
+        `SELECT started_at,COALESCE(stopped_at,last_heartbeat_at) stopped_at,poll_interval_ms,
                 successful_polls,failed_polls,processed_events,emitted_signals,
                 duplicate_events,gap_events,reconciliation_count,recovered_from_checkpoint
          FROM observe_runs WHERE observe_run_id=?`,
@@ -459,6 +531,7 @@ export class ObserveStore {
       .get(observeRunId) as {
         started_at: string;
         stopped_at: string;
+        poll_interval_ms: number;
         successful_polls: number;
         failed_polls: number;
         processed_events: number;
@@ -468,6 +541,15 @@ export class ObserveStore {
         reconciliation_count: number;
         recovered_from_checkpoint: number;
       };
+    const pollTimings = this.database
+      .prepare("SELECT started_at,completed_at FROM observe_polls WHERE observe_run_id=? ORDER BY sequence")
+      .all(observeRunId) as Array<{ started_at: string; completed_at: string }>;
+    const scheduling = deriveObserveSchedulingMetrics(
+      row.started_at,
+      row.stopped_at,
+      row.poll_interval_ms,
+      pollTimings.map((poll) => ({ startedAt: poll.started_at, completedAt: poll.completed_at })),
+    );
     const checkpoint = this.database
       .prepare("SELECT checkpoint_id FROM observe_checkpoints WHERE observe_run_id=? ORDER BY created_at DESC LIMIT 1")
       .get(observeRunId) as { checkpoint_id: string } | undefined;
@@ -496,6 +578,7 @@ export class ObserveStore {
       startedAt: row.started_at,
       stoppedAt: row.stopped_at,
       durationMs: Date.parse(row.stopped_at) - Date.parse(row.started_at),
+      ...scheduling,
       successfulPolls: row.successful_polls,
       failedPolls: row.failed_polls,
       processedEvents: row.processed_events,
@@ -528,12 +611,14 @@ export class ObserveStore {
     const insertCapture = this.database.prepare(
       `INSERT OR IGNORE INTO api_captures(
         capture_id,endpoint,request_url,fetched_at,latency_ms,http_status,
-        payload_sha256,response_json,schema_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        payload_sha256,response_json,schema_version,response_encoding
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 'GZIP_SHA256')`,
     );
     const link = this.database.prepare("INSERT INTO observe_poll_captures(poll_id,endpoint,capture_id) VALUES (?, ?, ?)");
     for (const [endpoint, capture] of entries) {
-      const identity = captureIdentity(capture);
+      const responseJson = JSON.stringify(capture.data);
+      const identity = captureIdentityFromResponseJson(capture.url, capture.fetchedAt, responseJson);
+      storeCompressedCapturePayload(this.database, identity.payloadSha256, responseJson, capture.fetchedAt);
       insertCapture.run(
         identity.captureId,
         endpoint,
@@ -542,7 +627,6 @@ export class ObserveStore {
         capture.latencyMs,
         capture.status,
         identity.payloadSha256,
-        JSON.stringify(capture.data),
         VERSIONS.schemaVersion,
       );
       link.run(pollId, endpoint, identity.captureId);
@@ -554,7 +638,7 @@ export class ObserveStore {
     const trade = event.trade;
     const activityType = event.activity?.type;
     const classification = trade
-      ? event.isGap ? "GAP_TRADE" : "STANDARD_TRADE"
+      ? event.isCombo ? "COMBO_ACTIVITY" : event.isGap ? "GAP_TRADE" : "STANDARD_TRADE"
       : activityType && ["SPLIT", "MERGE", "CONVERSION"].includes(activityType)
         ? "COMBO_ACTIVITY"
         : activityType && ["REDEEM", "REWARD", "MAKER_REBATE", "REFERRAL_REWARD"].includes(activityType)
@@ -581,7 +665,7 @@ export class ObserveStore {
         trade ? decimalToScaled(trade.price, PRICE_SCALE_DIGITS).toString() : "0",
         trade ? decimalToScaled(trade.size, SHARE_SCALE_DIGITS).toString() : "0",
         event.isGap ? 1 : 0,
-        event.activity && ["SPLIT", "MERGE", "CONVERSION"].includes(event.activity.type) ? 1 : 0,
+        event.isCombo ? 1 : 0,
         JSON.stringify(raw),
         input.completedAt,
         classification,
@@ -590,8 +674,8 @@ export class ObserveStore {
       .prepare(
         `INSERT INTO observe_events(
           observe_event_id,baseline_run_id,source_event_key,source_type,source_timestamp,
-          is_gap,first_observe_run_id,first_poll_id,first_observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          is_gap,activity_confirmed,first_observe_run_id,first_poll_id,first_observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         createHash("sha256").update(`${input.baseline.baselineRunId}|${event.sourceEventKey}`).digest("hex"),
@@ -600,6 +684,7 @@ export class ObserveStore {
         event.sourceType,
         event.sourceTimestamp,
         event.isGap ? 1 : 0,
+        event.activityConfirmed ? 1 : 0,
         input.observeRunId,
         pollId,
         input.completedAt,
@@ -614,7 +699,7 @@ export class ObserveStore {
   ): void {
     this.database
       .prepare(
-        `INSERT OR REPLACE INTO capital_estimates(
+        `INSERT OR IGNORE INTO capital_estimates(
           capital_estimate_id,target_id,source_event_key,position_value_micros,wallet_balance_micros,
           target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
           capital_estimate_status,capital_confidence,capital_estimate_reason,position_snapshot_time,
@@ -648,6 +733,39 @@ export class ObserveStore {
         this.sourceVersion.dirty ? 1 : 0,
         createdAt,
       );
+    const stored = this.database.prepare(
+      `SELECT target_id,source_event_key,position_value_micros,wallet_balance_micros,
+              target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+              capital_estimate_status,capital_confidence,capital_estimate_reason,
+              position_snapshot_time,wallet_balance_snapshot_time,target_trade_timestamp,
+              fallback_amount_micros,schema_version,strategy_version,risk_version,
+              ruleset_snapshot_json,ruleset_hash
+       FROM capital_estimates WHERE capital_estimate_id=?`,
+    ).get(estimate.capitalEstimateId) as Record<string, unknown> | undefined;
+    const expected = {
+      target_id: targetId,
+      source_event_key: sourceEventKey,
+      position_value_micros: estimate.positionValueMicros,
+      wallet_balance_micros: estimate.walletBalanceMicros,
+      target_visible_capital_micros: estimate.targetVisibleCapitalMicros,
+      target_trade_amount_micros: estimate.targetTradeAmountMicros,
+      target_trade_capital_ratio_ppm: estimate.targetTradeCapitalRatioPpm,
+      capital_estimate_status: estimate.capitalEstimateStatus,
+      capital_confidence: estimate.capitalConfidence,
+      capital_estimate_reason: estimate.capitalEstimateReason,
+      position_snapshot_time: estimate.positionSnapshotTime,
+      wallet_balance_snapshot_time: estimate.walletBalanceSnapshotTime,
+      target_trade_timestamp: estimate.targetTradeTimestamp,
+      fallback_amount_micros: estimate.fallbackAmountMicros,
+      schema_version: VERSIONS.schemaVersion,
+      strategy_version: VERSIONS.strategyVersion,
+      risk_version: VERSIONS.riskVersion,
+      ruleset_snapshot_json: RULESET_SNAPSHOT_JSON,
+      ruleset_hash: RULESET_HASH,
+    };
+    if (!stored || stableJson(stored) !== stableJson(expected)) {
+      throw new Error(`CAPITAL_ESTIMATE_CONFLICT:${estimate.capitalEstimateId}`);
+    }
   }
 
   private insertObserveSignal(input: CommitPollInput, pollId: string, signal: ObserveSignal): void {

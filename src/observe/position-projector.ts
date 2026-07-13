@@ -21,7 +21,6 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
 
   const allOrdered = [...events]
     .sort((a, b) => a.sourceTimestamp - b.sourceTimestamp || a.sourceEventKey.localeCompare(b.sourceEventKey));
-  const ordered = allOrdered.filter((event) => event.trade !== undefined);
 
   for (const event of allOrdered) {
     if (event.activity) {
@@ -36,6 +35,7 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
       }
       continue;
     }
+    if (event.isCombo) continue;
     const trade = event.trade!;
     conditionByAsset.set(trade.asset, trade.conditionId.toLowerCase());
     const size = decimalToScaled(trade.size, SHARE_SCALE_DIGITS);
@@ -45,6 +45,7 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
     if (trade.side === "BUY") {
       if (event.isGap) historical.set(trade.asset, beforeHistorical + size);
       else tracked.set(trade.asset, beforeTracked + size);
+      if (!event.activityConfirmed) continue;
       const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_BUY");
       signals.push({
         signalId: id,
@@ -70,6 +71,7 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
     const remaining = size - recognizedSell;
     const historicalSell = remaining < beforeHistorical ? remaining : beforeHistorical;
     historical.set(trade.asset, beforeHistorical - historicalSell);
+    if (!event.activityConfirmed) continue;
     if (event.isGap || beforeTracked > 0n) {
       const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_SELL");
       signals.push({

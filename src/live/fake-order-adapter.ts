@@ -15,12 +15,15 @@ export class FakeOrderAdapter implements OrderAdapter {
     const externalOrderId = `fake-${order.liveOrderId}`;
     const ratio = BigInt(this.options.fillRatioPpm ?? 1_000_000);
     const filledSize = (BigInt(order.sizeMicros) * ratio) / 1_000_000n;
-    const filledNotional = (BigInt(order.amountMicros) * ratio) / 1_000_000n;
+    const quotePrice = BigInt(order.quoteVwapPriceUnits);
+    const filledNotional = order.side === "BUY"
+      ? (filledSize * quotePrice + 1_000_000_000_000_000_000n - 1n) / 1_000_000_000_000_000_000n
+      : (filledSize * quotePrice) / 1_000_000_000_000_000_000n;
     const status = this.options.forceStatus
       ?? (filledSize === 0n ? "ACKNOWLEDGED" : filledSize < BigInt(order.sizeMicros) ? "PARTIALLY_FILLED" : "FILLED");
     const fill: LiveFillEvent[] = filledSize > 0n ? [{
       externalFillId: `${externalOrderId}-fill-1`,
-      priceUnits: order.priceUnits,
+      priceUnits: order.quoteVwapPriceUnits,
       sizeMicros: filledSize.toString(),
       notionalMicros: filledNotional.toString(),
       feeMicros: "0",
@@ -31,6 +34,8 @@ export class FakeOrderAdapter implements OrderAdapter {
       adapterType: this.adapterType,
       externalOrderId,
       status,
+      confirmationPending: false,
+      terminal: !["CREATED", "SUBMITTED", "ACKNOWLEDGED"].includes(status),
       filledSizeMicros: filledSize.toString(),
       raw: { fake: true, idempotencyKey: order.idempotencyKey },
     };
@@ -40,6 +45,8 @@ export class FakeOrderAdapter implements OrderAdapter {
       adapterType: this.adapterType,
       externalOrderId,
       status,
+      confirmationPending: false,
+      terminal: !["CREATED", "SUBMITTED", "ACKNOWLEDGED"].includes(status),
       fills: fill,
       raw: { fake: true, idempotencyKey: order.idempotencyKey },
     };
@@ -51,10 +58,19 @@ export class FakeOrderAdapter implements OrderAdapter {
       adapterType: this.adapterType,
       externalOrderId: orderId,
       status: "CANCELLED",
+      confirmationPending: false,
+      terminal: true,
       filledSizeMicros: existing?.filledSizeMicros ?? "0",
       raw: { fake: true, cancelled: true },
     });
-    return { adapterType: this.adapterType, cancelled: true, status: "CANCELLED", raw: { fake: true } };
+    return {
+      adapterType: this.adapterType,
+      cancelled: true,
+      status: "CANCELLED",
+      confirmationPending: false,
+      terminal: true,
+      raw: { fake: true },
+    };
   }
 
   async getOrder(orderId: string): Promise<OrderStatus> {
@@ -64,7 +80,7 @@ export class FakeOrderAdapter implements OrderAdapter {
   }
 
   async getOpenOrders(): Promise<OrderStatus[]> {
-    return [...this.orders.values()].filter((order) => ["CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED"].includes(order.status));
+    return [...this.orders.values()].filter((order) => order.terminal !== true);
   }
 
   async getFills(orderId: string): Promise<LiveFillEvent[]> {

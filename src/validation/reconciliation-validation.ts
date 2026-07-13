@@ -17,6 +17,25 @@ export class ReconciliationValidation implements ValidationValidator {
       const observeReports = database.prepare(
         `SELECT sync_status,count(*) count FROM reconciliation_reports GROUP BY sync_status`,
       ).all() as unknown as Array<{ sync_status: string; count: number }>;
+      const latestObserveReport = database.prepare(
+        `SELECT reconciliation_report_id,observe_run_id,sync_status,created_at
+         FROM reconciliation_reports ORDER BY created_at DESC,reconciliation_report_id DESC LIMIT 1`,
+      ).get() as {
+        reconciliation_report_id: string;
+        observe_run_id: string;
+        sync_status: "SYNCED" | "MINOR_DIFF" | "MAJOR_DESYNC";
+        created_at: string;
+      } | undefined;
+      const historicalMajorDesyncCount = observeReports
+        .find((report) => report.sync_status === "MAJOR_DESYNC")?.count ?? 0;
+      const observeStatus = latestObserveReport?.sync_status === "SYNCED"
+        ? "PASS"
+        : latestObserveReport?.sync_status === "MAJOR_DESYNC" ? "FAIL" : "WARN";
+      const observeReason = !latestObserveReport
+        ? "OBSERVE_RECONCILIATION_NOT_RUN"
+        : latestObserveReport.sync_status === "SYNCED"
+          ? "OK"
+          : `OBSERVE_RECONCILIATION_${latestObserveReport.sync_status}`;
       return [
         check({
           checkType: this.type,
@@ -37,10 +56,15 @@ export class ReconciliationValidation implements ValidationValidator {
         check({
           checkType: this.type,
           checkName: "observe_reconciliation_reports",
-          status: observeReports.length === 0 ? "WARN" : "PASS",
-          blocking: false,
-          reason: observeReports.length === 0 ? "OBSERVE_RECONCILIATION_NOT_RUN" : "OK",
-          metrics: { observeReports },
+          status: observeStatus,
+          blocking: observeStatus === "FAIL",
+          reason: observeReason,
+          metrics: {
+            latestReport: latestObserveReport ?? null,
+            latestSyncStatus: latestObserveReport?.sync_status ?? null,
+            historicalMajorDesyncCount,
+            observeReports,
+          },
           now: context.now,
         }),
       ];

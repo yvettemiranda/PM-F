@@ -1,4 +1,18 @@
 import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from "../domain/models.js";
+import { stableJson } from "../domain/versioning.js";
+import {
+  parseClobMarket,
+  parseClobMarketInfo,
+  parseClobOrderbook,
+  parseClobTime,
+  parseFeeRate,
+  parsePublicActivity,
+  parsePublicPositions,
+  parsePublicProfile,
+  parsePublicTrades,
+  parseRelayerDeployment,
+  parseRpcResponse,
+} from "./public-api-schema.js";
 
 export interface ApiCapture<T> {
   url: string;
@@ -13,6 +27,10 @@ export interface PagedResult<T> {
   captures: ApiCapture<T[]>[];
   historyComplete: boolean;
   stopReason: string;
+}
+
+export interface MergedPagedResult<T> extends PagedResult<T> {
+  merged: ApiCapture<T[]>;
 }
 
 export interface ClobOrderbook {
@@ -57,6 +75,20 @@ export interface PublicApiOptions {
   polygonRpcUrl?: string;
 }
 
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+function assertAddress(address: string): string {
+  if (!ADDRESS_RE.test(address)) throw new Error(`INVALID_WALLET_ADDRESS:${address}`);
+  return address.toLowerCase();
+}
+
+function assertPageLimit(name: string, value: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`INVALID_${name.toUpperCase()}_LIMIT:${value}`);
+  }
+  return value;
+}
+
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -80,9 +112,19 @@ export class PolymarketPublicApi {
     this.backoffFactor = options.backoffFactor ?? 2;
     this.maxBackoffMs = options.maxBackoffMs ?? 30_000;
     this.polygonRpcUrl = options.polygonRpcUrl ?? "https://polygon-bor-rpc.publicnode.com";
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) throw new Error("INVALID_REQUEST_TIMEOUT");
+    if (!Number.isSafeInteger(this.maxRetries) || this.maxRetries < 0) throw new Error("INVALID_MAX_RETRIES");
+    if (!Number.isFinite(this.backoffFactor) || this.backoffFactor < 1) throw new Error("INVALID_BACKOFF_FACTOR");
+    if (!Number.isSafeInteger(this.maxBackoffMs) || this.maxBackoffMs <= 0) throw new Error("INVALID_MAX_BACKOFF");
+    try {
+      const rpc = new URL(this.polygonRpcUrl);
+      if (rpc.protocol !== "https:") throw new Error("INVALID_RPC_PROTOCOL");
+    } catch {
+      throw new Error("INVALID_POLYGON_RPC_URL");
+    }
   }
 
-  private async request<T>(url: string, init?: RequestInit): Promise<ApiCapture<T>> {
+  private async request<T>(url: string, init?: RequestInit, parse?: (value: unknown) => T): Promise<ApiCapture<T>> {
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       const started = performance.now();
@@ -100,7 +142,7 @@ export class PolymarketPublicApi {
             fetchedAt: new Date().toISOString(),
             latencyMs,
             status: response.status,
-            data: JSON.parse(body) as T,
+            data: parse ? parse(JSON.parse(body) as unknown) : JSON.parse(body) as T,
           };
         }
       } catch (error) {
@@ -115,90 +157,155 @@ export class PolymarketPublicApi {
   }
 
   async profile(address: string): Promise<ApiCapture<PublicProfile>> {
-    return this.request(`https://gamma-api.polymarket.com/public-profile?address=${address}`);
+    return this.request(`https://gamma-api.polymarket.com/public-profile?address=${encodeURIComponent(assertAddress(address))}`, undefined, parsePublicProfile);
   }
 
   async positions(address: string): Promise<ApiCapture<PublicPosition[]>> {
-    return this.request(`https://data-api.polymarket.com/positions?user=${address}&sizeThreshold=0&limit=500&offset=0`);
+    return this.request(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(assertAddress(address))}&sizeThreshold=0&limit=500&offset=0`, undefined, parsePublicPositions);
+  }
+
+  async allPositions(address: string): Promise<MergedPagedResult<PublicPosition>> {
+    const wallet = encodeURIComponent(assertAddress(address));
+    const result = await this.paged<PublicPosition>(
+      (offset) => `https://data-api.polymarket.com/positions?user=${wallet}&sizeThreshold=0&limit=500&offset=${offset}`,
+      500,
+      parsePublicPositions,
+    );
+    const last = result.captures.at(-1);
+    if (!last) throw new Error("Positions pagination returned no capture");
+    const seenAssets = new Set<string>();
+    for (const position of result.rows) {
+      if (seenAssets.has(position.asset)) {
+        throw new Error(`API_SCHEMA_INVALID:positions:duplicate_asset:${position.asset}`);
+      }
+      seenAssets.add(position.asset);
+    }
+    return {
+      ...result,
+      merged: {
+        url: `${last.url}&mergedPages=${result.captures.length}`,
+        fetchedAt: last.fetchedAt,
+        latencyMs: result.captures.reduce((total, capture) => total + capture.latencyMs, 0),
+        status: last.status,
+        data: result.rows,
+      },
+    };
   }
 
   async trades(address: string): Promise<PagedResult<PublicTrade>> {
+    const wallet = encodeURIComponent(assertAddress(address));
     return this.paged<PublicTrade>(
-      (offset) => `https://data-api.polymarket.com/trades?user=${address}&takerOnly=false&limit=1000&offset=${offset}`,
+      (offset) => `https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=1000&offset=${offset}`,
       1_000,
+      parsePublicTrades,
     );
   }
 
   async recentTrades(address: string, limit = 1_000): Promise<ApiCapture<PublicTrade[]>> {
-    return this.request(`https://data-api.polymarket.com/trades?user=${address}&takerOnly=false&limit=${limit}&offset=0`);
+    const wallet = encodeURIComponent(assertAddress(address));
+    return this.request(`https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=${assertPageLimit("trades", limit, 1_000)}&offset=0`, undefined, parsePublicTrades);
   }
 
   async activity(address: string): Promise<PagedResult<PublicActivity>> {
+    const wallet = encodeURIComponent(assertAddress(address));
     return this.paged<PublicActivity>(
       (offset) =>
-        `https://data-api.polymarket.com/activity?user=${address}&limit=500&offset=${offset}&sortBy=TIMESTAMP&sortDirection=DESC`,
+        `https://data-api.polymarket.com/activity?user=${wallet}&limit=500&offset=${offset}&sortBy=TIMESTAMP&sortDirection=DESC`,
       500,
+      parsePublicActivity,
     );
   }
 
   async recentActivity(address: string, limit = 500): Promise<ApiCapture<PublicActivity[]>> {
+    const wallet = encodeURIComponent(assertAddress(address));
     return this.request(
-      `https://data-api.polymarket.com/activity?user=${address}&limit=${limit}&offset=0&sortBy=TIMESTAMP&sortDirection=DESC`,
+      `https://data-api.polymarket.com/activity?user=${wallet}&limit=${assertPageLimit("activity", limit, 500)}&offset=0&sortBy=TIMESTAMP&sortDirection=DESC`,
+      undefined,
+      parsePublicActivity,
     );
   }
 
-  private async paged<T>(urlForOffset: (offset: number) => string, pageSize: number): Promise<PagedResult<T>> {
+  async activitySince(address: string, startTimestamp: number): Promise<PagedResult<PublicActivity>> {
+    if (!Number.isSafeInteger(startTimestamp) || startTimestamp < 0) {
+      throw new Error("INVALID_ACTIVITY_START_TIMESTAMP");
+    }
+    const wallet = encodeURIComponent(assertAddress(address));
+    return this.paged<PublicActivity>(
+      (offset) => `https://data-api.polymarket.com/activity?user=${wallet}&limit=500&offset=${offset}&start=${startTimestamp}&sortBy=TIMESTAMP&sortDirection=ASC`,
+      500,
+      parsePublicActivity,
+    );
+  }
+
+  private async paged<T>(
+    urlForOffset: (offset: number) => string,
+    pageSize: number,
+    parsePage: (value: unknown) => T[],
+  ): Promise<PagedResult<T>> {
     const rows: T[] = [];
     const captures: ApiCapture<T[]>[] = [];
+    const finish = async (historyComplete: boolean, stopReason: string): Promise<PagedResult<T>> => {
+      // Offset pagination is not snapshot-isolated. If page zero changed while
+      // later offsets were being read, the merged history can contain a hole;
+      // fail closed and let the caller retry from its persisted cursor.
+      if (captures.length > 1) {
+        const head = await this.request<T[]>(urlForOffset(0), undefined, parsePage);
+        if (stableJson(head.data) !== stableJson(captures[0]!.data)) {
+          throw new Error("PAGINATION_SNAPSHOT_DRIFT");
+        }
+      }
+      return { rows, captures, historyComplete, stopReason };
+    };
     for (let offset = 0; offset <= 10_000; offset += pageSize) {
       try {
-        const capture = await this.request<T[]>(urlForOffset(offset));
+        const capture = await this.request<T[]>(urlForOffset(offset), undefined, parsePage);
         captures.push(capture);
         rows.push(...capture.data);
         if (capture.data.length < pageSize) {
-          return { rows, captures, historyComplete: true, stopReason: "END_OF_DATA" };
+          return finish(true, "END_OF_DATA");
         }
       } catch (error) {
         if (error instanceof HttpError && error.status === 400 && error.body.includes("max historical activity offset")) {
-          return { rows, captures, historyComplete: false, stopReason: error.body };
+          return finish(false, error.body);
         }
         throw error;
       }
     }
-    return { rows, captures, historyComplete: false, stopReason: "CLIENT_OFFSET_LIMIT" };
+    return finish(false, "CLIENT_OFFSET_LIMIT");
   }
 
   async clobTime(): Promise<ApiCapture<number>> {
-    return this.request("https://clob.polymarket.com/time");
+    return this.request("https://clob.polymarket.com/time", undefined, parseClobTime);
   }
 
   async orderbook(assetId: string): Promise<ApiCapture<ClobOrderbook>> {
-    return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`);
+    return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`, undefined, parseClobOrderbook);
   }
 
   async feeRate(assetId: string): Promise<ApiCapture<{ base_fee: number }>> {
-    return this.request(`https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`);
+    return this.request(`https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`, undefined, parseFeeRate);
   }
 
   async clobMarket(conditionId: string): Promise<ApiCapture<ClobMarket>> {
-    return this.request(`https://clob.polymarket.com/markets/${encodeURIComponent(conditionId)}`);
+    return this.request(`https://clob.polymarket.com/markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarket);
   }
 
   async clobMarketInfo(conditionId: string): Promise<ApiCapture<ClobMarketInfo>> {
-    return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`);
+    return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarketInfo);
   }
 
   async contractCode(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {
+    const wallet = assertAddress(address);
     return this.request(this.polygonRpcUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [address, "latest"] }),
-    });
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [wallet, "latest"] }),
+    }, parseRpcResponse);
   }
 
   async pUsdBalance(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {
     const token = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
-    const account = address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+    const account = assertAddress(address).replace(/^0x/, "").padStart(64, "0");
     return this.request(this.polygonRpcUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -208,13 +315,15 @@ export class PolymarketPublicApi {
         method: "eth_call",
         params: [{ to: token, data: `0x70a08231${account}` }, "latest"],
       }),
-    });
+    }, parseRpcResponse);
   }
 
   async relayerDeployed(address: string, type: "SAFE" | "WALLET"): Promise<ApiCapture<{ deployed: boolean }> | null> {
+    const wallet = encodeURIComponent(assertAddress(address));
     try {
-      return await this.request(`https://relayer-v2.polymarket.com/deployed?address=${address}&type=${type}`);
-    } catch {
+      return await this.request(`https://relayer-v2.polymarket.com/deployed?address=${wallet}&type=${type}`, undefined, parseRelayerDeployment);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("API_SCHEMA_INVALID:")) throw error;
       return null;
     }
   }

@@ -15,6 +15,11 @@ function scalar(database: DatabaseSync, sql: string): string {
   return String(row?.value ?? "0");
 }
 
+function sumTextColumn(database: DatabaseSync, sql: string): string {
+  const rows = database.prepare(sql).all() as unknown as Array<{ value: string }>;
+  return rows.reduce((total, row) => total + BigInt(row.value), 0n).toString();
+}
+
 export class PaperReplayValidation implements ValidationValidator {
   readonly type = "PAPER_REPLAY" as const;
 
@@ -68,21 +73,42 @@ export class PaperReplayValidation implements ValidationValidator {
   private paperExecutionSummary(database: DatabaseSync, now: () => Date): ValidationCheckResult {
     const metrics = {
       signals: scalar(database, "SELECT count(*) value FROM signals"),
+      executionAttempts: scalar(database, "SELECT count(*) value FROM paper_executions"),
       executed: scalar(database, "SELECT count(*) value FROM paper_executions WHERE state='EXECUTED'"),
       rejected: scalar(database, "SELECT count(*) value FROM paper_executions WHERE state='REJECTED'"),
       fills: scalar(database, "SELECT count(*) value FROM paper_fill_ledger"),
       partialFills: scalar(database, "SELECT count(*) value FROM paper_orders WHERE state='PARTIALLY_FILLED'"),
-      pnlMicros: scalar(database, "SELECT COALESCE(SUM(CAST(pnl_micros AS INTEGER)),0) value FROM paper_pnl_ledger"),
-      exposureMicros: scalar(database, "SELECT COALESCE(SUM(CAST(remaining_cost_micros AS INTEGER)),0) value FROM paper_positions WHERE status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')"),
+      pnlMicros: sumTextColumn(database, "SELECT pnl_micros value FROM paper_pnl_ledger"),
+      exposureMicros: sumTextColumn(database, "SELECT remaining_cost_micros value FROM paper_positions WHERE status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')"),
       maxDrawdownMicros: this.maxDrawdown(database),
     };
-    const hasPaper = Object.values(metrics).some((value) => value !== "0");
+    const signalCount = BigInt(metrics.signals);
+    const executionAttempts = BigInt(metrics.executionAttempts);
+    const executed = BigInt(metrics.executed);
+    const fills = BigInt(metrics.fills);
+    let status: ValidationCheckResult["status"];
+    let blocking = false;
+    let reason: string;
+    if (executionAttempts === 0n) {
+      status = "NOT_RUN";
+      reason = signalCount > 0n ? "PAPER_EXECUTION_NOT_RUN" : "PAPER_REPLAY_NOT_RUN";
+    } else if (executed > 0n && fills === 0n) {
+      status = "FAIL";
+      blocking = true;
+      reason = "PAPER_EXECUTED_WITHOUT_FILL_LEDGER";
+    } else if (fills === 0n) {
+      status = "WARN";
+      reason = "PAPER_EXECUTION_NO_FILLS";
+    } else {
+      status = "PASS";
+      reason = "OK";
+    }
     return check({
       checkType: this.type,
       checkName: "paper_execution_summary",
-      status: hasPaper ? "PASS" : "WARN",
-      blocking: false,
-      reason: hasPaper ? "OK" : "PAPER_EXECUTION_DATA_NOT_AVAILABLE",
+      status,
+      blocking,
+      reason,
       metrics,
       now,
     });

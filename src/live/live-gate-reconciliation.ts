@@ -5,6 +5,14 @@ function sumStrings(values: string[]): bigint {
   return values.reduce((total, value) => total + BigInt(value), 0n);
 }
 
+function totalsByAccount(rows: Array<{ paper_account_id: string; value: string }>): Map<string, bigint> {
+  const totals = new Map<string, bigint>();
+  for (const row of rows) {
+    totals.set(row.paper_account_id, (totals.get(row.paper_account_id) ?? 0n) + BigInt(row.value));
+  }
+  return totals;
+}
+
 export class LiveGateReconciliation {
   constructor(private readonly database: DatabaseSync) {}
 
@@ -24,66 +32,72 @@ export class LiveGateReconciliation {
   }
 
   private cashLedgerCheck(): LiveGateCheck {
-    const rows = this.database.prepare(
-      `SELECT a.paper_account_id,a.cash_balance_micros,
-              COALESCE(SUM(CAST(l.cash_delta_micros AS INTEGER)),0) ledger_cash
-       FROM paper_accounts a
-       LEFT JOIN paper_cash_ledger l ON l.paper_account_id=a.paper_account_id
-       GROUP BY a.paper_account_id`,
-    ).all() as unknown as Array<{ paper_account_id: string; cash_balance_micros: string; ledger_cash: number }>;
-    const mismatch = rows.find((row) => BigInt(row.cash_balance_micros) !== BigInt(row.ledger_cash));
+    const accounts = this.database.prepare(
+      "SELECT paper_account_id,cash_balance_micros FROM paper_accounts",
+    ).all() as unknown as Array<{ paper_account_id: string; cash_balance_micros: string }>;
+    const ledger = this.database.prepare(
+      "SELECT paper_account_id,cash_delta_micros value FROM paper_cash_ledger",
+    ).all() as unknown as Array<{ paper_account_id: string; value: string }>;
+    const totals = totalsByAccount(ledger);
+    const mismatch = accounts.find((row) => BigInt(row.cash_balance_micros) !== (totals.get(row.paper_account_id) ?? 0n));
     return mismatch
       ? { name: "reconciliation_cash_ledger", passed: false, reason: `CASH_LEDGER_MISMATCH:${mismatch.paper_account_id}` }
       : { name: "reconciliation_cash_ledger", passed: true, reason: "OK" };
   }
 
   private reservedLedgerCheck(): LiveGateCheck {
-    const rows = this.database.prepare(
-      `SELECT a.paper_account_id,a.reserved_balance_micros,
-              COALESCE(SUM(CAST(l.reserved_delta_micros AS INTEGER)),0) ledger_reserved
-       FROM paper_accounts a
-       LEFT JOIN paper_cash_ledger l ON l.paper_account_id=a.paper_account_id
-       GROUP BY a.paper_account_id`,
-    ).all() as unknown as Array<{ paper_account_id: string; reserved_balance_micros: string; ledger_reserved: number }>;
-    const mismatch = rows.find((row) => BigInt(row.reserved_balance_micros) !== BigInt(row.ledger_reserved));
+    const accounts = this.database.prepare(
+      "SELECT paper_account_id,reserved_balance_micros FROM paper_accounts",
+    ).all() as unknown as Array<{ paper_account_id: string; reserved_balance_micros: string }>;
+    const ledger = this.database.prepare(
+      "SELECT paper_account_id,reserved_delta_micros value FROM paper_cash_ledger",
+    ).all() as unknown as Array<{ paper_account_id: string; value: string }>;
+    const totals = totalsByAccount(ledger);
+    const mismatch = accounts.find((row) => BigInt(row.reserved_balance_micros) !== (totals.get(row.paper_account_id) ?? 0n));
     return mismatch
       ? { name: "reconciliation_reserved_ledger", passed: false, reason: `RESERVED_LEDGER_MISMATCH:${mismatch.paper_account_id}` }
       : { name: "reconciliation_reserved_ledger", passed: true, reason: "OK" };
   }
 
   private realizedPnlCheck(): LiveGateCheck {
-    const rows = this.database.prepare(
-      `SELECT a.paper_account_id,a.realized_pnl_micros,
-              COALESCE(SUM(CAST(p.pnl_micros AS INTEGER)),0) ledger_pnl
-       FROM paper_accounts a
-       LEFT JOIN paper_pnl_ledger p ON p.paper_account_id=a.paper_account_id
-       GROUP BY a.paper_account_id`,
-    ).all() as unknown as Array<{ paper_account_id: string; realized_pnl_micros: string; ledger_pnl: number }>;
-    const mismatch = rows.find((row) => BigInt(row.realized_pnl_micros) !== BigInt(row.ledger_pnl));
+    const accounts = this.database.prepare(
+      "SELECT paper_account_id,realized_pnl_micros FROM paper_accounts",
+    ).all() as unknown as Array<{ paper_account_id: string; realized_pnl_micros: string }>;
+    const ledger = this.database.prepare(
+      "SELECT paper_account_id,pnl_micros value FROM paper_pnl_ledger",
+    ).all() as unknown as Array<{ paper_account_id: string; value: string }>;
+    const totals = totalsByAccount(ledger);
+    const mismatch = accounts.find((row) => BigInt(row.realized_pnl_micros) !== (totals.get(row.paper_account_id) ?? 0n));
     return mismatch
       ? { name: "reconciliation_realized_pnl", passed: false, reason: `REALIZED_PNL_MISMATCH:${mismatch.paper_account_id}` }
       : { name: "reconciliation_realized_pnl", passed: true, reason: "OK" };
   }
 
   private negativeBalanceCheck(): LiveGateCheck {
-    const row = this.database.prepare(
-      `SELECT paper_account_id FROM paper_accounts
-       WHERE CAST(cash_balance_micros AS INTEGER)<0 OR CAST(reserved_balance_micros AS INTEGER)<0
-       LIMIT 1`,
-    ).get() as { paper_account_id: string } | undefined;
-    return row
-      ? { name: "reconciliation_negative_balance", passed: false, reason: `NEGATIVE_BALANCE:${row.paper_account_id}` }
+    const rows = this.database.prepare(
+      "SELECT paper_account_id,cash_balance_micros,reserved_balance_micros FROM paper_accounts",
+    ).all() as unknown as Array<{
+      paper_account_id: string;
+      cash_balance_micros: string;
+      reserved_balance_micros: string;
+    }>;
+    const mismatch = rows.find((row) => BigInt(row.cash_balance_micros) < 0n || BigInt(row.reserved_balance_micros) < 0n);
+    return mismatch
+      ? { name: "reconciliation_negative_balance", passed: false, reason: `NEGATIVE_BALANCE:${mismatch.paper_account_id}` }
       : { name: "reconciliation_negative_balance", passed: true, reason: "OK" };
   }
 
   private negativePositionCheck(): LiveGateCheck {
-    const row = this.database.prepare(
-      `SELECT paper_position_id FROM paper_positions
-       WHERE CAST(current_size_micros AS INTEGER)<0 OR CAST(remaining_cost_micros AS INTEGER)<0
-       LIMIT 1`,
-    ).get() as { paper_position_id: string } | undefined;
-    return row
-      ? { name: "reconciliation_negative_position", passed: false, reason: `NEGATIVE_POSITION:${row.paper_position_id}` }
+    const rows = this.database.prepare(
+      "SELECT paper_position_id,current_size_micros,remaining_cost_micros FROM paper_positions",
+    ).all() as unknown as Array<{
+      paper_position_id: string;
+      current_size_micros: string;
+      remaining_cost_micros: string;
+    }>;
+    const mismatch = rows.find((row) => BigInt(row.current_size_micros) < 0n || BigInt(row.remaining_cost_micros) < 0n);
+    return mismatch
+      ? { name: "reconciliation_negative_position", passed: false, reason: `NEGATIVE_POSITION:${mismatch.paper_position_id}` }
       : { name: "reconciliation_negative_position", passed: true, reason: "OK" };
   }
 

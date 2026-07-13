@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import type { IdentityStatus, PublicPosition, SyncStatus } from "../domain/models.js";
-import { RULESET } from "../domain/versioning.js";
+import { RULESET, RULESET_HASH, stableJson } from "../domain/versioning.js";
 
 export type CapitalEstimateStatus = "COMPLETE" | "INCOMPLETE" | "FAILED";
 export type CapitalConfidence = "HIGH" | "MEDIUM" | "LOW";
@@ -91,16 +91,25 @@ export function estimateTargetCapital(input: {
         : "WALLET_BALANCE_MISSING_OR_STALE";
   }
 
-  const identity = [
-    input.walletAddress.toLowerCase(),
-    input.sourceEventKey ?? "NONE",
-    input.positionSnapshotTime ?? "NONE",
-    input.walletBalanceSnapshotTime ?? "NONE",
-    tradeTimestamp ?? "NONE",
-    status,
-    confidence,
-    tradeAmount?.toString() ?? "NONE",
-  ].join("|");
+  const identity = stableJson({
+    walletAddress: input.walletAddress.toLowerCase(),
+    sourceEventKey: input.sourceEventKey ?? null,
+    identityStatus: input.identityStatus,
+    syncStatus: input.syncStatus,
+    positionValueMicros: positionValue?.toString() ?? null,
+    walletBalanceMicros: input.walletBalanceMicros?.toString() ?? null,
+    targetVisibleCapitalMicros: visibleCapital?.toString() ?? null,
+    targetTradeAmountMicros: tradeAmount?.toString() ?? null,
+    targetTradeCapitalRatioPpm: ratioPpm?.toString() ?? null,
+    capitalEstimateStatus: status,
+    capitalConfidence: confidence,
+    capitalEstimateReason: reason,
+    positionSnapshotTime: input.positionSnapshotTime,
+    walletBalanceSnapshotTime: input.walletBalanceSnapshotTime,
+    targetTradeTimestamp: tradeTimestamp,
+    fallbackAmountMicros: fallbackAmountMicros.toString(),
+    rulesetHash: RULESET_HASH,
+  });
   return {
     capitalEstimateId: createHash("sha256").update(identity).digest("hex"),
     positionValueMicros: positionValue?.toString() ?? null,

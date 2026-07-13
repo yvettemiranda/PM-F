@@ -1,14 +1,15 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../src/domain/versioning.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { OperationalLock } from "../src/operational/operational-lock.js";
 import { OperationalRunner } from "../src/operational/operational-runner.js";
 import { OperationalStore } from "../src/operational/operational-store.js";
+import type { OperationalMode } from "../src/operational/types.js";
 
 const directories: string[] = [];
 const sourceVersion: SourceVersion = { commit: "operational-test", dirty: false };
@@ -87,6 +88,7 @@ function insertPublishedSignal(databasePath: string): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -104,6 +106,7 @@ describe("Operational validation framework", () => {
 
     expect(result.liveAllowed).toBe(false);
     expect(result.finalStatus).toBe("OPERATIONAL_FRAMEWORK_READY");
+    expect(result.resultStatus).toBe("INCOMPLETE");
     expect(existsSync(result.jsonReportPath)).toBe(true);
     expect(existsSync(result.markdownReportPath)).toBe(true);
     expect(result.workingDatabasePath).not.toBe(env.databasePath);
@@ -126,6 +129,7 @@ describe("Operational validation framework", () => {
     });
 
     expect(result.finalStatus).toBe("OPERATIONAL_FRAMEWORK_READY");
+    expect(result.resultStatus).toBe("INCOMPLETE");
     expect(count(result.workingDatabasePath, "shadow_risk_observations")).toBe(1);
     expect(count(result.workingDatabasePath, "risk_decisions")).toBe(0);
     const observation = scalar<{ result: string; reason: string }>(
@@ -148,6 +152,8 @@ describe("Operational validation framework", () => {
 
     expect(result.paperAccountId).toBeTruthy();
     expect(result.finalStatus).toBe("OPERATIONAL_FRAMEWORK_READY");
+    expect(result.resultStatus).toBe("INCOMPLETE");
+    expect(result.warnings.some((warning) => warning.includes("NO_NEW_PAPER_SIGNAL_CONSUMED"))).toBe(true);
     expect(count(env.databasePath, "paper_accounts")).toBe(0);
     expect(count(result.workingDatabasePath, "paper_accounts")).toBe(1);
     expect(count(result.workingDatabasePath, "operational_paper_bindings")).toBe(1);
@@ -193,18 +199,65 @@ describe("Operational validation framework", () => {
     store.close();
   });
 
-  it("blocks mutating operational modes when snapshot isolation is disabled", async () => {
+  it("blocks every operational mode when snapshot isolation is disabled", async () => {
     const env = setup();
-    await expect(new OperationalRunner(sourceVersion, now).run({
-      sourceDatabasePath: env.databasePath,
-      outputDirectory: join(env.directory, "operational"),
-      mode: "PAPER_VALIDATION_OPERATIONAL",
-      durationMs: 0,
-      useSnapshot: false,
-      wait: async () => {},
-    })).rejects.toThrow(/OPERATIONAL_MUTATING_MODE_REQUIRES_SNAPSHOT/);
+    const modes: OperationalMode[] = [
+      "OBSERVE_ONLY_OPERATIONAL",
+      "PAPER_VALIDATION_OPERATIONAL",
+      "HEALTH_MONITOR_ONLY",
+      "CONSISTENCY_MONITOR_ONLY",
+      "CRASH_RECOVERY_OPERATIONAL",
+    ];
+    for (const mode of modes) {
+      await expect(new OperationalRunner(sourceVersion, now).run({
+        sourceDatabasePath: env.databasePath,
+        outputDirectory: join(env.directory, "operational"),
+        mode,
+        durationMs: 0,
+        useSnapshot: false,
+        wait: async () => {},
+      })).rejects.toThrow("OPERATIONAL_SNAPSHOT_REQUIRED");
+    }
 
     expect(count(env.databasePath, "operational_runs")).toBe(0);
     expect(count(env.databasePath, "paper_accounts")).toBe(0);
+  });
+
+  it("keeps only the latest consistency cycle in memory while preserving persisted history", async () => {
+    const env = setup();
+    let tick = 0;
+    const advancingNow = () => new Date(Date.parse("2026-07-09T00:00:00.000Z") + tick++);
+    const result = await new OperationalRunner(sourceVersion, advancingNow).run({
+      sourceDatabasePath: env.databasePath,
+      outputDirectory: join(env.directory, "operational"),
+      mode: "CONSISTENCY_MONITOR_ONLY",
+      durationMs: 100,
+      pollIntervalMs: 0,
+      useSnapshot: true,
+      wait: async () => {},
+    });
+
+    const report = JSON.parse(readFileSync(result.jsonReportPath, "utf8")) as {
+      consistency: { checks: unknown[] };
+    };
+    const persistedChecks = count(result.workingDatabasePath, "operational_consistency_checks");
+    expect(persistedChecks).toBeGreaterThan(report.consistency.checks.length);
+    expect(report.consistency.checks).toHaveLength(13);
+  });
+
+  it("closes the operational store when execution fails after the store is opened", async () => {
+    const env = setup();
+    const close = vi.spyOn(OperationalStore.prototype, "close");
+
+    await expect(new OperationalRunner(sourceVersion, now).run({
+      sourceDatabasePath: env.databasePath,
+      outputDirectory: join(env.directory, "operational"),
+      mode: "INVALID_MODE" as never,
+      durationMs: 0,
+      useSnapshot: true,
+      wait: async () => {},
+    })).rejects.toThrow();
+
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

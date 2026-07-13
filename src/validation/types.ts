@@ -82,7 +82,7 @@ export interface ValidationRunReport {
   recovery: Record<string, unknown>;
   liveGate: Record<string, unknown>;
   finalResult: {
-    status: "PASS" | "FAIL";
+    status: "PASS" | "FAIL" | "INCOMPLETE";
     finalReadinessStatus: FinalReadinessStatus;
     liveAllowed: false;
     blockingFailures: string[];

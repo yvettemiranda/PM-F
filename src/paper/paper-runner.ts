@@ -24,6 +24,13 @@ export class PaperRunner {
   private readonly wait: (milliseconds: number) => Promise<void>;
 
   constructor(private readonly executor: PaperExecutor, private readonly options: PaperRunnerOptions) {
+    const intervalMs = options.intervalMs ?? 1_000;
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      throw new Error(`PAPER_INTERVAL_MUST_BE_POSITIVE:${String(intervalMs)}`);
+    }
+    if (options.durationMs !== undefined && (!Number.isFinite(options.durationMs) || options.durationMs <= 0)) {
+      throw new Error(`PAPER_DURATION_MUST_BE_POSITIVE:${String(options.durationMs)}`);
+    }
     this.now = options.now ?? (() => new Date());
     this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
