@@ -34,7 +34,7 @@ describe("ReplayEngine", () => {
     expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
   });
 
-  it("uses Activity as a second source to confirm a duplicated Trades row", () => {
+  it("does not let one Activity row confirm a second identical Trades occurrence", () => {
     const first = trade({});
     const report = new ReplayEngine().run({
       walletAddress: wallet,
@@ -45,10 +45,33 @@ describe("ReplayEngine", () => {
       hasGoldenExpectations: true,
     });
 
-    expect(report.status).toBe("PASSED");
+    expect(report.status).toBe("INCOMPLETE");
     expect(report.metrics.duplicateRows).toBe(1);
+    expect(report.metrics.confirmedDuplicateRows).toBe(0);
+    expect(report.metrics.ambiguousEvents).toBe(1);
+    expect(report.metrics.uniqueEvents).toBe(1);
+    expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
+  });
+
+  it("preserves a repeated fill when Trades and Activity confirm the same multiplicity", () => {
+    const first = trade({});
+    const activityTrade = { ...first, type: "TRADE" };
+    const report = new ReplayEngine().run({
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [first, { ...first }],
+      activity: [activityTrade, { ...activityTrade }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.metrics.duplicateRows).toBe(2);
     expect(report.metrics.confirmedDuplicateRows).toBe(1);
     expect(report.metrics.ambiguousEvents).toBe(0);
+    expect(report.metrics.uniqueEvents).toBe(2);
+    expect(report.metrics.buySignals).toBe(2);
+    expect(new Set(report.signals.map((signal) => signal.sourceEventKey)).size).toBe(2);
   });
 
   it("replays an Activity-only TRADE instead of silently dropping it", () => {
@@ -93,7 +116,7 @@ describe("ReplayEngine", () => {
     expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
   });
 
-  it("uses one Trades row to confirm a duplicated Activity row", () => {
+  it("does not let one Trades row confirm a second identical Activity occurrence", () => {
     const first = trade({ transactionHash: "0xactivity-confirmed-duplicate" });
     const activityTrade = { ...first, type: "TRADE" };
     const report = new ReplayEngine().run({
@@ -106,9 +129,52 @@ describe("ReplayEngine", () => {
     });
 
     expect(report.metrics.duplicateRows).toBe(1);
-    expect(report.metrics.confirmedDuplicateRows).toBe(1);
-    expect(report.metrics.ambiguousEvents).toBe(0);
+    expect(report.metrics.confirmedDuplicateRows).toBe(0);
+    expect(report.metrics.ambiguousEvents).toBe(1);
+    expect(report.metrics.uniqueEvents).toBe(1);
+    expect(report.status).toBe("INCOMPLETE");
+  });
+
+  it("replays the confirmed repeated fills that caused the 24-hour Observe desync", () => {
+    const repeatedSell = trade({
+      transactionHash: "0x31add6643877a7ed3aea1d8507e377ebc1efbd663cfdb6dc3c57837c3301affc",
+      side: "SELL",
+      price: "0.997",
+      size: "15712.79",
+      timestamp: 1783902581,
+    });
+    const aggregateSell = trade({
+      ...repeatedSell,
+      size: "31425.58",
+    });
+    const trades = [repeatedSell, { ...repeatedSell }, aggregateSell];
+    const activity = trades.map((item) => ({ ...item, type: "TRADE" }));
+    const input = {
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED" as const,
+      positionBaseline: [{ asset: "asset-1", size: "62851.16" }],
+      hasPositionBaseline: true,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    };
+    const report = new ReplayEngine().run({ ...input, trades, activity });
+    const reordered = new ReplayEngine().run({
+      ...input,
+      trades: [aggregateSell, ...trades.slice(0, 2).reverse()],
+      activity: [...activity].reverse(),
+    });
+
     expect(report.status).toBe("PASSED");
+    expect(report.metrics).toMatchObject({
+      uniqueEvents: 3,
+      duplicateRows: 2,
+      confirmedDuplicateRows: 1,
+      ambiguousEvents: 0,
+      historicalSells: 3,
+      finalHistoricalPositions: {},
+    });
+    expect(report.positionLedger).toHaveLength(3);
+    expect(reordered.reportHash).toBe(report.reportHash);
   });
 
   it("computes sell ratio before applying the sell", () => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { sourceEventKey } from "../src/domain/idempotency.js";
+import {
+  resolveSourceEventMultiplicity,
+  resolvedSourceEventTradeMap,
+  sourceEventKey,
+  sourceEventOccurrences,
+} from "../src/domain/idempotency.js";
 import type { PublicTrade } from "../src/domain/models.js";
 
 const base: PublicTrade = {
@@ -16,6 +21,34 @@ const base: PublicTrade = {
 describe("source event identity", () => {
   it("collapses an exact repeated API row", () => {
     expect(sourceEventKey(base)).toBe(sourceEventKey({ ...base }));
+  });
+
+  it("assigns stable occurrence keys to identical fills without changing the first key", () => {
+    const occurrences = sourceEventOccurrences([base, { ...base }]);
+    expect(occurrences.map((item) => item.sourceEventKey)).toEqual([
+      sourceEventKey(base),
+      sourceEventKey(base, 1),
+    ]);
+    expect(occurrences[0]?.sourceEventKey).not.toBe(occurrences[1]?.sourceEventKey);
+    expect(sourceEventOccurrences([{ ...base }, base]).map((item) => item.sourceEventKey))
+      .toEqual(occurrences.map((item) => item.sourceEventKey));
+  });
+
+  it("confirms repeated occurrences by matching Trades and Activity multiplicity", () => {
+    const confirmed = resolveSourceEventMultiplicity(
+      [base, { ...base }],
+      [{ ...base }, base],
+    );
+    expect(confirmed.confirmedRepeatedKeys).toEqual([sourceEventKey(base, 1)]);
+    expect(confirmed.ambiguousRepeatedKeys).toEqual([]);
+
+    const mismatched = resolveSourceEventMultiplicity([base, { ...base }], [base]);
+    expect(mismatched.confirmedRepeatedKeys).toEqual([]);
+    expect(mismatched.ambiguousRepeatedKeys).toEqual([sourceEventKey(base, 1)]);
+    expect([...resolvedSourceEventTradeMap(
+      [base, { ...base }],
+      [{ ...base }, base],
+    ).keys()]).toEqual([sourceEventKey(base), sourceEventKey(base, 1)]);
   });
 
   it("preserves separate fills in the same transaction when size differs", () => {

@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
-import { activityEventKey, signalIdempotencyKey, sourceEventKey } from "../domain/idempotency.js";
+import {
+  activityEventKey,
+  resolveSourceEventMultiplicity,
+  signalIdempotencyKey,
+} from "../domain/idempotency.js";
 import type { EventClassification, IdentityStatus, PublicActivity, PublicTrade, Signal, SourceEvent } from "../domain/models.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { VERSIONS, stableJson } from "../domain/versioning.js";
@@ -109,20 +113,22 @@ export class ReplayEngine {
     const comboKeys = new Set(
       input.activity.filter((item) => isTradeActivity(item) && item.isCombo).map(activityKey),
     );
-    const seen = new Set<string>();
-    const duplicateTradeRowsByKey = new Map<string, number>();
-    const duplicateActivityRowsByKey = new Map<string, number>();
+    const activityTradeRows = input.activity.flatMap((activity) => {
+      const trade = activityAsTrade(activity);
+      return trade ? [{ activity, trade }] : [];
+    });
+    const multiplicity = resolveSourceEventMultiplicity(
+      input.trades,
+      activityTradeRows.map((item) => item.trade),
+    );
+    const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
+    const ambiguousRepeatedKeys = new Set(multiplicity.ambiguousRepeatedKeys);
     const events: SourceEvent[] = [];
-    let duplicateRows = 0;
+    const duplicateRows = multiplicity.trades.filter((item) => item.occurrenceIndex > 0).length
+      + multiplicity.activityTrades.filter((item) => item.occurrenceIndex > 0).length;
 
-    for (const trade of input.trades) {
-      const key = sourceEventKey(trade);
-      if (seen.has(key)) {
-        duplicateRows += 1;
-        duplicateTradeRowsByKey.set(key, (duplicateTradeRowsByKey.get(key) ?? 0) + 1);
-        continue;
-      }
-      seen.add(key);
+    for (const { trade, sourceEventKey: key, occurrenceIndex } of multiplicity.trades) {
+      if (occurrenceIndex > 0 && !confirmedRepeatedKeys.has(key)) continue;
       events.push({
         sourceEventKey: key,
         trade,
@@ -137,25 +143,14 @@ export class ReplayEngine {
     // Activity can lead Trades or remain the only available source when the
     // historical Trades endpoint is truncated. Merge both sources by the same
     // source_event_key instead of silently discarding Activity-only trades.
-    const seenActivityTradeKeys = new Set<string>();
-    for (const activity of input.activity) {
-      const trade = activityAsTrade(activity);
-      if (!trade) continue;
-      const key = sourceEventKey(trade);
-      if (seenActivityTradeKeys.has(key)) {
-        duplicateRows += 1;
-        duplicateActivityRowsByKey.set(key, (duplicateActivityRowsByKey.get(key) ?? 0) + 1);
-        const existing = eventByKey.get(key);
-        if (existing) existing.isCombo = existing.isCombo || activity.isCombo === true;
-        continue;
-      }
-      seenActivityTradeKeys.add(key);
+    for (const [index, { trade, sourceEventKey: key, occurrenceIndex }] of multiplicity.activityTrades.entries()) {
+      if (occurrenceIndex > 0 && !confirmedRepeatedKeys.has(key)) continue;
+      const activity = activityTradeRows[index]!.activity;
       const existing = eventByKey.get(key);
       if (existing) {
         existing.isCombo = existing.isCombo || activity.isCombo === true;
         continue;
       }
-      seen.add(key);
       events.push({
         sourceEventKey: key,
         trade,
@@ -188,6 +183,12 @@ export class ReplayEngine {
       } else {
         eventOutcomes[key] = { eventClassification: "UNRECOGNIZED", reason: `UNRECOGNIZED_ACTIVITY_TYPE:${item.type}` };
       }
+    }
+    for (const key of ambiguousRepeatedKeys) {
+      eventOutcomes[key] = {
+        eventClassification: "UNRECOGNIZED",
+        reason: "AMBIGUOUS_IDENTICAL_TRADE_OCCURRENCE",
+      };
     }
     let historicalSells = 0;
     let gapEvents = 0;
@@ -291,27 +292,8 @@ export class ReplayEngine {
     }
 
     const buySignals = signals.filter((signal) => signal.signalType === "TARGET_BUY").length;
-    const activityEventCounts = new Map<string, number>();
-    for (const item of input.activity) {
-      if (!isTradeActivity(item)) continue;
-      const key = sourceEventKey(item);
-      activityEventCounts.set(key, (activityEventCounts.get(key) ?? 0) + 1);
-    }
-    let confirmedDuplicateRows = 0;
-    let ambiguousEvents = 0;
-    const tradeEventCounts = new Map<string, number>();
-    for (const item of input.trades) {
-      const key = sourceEventKey(item);
-      tradeEventCounts.set(key, (tradeEventCounts.get(key) ?? 0) + 1);
-    }
-    for (const [key, count] of duplicateTradeRowsByKey) {
-      if (activityEventCounts.get(key) === 1) confirmedDuplicateRows += count;
-      else ambiguousEvents += count;
-    }
-    for (const [key, count] of duplicateActivityRowsByKey) {
-      if (tradeEventCounts.get(key) === 1) confirmedDuplicateRows += count;
-      else ambiguousEvents += count;
-    }
+    const confirmedDuplicateRows = confirmedRepeatedKeys.size;
+    const ambiguousEvents = ambiguousRepeatedKeys.size;
     const incompleteReasons: string[] = [];
     if (!input.hasCapitalSnapshots) incompleteReasons.push("HISTORICAL_CAPITAL_SNAPSHOTS_MISSING");
     if (!input.hasGoldenExpectations) incompleteReasons.push("GOLDEN_EXPECTATIONS_MISSING");

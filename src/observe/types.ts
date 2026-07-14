@@ -79,13 +79,27 @@ export interface ReconciliationResult {
   syncStatus: SyncStatus;
   issueCount: number;
   observedPositionsHash: string;
-  details: Array<{
-    asset: string;
-    expectedMicros: string;
-    observedMicros: string;
-    differenceMicros: string;
-    toleranceMicros: string;
-  }>;
+  details: ReconciliationDetail[];
+}
+
+export type ReconciliationDetail = {
+  issueType: "POSITION_QUANTITY_DIFF";
+  asset: string;
+  expectedMicros: string;
+  observedMicros: string;
+  differenceMicros: string;
+  toleranceMicros: string;
+} | {
+  issueType: "SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS";
+  sourceEventKey: string;
+  tradesCount: number;
+  activityCount: number;
+};
+
+export interface SourceEventMultiplicityAmbiguity {
+  sourceEventKey: string;
+  tradesCount: number;
+  activityCount: number;
 }
 
 export interface ObserveRunMetrics {

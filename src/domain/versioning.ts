@@ -5,7 +5,7 @@ export const VERSIONS = Object.freeze({
   signalVersion: "1.4.0",
   strategyVersion: "2.0.0",
   riskVersion: "1.4.0",
-  replayVersion: "1.5.0",
+  replayVersion: "1.6.0",
   paperVersion: "1.2.0",
   liveVersion: "1.2.0",
   validationVersion: "1.0.0",

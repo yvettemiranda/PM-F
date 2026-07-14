@@ -2,8 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { ApiCapture } from "../../adapters/polymarket-public.js";
-import { activityEventKey, SOURCE_IDENTITY_VERSION, sourceEventKey } from "../../domain/idempotency.js";
+import {
+  ACTIVITY_IDENTITY_VERSION,
+  activityEventKey,
+  resolveSourceEventMultiplicity,
+  SOURCE_IDENTITY_VERSION,
+} from "../../domain/idempotency.js";
 import type { PublicActivity, PublicTrade, WalletIdentityReport } from "../../domain/models.js";
+import { activityAsTrade } from "../../domain/activity-trade.js";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../../domain/fixed.js";
 import {
   RULESET,
@@ -1112,6 +1118,15 @@ export class Phase0Database {
   ): string {
     const now = new Date().toISOString();
     const replayRunId = randomUUID();
+    const activityTradeRows = activity.flatMap((item) => {
+      const trade = activityAsTrade(item);
+      return trade ? [{ item, trade }] : [];
+    });
+    const multiplicity = resolveSourceEventMultiplicity(
+      trades,
+      activityTradeRows.map((item) => item.trade),
+    );
+    const tradeOccurrenceKeys = new Set(multiplicity.trades.map((item) => item.sourceEventKey));
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const insertRaw = this.database.prepare(
@@ -1119,15 +1134,15 @@ export class Phase0Database {
           source_event_key, target_id, identity_version, source_type, source_transaction_hash,
           source_timestamp, asset_id, condition_id, side, price_units, size_micros,
           gap_event, is_combo, raw_json, created_at, capture_run_id, event_classification
-        ) VALUES (?, ?, ?, 'DATA_API_TRADE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
-      for (const trade of trades) {
-        const eventKey = sourceEventKey(trade);
+      for (const { trade, sourceEventKey: eventKey } of multiplicity.trades) {
         const outcome = report.eventOutcomes[eventKey];
         insertRaw.run(
           eventKey,
           targetId,
           SOURCE_IDENTITY_VERSION,
+          "DATA_API_TRADE",
           trade.transactionHash.toLowerCase(),
           trade.timestamp,
           trade.asset,
@@ -1138,6 +1153,31 @@ export class Phase0Database {
           outcome?.eventClassification === "GAP_TRADE" ? 1 : 0,
           outcome?.eventClassification === "COMBO_ACTIVITY" ? 1 : 0,
           JSON.stringify(trade),
+          now,
+          options.captureRunId ?? null,
+          outcome?.eventClassification ?? "UNRECOGNIZED",
+        );
+      }
+
+      for (const [index, { trade, sourceEventKey: eventKey }] of multiplicity.activityTrades.entries()) {
+        if (tradeOccurrenceKeys.has(eventKey)) continue;
+        const item = activityTradeRows[index]!.item;
+        const outcome = report.eventOutcomes[eventKey];
+        insertRaw.run(
+          eventKey,
+          targetId,
+          SOURCE_IDENTITY_VERSION,
+          "DATA_API_ACTIVITY",
+          trade.transactionHash.toLowerCase(),
+          trade.timestamp,
+          trade.asset,
+          trade.conditionId.toLowerCase(),
+          trade.side,
+          decimalToScaled(trade.price, PRICE_SCALE_DIGITS).toString(),
+          decimalToScaled(trade.size, SHARE_SCALE_DIGITS).toString(),
+          outcome?.eventClassification === "GAP_TRADE" ? 1 : 0,
+          outcome?.eventClassification === "COMBO_ACTIVITY" ? 1 : 0,
+          JSON.stringify(item),
           now,
           options.captureRunId ?? null,
           outcome?.eventClassification ?? "UNRECOGNIZED",
@@ -1158,7 +1198,7 @@ export class Phase0Database {
         insertActivity.run(
           eventKey,
           targetId,
-          SOURCE_IDENTITY_VERSION,
+          ACTIVITY_IDENTITY_VERSION,
           item.transactionHash.toLowerCase(),
           item.timestamp,
           item.asset ?? "",

@@ -202,6 +202,302 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("preserves confirmed identical fills as separate occurrences across polls and restart", async () => {
+    const { databasePath } = setup([position("62851.16")]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const transactionHash = "0x31add6643877a7ed3aea1d8507e377ebc1efbd663cfdb6dc3c57837c3301affc";
+    const repeatedSell = trade({
+      transactionHash,
+      side: "SELL",
+      price: "0.997",
+      size: "15712.79",
+      timestamp: baselineSecond + 70,
+    });
+    const aggregateSell = trade({
+      transactionHash,
+      side: "SELL",
+      price: "0.997",
+      size: "31425.58",
+      timestamp: baselineSecond + 70,
+    });
+    const fills = [repeatedSell, { ...repeatedSell }, aggregateSell];
+    const firstStore = new ObserveStore(databasePath, sourceVersion);
+    const firstRunner = new ObserveOnlyRunner(firstStore, new QueueSource([
+      snapshot([], [position("62851.16")], now.toISOString()),
+      snapshot(fills, [position("0")], "2026-07-08T00:01:10.000Z"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await firstRunner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await firstRunner.pollOnce();
+    firstStore.stopRun(firstRunner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(firstStore.runMetrics(firstRunner.start().observeRunId)).toMatchObject({
+      processedEvents: 3,
+      emittedSignals: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    firstStore.close();
+
+    now = new Date("2026-07-08T00:01:20.000Z");
+    const secondStore = new ObserveStore(databasePath, sourceVersion);
+    const secondRunner = new ObserveOnlyRunner(secondStore, new QueueSource([
+      snapshot([aggregateSell, ...fills.slice(0, 2).reverse()], [position("0")], now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+    await secondRunner.pollOnce();
+    secondStore.stopRun(secondRunner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(secondStore.runMetrics(secondRunner.start().observeRunId)).toMatchObject({
+      processedEvents: 0,
+      emittedSignals: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    secondStore.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM raw_events WHERE source_transaction_hash=?",
+    ).get(transactionHash) as { count: number }).count).toBe(3);
+    check.close();
+  });
+
+  it("waits for multiplicity confirmation and emits each identical BUY exactly once", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const repeatedBuy = trade({
+      transactionHash: "0xidentical-buy",
+      side: "BUY",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const firstTradeSnapshot = snapshot(
+      [repeatedBuy, { ...repeatedBuy }],
+      [position("20")],
+      "2026-07-08T00:01:10.000Z",
+    );
+    firstTradeSnapshot.activity = capture("activity", [{
+      ...repeatedBuy,
+      type: "TRADE",
+      isCombo: false,
+    }], firstTradeSnapshot.activity.fetchedAt);
+    const confirmedSnapshot = snapshot(
+      [{ ...repeatedBuy }, repeatedBuy],
+      [position("20")],
+      "2026-07-08T00:01:20.000Z",
+    );
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      firstTradeSnapshot,
+      confirmedSnapshot,
+      snapshot([repeatedBuy, { ...repeatedBuy }], [position("20")], "2026-07-08T00:01:30.000Z"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 2,
+      emittedSignals: 1,
+      finalSyncStatus: "MINOR_DIFF",
+    });
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:30.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 2,
+      emittedSignals: 2,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM observe_events WHERE activity_confirmed=1",
+    ).get() as { count: number }).count).toBe(2);
+    expect((check.prepare(
+      "SELECT count(*) count FROM signals WHERE producer_mode='OBSERVE_ONLY'",
+    ).get() as { count: number }).count).toBe(2);
+    check.close();
+  });
+
+  it("keeps an unresolved repeated occurrence out of the Observe gate even when positions match", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const repeatedBuy = trade({
+      transactionHash: "0xambiguous-identical-buy",
+      side: "BUY",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const ambiguousSnapshot = snapshot(
+      [repeatedBuy, { ...repeatedBuy }],
+      [position("10")],
+      now.toISOString(),
+    );
+    ambiguousSnapshot.activity = capture("activity", [{
+      ...repeatedBuy,
+      type: "TRADE",
+      isCombo: false,
+    }], ambiguousSnapshot.activity.fetchedAt);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      ambiguousSnapshot,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      emittedSignals: 1,
+      finalSyncStatus: "MINOR_DIFF",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    const report = check.prepare(
+      "SELECT detail_json FROM reconciliation_reports WHERE observe_run_id=? ORDER BY created_at DESC LIMIT 1",
+    ).get(runner.start().observeRunId) as { detail_json: string };
+    expect(JSON.parse(report.detail_json)).toContainEqual(expect.objectContaining({
+      issueType: "SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS",
+      tradesCount: 1,
+      activityCount: 0,
+    }));
+    check.close();
+  });
+
+  it("keeps an Activity-only repeated occurrence out of the Observe gate", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const repeatedBuy = trade({
+      transactionHash: "0xactivity-only-identical-buy",
+      side: "BUY",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const activityAhead = snapshot([repeatedBuy], [position("10")], now.toISOString());
+    activityAhead.activity = capture("activity", [
+      { ...repeatedBuy, type: "TRADE", isCombo: false },
+      { ...repeatedBuy, type: "TRADE", isCombo: false },
+    ], activityAhead.activity.fetchedAt);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      activityAhead,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 1,
+      finalSyncStatus: "MINOR_DIFF",
+    });
+    store.close();
+  });
+
+  it("makes an identical occurrence confirmed only after restart a non-executable gap signal", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const repeatedBuy = trade({
+      transactionHash: "0xrestart-confirmed-identical-buy",
+      side: "BUY",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const ambiguousSnapshot = snapshot(
+      [repeatedBuy, { ...repeatedBuy }],
+      [position("10")],
+      now.toISOString(),
+    );
+    ambiguousSnapshot.activity = capture("activity", [{
+      ...repeatedBuy,
+      type: "TRADE",
+      isCombo: false,
+    }], ambiguousSnapshot.activity.fetchedAt);
+
+    const firstStore = new ObserveStore(databasePath, sourceVersion);
+    const firstRunner = new ObserveOnlyRunner(firstStore, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      ambiguousSnapshot,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+    await firstRunner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await firstRunner.pollOnce();
+    firstStore.stopRun(firstRunner.start().observeRunId, now.toISOString(), "TEST_RESTART");
+    firstStore.close();
+
+    now = new Date("2026-07-08T00:01:20.000Z");
+    const delayedActivity = snapshot([], [position("20")], now.toISOString());
+    delayedActivity.activity = capture("activity", [
+      { ...repeatedBuy, type: "TRADE", isCombo: false },
+      { ...repeatedBuy, type: "TRADE", isCombo: false },
+    ], delayedActivity.activity.fetchedAt);
+    const secondStore = new ObserveStore(databasePath, sourceVersion);
+    const secondRunner = new ObserveOnlyRunner(secondStore, new QueueSource([
+      delayedActivity,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+    await secondRunner.pollOnce();
+    secondStore.stopRun(secondRunner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(secondStore.runMetrics(secondRunner.start().observeRunId).finalSyncStatus).toBe("SYNCED");
+    secondStore.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    const signals = check.prepare(
+      `SELECT execution_eligible,execution_block_reason,event_classification
+       FROM signals WHERE producer_mode='OBSERVE_ONLY' ORDER BY created_at,signal_id`,
+    ).all() as Array<{
+      execution_eligible: number;
+      execution_block_reason: string | null;
+      event_classification: string;
+    }>;
+    expect(signals).toEqual(expect.arrayContaining([
+      { execution_eligible: 1, execution_block_reason: null, event_classification: "STANDARD_TRADE" },
+      { execution_eligible: 0, execution_block_reason: "GAP_EVENT", event_classification: "GAP_TRADE" },
+    ]));
+    const gapConfirmed = check.prepare(
+      "SELECT count(*) count FROM observe_events WHERE activity_confirmed=1 AND is_gap=1",
+    ).get() as { count: number };
+    expect(gapConfirmed.count).toBe(1);
+    check.close();
+  });
+
   it("records an API failure and makes recovered events non-executable gap signals", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");

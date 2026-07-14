@@ -15,7 +15,8 @@ import {
   generateGoldenCandidates,
   renderGoldenCandidatesMarkdown,
 } from "../services/golden-expectations.js";
-import { sourceEventKey } from "../domain/idempotency.js";
+import { resolvedSourceEventTradeMap } from "../domain/idempotency.js";
+import { activityAsTrade } from "../domain/activity-trade.js";
 
 const address = process.argv.slice(2).find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
 if (!address || !/^0x[a-f0-9]{40}$/.test(address)) {
@@ -188,10 +189,11 @@ try {
     activity: activity.rows,
     replay,
   });
-  const tradeByEventKey = new Map(trades.rows.map((trade) => [
-    sourceEventKey(trade),
-    trade,
-  ]));
+  const activityTrades = activity.rows.flatMap((item) => {
+    const trade = activityAsTrade(item);
+    return trade ? [trade] : [];
+  });
+  const tradeByEventKey = resolvedSourceEventTradeMap(trades.rows, activityTrades);
   const capitalEstimatesBySourceEventKey = Object.fromEntries(
     replay.signals
       .filter((signal) => signal.signalType === "TARGET_BUY" && signal.executionEligible)

@@ -1,10 +1,19 @@
-import { activityEventKey, sourceEventKey } from "../domain/idempotency.js";
+import {
+  activityEventKey,
+  resolveSourceEventMultiplicity,
+  sourceEventKey,
+} from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
 import { reconcileProjection } from "./reconciliation.js";
 import { ObserveStore, type StartedObserveRun } from "./observe-store.js";
-import type { ObserveDataSource, ObserveEvent, ObserveRunMetrics } from "./types.js";
+import type {
+  ObserveDataSource,
+  ObserveEvent,
+  ObserveRunMetrics,
+  SourceEventMultiplicityAmbiguity,
+} from "./types.js";
 import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { observeSchedulingGapThresholdMs } from "./scheduling.js";
@@ -149,11 +158,33 @@ export class ObserveOnlyRunner {
     }
 
     const baselineSecond = Math.floor(Date.parse(started.baseline.snapshotTime) / 1_000);
+    const tradeRows = snapshot.trades.data.filter((trade) => trade.timestamp > baselineSecond);
+    const activityRows = snapshot.activity.data.filter((activity) => activity.timestamp > baselineSecond);
+    const activityTrades = activityRows.flatMap((activity) => {
+      const trade = activityAsTrade(activity);
+      return trade ? [{ activity, trade }] : [];
+    });
+    const multiplicity = resolveSourceEventMultiplicity(
+      tradeRows,
+      activityTrades.map((item) => item.trade),
+    );
+    const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
+    const storedTradeKeys = new Set(
+      storedEvents.filter((event) => event.trade !== undefined).map((event) => event.sourceEventKey),
+    );
+    // Trades and Activity need not expose the same occurrence in the same
+    // response. A persisted Trade occurrence is durable evidence, so a later
+    // Activity occurrence with the same deterministic rank may confirm it.
+    for (const item of multiplicity.activityTrades) {
+      if (item.occurrenceIndex > 0 && storedTradeKeys.has(item.sourceEventKey)) {
+        confirmedRepeatedKeys.add(item.sourceEventKey);
+      }
+    }
+    let ambiguousActivityOccurrences = 0;
     const incoming: ObserveEvent[] = [
-      ...snapshot.trades.data
-        .filter((trade) => trade.timestamp > baselineSecond)
-        .map((trade): ObserveEvent => ({
-          sourceEventKey: sourceEventKey(trade),
+      ...multiplicity.trades
+        .map(({ trade, sourceEventKey }): ObserveEvent => ({
+          sourceEventKey,
           sourceType: "DATA_API_TRADE",
           sourceTimestamp: trade.timestamp,
           isGap: this.gapActive,
@@ -161,19 +192,29 @@ export class ObserveOnlyRunner {
           activityConfirmed: false,
           trade,
         })),
-      ...snapshot.activity.data
-        .filter((activity) => activity.timestamp > baselineSecond)
-        .map((activity): ObserveEvent => {
-          const normalizedTrade = activityAsTrade(activity);
-          return normalizedTrade ? {
-            sourceEventKey: sourceEventKey(normalizedTrade),
+      ...multiplicity.activityTrades
+        .flatMap(({ trade, sourceEventKey, occurrenceIndex }, index): ObserveEvent[] => {
+          const activity = activityTrades[index]!.activity;
+          // A single Activity trade remains a valid source on its own. A later
+          // byte-identical occurrence has no public row id and is admitted only
+          // when Trades independently exposes the same multiset occurrence.
+          if (occurrenceIndex > 0 && !confirmedRepeatedKeys.has(sourceEventKey)) {
+            ambiguousActivityOccurrences += 1;
+            return [];
+          }
+          return [{
+            sourceEventKey,
             sourceType: "DATA_API_TRADE",
-            sourceTimestamp: normalizedTrade.timestamp,
+            sourceTimestamp: trade.timestamp,
             isGap: this.gapActive,
             isCombo: activity.isCombo === true,
             activityConfirmed: true,
-            trade: normalizedTrade,
-          } : {
+            trade,
+          }];
+        }),
+      ...activityRows
+        .filter((activity) => activityAsTrade(activity) === null)
+        .map((activity): ObserveEvent => ({
             sourceEventKey: activityEventKey(activity),
             sourceType: "DATA_API_ACTIVITY",
             sourceTimestamp: activity.timestamp,
@@ -181,11 +222,10 @@ export class ObserveOnlyRunner {
             isCombo: ["SPLIT", "MERGE", "CONVERSION"].includes(activity.type),
             activityConfirmed: true,
             activity,
-          };
-        }),
+          })),
     ];
     const unique = new Map<string, ObserveEvent>();
-    let duplicateEvents = 0;
+    let duplicateEvents = ambiguousActivityOccurrences;
     for (const event of incoming) {
       const prior = unique.get(event.sourceEventKey);
       if (prior) {
@@ -209,21 +249,53 @@ export class ObserveOnlyRunner {
         const stored = storedByKey.get(event.sourceEventKey);
         return stored !== undefined && (!stored.activityConfirmed || (event.isCombo && !stored.isCombo));
       })
-      .map((event) => ({ sourceEventKey: event.sourceEventKey, isCombo: event.isCombo }));
+      .map((event) => ({
+        sourceEventKey: event.sourceEventKey,
+        isCombo: event.isCombo,
+        isGap: (storedByKey.get(event.sourceEventKey)?.isGap ?? false) || event.isGap,
+      }));
     for (const confirmation of eventConfirmations) {
       const stored = storedByKey.get(confirmation.sourceEventKey);
       if (!stored) throw new Error(`Observed event missing during confirmation: ${confirmation.sourceEventKey}`);
       stored.activityConfirmed = true;
       stored.isCombo = stored.isCombo || confirmation.isCombo;
+      stored.isGap = stored.isGap || confirmation.isGap;
     }
-    const projection = projectObserveEvents(started.baseline, [...storedEvents, ...newEvents]);
+    const allEvents = [...storedEvents, ...newEvents];
+    const projection = projectObserveEvents(started.baseline, allEvents);
     const signalCandidateKeys = new Set([
       ...newEvents.filter((event) => event.activityConfirmed).map((event) => event.sourceEventKey),
       ...eventConfirmations.map((event) => event.sourceEventKey),
     ]);
     const signalsToEmit = projection.signals.filter((signal) => signalCandidateKeys.has(signal.sourceEventKey));
+    const currentTradeKeys = new Set(multiplicity.trades.map((item) => item.sourceEventKey));
+    const currentActivityKeys = new Set(multiplicity.activityTrades.map((item) => item.sourceEventKey));
+    const ambiguousKeys = new Set(
+      multiplicity.ambiguousRepeatedKeys.filter((key) => !confirmedRepeatedKeys.has(key)),
+    );
+    for (const event of allEvents) {
+      if (
+        event.trade
+        && event.sourceEventKey !== sourceEventKey(event.trade)
+        && !event.activityConfirmed
+      ) {
+        ambiguousKeys.add(event.sourceEventKey);
+      }
+    }
+    const sourceEventAmbiguities: SourceEventMultiplicityAmbiguity[] = [...ambiguousKeys]
+      .sort()
+      .map((key) => ({
+        sourceEventKey: key,
+        tradesCount: currentTradeKeys.has(key) || storedTradeKeys.has(key) ? 1 : 0,
+        activityCount: currentActivityKeys.has(key) ? 1 : 0,
+      }));
     const previousDiffs = this.store.consecutiveDiffCount(started.baseline.baselineRunId);
-    const reconciliation = reconcileProjection(projection.projection, snapshot.positions.data, previousDiffs);
+    const reconciliation = reconcileProjection(
+      projection.projection,
+      snapshot.positions.data,
+      previousDiffs,
+      sourceEventAmbiguities,
+    );
     const balanceResult = snapshot.pUsdBalance.data.result;
     const walletBalanceMicros = balanceResult && /^0x[0-9a-f]+$/i.test(balanceResult) ? BigInt(balanceResult) : null;
     const capitalEstimate = estimateTargetCapital({

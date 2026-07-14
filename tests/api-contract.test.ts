@@ -76,4 +76,44 @@ describe("API contract validation", () => {
     expect(report.status).toBe("FAILED");
     expect(report.schemaErrors.length).toBeGreaterThan(0);
   });
+
+  it("distinguishes confirmed identical fill multiplicity from an ambiguous extra row", () => {
+    const fill = {
+      proxyWallet: wallet,
+      transactionHash: "0x1",
+      conditionId: "0x2",
+      asset: "1",
+      side: "BUY" as const,
+      price: "0.5",
+      size: "10",
+      timestamp: 1_700_000_000,
+    };
+    const common = {
+      positions: [],
+      tradeHistoryComplete: true,
+      activityHistoryComplete: true,
+      clobTime: { url: "time", fetchedAt: "2023-11-14T22:13:20.000Z", latencyMs: 0, status: 200, data: 1_700_000_000 },
+      captures: [],
+    };
+    const confirmed = validateApiContract({
+      ...common,
+      trades: [fill, { ...fill }],
+      activity: [{ ...fill, type: "TRADE" }, { ...fill, type: "TRADE" }],
+    });
+    expect(confirmed.status).toBe("PASSED");
+    expect(confirmed.observations).toMatchObject({
+      exactDuplicateRows: 1,
+      confirmedDuplicateRows: 1,
+      ambiguousDuplicateRows: 0,
+    });
+
+    const ambiguous = validateApiContract({
+      ...common,
+      trades: [fill, { ...fill }],
+      activity: [{ ...fill, type: "TRADE" }],
+    });
+    expect(ambiguous.status).toBe("INCOMPLETE");
+    expect(ambiguous.observations.ambiguousDuplicateRows).toBe(1);
+    expect(ambiguous.warnings).toContain("EXACT_DUPLICATE_TRADE_ROWS_REQUIRE_RECONCILIATION");
+  });
 });

@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { decimalToScaled, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import type { PublicPosition, SyncStatus } from "../domain/models.js";
 import { RULESET, stableJson } from "../domain/versioning.js";
-import type { ObserveProjectionEntry, ReconciliationResult } from "./types.js";
+import type {
+  ObserveProjectionEntry,
+  ReconciliationResult,
+  SourceEventMultiplicityAmbiguity,
+} from "./types.js";
 
 function absolute(value: bigint): bigint {
   return value < 0n ? -value : value;
@@ -12,6 +16,7 @@ export function reconcileProjection(
   projection: ObserveProjectionEntry[],
   positions: PublicPosition[],
   previousConsecutiveDiffs = 0,
+  sourceEventAmbiguities: readonly SourceEventMultiplicityAmbiguity[] = [],
 ): ReconciliationResult {
   const expected = new Map(projection.map((entry) => [entry.asset, BigInt(entry.expectedTotalMicros)]));
   const observed = new Map(positions.map((position) => [position.asset, decimalToScaled(position.size, SHARE_SCALE_DIGITS)]));
@@ -26,6 +31,7 @@ export function reconcileProjection(
     const tolerance = relativeTolerance > absoluteTolerance ? relativeTolerance : absoluteTolerance;
     if (absolute(difference) > tolerance) {
       details.push({
+        issueType: "POSITION_QUANTITY_DIFF",
         asset,
         expectedMicros: expectedValue.toString(),
         observedMicros: observedValue.toString(),
@@ -33,6 +39,14 @@ export function reconcileProjection(
         toleranceMicros: tolerance.toString(),
       });
     }
+  }
+  for (const ambiguity of sourceEventAmbiguities) {
+    details.push({
+      issueType: "SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS",
+      sourceEventKey: ambiguity.sourceEventKey,
+      tradesCount: ambiguity.tradesCount,
+      activityCount: ambiguity.activityCount,
+    });
   }
   let syncStatus: SyncStatus = "SYNCED";
   if (details.length > 0) {

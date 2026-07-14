@@ -46,7 +46,7 @@ export interface CommitPollInput {
   completedAt: string;
   snapshot: ObservePollSnapshot;
   newEvents: ObserveEvent[];
-  eventConfirmations: Array<{ sourceEventKey: string; isCombo: boolean }>;
+  eventConfirmations: Array<{ sourceEventKey: string; isCombo: boolean; isGap: boolean }>;
   duplicateEvents: number;
   projection: ObserveProjectionResult;
   signalsToEmit: ObserveSignal[];
@@ -371,9 +371,19 @@ export class ObserveStore {
             "UPDATE raw_events SET is_combo=1,event_classification='COMBO_ACTIVITY' WHERE source_event_key=?",
           ).run(confirmation.sourceEventKey);
         }
+        if (confirmation.isGap) {
+          this.database.prepare(
+            `UPDATE raw_events
+             SET gap_event=1,
+                 event_classification=CASE WHEN is_combo=1 THEN 'COMBO_ACTIVITY' ELSE 'GAP_TRADE' END
+             WHERE source_event_key=?`,
+          ).run(confirmation.sourceEventKey);
+        }
         this.database.prepare(
-          "UPDATE observe_events SET activity_confirmed=1 WHERE baseline_run_id=? AND source_event_key=?",
-        ).run(input.baseline.baselineRunId, confirmation.sourceEventKey);
+          `UPDATE observe_events
+           SET activity_confirmed=1,is_gap=CASE WHEN is_gap=1 OR ?=1 THEN 1 ELSE 0 END
+           WHERE baseline_run_id=? AND source_event_key=?`,
+        ).run(confirmation.isGap ? 1 : 0, input.baseline.baselineRunId, confirmation.sourceEventKey);
       }
       this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
       for (const bundle of input.signalContexts) {

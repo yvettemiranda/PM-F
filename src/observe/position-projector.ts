@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
+import { sourceEventKey } from "../domain/idempotency.js";
 import { stableJson } from "../domain/versioning.js";
 import type { ObserveBaseline, ObserveEvent, ObserveProjectionEntry, ObserveProjectionResult, ObserveSignal } from "./types.js";
 
@@ -37,6 +38,10 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
     }
     if (event.isCombo) continue;
     const trade = event.trade!;
+    // Occurrence zero keeps the legacy event key. A later byte-identical Trade
+    // occurrence has no upstream row id, so it may affect projection/signals
+    // only after the independent Activity feed confirms the same occurrence.
+    if (event.sourceEventKey !== sourceEventKey(trade) && !event.activityConfirmed) continue;
     conditionByAsset.set(trade.asset, trade.conditionId.toLowerCase());
     const size = decimalToScaled(trade.size, SHARE_SCALE_DIGITS);
     const beforeHistorical = historical.get(trade.asset) ?? 0n;

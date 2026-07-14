@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { activityEventKey, sourceEventKey } from "../domain/idempotency.js";
+import { activityEventKey, resolvedSourceEventTradeMap } from "../domain/idempotency.js";
 import type { PublicActivity, PublicTrade } from "../domain/models.js";
+import { activityAsTrade } from "../domain/activity-trade.js";
 import { stableJson } from "../domain/versioning.js";
 import type { ReplayReport } from "../replay/replay-engine.js";
 import type { CaptureManifest, CaptureSampleRole } from "./capture-manifest.js";
@@ -51,7 +52,11 @@ export function generateGoldenCandidates(input: {
   replay: ReplayReport;
 }): GoldenExpectation[] {
   const candidates: GoldenExpectation[] = [];
-  const tradeByEventKey = new Map(input.trades.map((trade) => [sourceEventKey(trade), trade]));
+  const activityTrades = input.activity.flatMap((item) => {
+    const trade = activityAsTrade(item);
+    return trade ? [trade] : [];
+  });
+  const tradeByEventKey = resolvedSourceEventTradeMap(input.trades, activityTrades);
 
   for (const type of ["TARGET_BUY", "TARGET_SELL"] as const) {
     const signal = input.replay.signals.find((item) => item.signalType === type && item.executionEligible);

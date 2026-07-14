@@ -1,7 +1,8 @@
 # Progress
 
 ## Current task
-- 全仓库 Production Readiness Hardening 已完成：代码、独立复核、提交、clean-commit 全量回归、真实只读 API 契约采样、业务库隔离迁移和五类 Operational smoke 均已有证据。
+- 2026-07-13 至 2026-07-14 的 24 小时 Observe 已完整运行，但因同一交易内字段完全相同的多笔成交被 `source_event_key` 折叠，5,088 次对账中出现 5,086 次 `MAJOR_DESYNC`，验收未通过。
+- 重复成交身份缺陷已修复并通过真实 capture 回放；下一步需在 clean commit 上创建新 Position Baseline、完成短时 Observe 对账，再重新执行 24 小时 Observe。
 
 ## Completed
 - 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
@@ -34,11 +35,16 @@
 - clean commit 上的 Final Validation 记录 `sourceDirty=false`，2.18.0 snapshot 完整性和外键检查通过；业务源库 hash 在验证前后保持不变。
 - 2.18.0 下五种 `operational:validate` 零时长 smoke 全部无 blocking failure、`liveAllowed=false`，并因 long soak/实时覆盖/新 Paper 消费未执行而正确报告 `INCOMPLETE`；所有运行均使用 Online Backup，源库 hash 未变。
 - 真实公开接口采样成功：Profile、4000 Trades、3500 Activity、127 Positions、CLOB Time/Market/Orderbook 均通过 runtime parser；全程只读、无认证、无订单。
+- `source_event_key` 升级为兼容旧 key 的 v1.2 多重集身份：occurrence 0 保持不变，后续相同 occurrence 使用确定性 sibling key；只有 Trades/Activity 双源确认后才进入投影和 Signal。
+- 双源数量不一致会写入 `SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS` reconciliation evidence，并至少进入 `MINOR_DIFF`；持续不一致升级 `MAJOR_DESYNC`，无法误通过 Observe Gate。
+- 延迟到断线或重启后才确认的 occurrence 会单调升级为 Gap，持久化为 `GAP_TRADE`，生成的 Signal 固定 `executionEligible=false`，不会补执行。
+- 失败 24 小时任务中的真实三行成交 capture 已回放为 3 个独立事件，`confirmedRepeated=1`、`ambiguousRepeated=0`、Replay `PASSED`，报告 hash 为 `6b7909875f4cfef732330e1cf1d22e78cf823ef614577b17f97e7c4b51705d84`。
+- 最新验证：TypeScript 通过；28 个测试文件、334 项测试全部通过；`git diff --check` 通过。
 
 ## Current gate
 - 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
 - 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 由用户通过双击入口完成 24 小时 Observe，把报告交给 Codex 分析后再执行长周期 Paper。
+- 在新 commit 上创建 Position Baseline 并运行短时 Observe；只有恢复 `SYNCED` 后才重跑 24 小时 Observe。
 - 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。

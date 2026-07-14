@@ -1,5 +1,5 @@
 import type { ApiCapture } from "../adapters/polymarket-public.js";
-import { sourceEventKey } from "../domain/idempotency.js";
+import { resolveSourceEventMultiplicity, sourceEventKey } from "../domain/idempotency.js";
 import type { PublicActivity, PublicPosition, PublicTrade } from "../domain/models.js";
 
 export interface ApiContractInput {
@@ -97,7 +97,6 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
   }
 
   const eventCounts = new Map<string, number>();
-  const activityEventCounts = new Map<string, number>();
   const secondCounts = new Map<number, number>();
   const transactionCounts = new Map<string, number>();
   let maxPriceFractionDigits = 0;
@@ -111,25 +110,16 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
     maxPriceFractionDigits = Math.max(maxPriceFractionDigits, fractionDigits(trade.price));
     maxSizeFractionDigits = Math.max(maxSizeFractionDigits, fractionDigits(trade.size));
   }
-  for (const item of input.activity) {
-    if (!isTradeActivity(item)) continue;
-    const key = sourceEventKey(item);
-    activityEventCounts.set(key, (activityEventCounts.get(key) ?? 0) + 1);
-  }
+  const tradeActivities = input.activity.filter(isTradeActivity);
+  const multiplicity = resolveSourceEventMultiplicity(input.trades, tradeActivities);
 
   const requestLatencies = input.captures.map((capture) => capture.latencyMs);
   const tradeTimestamps = input.trades.map((trade) => trade.timestamp).filter(Number.isFinite);
   const activityTypeCounts: Record<string, number> = {};
   for (const item of input.activity) activityTypeCounts[item.type] = (activityTypeCounts[item.type] ?? 0) + 1;
   const exactDuplicateRows = [...eventCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
-  let confirmedDuplicateRows = 0;
-  let ambiguousDuplicateRows = 0;
-  for (const [key, count] of eventCounts) {
-    const duplicateCount = Math.max(0, count - 1);
-    if (duplicateCount === 0) continue;
-    if (activityEventCounts.get(key) === 1) confirmedDuplicateRows += duplicateCount;
-    else ambiguousDuplicateRows += duplicateCount;
-  }
+  const confirmedDuplicateRows = multiplicity.confirmedRepeatedKeys.length;
+  const ambiguousDuplicateRows = multiplicity.ambiguousRepeatedKeys.length;
   const sameSecond = [...secondCounts.values()].filter((count) => count > 1);
   const multiRowTransactions = [...transactionCounts.values()].filter((count) => count > 1);
   const localTimeAtResponse = Date.parse(input.clobTime.fetchedAt);
@@ -138,7 +128,6 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
   const warnings: string[] = [];
   if (!input.tradeHistoryComplete) warnings.push("TRADE_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT");
   if (!input.activityHistoryComplete) warnings.push("ACTIVITY_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT");
-  if (confirmedDuplicateRows > 0) warnings.push("EXACT_DUPLICATE_TRADE_ROWS_CONFIRMED_BY_ACTIVITY");
   if (ambiguousDuplicateRows > 0) warnings.push("EXACT_DUPLICATE_TRADE_ROWS_REQUIRE_RECONCILIATION");
 
   return {
