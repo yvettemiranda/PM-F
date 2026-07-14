@@ -202,6 +202,32 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("anchors the Activity cursor at the position baseline when no events exist", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      snapshot([], [position("100")], "2026-07-08T00:01:10.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    expect(source.activityFromTimestamps).toEqual([
+      baselineSecond - 1,
+      baselineSecond - 1,
+    ]);
+  });
+
   it("preserves confirmed identical fills as separate occurrences across polls and restart", async () => {
     const { databasePath } = setup([position("62851.16")]);
     let now = new Date("2026-07-08T00:01:00.000Z");
@@ -934,8 +960,8 @@ describe("ObserveOnlyRunner", () => {
     ).get()).toEqual({ activity_confirmed: 1 });
     expect((check.prepare("SELECT count(*) count FROM signal_execution_contexts").get() as { count: number }).count).toBe(1);
     expect(source.activityFromTimestamps).toEqual([
-      undefined,
-      undefined,
+      baselineSecond - 1,
+      baselineSecond - 1,
       pendingTrade.timestamp - 1,
     ]);
     check.close();

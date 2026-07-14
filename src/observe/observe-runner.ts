@@ -99,6 +99,7 @@ export class ObserveOnlyRunner {
   async pollOnce(): Promise<boolean> {
     const started = this.start();
     const storedEvents = this.store.loadObservedEvents(started.baseline.baselineRunId);
+    const baselineSecond = Math.floor(Date.parse(started.baseline.snapshotTime) / 1_000);
     const oldestUnconfirmedTradeTimestamp = storedEvents
       .filter((event) => event.trade && !event.activityConfirmed)
       .reduce<number | null>((oldest, event) => (
@@ -113,7 +114,10 @@ export class ObserveOnlyRunner {
       ? Math.max(1, oldestUnconfirmedTradeTimestamp - 1)
       : latestConfirmedActivityTimestamp !== null
         ? Math.max(1, latestConfirmedActivityTimestamp - ACTIVITY_CURSOR_OVERLAP_SECONDS)
-        : undefined;
+        // A baseline with no later events still needs an incremental Activity
+        // cursor. Falling back to the unbounded history endpoint repeatedly
+        // hits its offset limit for high-frequency wallets.
+        : Math.max(1, baselineSecond - 1);
     const sequence = this.store.nextPollSequence(started.observeRunId);
     const pollStartedAt = this.now().toISOString();
     if (
@@ -157,7 +161,6 @@ export class ObserveOnlyRunner {
       return false;
     }
 
-    const baselineSecond = Math.floor(Date.parse(started.baseline.snapshotTime) / 1_000);
     const tradeRows = snapshot.trades.data.filter((trade) => trade.timestamp > baselineSecond);
     const activityRows = snapshot.activity.data.filter((activity) => activity.timestamp > baselineSecond);
     const activityTrades = activityRows.flatMap((activity) => {

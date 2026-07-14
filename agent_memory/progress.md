@@ -38,8 +38,9 @@
 - `source_event_key` 升级为兼容旧 key 的 v1.2 多重集身份：occurrence 0 保持不变，后续相同 occurrence 使用确定性 sibling key；只有 Trades/Activity 双源确认后才进入投影和 Signal。
 - 双源数量不一致会写入 `SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS` reconciliation evidence，并至少进入 `MINOR_DIFF`；持续不一致升级 `MAJOR_DESYNC`，无法误通过 Observe Gate。
 - 延迟到断线或重启后才确认的 occurrence 会单调升级为 Gap，持久化为 `GAP_TRADE`，生成的 Signal 固定 `executionEligible=false`，不会补执行。
+- 新 Position Baseline 后没有事件时，Activity 增量游标固定锚定在 baseline 前 1 秒；不再反复请求受 offset 限制的全部历史，也不使用 Trades/recovery 水位推进 Activity 游标。
 - 失败 24 小时任务中的真实三行成交 capture 已回放为 3 个独立事件，`confirmedRepeated=1`、`ambiguousRepeated=0`、Replay `PASSED`，报告 hash 为 `6b7909875f4cfef732330e1cf1d22e78cf823ef614577b17f97e7c4b51705d84`。
-- 最新验证：TypeScript 通过；28 个测试文件、334 项测试全部通过；`git diff --check` 通过。
+- 最新验证：TypeScript 通过；28 个测试文件、335 项测试全部通过；`git diff --check` 通过。
 
 ## Current gate
 - 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
