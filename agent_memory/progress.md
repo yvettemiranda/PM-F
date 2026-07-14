@@ -2,7 +2,7 @@
 
 ## Current task
 - 2026-07-13 至 2026-07-14 的 24 小时 Observe 已完整运行，但因同一交易内字段完全相同的多笔成交被 `source_event_key` 折叠，5,088 次对账中出现 5,086 次 `MAJOR_DESYNC`，验收未通过。
-- 重复成交身份缺陷已修复并通过真实 capture 回放；下一步需在 clean commit 上创建新 Position Baseline、完成短时 Observe 对账，再重新执行 24 小时 Observe。
+- 重复成交身份及 fresh baseline Activity 游标缺陷均已修复；新基准上的 90 秒 Observe 短测已通过，下一步只需重新执行完整 24 小时 Observe。
 
 ## Completed
 - 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
@@ -40,6 +40,7 @@
 - 延迟到断线或重启后才确认的 occurrence 会单调升级为 Gap，持久化为 `GAP_TRADE`，生成的 Signal 固定 `executionEligible=false`，不会补执行。
 - 新 Position Baseline 后没有事件时，Activity 增量游标固定锚定在 baseline 前 1 秒；不再反复请求受 offset 限制的全部历史，也不使用 Trades/recovery 水位推进 Activity 游标。
 - 失败 24 小时任务中的真实三行成交 capture 已回放为 3 个独立事件，`confirmedRepeated=1`、`ambiguousRepeated=0`、Replay `PASSED`，报告 hash 为 `6b7909875f4cfef732330e1cf1d22e78cf823ef614577b17f97e7c4b51705d84`。
+- clean commit `9e22cafd3127390fb871dce66881d91ba18fb9e3` 上的 90 秒 Observe：6/6 轮询成功、0 API failure、0 Gap、0 drift、6 次 reconciliation 全部一致，最终 `SYNCED`，状态 `SHORT_SOAK_PASSED`；报告为 `data/observe/observe-eb12fa48-0f08-4b5c-bc0d-7f11cc9540aa.json`。
 - 最新验证：TypeScript 通过；28 个测试文件、335 项测试全部通过；`git diff --check` 通过。
 
 ## Current gate
@@ -47,5 +48,5 @@
 - 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 在新 commit 上创建 Position Baseline 并运行短时 Observe；只有恢复 `SYNCED` 后才重跑 24 小时 Observe。
+- 使用最新 READY Position Baseline 重新运行 24 小时 Observe；短测通过不替代 24 小时稳定性 Gate。
 - 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。
