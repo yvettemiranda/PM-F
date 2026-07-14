@@ -2,7 +2,7 @@
 
 ## Active blockers
 - 原 24 小时 Observe 失败证据继续保留；身份折叠与 Activity 游标缺陷已修复，真实 capture replay 和新基准短时对账已通过，但修复后的 24 小时 Observe 尚未完成，因此 Observe 稳定性 Gate 仍未通过。
-- 修复后的 24 小时 Observe、长周期 Paper、Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
+- 修复后的 24 小时 Observe + Paper 联合长测、Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
 - Data API 历史 offset 上限导致完整钱包历史不可得，历史 Replay 仍为 `INCOMPLETE`；缺历史 orderbook snapshot，不能声称历史 Paper execution/PnL 已验证。
 - 真实 geoblock/compliance、隔离钱包、安全凭据存储、真实只读余额/订单/成交/仓位 provider、人工授权和小额实盘前检查尚未完成。
 - 2026-07-13 最终只读复测官方 geoblock 返回 `BLOCKED (US/CA)`，CLOB clock offset 约 `1733ms` 且为 `UNSAFE`；当前环境明确不能用于 Live，必须在合法部署环境重新验证，禁止绕过。
@@ -16,6 +16,8 @@
 - 业务源库当前仍为 schema 2.4.0，未在本轮审计中原地修改。运行时准备会自动 backup-first，再迁移至 2.18.0，并做 integrity/FK/Live Gate 安全状态检查；第一次正式启动仍应观察迁移日志并保留自动备份。
 
 ## Resolved in current hardening
+- 原联合入口的 Paper 会早于 Observe 结束、正常完成仍标记“提前停止”、信号崩溃可被吞成成功、`wait` 可无限阻塞、日志未刷盘就打包、Finder 可选错旧 ZIP 等操作缺陷已修复。现只有 Observe 报告明确 `liveStabilityEligible=true` 且 `activeRuntimeMs>=86400000`、Paper 安全报告通过时才显示正常结束。
+- 结果 ZIP 改为唯一名、临时写入、完整性校验和严格 4 项白名单；已排除 macOS AppleDouble/`__MACOSX`、SQLite、`.env`、账户 ID 和凭据。
 - 同一交易中两笔字段完全相同的真实成交曾被 v1.1 字段哈希折叠；现已使用兼容旧 key 的 occurrence 多重集身份修复。双源确认、数量歧义阻断、跨重启延迟确认 Gap 化、数据库保存和 Replay 均有回归测试，真实失败 capture 可稳定还原 3 个事件。
 - fresh baseline 后没有 post-baseline event 时，Activity 游标曾为 `undefined`，导致高频钱包每隔一轮重扫不完整历史并触发 `OBSERVE_INCREMENTAL_PAGE_SATURATED`；现已固定回看 baseline 前 1 秒，并有无事件连续轮询回归测试。
 - 游标修复后的 90 秒真实 Observe 已连续 6 次成功轮询并保持 `SYNCED`，没有 API failure、Gap、状态漂移或 checkpoint 异常；长周期结论仍等待重新执行 24 小时任务。

@@ -1,8 +1,8 @@
 # Progress
 
 ## Current task
-- 2026-07-13 至 2026-07-14 的 24 小时 Observe 已完整运行，但因同一交易内字段完全相同的多笔成交被 `source_event_key` 折叠，5,088 次对账中出现 5,086 次 `MAJOR_DESYNC`，验收未通过。
-- 重复成交身份及 fresh baseline Activity 游标缺陷均已修复；新基准上的 90 秒 Observe 短测已通过，下一步只需重新执行完整 24 小时 Observe。
+- 重复成交身份及 fresh baseline Activity 游标缺陷已修复，新基准 90 秒 Observe 短测已通过。
+- 操作流程已收敛为桌面三个按钮：一键并行 Paper + Observe 24 小时、提前安全停止、自动选中最新结果。24 小时后会自动释放锁/防睡眠、生成唯一 ZIP 并在 Finder 选中；此轮长测尚未启动。
 
 ## Completed
 - 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
@@ -28,7 +28,7 @@
 - Live Execution row/transition/audit 使用可嵌套 SAVEPOINT 原子提交；Settlement current projection 的每次变化与 append-only event、transition、audit 同事务，故障注入验证会完整回滚。
 - 批量冻结仓位也自持事务；任一仓位 transition 失败会全部回滚。Redeem 失败后的 projection/event/transition 统一回到 `RESOLVED`，失败原因只作为不可变 evidence 保存。
 - 依赖锁定 `@polymarket/clob-client-v2@1.0.8`、`viem@2.55.0`，并覆盖 `ws@8.21.0`；官方 CLOB SDK 当前已是 npm 最新版。
-- 双击 Observe/Paper/停止/报告入口已加单实例、精确 PID、frozen install、caffeinate、安全停止和自动报告；没有 Live 入口。
+- 双击 Observe/Paper/停止/报告入口已加单实例、精确 PID、frozen install、caffeinate、有界停止和自动报告；用户日常只需桌面三按钮，没有 Live 入口。
 - 最新验证：TypeScript 通过；28 个测试文件、323 项测试全部通过；`git diff --check` 与全部 `.command/.sh` zsh 语法通过。
 - 业务库 Online Backup 隔离验证保持源文件 SHA-256 `008a7a76...f8fbb55` 不变；2.18.0 迁移快照 `integrity_check=ok`、`foreign_key_check=[]`，仍为 `PAPER + LIVE_DISABLED`。
 - `validate:final --type=all` framework session 通过，但顶层正确报告 `INCOMPLETE`、`VALIDATION_FRAMEWORK_READY`、`liveAllowed=false`；未把 Replay/历史 orderbook 数据不足冒充 PASS。
@@ -42,11 +42,14 @@
 - 失败 24 小时任务中的真实三行成交 capture 已回放为 3 个独立事件，`confirmedRepeated=1`、`ambiguousRepeated=0`、Replay `PASSED`，报告 hash 为 `6b7909875f4cfef732330e1cf1d22e78cf823ef614577b17f97e7c4b51705d84`。
 - clean commit `9e22cafd3127390fb871dce66881d91ba18fb9e3` 上的 90 秒 Observe：6/6 轮询成功、0 API failure、0 Gap、0 drift、6 次 reconciliation 全部一致，最终 `SYNCED`，状态 `SHORT_SOAK_PASSED`；报告为 `data/observe/observe-eb12fa48-0f08-4b5c-bc0d-7f11cc9540aa.json`。
 - 最新验证：TypeScript 通过；28 个测试文件、335 项测试全部通过；`git diff --check` 通过。
+- 已仅删除隔离 Validation/Operational 任务的可再生 SQLite 快照、`.DS_Store` 和失效 FIFO，回收 3,153,285,120 bytes；主库、迁移备份、原 24 小时失败证据、90 秒通过证据及最新 Validation/Operational 报告均保留。
+- 操作入口语法、中文/空格路径、日志尾部刷盘、有界子进程停止、最新 ZIP/fallback 选择及严格 4 文件压缩包已通过独立 smoke 测试。
 
 ## Current gate
 - 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
 - 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 使用最新 READY Position Baseline 重新运行 24 小时 Observe；短测通过不替代 24 小时稳定性 Gate。
+- 双击桌面 `Polymarket验证_点这里/1_开始24小时验证.command`，同时重跑修复后 Observe 与 Paper；短测通过不替代 24 小时稳定性 Gate。
+- 结束后只需提供 Finder 自动选中的 `发给Codex_日期时间_PID.zip`，再执行 Crash Recovery 和最终一致性分析。
 - 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。
