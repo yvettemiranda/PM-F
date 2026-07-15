@@ -2,6 +2,8 @@ import { PolymarketPublicApi } from "../adapters/polymarket-public.js";
 import type { ApiCapture } from "../adapters/polymarket-public.js";
 import type { ObserveDataSource, ObservePollSnapshot } from "./types.js";
 
+const INCREMENTAL_TRADE_HEAD_LIMIT = 100;
+
 function mergeCaptures<T>(endpoint: string, captures: ApiCapture<T[]>[], rows: T[]): ApiCapture<T[]> {
   const last = captures.at(-1);
   if (!last) throw new Error(`Recovery returned no capture for ${endpoint}`);
@@ -18,6 +20,18 @@ export class PublicObserveDataSource implements ObserveDataSource {
   private readonly tradeCoverageWatermarks = new Map<string, number>();
 
   constructor(private readonly api = new PolymarketPublicApi()) {}
+
+  private async incrementalTrades(walletAddress: string, tradeWatermark?: number) {
+    const head = await this.api.recentTrades(walletAddress, INCREMENTAL_TRADE_HEAD_LIMIT);
+    const oldest = head.data.length === 0 ? null : Math.min(...head.data.map((row) => row.timestamp));
+    if (
+      head.data.length < INCREMENTAL_TRADE_HEAD_LIMIT
+      || (tradeWatermark !== undefined && oldest !== null && oldest < tradeWatermark)
+    ) {
+      return head;
+    }
+    return this.api.recentTrades(walletAddress);
+  }
 
   async poll(
     walletAddress: string,
@@ -44,7 +58,7 @@ export class PublicObserveDataSource implements ObserveDataSource {
     }
     const tradeWatermark = this.tradeCoverageWatermarks.get(walletAddress);
     const [trades, activityHistory, positionHistory, pUsdBalance] = await Promise.all([
-      this.api.recentTrades(walletAddress),
+      this.incrementalTrades(walletAddress, tradeWatermark),
       activityFromTimestamp === undefined
         ? this.api.activity(walletAddress)
         : this.api.activitySince(walletAddress, activityFromTimestamp),

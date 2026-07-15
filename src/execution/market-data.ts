@@ -1,4 +1,4 @@
-import { PolymarketPublicApi } from "../adapters/polymarket-public.js";
+import { PolymarketPublicApi, PolymarketPublicHttpError } from "../adapters/polymarket-public.js";
 import { decimalToScaled } from "../domain/fixed.js";
 
 export interface ExecutionOrderbookLevel {
@@ -37,6 +37,25 @@ export interface ExecutionResolutionSnapshot {
   raw: Record<string, unknown>;
 }
 
+export class OrderbookUnavailableError extends Error {
+  readonly code = "NO_ORDERBOOK_EXISTS";
+
+  constructor(
+    readonly assetId: string,
+    readonly conditionId: string,
+    options: { cause?: unknown } = {},
+  ) {
+    super(`No orderbook exists for ${assetId}`, options);
+    this.name = "OrderbookUnavailableError";
+  }
+}
+
+export function isOrderbookUnavailableError(error: unknown): boolean {
+  return error instanceof OrderbookUnavailableError
+    || (typeof error === "object" && error !== null && "code" in error
+      && (error as { code?: unknown }).code === "NO_ORDERBOOK_EXISTS");
+}
+
 export interface ExecutionMarketDataProvider {
   orderbook(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionOrderbookSnapshot>;
   fee(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionFeeSnapshot>;
@@ -57,7 +76,19 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
   constructor(private readonly api = new PolymarketPublicApi()) {}
 
   async orderbook(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionOrderbookSnapshot> {
-    const capture = await this.api.orderbook(assetId, signal);
+    let capture;
+    try {
+      capture = await this.api.orderbook(assetId, signal);
+    } catch (error) {
+      if (
+        error instanceof PolymarketPublicHttpError
+        && error.status === 404
+        && /no orderbook exists/i.test(error.body)
+      ) {
+        throw new OrderbookUnavailableError(assetId, conditionId, { cause: error });
+      }
+      throw error;
+    }
     if (capture.data.asset_id !== assetId || capture.data.market.toLowerCase() !== conditionId.toLowerCase()) {
       throw new Error("ORDERBOOK_IDENTITY_MISMATCH");
     }

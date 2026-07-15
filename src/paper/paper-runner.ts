@@ -1,4 +1,5 @@
 import type { PaperExecutor } from "./paper-executor.js";
+import type { PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
 import type { PaperAccountSnapshot } from "./types.js";
 
 const DEFAULT_REPORT_DETAIL_LIMIT = 100;
@@ -22,18 +23,25 @@ export interface PaperRunnerReport {
   droppedErrorCount: number;
   errors: Array<{ time: string; message: string }>;
   account: PaperAccountSnapshot;
+  acceptance: PaperAcceptanceSummary;
 }
 
 export type PaperRunCompletionStatus =
   | "COMPLETED"
   | "COMPLETED_WITH_ERRORS"
-  | "COMPLETED_INCOMPLETE_VALUATION";
+  | "COMPLETED_INCOMPLETE_VALUATION"
+  | "COMPLETED_INCONSISTENT"
+  | "COMPLETED_WITH_SAFETY_BLOCKERS"
+  | "COMPLETED_INCOMPLETE_COVERAGE";
 
 export function paperRunCompletionStatus(report: PaperRunnerReport): PaperRunCompletionStatus {
   if (report.errorCount > 0) return "COMPLETED_WITH_ERRORS";
+  if (!report.acceptance.consistency.passed) return "COMPLETED_INCONSISTENT";
+  if (report.acceptance.marketData.blockerCount > 0) return "COMPLETED_WITH_SAFETY_BLOCKERS";
   if (report.account.valuationStatus !== "COMPLETE" || report.account.unpricedPositionCount !== 0) {
     return "COMPLETED_INCOMPLETE_VALUATION";
   }
+  if (report.acceptance.coverage.BUY === "NOT_OBSERVED") return "COMPLETED_INCOMPLETE_COVERAGE";
   return "COMPLETED";
 }
 
@@ -75,23 +83,24 @@ export class PaperRunner {
     let consumedSignals = 0;
     let errorCount = 0;
     const errors: PaperRunnerReport["errors"] = [];
+    const recordError = (error: unknown): void => {
+      errorCount += 1;
+      if (errors.length >= this.reportDetailLimit) errors.shift();
+      errors.push({ time: this.now().toISOString(), message: error instanceof Error ? error.message : String(error) });
+    };
     while (!signal?.aborted && this.now().valueOf() < deadline) {
       try {
-        consumedSignals += (await this.executor.consumeAvailableSignals(this.options.accountId, signal)).length;
-        if (!signal?.aborted) await this.executor.retryPending(this.options.accountId, signal);
-        if (!signal?.aborted) await this.executor.checkStopLosses(this.options.accountId, signal);
-        if (!signal?.aborted) await this.executor.processSettlements(this.options.accountId, signal);
+        consumedSignals += await this.executeCycle(signal, recordError);
       } catch (error) {
         if (isCancellationFromSignal(error, signal)) break;
-        errorCount += 1;
-        if (errors.length >= this.reportDetailLimit) errors.shift();
-        errors.push({ time: this.now().toISOString(), message: error instanceof Error ? error.message : String(error) });
+        recordError(error);
       }
       cycles += 1;
       const remaining = deadline - this.now().valueOf();
       if (remaining <= 0) break;
       await this.waitForInterval(Math.min(this.options.intervalMs ?? 1_000, remaining), signal);
     }
+    const account = await this.executor.accountSnapshot(this.options.accountId, signal);
     return {
       accountId: this.options.accountId,
       startedAt,
@@ -101,8 +110,37 @@ export class PaperRunner {
       errorCount,
       droppedErrorCount: Math.max(0, errorCount - errors.length),
       errors,
-      account: await this.executor.accountSnapshot(this.options.accountId, signal),
+      account,
+      acceptance: this.executor.acceptanceSummary(this.options.accountId),
     };
+  }
+
+  async finalDrain(signal?: AbortSignal): Promise<number> {
+    if (signal?.aborted) throw new Error("FINAL_DRAIN_INCOMPLETE");
+    const consumed = await this.executeCycle(signal, (error) => { throw error; });
+    if (signal?.aborted) throw new Error("FINAL_DRAIN_INCOMPLETE");
+    return consumed;
+  }
+
+  private async executeCycle(signal: AbortSignal | undefined, onError: (error: unknown) => void): Promise<number> {
+    let consumedSignals = 0;
+    const runStage = async (action: () => Promise<void>): Promise<void> => {
+      if (signal?.aborted) return;
+      try {
+        await action();
+      } catch (error) {
+        if (isCancellationFromSignal(error, signal)) throw error;
+        onError(error);
+      }
+    };
+    await runStage(async () => this.executor.recoverMarketData(this.options.accountId, signal));
+    await runStage(async () => { await this.executor.processSettlements(this.options.accountId, signal); });
+    await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
+    await runStage(async () => this.executor.retryPending(this.options.accountId, signal));
+    await runStage(async () => {
+      consumedSignals += (await this.executor.consumeAvailableSignals(this.options.accountId, signal)).length;
+    });
+    return consumedSignals;
   }
 
   private async waitForInterval(milliseconds: number, signal?: AbortSignal): Promise<void> {

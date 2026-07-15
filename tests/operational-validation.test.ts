@@ -158,6 +158,10 @@ describe("Operational validation framework", () => {
     expect(count(result.workingDatabasePath, "paper_accounts")).toBe(1);
     expect(count(result.workingDatabasePath, "operational_paper_bindings")).toBe(1);
     expect(count(result.workingDatabasePath, "paper_cash_ledger")).toBe(1);
+    expect(scalar<{ target_id: string | null }>(
+      result.workingDatabasePath,
+      "SELECT target_id FROM paper_accounts LIMIT 1",
+    ).target_id).toMatch(/^operational-paper-target-/);
   });
 
   it("crash recovery operational validation records recovery checks on a snapshot", async () => {

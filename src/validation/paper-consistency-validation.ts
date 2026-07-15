@@ -314,7 +314,7 @@ export class PaperConsistencyValidation implements ValidationValidator {
     for (const account of accounts) {
       const openPositions = database.prepare(
         `SELECT paper_position_id,current_size_micros FROM paper_positions
-         WHERE paper_account_id=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')`,
+         WHERE paper_account_id=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')`,
       ).all(account.paper_account_id) as unknown as Array<{ paper_position_id: string; current_size_micros: string }>;
       const hasOpenSize = openPositions.some((position) => BigInt(position.current_size_micros) > 0n);
       if (!hasOpenSize) continue;

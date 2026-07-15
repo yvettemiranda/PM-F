@@ -106,4 +106,26 @@ describe("SettlementService", () => {
     expect(resolution).toHaveBeenCalledTimes(2);
     expect(state.redeemed).toEqual([]);
   });
+
+  it("records a failed resolution request and records recovery after a later successful fetch", async () => {
+    const resolution = vi.fn()
+      .mockRejectedValueOnce(new Error("RESOLUTION_API_DOWN"))
+      .mockResolvedValueOnce({
+        ...resolved("asset-yes", "0"),
+        resolved: false,
+        payoutNumerator: null,
+        payoutDenominator: null,
+      });
+    const state = store([candidate("position-a", "asset-yes")]);
+    state.implementation.recordSettlementError = vi.fn();
+    state.implementation.recordSettlementSuccess = vi.fn();
+    const service = new SettlementService(marketData(resolution), state.implementation, now);
+
+    await service.process("paper");
+    await service.process("paper");
+
+    expect(state.implementation.recordSettlementError).toHaveBeenCalledTimes(1);
+    expect(state.implementation.recordSettlementSuccess).toHaveBeenCalledTimes(1);
+    expect(state.redeemed).toEqual([]);
+  });
 });

@@ -94,7 +94,7 @@ function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("REQUEST_ABORTED");
 }
 
-class HttpError extends Error {
+export class PolymarketPublicHttpError extends Error {
   constructor(
     readonly status: number,
     readonly body: string,
@@ -148,7 +148,7 @@ export class PolymarketPublicApi {
         const body = await response.text();
         const latencyMs = Math.round((performance.now() - started) * 100) / 100;
         if (!response.ok) {
-          const error = new HttpError(response.status, body, url);
+          const error = new PolymarketPublicHttpError(response.status, body, url);
           if ((response.status !== 429 && response.status < 500) || attempt === this.maxRetries) throw error;
           lastError = error;
         } else {
@@ -162,7 +162,7 @@ export class PolymarketPublicApi {
         }
       } catch (error) {
         if (externalSignal?.aborted) throw abortError(externalSignal);
-        if (error instanceof HttpError && error.status !== 429 && error.status < 500) throw error;
+        if (error instanceof PolymarketPublicHttpError && error.status !== 429 && error.status < 500) throw error;
         lastError = error;
         if (attempt === this.maxRetries) break;
       }
@@ -287,7 +287,7 @@ export class PolymarketPublicApi {
           return finish(true, "END_OF_DATA");
         }
       } catch (error) {
-        if (error instanceof HttpError && error.status === 400 && error.body.includes("max historical activity offset")) {
+        if (error instanceof PolymarketPublicHttpError && error.status === 400 && error.body.includes("max historical activity offset")) {
           return finish(false, error.body);
         }
         throw error;

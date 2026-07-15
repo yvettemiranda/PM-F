@@ -418,6 +418,23 @@ export class Phase0Database {
         throw error;
       }
     }
+    const paperMarketDataHealthApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.19.0");
+    if (!paperMarketDataHealthApplied) {
+      const paperMarketDataHealthSql = readFileSync(new URL("./024_paper_market_data_health.sql", import.meta.url), "utf8");
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(paperMarketDataHealthSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.19.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

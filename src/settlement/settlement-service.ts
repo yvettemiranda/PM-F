@@ -13,6 +13,8 @@ export interface SettlementStore {
   settlementCandidates(accountId: string): SettlementCandidate[];
   markSettlementPending(positionId: string, reason: string): void;
   redeemSettledPosition(positionId: string, resolution: PaperResolutionSnapshot): string;
+  recordSettlementError?(candidate: SettlementCandidate, error: unknown): void;
+  recordSettlementSuccess?(candidate: SettlementCandidate): void;
 }
 
 export class SettlementService {
@@ -27,7 +29,12 @@ export class SettlementService {
     const resolutions = new Map<string, Promise<PaperResolutionSnapshot>>();
     for (const candidate of this.store.settlementCandidates(accountId)) {
       if (signal?.aborted) break;
-      if (this.now().valueOf() < Date.parse(candidate.marketEndTime)) continue;
+      const marketEnd = Date.parse(candidate.marketEndTime);
+      if (!Number.isFinite(marketEnd)) {
+        this.store.recordSettlementError?.(candidate, new Error("INVALID_MARKET_END_TIME"));
+        continue;
+      }
+      if (this.now().valueOf() < marketEnd) continue;
       if (candidate.status !== "SETTLEMENT_PENDING") {
         this.store.markSettlementPending(candidate.positionId, "MARKET_END_REACHED");
       }
@@ -37,10 +44,22 @@ export class SettlementService {
         resolutionPromise = this.marketData.resolution(candidate.conditionId, candidate.assetId, signal);
         resolutions.set(marketKey, resolutionPromise);
       }
-      const resolution = await resolutionPromise;
+      let resolution: PaperResolutionSnapshot;
+      try {
+        resolution = await resolutionPromise;
+      } catch (error) {
+        if (signal?.aborted) break;
+        this.store.recordSettlementError?.(candidate, error);
+        continue;
+      }
       if (signal?.aborted) break;
+      this.store.recordSettlementSuccess?.(candidate);
       if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) continue;
-      completed.push(this.store.redeemSettledPosition(candidate.positionId, resolution));
+      try {
+        completed.push(this.store.redeemSettledPosition(candidate.positionId, resolution));
+      } catch (error) {
+        this.store.recordSettlementError?.(candidate, error);
+      }
     }
     return completed;
   }

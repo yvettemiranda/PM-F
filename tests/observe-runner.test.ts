@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ApiCapture } from "../src/adapters/polymarket-public.js";
+import { PolymarketPublicApi, type ApiCapture } from "../src/adapters/polymarket-public.js";
 import type { PublicActivity, PublicPosition, PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { ObserveOnlyRunner } from "../src/observe/observe-runner.js";
+import { PublicObserveDataSource } from "../src/observe/public-data-source.js";
 import { ObserveStore } from "../src/observe/observe-store.js";
 import type { ObserveDataSource, ObservePollSnapshot } from "../src/observe/types.js";
 import { buildCaptureManifest, captureIdentity } from "../src/services/capture-manifest.js";
@@ -226,6 +227,134 @@ describe("ObserveOnlyRunner", () => {
       baselineSecond - 1,
       baselineSecond - 1,
     ]);
+  });
+
+  it("keeps the conservative Activity window while a Trade awaits confirmation", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const pending = trade({ transactionHash: "0xpending-confirmation", timestamp: baselineSecond + 70 });
+    const pendingSnapshot = snapshot([pending], [position("100")], "2026-07-08T00:01:10.000Z");
+    pendingSnapshot.activity = capture("activity", [], pendingSnapshot.activity.fetchedAt);
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      pendingSnapshot,
+      { ...pendingSnapshot, trades: capture("trades", [pending], "2026-07-08T00:01:20.000Z") },
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+
+    store.close();
+  });
+
+  it("preserves event, Signal, gap, and projection semantics with reduced normal-poll windows", async () => {
+    const runScenario = async () => {
+      const { databasePath } = setup([]);
+      let now = new Date("2026-07-08T00:01:00.000Z");
+      const buy = trade({ transactionHash: "0xoptimized-buy", timestamp: baselineSecond + 70 });
+      const reward = activity({
+        transactionHash: "0xoptimized-reward",
+        type: "REWARD",
+        timestamp: baselineSecond + 10,
+      });
+      const activityRows: PublicActivity[] = [reward, { ...buy, type: "TRADE", isCombo: false }];
+      const tradeLimits: number[] = [];
+      const activityStarts: number[] = [];
+      let positionPoll = 0;
+      const paged = <T>(url: string, rows: T[]) => ({
+        rows,
+        captures: [capture(url, rows, now.toISOString())],
+        historyComplete: true,
+        stopReason: "END_OF_DATA",
+      });
+      const api = {
+        trades: async () => paged("trades-recovery", []),
+        activity: async () => paged("activity-recovery", []),
+        recentTrades: async (_address: string, limit: number) => {
+          tradeLimits.push(limit);
+          return capture("trades-head", [buy], now.toISOString());
+        },
+        activitySince: async (_address: string, start: number) => {
+          activityStarts.push(start);
+          return paged("activity-since", activityRows.filter((row) => row.timestamp >= start));
+        },
+        allPositions: async () => {
+          const rows = positionPoll++ === 0 ? [] : [position("10")];
+          return { ...paged("positions", rows), merged: capture("positions", rows, now.toISOString()) };
+        },
+        pUsdBalance: async () => capture(
+          "balance",
+          { jsonrpc: "2.0", id: 2, result: "0x0" },
+          now.toISOString(),
+        ),
+      };
+      const delegate = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+      const source: ObserveDataSource = delegate;
+      const store = new ObserveStore(databasePath, sourceVersion);
+      const runner = new ObserveOnlyRunner(store, source, {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+      });
+      await runner.pollOnce();
+      now = new Date("2026-07-08T00:01:10.000Z");
+      await runner.pollOnce();
+      now = new Date("2026-07-08T00:01:20.000Z");
+      await runner.pollOnce();
+      const observeRunId = runner.start().observeRunId;
+      store.stopRun(observeRunId, now.toISOString(), "TEST_COMPLETE");
+      const metrics = store.runMetrics(observeRunId);
+      store.close();
+
+      const check = new DatabaseSync(databasePath, { readOnly: true });
+      const events = check.prepare(
+        `SELECT source_event_key,is_gap,activity_confirmed
+         FROM observe_events ORDER BY source_event_key`,
+      ).all();
+      const signals = check.prepare(
+        `SELECT signal_type,execution_eligible,event_classification
+         FROM signals WHERE producer_mode='OBSERVE_ONLY' ORDER BY signal_id`,
+      ).all();
+      const checkpoint = check.prepare(
+        `SELECT replay_state,position_projection_hash,position_projection_json
+         FROM observe_checkpoints WHERE observe_run_id=? ORDER BY created_at DESC LIMIT 1`,
+      ).get(observeRunId);
+      check.close();
+      return {
+        tradeLimits,
+        activityStarts,
+        events,
+        signals,
+        checkpoint,
+        semanticMetrics: {
+          processedEvents: metrics.processedEvents,
+          emittedSignals: metrics.emittedSignals,
+          gapEvents: metrics.gapEvents,
+          finalSyncStatus: metrics.finalSyncStatus,
+        },
+      };
+    };
+
+    const optimized = await runScenario();
+
+    expect(optimized.tradeLimits).toEqual([100, 100]);
+    expect(optimized.activityStarts).toEqual([baselineSecond - 1, baselineSecond - 230]);
+    expect(optimized.events).toHaveLength(2);
+    expect(optimized.signals).toHaveLength(1);
+    expect(optimized.semanticMetrics).toMatchObject({
+      processedEvents: 2,
+      emittedSignals: 1,
+      finalSyncStatus: "SYNCED",
+    });
   });
 
   it("preserves confirmed identical fills as separate occurrences across polls and restart", async () => {
@@ -595,10 +724,12 @@ describe("ObserveOnlyRunner", () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
     let pollCount = 0;
+    const recoveryRequests: Array<number | undefined> = [];
     const delayedBuy = trade({ transactionHash: "0xinflight-sleep", timestamp: baselineSecond + 90 });
     const source: ObserveDataSource = {
-      async poll() {
+      async poll(_walletAddress, recoveryFromTimestamp) {
         pollCount += 1;
+        recoveryRequests.push(recoveryFromTimestamp);
         if (pollCount === 1) return snapshot([], [position("100")], now.toISOString());
         now = new Date("2026-07-08T00:01:40.000Z");
         return snapshot([delayedBuy], [position("110")], now.toISOString());
@@ -615,6 +746,7 @@ describe("ObserveOnlyRunner", () => {
     await runner.pollOnce();
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
 
+    expect(recoveryRequests).toEqual([baselineSecond, undefined, baselineSecond + 60]);
     expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
       schedulingGapCount: 1,
       maxSchedulingGapMs: 10_000,

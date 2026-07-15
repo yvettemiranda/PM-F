@@ -143,13 +143,27 @@ export class ObserveOnlyRunner {
       return false;
     }
 
-    const completedAt = this.now().toISOString();
+    let completedAt = this.now().toISOString();
     if (
       Date.parse(completedAt) - Date.parse(pollStartedAt)
         > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
     ) {
       this.gapActive = true;
       recoveryFrom = this.lastSuccessfulAt ?? started.gapFrom;
+      try {
+        snapshot = await this.source.poll(
+          this.options.walletAddress,
+          Math.floor(Date.parse(recoveryFrom) / 1_000),
+          activityFromTimestamp,
+        );
+        completedAt = this.now().toISOString();
+      } catch (error) {
+        const failedAt = this.now().toISOString();
+        this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
+        this.lastPollCompletedAt = failedAt;
+        this.gapActive = true;
+        return false;
+      }
     }
     try {
       if (recoveryFrom) assertRecoveryCoverage(snapshot, recoveryFrom);

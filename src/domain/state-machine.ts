@@ -83,6 +83,15 @@ export const PAPER_POSITION_TRANSITIONS: TransitionMap<PaperPositionState> = {
   FROZEN: ["OPEN", "PARTIALLY_CLOSED", "SETTLEMENT_PENDING"],
 };
 
+export type PaperMarketDataState = "HEALTHY" | "DEGRADED" | "FROZEN" | "SETTLEMENT_ONLY";
+
+export const PAPER_MARKET_DATA_TRANSITIONS: TransitionMap<PaperMarketDataState> = {
+  HEALTHY: ["HEALTHY", "DEGRADED", "FROZEN", "SETTLEMENT_ONLY"],
+  DEGRADED: ["DEGRADED", "FROZEN", "HEALTHY", "SETTLEMENT_ONLY"],
+  FROZEN: ["FROZEN", "HEALTHY", "SETTLEMENT_ONLY"],
+  SETTLEMENT_ONLY: ["SETTLEMENT_ONLY"],
+};
+
 export type LiveExecutionMachineState =
   | "WAITING_EXECUTION"
   | "PARTIALLY_EXECUTED"

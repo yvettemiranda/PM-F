@@ -189,4 +189,101 @@ describe("Polymarket public API pagination", () => {
       .resolves.toMatchObject({ trades: { data: { length: 1_000 } } });
     expect(activityStarts).toEqual([1_699_999_900]);
   });
+
+  it("uses a bounded trade head after recovery when it already overlaps the committed watermark", async () => {
+    const fetchedAt = "2026-07-13T00:00:00.000Z";
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const trade = (timestamp: number) => ({
+      proxyWallet: wallet,
+      transactionHash: `0x${timestamp}`,
+      conditionId: "0xcondition",
+      asset: `asset-${timestamp}`,
+      side: "BUY" as const,
+      price: "0.5",
+      size: "1",
+      timestamp,
+    });
+    const paged = <T>(url: string, rows: T[]) => ({
+      rows,
+      captures: [{ url, fetchedAt, latencyMs: 0, status: 200, data: rows }],
+      historyComplete: true,
+      stopReason: "END_OF_DATA",
+    });
+    const recoveryRows = [trade(1_700_000_100), trade(1_700_000_000)];
+    const requestedTradeLimits: number[] = [];
+    const boundedHead = Array.from({ length: 100 }, (_, index) => trade(1_700_000_100 - index));
+    const api = {
+      trades: async () => paged("fake://trades-recovery", recoveryRows),
+      activity: async () => paged("fake://activity-recovery", []),
+      recentTrades: async (_address: string, limit: number) => {
+        requestedTradeLimits.push(limit);
+        return { url: `fake://trades?limit=${limit}`, fetchedAt, latencyMs: 0, status: 200, data: boundedHead };
+      },
+      activitySince: async () => paged("fake://activity-since", []),
+      allPositions: async () => ({
+        ...paged("fake://positions", []),
+        merged: { url: "fake://positions", fetchedAt, latencyMs: 0, status: 200, data: [] },
+      }),
+      pUsdBalance: async () => ({
+        url: "fake://balance",
+        fetchedAt,
+        latencyMs: 0,
+        status: 200,
+        data: { jsonrpc: "2.0", id: 2, result: "0x0" },
+      }),
+    };
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+
+    await source.poll(wallet, 1_700_000_000);
+    const normal = await source.poll(wallet, undefined, 1_699_999_900);
+
+    expect(requestedTradeLimits).toEqual([100]);
+    expect(normal.trades.data).toHaveLength(100);
+    expect(Math.min(...normal.trades.data.map((row) => row.timestamp))).toBeLessThan(1_700_000_100);
+  });
+
+  it("preserves the caller overlap window after recovery so delayed Activity remains visible", async () => {
+    const fetchedAt = "2026-07-13T00:00:00.000Z";
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const paged = <T>(url: string, rows: T[]) => ({
+      rows,
+      captures: [{ url, fetchedAt, latencyMs: 0, status: 200, data: rows }],
+      historyComplete: true,
+      stopReason: "END_OF_DATA",
+    });
+    const activityRow = {
+      proxyWallet: wallet,
+      transactionHash: "0xactivity",
+      type: "REWARD" as const,
+      timestamp: 1_700_000_100,
+    };
+    const activityStarts: number[] = [];
+    const api = {
+      trades: async () => paged("fake://trades-recovery", []),
+      activity: async () => paged("fake://activity-recovery", [activityRow]),
+      recentTrades: async () => ({ url: "fake://trades", fetchedAt, latencyMs: 0, status: 200, data: [] }),
+      activitySince: async (_address: string, start: number) => {
+        activityStarts.push(start);
+        return paged("fake://activity-since", []);
+      },
+      allPositions: async () => ({
+        ...paged("fake://positions", []),
+        merged: { url: "fake://positions", fetchedAt, latencyMs: 0, status: 200, data: [] },
+      }),
+      pUsdBalance: async () => ({
+        url: "fake://balance",
+        fetchedAt,
+        latencyMs: 0,
+        status: 200,
+        data: { jsonrpc: "2.0", id: 2, result: "0x0" },
+      }),
+    };
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+
+    await source.poll(wallet, 1_699_999_000);
+    await source.poll(wallet, undefined, 1_699_999_800);
+    await source.poll(wallet, undefined, 1_699_999_800);
+
+    expect(activityStarts).toEqual([1_699_999_800, 1_699_999_800]);
+  });
 });

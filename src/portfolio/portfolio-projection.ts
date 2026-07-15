@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { RULESET, stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { calculateUnrealizedPnl } from "../pnl/pnl-model.js";
+import { isOrderbookUnavailableError } from "../execution/market-data.js";
 import { matchPaperSell } from "../paper/matching.js";
 import type {
   PaperAccountSnapshot,
@@ -32,6 +33,19 @@ interface ProjectionPositionRow {
   remaining_cost_micros: string;
 }
 
+export interface PaperProjectionMarketHealth {
+  shouldAttempt(accountId: string, assetId: string, conditionId: string): boolean;
+  onUnavailable(
+    accountId: string,
+    assetId: string,
+    conditionId: string,
+    error: unknown,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  onFailure(accountId: string, assetId: string, conditionId: string, code: string, message: string): void;
+  onSuccess(accountId: string, assetId: string, conditionId: string): boolean;
+}
+
 function hash(parts: Array<string | number>): string {
   return createHash("sha256").update(parts.join("|")).digest("hex");
 }
@@ -46,6 +60,7 @@ export class PortfolioProjectionService {
     private readonly marketData: PaperMarketDataProvider,
     private readonly sourceVersion: SourceVersion,
     private readonly now: () => Date,
+    private readonly marketHealth?: PaperProjectionMarketHealth,
   ) {}
 
   async projectPaperAccount(accountId: string, signal?: AbortSignal): Promise<PaperAccountSnapshot> {
@@ -70,8 +85,12 @@ export class PortfolioProjectionService {
         unpricedPositionCount += group.length;
         continue;
       }
+      const first = group[0]!;
+      if (this.marketHealth && !this.marketHealth.shouldAttempt(accountId, first.asset_id, first.condition_id)) {
+        unpricedPositionCount += group.length;
+        continue;
+      }
       try {
-        const first = group[0]!;
         const [book, fee] = await Promise.all([
           this.marketData.orderbook(first.asset_id, first.condition_id, signal),
           this.marketData.fee(first.asset_id, first.condition_id, signal),
@@ -80,12 +99,52 @@ export class PortfolioProjectionService {
           unpricedPositionCount += group.length;
           continue;
         }
+        if (book.assetId !== first.asset_id || book.conditionId.toLowerCase() !== first.condition_id.toLowerCase()) {
+          this.marketHealth?.onFailure(
+            accountId,
+            first.asset_id,
+            first.condition_id,
+            "ORDERBOOK_IDENTITY_MISMATCH",
+            "Orderbook identity does not match the requested market",
+          );
+          unpricedPositionCount += group.length;
+          continue;
+        }
+        if (fee.assetId !== first.asset_id) {
+          this.marketHealth?.onFailure(
+            accountId,
+            first.asset_id,
+            first.condition_id,
+            "FEE_ASSET_IDENTITY_MISMATCH",
+            "Fee identity does not match the requested asset",
+          );
+          unpricedPositionCount += group.length;
+          continue;
+        }
         if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null || fee.exponent === null) {
+          this.marketHealth?.onFailure(
+            accountId,
+            first.asset_id,
+            first.condition_id,
+            "FEE_MODEL_UNAVAILABLE",
+            "Fee model unavailable during portfolio valuation",
+          );
           unpricedPositionCount += group.length;
           continue;
         }
         const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
         if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+          this.marketHealth?.onFailure(
+            accountId,
+            first.asset_id,
+            first.condition_id,
+            "ORDERBOOK_STALE",
+            `Orderbook age ${String(age)}ms`,
+          );
+          unpricedPositionCount += group.length;
+          continue;
+        }
+        if (this.marketHealth && !this.marketHealth.onSuccess(accountId, first.asset_id, first.condition_id)) {
           unpricedPositionCount += group.length;
           continue;
         }
@@ -155,7 +214,21 @@ export class PortfolioProjectionService {
           );
         });
         pricedPositionCount += group.length;
-      } catch {
+      } catch (error) {
+        const first = group[0]!;
+        if (this.marketHealth) {
+          if (isOrderbookUnavailableError(error)) {
+            await this.marketHealth.onUnavailable(accountId, first.asset_id, first.condition_id, error, signal);
+          } else if (!signal?.aborted) {
+            this.marketHealth.onFailure(
+              accountId,
+              first.asset_id,
+              first.condition_id,
+              "MARKET_DATA_REQUEST_FAILED",
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }
         unpricedPositionCount += group.length;
       }
     }
@@ -327,6 +400,14 @@ export class PortfolioProjectionService {
   }
 
   private feeId(fee: PaperFeeSnapshot): string {
-    return hash([fee.assetId, fee.snapshotTime, fee.status, fee.feeRatePpm ?? "NONE"]);
+    return hash([
+      fee.assetId,
+      fee.snapshotTime,
+      fee.status,
+      fee.baseFee ?? "NONE",
+      fee.feeRatePpm ?? "NONE",
+      fee.exponent ?? "NONE",
+      fee.sourceUrl,
+    ]);
   }
 }

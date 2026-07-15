@@ -129,9 +129,24 @@ export class RiskManager {
     if (issue) return fail("reconciliation", `MAJOR_DESYNC_RECONCILIATION:${issue.issue_id}`);
     pass("reconciliation");
 
-    const frozen = this.frozenPositionCount(input.mode, input.accountId);
+    const frozen = this.blockingFrozenPositionCount(input.mode, input.accountId);
     if (frozen > 0) return fail("frozen_positions", "FROZEN_POSITION_PROTECTION");
     pass("frozen_positions");
+
+    if (input.mode === "PAPER" && input.signal.signalType === "TARGET_BUY") {
+      const marketDataState = this.paperMarketDataState(
+        input.accountId,
+        input.signal.assetId,
+        input.signal.conditionId,
+      );
+      if (marketDataState && marketDataState !== "HEALTHY") {
+        return fail(
+          "market_data_health",
+          marketDataState === "SETTLEMENT_ONLY" ? "MARKET_SETTLEMENT_ONLY" : "MARKET_DATA_FROZEN",
+        );
+      }
+      pass("market_data_health", marketDataState ?? "HEALTHY");
+    }
 
     if (input.signal.signalType === "TARGET_BUY") {
       const capital = input.signal.capitalDecision;
@@ -432,12 +447,26 @@ export class RiskManager {
     return row ?? null;
   }
 
-  private frozenPositionCount(mode: ExecutorMode, accountId: string): number {
+  private blockingFrozenPositionCount(mode: ExecutorMode, accountId: string): number {
     const table = mode === "LIVE" ? "live_positions" : "paper_positions";
     const accountColumn = mode === "LIVE" ? "live_account_id" : "paper_account_id";
-    const row = this.database.prepare(`SELECT count(*) count FROM ${table} WHERE ${accountColumn}=? AND status='FROZEN'`)
+    const marketDataExclusion = mode === "PAPER"
+      ? " AND (frozen_reason IS NULL OR frozen_reason NOT LIKE 'MARKET_DATA:%')"
+      : "";
+    const row = this.database.prepare(
+      `SELECT count(*) count FROM ${table}
+       WHERE ${accountColumn}=? AND status='FROZEN'${marketDataExclusion}`,
+    )
       .get(accountId) as { count: number };
     return row.count;
+  }
+
+  private paperMarketDataState(accountId: string, assetId: string, conditionId: string): string | null {
+    const row = this.database.prepare(
+      `SELECT state FROM paper_market_data_health
+       WHERE paper_account_id=? AND asset_id=? AND condition_id=?`,
+    ).get(accountId, assetId, conditionId) as { state: string } | undefined;
+    return row?.state ?? null;
   }
 
   private marketExposure(mode: ExecutorMode, accountId: string, conditionId: string): bigint {

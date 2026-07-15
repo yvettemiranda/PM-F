@@ -1,5 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -26,6 +27,66 @@ const wallet = "0x0000000000000000000000000000000000000001";
 const conditionId = `0x${"1".repeat(64)}`;
 const assetId = "asset-1";
 const directories: string[] = [];
+const childProcesses: ChildProcess[] = [];
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("TIMED_OUT_WAITING_FOR_PAPER_CRASH_BARRIER");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+}
+
+async function killPaperWorkerAtBarrier(input: {
+  databasePath: string;
+  accountId: string;
+  signalId: string;
+  barrier: "RESERVATION_BEFORE_COMMIT" | "BUY_FILL_BEFORE_COMMIT" | "SETTLEMENT_BEFORE_COMMIT";
+  markerPath: string;
+  nowIso: string;
+}): Promise<void> {
+  const fixture = new URL("./fixtures/paper-crash-worker.ts", import.meta.url).pathname;
+  const child = spawn(process.execPath, [
+    "--import",
+    "tsx",
+    fixture,
+    input.databasePath,
+    input.accountId,
+    input.barrier,
+    input.signalId,
+    input.markerPath,
+    input.nowIso,
+  ], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  childProcesses.push(child);
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+  await waitUntil(() => {
+    if (existsSync(input.markerPath)) return true;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`PAPER_CRASH_WORKER_EXITED_EARLY:${stderr}`);
+    }
+    return false;
+  });
+  child.kill("SIGKILL");
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const timeout = setTimeout(() => rejectPromise(new Error("PAPER_CRASH_WORKER_DID_NOT_EXIT")), 5_000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolvePromise();
+    });
+  });
+}
+
+function expectDatabaseSafe(databasePath: string): void {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  expect((database.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check)
+    .toBe("ok");
+  expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  database.close();
+}
 
 interface TestRuleset {
   hash: string;
@@ -90,6 +151,7 @@ class FakeMarketData implements PaperMarketDataProvider {
   book: PaperOrderbookSnapshot;
   feeSnapshot: PaperFeeSnapshot;
   resolutionSnapshot: PaperResolutionSnapshot;
+  orderbookError: Error | null = null;
   orderbookCalls = 0;
   feeCalls = 0;
   resolutionCalls = 0;
@@ -131,6 +193,7 @@ class FakeMarketData implements PaperMarketDataProvider {
 
   async orderbook(_assetId?: string, _conditionId?: string, _signal?: AbortSignal): Promise<PaperOrderbookSnapshot> {
     this.orderbookCalls += 1;
+    if (this.orderbookError) throw this.orderbookError;
     return this.book;
   }
 
@@ -456,6 +519,9 @@ function loadPaperSignal(databasePath: string, signalId: string) {
 }
 
 afterEach(() => {
+  for (const child of childProcesses.splice(0)) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -489,6 +555,28 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "gap"))).toBe("REJECTED");
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "draft"))).toBe("REJECTED");
     expect(count(env.databasePath, "paper_positions")).toBe(0);
+    env.executor.close();
+  });
+
+  it("consumes only Signals from the target bound to the Paper account", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    const secondWallet = "0x0000000000000000000000000000000000000002";
+    const phase0 = new Phase0Database(env.databasePath, sourceVersion);
+    phase0.initialize();
+    const secondTargetId = phase0.ensureTarget(secondWallet, "IDENTITY_CONFIRMED");
+    phase0.close();
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "bound-target", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: secondTargetId, signalId: "golden-only-target", createdAt: "2026-07-08T00:00:02.000Z" });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+
+    const executions = await env.executor.consumeAvailableSignals(env.accountId);
+
+    expect(executions).toHaveLength(1);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((db.prepare(
+      "SELECT count(*) count FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id='golden-only-target'",
+    ).get(env.accountId) as { count: number }).count).toBe(0);
+    db.close();
     env.executor.close();
   });
 
@@ -538,6 +626,10 @@ describe("PaperExecutor", () => {
     env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], [], "2026-07-07T23:59:00.000Z");
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stale", createdAt: "2026-07-08T00:00:02.000Z" });
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "stale"))).toBe("WAITING_EXECUTION");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "FROZEN",
+      lastErrorCode: "ORDERBOOK_STALE",
+    });
     expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1000000000");
     env.executor.close();
   });
@@ -577,6 +669,32 @@ describe("PaperExecutor", () => {
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const sizes = (db.prepare("SELECT current_size_micros FROM paper_positions ORDER BY created_at,paper_position_id").all() as Array<{ current_size_micros: string }>).map((row) => row.current_size_micros);
     expect(sizes.sort()).toEqual(["100000000", "90000000"].sort());
+    db.close();
+    env.executor.close();
+  });
+
+  it("allocates a partial multi-Position SELL pro rata with deterministic remainder handling", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "partial-pro-rata-a", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "partial-pro-rata-b", createdAt: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "partial-pro-rata-a");
+    await env.executor.consumeSignal(env.accountId, "partial-pro-rata-b");
+    env.market.book = env.market.makeBook([], [{ price: "0.5", size: "95" }]);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "partial-pro-rata-sell", createdAt: "2026-07-08T00:00:03.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "2" });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "partial-pro-rata-sell");
+
+    expect(env.executor.executionState(executionId)).toBe("EXIT_PENDING");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const sizes = (db.prepare(
+      "SELECT current_size_micros FROM paper_positions ORDER BY created_at,paper_position_id",
+    ).all() as Array<{ current_size_micros: string }>).map((row) => row.current_size_micros);
+    expect(sizes.sort()).toEqual(["135000000", "150000000"]);
+    const allocations = (db.prepare(
+      `SELECT filled_size_micros FROM paper_execution_positions
+       WHERE paper_execution_id=? ORDER BY paper_position_id`,
+    ).all(executionId) as Array<{ filled_size_micros: string }>).map((row) => row.filled_size_micros);
+    expect(allocations.map(BigInt).reduce((total, value) => total + value, 0n)).toBe(95_000_000n);
     db.close();
     env.executor.close();
   });
@@ -659,6 +777,34 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(executionId)).toBe("EXIT_PENDING");
     env.market.book = env.market.makeBook([], [{ price: "0.5", size: "1000" }]);
     expect(await env.executor.attemptExecution(executionId)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("does not let concurrent pending sells reserve more than the current Position size", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-sell-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "pending-sell-buy");
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-sell-one", createdAt: "2026-07-08T00:00:02.000Z", signalType: "TARGET_SELL", sellNumerator: "3", sellDenominator: "4" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-sell-two", createdAt: "2026-07-08T00:00:03.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "2" });
+    const first = await env.executor.consumeSignal(env.accountId, "pending-sell-one");
+    const second = await env.executor.consumeSignal(env.accountId, "pending-sell-two");
+    expect(env.executor.executionState(first)).toBe("EXIT_PENDING");
+    expect(env.executor.executionState(second)).toBe("EXIT_PENDING");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const pending = db.prepare(
+      `SELECT sum(CAST(ep.requested_size_micros AS INTEGER)-CAST(ep.filled_size_micros AS INTEGER)) pending
+       FROM paper_execution_positions ep
+       JOIN paper_executions e ON e.paper_execution_id=ep.paper_execution_id
+       WHERE e.state IN ('EXIT_PENDING','STOP_EXIT_PENDING')`,
+    ).get() as { pending: number };
+    expect(pending.pending).toBe(200_000_000);
+    db.close();
+    env.market.book = env.market.makeBook([], [{ price: "0.5", size: "1000" }]);
+    await env.executor.retryPending(env.accountId);
+    const finalDb = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((finalDb.prepare("SELECT current_size_micros FROM paper_positions").get() as { current_size_micros: string }).current_size_micros).toBe("0");
+    finalDb.close();
     env.executor.close();
   });
 
@@ -806,6 +952,30 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("fails closed when a confirmed settlement does not match the Position identity", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "settle-identity", createdAt: "2026-07-08T00:00:01.000Z", marketEndTime: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "settle-identity");
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    env.market.resolutionSnapshot = {
+      ...env.market.resolutionSnapshot,
+      assetId: "wrong-asset",
+      resolved: true,
+      payoutNumerator: "1",
+      payoutDenominator: "1",
+      raw: { closed: true },
+    };
+
+    await expect(env.executor.processSettlements(env.accountId)).resolves.toEqual([]);
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((db.prepare("SELECT status FROM paper_positions").get() as { status: string }).status).toBe("SETTLEMENT_PENDING");
+    expect((db.prepare("SELECT cash_balance_micros FROM paper_accounts WHERE paper_account_id=?").get(env.accountId) as { cash_balance_micros: string }).cash_balance_micros).toBe("900000000");
+    expect(count(env.databasePath, "paper_settlements")).toBe(0);
+    db.close();
+    env.executor.close();
+  });
+
   it("rolls back every fill mutation on a simulated crash and recovers after restart", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = env.market.makeBook([], []);
@@ -826,12 +996,388 @@ describe("PaperExecutor", () => {
     restarted.close();
   });
 
+  it("rolls back a crashed reservation atomically and consumes the Signal once after restart", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "crash-reserve", createdAt: "2026-07-08T00:00:01.000Z" });
+    const sabotage = new DatabaseSync(env.databasePath);
+    sabotage.exec("CREATE TRIGGER fail_paper_reserve BEFORE INSERT ON paper_reservation_ledger BEGIN SELECT RAISE(ABORT, 'simulated reserve crash'); END;");
+
+    await expect(env.executor.consumeSignal(env.accountId, "crash-reserve")).rejects.toThrow("simulated reserve crash");
+
+    expect(count(env.databasePath, "paper_executions")).toBe(0);
+    expect(count(env.databasePath, "paper_signal_consumptions")).toBe(0);
+    expect(count(env.databasePath, "paper_reservations")).toBe(0);
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
+    sabotage.exec("DROP TRIGGER fail_paper_reserve");
+    sabotage.close();
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    expect(restarted.executionState(await restarted.consumeSignal(env.accountId, "crash-reserve"))).toBe("EXECUTED");
+    expect(count(env.databasePath, "paper_signal_consumptions")).toBe(1);
+    restarted.close();
+  });
+
+  it("rolls back a crashed SELL ledger mutation and completes it after restart", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "crash-sell-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "crash-sell-buy");
+    env.market.book = env.market.makeBook([], [{ price: "0.5", size: "1000" }]);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "crash-sell", createdAt: "2026-07-08T00:00:02.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "1" });
+    const sabotage = new DatabaseSync(env.databasePath);
+    sabotage.exec("CREATE TRIGGER fail_paper_sell_pnl BEFORE INSERT ON paper_pnl_ledger BEGIN SELECT RAISE(ABORT, 'simulated sell crash'); END;");
+
+    await expect(env.executor.consumeSignal(env.accountId, "crash-sell")).rejects.toThrow("simulated sell crash");
+
+    const before = new DatabaseSync(env.databasePath, { readOnly: true });
+    const sellExecutionId = (before.prepare(
+      "SELECT paper_execution_id FROM paper_executions WHERE signal_id='crash-sell'",
+    ).get() as { paper_execution_id: string }).paper_execution_id;
+    expect((before.prepare("SELECT current_size_micros FROM paper_positions").get() as { current_size_micros: string }).current_size_micros).toBe("200000000");
+    expect((before.prepare("SELECT cash_balance_micros FROM paper_accounts WHERE paper_account_id=?").get(env.accountId) as { cash_balance_micros: string }).cash_balance_micros).toBe("900000000");
+    expect((before.prepare("SELECT count(*) count FROM paper_orders WHERE paper_execution_id=?").get(sellExecutionId) as { count: number }).count).toBe(0);
+    before.close();
+    sabotage.exec("DROP TRIGGER fail_paper_sell_pnl");
+    sabotage.close();
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    expect(await restarted.attemptExecution(sellExecutionId)).toBe("EXECUTED");
+    expect((await restarted.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1000000000");
+    restarted.close();
+  });
+
+  it("rolls back a crashed Settlement and redeems exactly once after restart", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "crash-settlement", createdAt: "2026-07-08T00:00:01.000Z", marketEndTime: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "crash-settlement");
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    env.market.resolutionSnapshot = { ...env.market.resolutionSnapshot, resolved: true, payoutNumerator: "1", payoutDenominator: "1", raw: { closed: true, winner: assetId } };
+    const sabotage = new DatabaseSync(env.databasePath);
+    sabotage.exec("CREATE TRIGGER fail_paper_settlement BEFORE INSERT ON paper_settlements BEGIN SELECT RAISE(ABORT, 'simulated settlement crash'); END;");
+
+    expect(await env.executor.processSettlements(env.accountId)).toEqual([]);
+
+    const before = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((before.prepare("SELECT status FROM paper_positions").get() as { status: string }).status).toBe("SETTLEMENT_PENDING");
+    expect((before.prepare("SELECT cash_balance_micros FROM paper_accounts WHERE paper_account_id=?").get(env.accountId) as { cash_balance_micros: string }).cash_balance_micros).toBe("900000000");
+    expect(count(env.databasePath, "paper_settlements")).toBe(0);
+    before.close();
+    sabotage.exec("DROP TRIGGER fail_paper_settlement");
+    sabotage.close();
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    expect(await restarted.processSettlements(env.accountId)).toHaveLength(1);
+    expect(await restarted.processSettlements(env.accountId)).toEqual([]);
+    expect(count(env.databasePath, "paper_settlements")).toBe(1);
+    restarted.close();
+  });
+
+  it("recovers exactly once after real SIGKILL at reservation, fill, and settlement barriers", async () => {
+    const reservationEnv = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: reservationEnv.databasePath,
+      targetId: reservationEnv.targetId,
+      signalId: "process-crash-reservation",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    reservationEnv.executor.close();
+    await killPaperWorkerAtBarrier({
+      databasePath: reservationEnv.databasePath,
+      accountId: reservationEnv.accountId,
+      signalId: "process-crash-reservation",
+      barrier: "RESERVATION_BEFORE_COMMIT",
+      markerPath: join(directories.at(-1)!, "reservation.marker"),
+      nowIso: "2026-07-08T00:00:00.000Z",
+    });
+    expectDatabaseSafe(reservationEnv.databasePath);
+    expect(count(reservationEnv.databasePath, "paper_executions")).toBe(0);
+    expect(count(reservationEnv.databasePath, "paper_reservations")).toBe(0);
+    const reservationRestarted = new PaperExecutor(
+      reservationEnv.databasePath,
+      reservationEnv.market,
+      { sourceVersion, now: () => reservationEnv.getClock() },
+    );
+    expect(reservationRestarted.executionState(
+      await reservationRestarted.consumeSignal(reservationEnv.accountId, "process-crash-reservation"),
+    )).toBe("EXECUTED");
+    const reservationAcceptance = reservationRestarted.acceptanceSummary(reservationEnv.accountId);
+    expect(reservationAcceptance.consistency.passed, JSON.stringify(reservationAcceptance.consistency)).toBe(true);
+    reservationRestarted.close();
+
+    const fillEnv = setup(new Date("2026-07-08T00:00:00.000Z"));
+    fillEnv.market.book = fillEnv.market.makeBook([], []);
+    insertSignal({
+      databasePath: fillEnv.databasePath,
+      targetId: fillEnv.targetId,
+      signalId: "process-crash-fill",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const fillExecutionId = await fillEnv.executor.consumeSignal(fillEnv.accountId, "process-crash-fill");
+    expect(fillEnv.executor.executionState(fillExecutionId)).toBe("WAITING_EXECUTION");
+    fillEnv.executor.close();
+    await killPaperWorkerAtBarrier({
+      databasePath: fillEnv.databasePath,
+      accountId: fillEnv.accountId,
+      signalId: "process-crash-fill",
+      barrier: "BUY_FILL_BEFORE_COMMIT",
+      markerPath: join(directories.at(-1)!, "fill.marker"),
+      nowIso: "2026-07-08T00:00:00.000Z",
+    });
+    expectDatabaseSafe(fillEnv.databasePath);
+    expect(count(fillEnv.databasePath, "paper_fill_ledger")).toBe(0);
+    const fillRestarted = new PaperExecutor(fillEnv.databasePath, fillEnv.market, {
+      sourceVersion,
+      now: () => fillEnv.getClock(),
+    });
+    fillEnv.market.book = fillEnv.market.makeBook([{ price: "0.5", size: "10000" }], []);
+    await fillRestarted.retryPending(fillEnv.accountId);
+    expect(fillRestarted.executionState(fillExecutionId)).toBe("EXECUTED");
+    expect(count(fillEnv.databasePath, "paper_signal_consumptions")).toBe(1);
+    expect(fillRestarted.acceptanceSummary(fillEnv.accountId).consistency.passed).toBe(true);
+    fillRestarted.close();
+
+    const settlementEnv = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: settlementEnv.databasePath,
+      targetId: settlementEnv.targetId,
+      signalId: "process-crash-settlement",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:02.000Z",
+    });
+    await settlementEnv.executor.consumeSignal(settlementEnv.accountId, "process-crash-settlement");
+    settlementEnv.executor.close();
+    await killPaperWorkerAtBarrier({
+      databasePath: settlementEnv.databasePath,
+      accountId: settlementEnv.accountId,
+      signalId: "process-crash-settlement",
+      barrier: "SETTLEMENT_BEFORE_COMMIT",
+      markerPath: join(directories.at(-1)!, "settlement.marker"),
+      nowIso: "2026-07-08T00:00:03.000Z",
+    });
+    expectDatabaseSafe(settlementEnv.databasePath);
+    expect(count(settlementEnv.databasePath, "paper_settlements")).toBe(0);
+    const settlementBefore = new DatabaseSync(settlementEnv.databasePath, { readOnly: true });
+    expect((settlementBefore.prepare("SELECT status FROM paper_positions").get() as { status: string }).status)
+      .toBe("SETTLEMENT_PENDING");
+    settlementBefore.close();
+    settlementEnv.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    settlementEnv.market.resolutionSnapshot = {
+      ...settlementEnv.market.resolutionSnapshot,
+      resolved: true,
+      payoutNumerator: "1",
+      payoutDenominator: "1",
+      raw: { closed: true, winner: assetId },
+    };
+    const settlementRestarted = new PaperExecutor(settlementEnv.databasePath, settlementEnv.market, {
+      sourceVersion,
+      now: () => settlementEnv.getClock(),
+    });
+    expect(await settlementRestarted.processSettlements(settlementEnv.accountId)).toHaveLength(1);
+    expect(await settlementRestarted.processSettlements(settlementEnv.accountId)).toEqual([]);
+    expect(count(settlementEnv.databasePath, "paper_settlements")).toBe(1);
+    expect(settlementRestarted.acceptanceSummary(settlementEnv.accountId).consistency.passed).toBe(true);
+    settlementRestarted.close();
+  }, 30_000);
+
   it("rejects a buy and releases funds when the fee model is unavailable", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.feeSnapshot = { ...env.market.feeSnapshot, status: "UNAVAILABLE", baseFee: null, feeRatePpm: null, exponent: null };
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "fee-missing", createdAt: "2026-07-08T00:00:01.000Z" });
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "fee-missing"))).toBe("REJECTED");
     expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "FROZEN",
+      lastErrorCode: "FEE_MODEL_UNAVAILABLE",
+    });
+    env.executor.close();
+  });
+
+  it("freezes a market when stop-loss evidence is stale instead of retrying every second", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stale-stop-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "stale-stop-buy");
+    env.market.book = env.market.makeBook(
+      [],
+      [{ price: "0.2", size: "1000" }],
+      "2026-07-07T23:59:55.000Z",
+    );
+
+    await expect(env.executor.checkStopLosses(env.accountId)).resolves.toEqual([]);
+
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "FROZEN",
+      lastErrorCode: "ORDERBOOK_STALE",
+    });
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare("SELECT status FROM paper_positions").get() as { status: string }).status)
+      .toBe("FROZEN");
+    database.close();
+    env.executor.close();
+  });
+
+  it("lets settlement win over an unfinished sell allocation", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "settlement-wins-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:03.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "settlement-wins-buy");
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "settlement-wins-sell",
+      signalType: "TARGET_SELL",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      sellNumerator: "1",
+      sellDenominator: "1",
+    });
+    const sellExecutionId = await env.executor.consumeSignal(env.accountId, "settlement-wins-sell");
+    expect(env.executor.executionState(sellExecutionId)).toBe("EXIT_PENDING");
+
+    env.setClock(new Date("2026-07-08T00:00:04.000Z"));
+    await env.executor.processSettlements(env.accountId);
+
+    expect(env.executor.executionState(sellExecutionId)).toBe("CANCELLED");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare("SELECT status FROM paper_positions").get() as { status: string }).status)
+      .toBe("SETTLEMENT_PENDING");
+    expect((database.prepare(
+      "SELECT requested_size_micros,filled_size_micros FROM paper_execution_positions WHERE paper_execution_id=?",
+    ).get(sellExecutionId) as { requested_size_micros: string; filled_size_micros: string }))
+      .toEqual({ requested_size_micros: "0", filled_size_micros: "0" });
+    database.close();
+    env.executor.close();
+  });
+
+  it("keeps a buy waiting without a simulated fill when the orderbook does not exist", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "no-orderbook-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "no-orderbook-buy");
+
+    expect(env.executor.executionState(executionId)).toBe("WAITING_EXECUTION");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("100000000");
+    expect(count(env.databasePath, "paper_orders")).toBe(0);
+    expect(count(env.databasePath, "paper_fill_ledger")).toBe(0);
+    expect(count(env.databasePath, "paper_positions")).toBe(0);
+    env.executor.close();
+  });
+
+  it("persists orderbook backoff and requires two fresh probes before recovery", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "no-orderbook-recovery",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "no-orderbook-recovery");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("FROZEN");
+    const callsAfterFailure = env.market.orderbookCalls;
+
+    await env.executor.attemptExecution(executionId);
+    expect(env.market.orderbookCalls).toBe(callsAfterFailure);
+
+    env.market.orderbookError = null;
+    env.setClock(new Date("2026-07-08T00:00:05.000Z"));
+    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], []);
+    await env.executor.attemptExecution(executionId);
+    expect(env.executor.executionState(executionId)).toBe("WAITING_EXECUTION");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).consecutiveSuccesses).toBe(1);
+
+    env.setClock(new Date("2026-07-08T00:00:10.000Z"));
+    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], []);
+    expect(await env.executor.attemptExecution(executionId)).toBe("EXECUTED");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("HEALTHY");
+    env.executor.close();
+  });
+
+  it("rejects a new buy without reserving more money while its market data is frozen", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "frozen-first", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "frozen-first");
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "frozen-second", createdAt: "2026-07-08T00:00:02.000Z" });
+
+    const secondExecutionId = await env.executor.consumeSignal(env.accountId, "frozen-second");
+
+    expect(env.executor.executionState(secondExecutionId)).toBe("REJECTED");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("100000000");
+    env.executor.close();
+  });
+
+  it("routes a closed market without an orderbook to settlement-only and releases a waiting buy", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    env.market.resolutionSnapshot = {
+      ...env.market.resolutionSnapshot,
+      resolved: true,
+      payoutNumerator: "1",
+      payoutDenominator: "1",
+      raw: { closed: true, winner: assetId },
+    };
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "closed-no-book", createdAt: "2026-07-08T00:00:01.000Z" });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "closed-no-book");
+
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("SETTLEMENT_ONLY");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
+    expect(count(env.databasePath, "paper_orders")).toBe(0);
+    env.executor.close();
+  });
+
+  it("defers stop-loss checks without throwing or fabricating an exit when the orderbook is missing", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stop-no-book", createdAt: "2026-07-08T00:00:01.000Z" });
+    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "stop-no-book"))).toBe("EXECUTED");
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+
+    await expect(env.executor.checkStopLosses(env.accountId)).resolves.toEqual([]);
+
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("FROZEN");
+    expect(count(env.databasePath, "paper_orders")).toBe(1);
+    expect(count(env.databasePath, "paper_positions")).toBe(1);
+    env.executor.close();
+  });
+
+  it("marks valuation incomplete and respects persisted backoff for a missing position orderbook", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "valuation-no-book", createdAt: "2026-07-08T00:00:01.000Z" });
+    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "valuation-no-book"))).toBe("EXECUTED");
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    env.market.resetCallCounts();
+
+    const first = await env.executor.accountSnapshot(env.accountId);
+    const callsAfterFailure = env.market.orderbookCalls;
+    const second = await env.executor.accountSnapshot(env.accountId);
+
+    expect(first.valuationStatus).toBe("INCOMPLETE");
+    expect(second.valuationStatus).toBe("INCOMPLETE");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("FROZEN");
+    expect(env.market.orderbookCalls).toBe(callsAfterFailure);
     env.executor.close();
   });
 

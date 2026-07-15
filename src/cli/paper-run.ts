@@ -82,14 +82,27 @@ const main = async (): Promise<void> => {
   try {
     const persistedAccountId = await readOptionalText(accountIdFile);
     const explicitAccountId = valueArg("account-id");
+    const targetWallet = valueArg("target-wallet")?.trim().toLowerCase();
+    const target = targetWallet
+      ? accountLookup.prepare(
+        "SELECT target_id FROM monitor_targets WHERE lower(wallet_address)=? AND identity_status='IDENTITY_CONFIRMED'",
+      ).get(targetWallet) as { target_id: string } | undefined
+      : undefined;
+    if (targetWallet && !target) throw new Error(`PAPER_TARGET_WALLET_NOT_CONFIRMED:${targetWallet}`);
     const selection = selectPaperAccount({
       ...(explicitAccountId ? { explicitAccountId } : {}),
       ...(persistedAccountId ? { persistedAccountId } : {}),
       forceNew: hasFlag("new-account"),
       accountExists: (accountId) => Boolean(accountLookup.prepare(
-        "SELECT 1 present FROM paper_accounts WHERE paper_account_id=? AND status='ACTIVE'",
-      ).get(accountId)),
-      createAccount: () => executor.createAccount(valueArg("account-name") ?? "Default Paper"),
+        `SELECT 1 present FROM paper_accounts
+         WHERE paper_account_id=? AND status='ACTIVE' AND target_id IS NOT NULL
+           AND (? IS NULL OR target_id=?)`,
+      ).get(accountId, target?.target_id ?? null, target?.target_id ?? null)),
+      createAccount: () => executor.createAccount(
+        valueArg("account-name") ?? "Default Paper",
+        undefined,
+        target?.target_id,
+      ),
     });
     accountLookup.close();
     await writeTextAtomically(accountIdFile, `${selection.accountId}\n`);
@@ -105,6 +118,8 @@ const main = async (): Promise<void> => {
       processId: process.pid,
       accountId: selection.accountId,
       accountSource: selection.source,
+      targetId: target?.target_id ?? null,
+      targetWallet: targetWallet ?? null,
       replacedStalePersistedAccount: selection.replacedStalePersistedAccount,
       consumerCutoff,
       accountIdFile,
@@ -115,20 +130,27 @@ const main = async (): Promise<void> => {
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
     console.log(JSON.stringify({ event: "PAPER_RUNNER_READY", ...ready }));
 
-    let report = await new PaperRunner(executor, {
+    const runner = new PaperRunner(executor, {
       accountId: selection.accountId,
       intervalMs: intervalSeconds * 1_000,
       ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
-    }).run(controller.signal);
+    });
+    let report = await runner.run(controller.signal);
+    let finalDrainConsumedSignals = 0;
     if (currentShutdownMode() === "FINAL_VALUATION") {
       const finalValuationSignal = AbortSignal.any([
         finalValuationController.signal,
         AbortSignal.timeout(FINAL_VALUATION_TIMEOUT_MS),
       ]);
+      finalDrainConsumedSignals = await runner.finalDrain(finalValuationSignal);
+      const account = await executor.accountSnapshot(selection.accountId, finalValuationSignal);
       report = {
         ...report,
         stoppedAt: new Date().toISOString(),
-        account: await executor.accountSnapshot(selection.accountId, finalValuationSignal),
+        cycles: report.cycles + 1,
+        consumedSignals: report.consumedSignals + finalDrainConsumedSignals,
+        account,
+        acceptance: executor.acceptanceSummary(selection.accountId),
       };
     }
     await mkdir(outputDirectory, { recursive: true });
@@ -144,6 +166,7 @@ const main = async (): Promise<void> => {
       shutdownMode: currentShutdownMode(),
       accountSelection: selection,
       consumerCutoff,
+      finalDrainConsumedSignals,
       report,
       safety: {
         privateKeyLoaded: false,

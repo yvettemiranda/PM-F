@@ -12,6 +12,23 @@ export type PaperExecutionState =
 
 export type PaperPositionState = "OPEN" | "PARTIALLY_CLOSED" | "SETTLEMENT_PENDING" | "CLOSED" | "REDEEMED" | "FROZEN";
 
+export type PaperMarketDataHealthState = "HEALTHY" | "DEGRADED" | "FROZEN" | "SETTLEMENT_ONLY";
+
+export interface PaperMarketDataHealthSnapshot {
+  paperAccountId: string;
+  assetId: string;
+  conditionId: string;
+  state: PaperMarketDataHealthState;
+  consecutiveFailures: number;
+  consecutiveSuccesses: number;
+  nextRetryAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  lastFailureAt: string | null;
+  lastSuccessAt: string | null;
+  frozenAt: string | null;
+}
+
 export interface SignalExecutionContext {
   contextId: string;
   signalId: string;

@@ -10,7 +10,7 @@
 - 第二层：Paper Account、Risk Manager、Paper Executor、完整深度 VWAP/FAK、Reservation、Position、Ledger、PnL、Settlement/Redeem、Portfolio Projection。
 - 第三层：Live Gate、Live Account/Wallet metadata、Live Signal Consumer、Live Executor、官方 CLOB adapter seam、Order/Fill/Position/Ledger、Settlement/Redeem、Reconciliation、Crash Recovery、Emergency Stop。
 - 横切能力：Ruleset Registry、不可变 Audit/State Transition/Settlement Event、SQLite migrations、Final Validation、Operational Validation、双击操作入口。
-- 日常验证仅使用桌面 `Polymarket验证_点这里`的开始、提前停止、打开结果三个按钮；联合入口并行运行 Paper + Observe，Observe 真正达到 24 小时门槛后自动停止并生成严格白名单 ZIP。
+- 日常 Paper 验收仅使用桌面 `Polymarket验证_点这里`：先运行 2 小时短测，同一 clean commit 自动通过后才允许运行 7 天长测；任务到时自动停止并生成脱敏 ZIP。
 
 ## Current safety state
 - 默认且当前固定：`execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。
@@ -30,12 +30,12 @@
 - Live 启用前活动账户本金必须等于 Gate bankroll 配置，risk budget 不得超过配置总敞口，外部 pUSD 余额必须与 Live cash ledger 在容差内一致；每笔 BUY 重新检查单笔配置上限。
 
 ## Validation baseline
-- Node `24.14.0`，pnpm `11.7.0`，schema `2.18.0`。
+- Node `24.14.0`，pnpm `11.7.0`，schema `2.19.0`。
 - 最小证据：`pnpm install --frozen-lockfile`、`pnpm typecheck`、`pnpm test`、公开 API 实时契约采样、SQLite Online Backup 迁移演练、`integrity_check`、`foreign_key_check`、Final/Operational reports。
 - Validation/Operational 强制通过 SQLite Online Backup 在隔离 snapshot DB 运行；所有 validation type / operational mode 都拒绝 `--no-snapshot`，不得迁移或写入业务源库。
 - Final/Operational 最高自动状态分别是 `VALIDATION_FRAMEWORK_READY` / `OPERATIONAL_FRAMEWORK_READY`，且 `liveAllowed=false`；这些状态不等于 Live 已授权。
 - 当前业务源库保留旧 schema 供安全对照；最新 migration 已通过旧 schema fixture 和业务库 Online Backup 隔离演练。Observe/Paper 运行前会强制 `PAPER + LIVE_DISABLED`，需要迁移时先 Online Backup，再做完整性/外键检查。
-- 联合 24 小时结果自动写入被 Git 忽略的 `交给Codex/`；每轮 ZIP 只包含当轮 Observe JSON、Paper JSON、联合日志和中文摘要，不包含 SQLite、`.env`、账户 ID 或凭据。
+- Paper 验收结果自动写入被 Git 忽略的 `交给Codex/`；每轮 ZIP 只包含当轮 Observe、Paper、运行日志、隔离测试证明和中文摘要，不包含 SQLite、`.env`、账户 ID 或凭据。
 
 ## Remaining human gates
 - 24 小时 Observe 已通过；仍需完成长周期 Paper、Crash Recovery 长测与长期状态一致性验证。

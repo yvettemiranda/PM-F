@@ -2,7 +2,6 @@
 
 ## Active blockers
 - 原 24 小时运行仍缺 Paper JSON，无法证明当时 PaperRunner 错误为零；且没有任何 `executionEligible=true` 的 SELL，347 个模拟仓位全部 `OPEN`，正常卖出、止损、已实现 PnL、Settlement/Redeem 未被长测覆盖。
-- 修复后的真实短测中，一个未来到期且本地仍为 OPEN 的 asset 持续收到 CLOB `No orderbook exists` 404，Paper 报告为 `COMPLETED_WITH_ERRORS`。错误不会再导致报告无限膨胀，但在定义安全冻结/恢复或有界退避前，Paper Stability Gate 仍不能通过。
 - Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
 - Data API 历史 offset 上限导致完整钱包历史不可得，历史 Replay 仍为 `INCOMPLETE`；缺历史 orderbook snapshot，不能声称历史 Paper execution/PnL 已验证。
 - 真实 geoblock/compliance、隔离钱包、安全凭据存储、真实只读余额/订单/成交/仓位 provider、人工授权和小额实盘前检查尚未完成。
@@ -10,15 +9,18 @@
 
 ## Active risks
 - Paper 公开行情请求现支持外部 Abort；最终估值有 30 秒总预算并可由后续 TERM 立即升级为快速停止。其他未接入该 signal 的非 Paper 公共采集仍依赖各自 timeout/有限重试，操作入口继续保留 45 秒强制清理上限。
-- 24 小时轮询收到约 536 万条 Trade 记录，其中识别 2,368,476 个重复事件，仅 704 个新事件。幂等与最终对账正确，但重复数据比例过高，容易增加 API 负载和超时；在 7–30 天长跑前应优化增量窗口/页量。
+- 旧 24 小时轮询收到约 536 万条 Trade 记录，其中识别 2,368,476 个重复事件，仅 704 个新事件。当前正常 Trade 头页已降为 100 条且不覆盖 committed watermark 时自动回退 1000 条；仍需用 7 天长跑确认真实 API 负载改善幅度。
 - `@polymarket/clob-client-v2@1.0.8` 间接依赖 `elliptic@6.6.1`，`pnpm audit --prod` 报 1 个 LOW；公告所列修复版 6.6.2 尚未在 npm 发布，当前无法安全覆盖。官方 SDK 已是最新版，需持续关注上游更新。
 - Node 内置 `node:sqlite` 在 Node 24.14.0 仍输出 experimental warning；已锁定 Node 版本并有 Online Backup、事务、恢复和完整性测试，但长时间运行稳定性仍需 soak 证明。
 - 公开钱包成交依赖 Data API 增量轮询而非钱包 WebSocket；Activity/Trades/Positions 可短暂先后不一致。系统会保留 gap、MINOR_DIFF/MAJOR_DESYNC 和 reconciliation evidence，不得自动改仓掩盖差异。
 - CLOB orderbook 超过 2 秒会严格拒绝成交；这提高安全性但可能降低 Paper/未来 Live 成交率，必须用长期报告评估，不能为了成交率私自放宽。
 - 外部余额、订单、成交和仓位 provider 的生产实现仍需在真实部署环境接线与验收；当前 fake/disabled 测试只证明接口和状态机，不证明真实网络可用性。
-- 业务源库当前为 schema 2.18.0；短测前后 `integrity_check=ok`，仍保持 `PAPER + LIVE_DISABLED`。
+- 业务源库仍可能停留在 schema 2.18.0；首次短测会先做 SQLite Online Backup，再迁移到 2.19.0 并执行 integrity/FK/`PAPER + LIVE_DISABLED` 检查。
 
 ## Resolved in current hardening
+- Paper 不可用行情此前只形成重复运行错误；现 `No orderbook`、stale book 和 fee unavailable 都会持久化单市场冻结、有界退避和恢复证据，不伪造价格、不产生模拟成交，未恢复 blocker 无法通过 Gate。
+- Paper 最终 drain 超时、Settlement 请求/赎回异常、零费用但缺 Fee Ledger、target 漂移、Cash/Reservation 中间余额错误现在都会 fail closed；到期仓位会先事务化取消对应未成交退出 allocation。
+- Crash Recovery 不再只依赖 SQLite `RAISE(ABORT)`：新增真实子进程 SIGKILL 覆盖 Reservation、BUY Fill、Settlement，重启后完整性、外键、幂等和账户一致性均通过。
 - 联合入口原先记录后台 zsh/tsx 包装层 PID，TERM 后实际 Paper worker 会成为孤儿且缺报告；现改为后台 subshell 直接 exec Node worker，并用真实操作入口验证 Paper/Observe 均生成报告、四文件 ZIP 完整、无进程/锁/FIFO 残留。
 - Paper 快速停止后的 `INCOMPLETE` 账本快照曾可能仍标为 `COMPLETED`；现 CLI 使用独立完成状态，联合 Gate 再校验 `errorCount=0`、完整估值、零未估值仓位、VWAP 来源和 `FINAL_VALUATION` 关闭协议，人工快速停止不能误过 Gate。
 - Paper 停止原先可能卡在不可中断 interval、逐仓位重复盘口请求或最终全仓位网络估值；现已支持 Abort、按市场复用单轮快照、停止后账本-only 收尾，347 个仓位/4 个 asset 不再产生数百次重复请求。

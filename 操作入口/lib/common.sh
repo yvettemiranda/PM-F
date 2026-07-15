@@ -110,7 +110,8 @@ operator_record_is_active() {
   record="$(<"$record_file")"
   IFS=$'\t' read -r pid kind launcher <<< "$record"
   [[ "$pid" == <-> ]] || return 1
-  [[ "$launcher" == "$PROJECT_ROOT/操作入口/"*.command ]] || return 1
+  [[ "$launcher" == "$PROJECT_ROOT/操作入口/"*.command \
+    || "$launcher" == "$PROJECT_ROOT/操作入口/lib/run-paper-validation.sh" ]] || return 1
   operator_process_running "$pid" || return 1
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [[ "$command" == *"${launcher:t}"* ]]
@@ -451,6 +452,7 @@ operator_create_codex_bundle() {
   local paper_status="${4:-UNKNOWN}"
   local observe_status="${5:-UNKNOWN}"
   local run_started_at="${6:-UNKNOWN}"
+  local verification_file="${7:-}"
   local stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary observe_report paper_report
   local -a included=()
   local -a missing=()
@@ -495,6 +497,16 @@ operator_create_codex_bundle() {
     fi
   else
     missing+=("运行日志")
+  fi
+  if [[ -n "$verification_file" && -f "$verification_file" ]]; then
+    if operator_copy_sanitized_observe_report "$verification_file" "$bundle_dir/paper-isolated-verification.json"; then
+      included+=("paper-isolated-verification.json")
+    else
+      rm -f "$bundle_dir/paper-isolated-verification.json"
+      missing+=("Paper 隔离测试证明（脱敏失败）")
+    fi
+  elif [[ -n "$verification_file" ]]; then
+    missing+=("Paper 隔离测试证明")
   fi
 
   {

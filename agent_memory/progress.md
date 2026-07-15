@@ -3,6 +3,7 @@
 ## Current task
 - commit `ff1f77651919a167461e2338ae51f41b51521892` 上的 24 小时 Observe 已通过：`activeRuntimeMs=86400004`、5,300 次成功轮询、42 次失败均恢复、0 `MAJOR_DESYNC`、最终 `SYNCED`、`liveStabilityEligible=true`。
 - 联合验证仍未整体通过：原 24 小时 Paper 缺最终 JSON，且没有有效 SELL/止损/结算覆盖；但孤儿 PID 1300/1316 已安全停止，进程跟踪和收尾路径已修复。
+- Paper 验收环境代码已完成：单市场行情冻结/退避/恢复、fresh target-bound 账户、账户级验收汇总、2 小时短测和 7 天长测双击入口均已落地；下一步在 clean commit 上运行正式 2 小时自然数据短测。全程保持 `PAPER + LIVE_DISABLED`。
 
 ## Completed
 - 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
@@ -56,13 +57,18 @@
 - 最终估值增加 30 秒全局预算；公开 CLOB orderbook/fee/resolution 请求支持外部 Abort，重试和 backoff 也可取消。USR1 后再发 TERM 的隔离实测会升级为 `FAST_ABORT/STOPPED_EARLY`、exit 1，不会等 45 秒强杀或误过 Gate。
 - 计划收尾取消在途 Paper 行情请求时，仅与该 AbortSignal reason 对应的取消会被视为正常停止；同时发生的普通业务错误仍计入 `errorCount`，避免健康任务因正常收尾时机假失败，也不会吞掉真实错误。
 - 最终并行规格/证据复审覆盖 PID、信号升级、30 秒估值预算、45 秒清理上界、报告与双重 Gate、盘口聚合及安全边界；已关闭全部发现项，未发现剩余 P0/P1/P2。
+- Paper 行情健康状态已持久化到 schema 2.19.0：`No orderbook`、stale book、fee unavailable 均按 account+asset+condition 冻结并有界退避；只有连续两次新鲜、身份正确且费用可用的探针才恢复，已结束市场转入 `SETTLEMENT_ONLY`。
+- Paper 账户强制绑定 confirmed target 且不可变；消费、cutoff 审计和验收均按 target 隔离。验收会检查 Cash/Reservation 逐行余额链、Fee evidence、PnL、Position、Settlement error、Market blocker、Execution target 和不可变 Audit。
+- Settlement 采用 settlement-wins：仓位进入结算前事务化截断对应未成交 SELL/STOP allocation，避免 `SETTLEMENT_PENDING` 与退出成交状态冲突。
+- Observe Trades 正常头页降为 100 条并在不覆盖水位时回退 1000 条；Activity 保留 baseline/未确认交易回看和已确认事件 5 分钟重叠，不用漏事件换请求量。
+- Crash Recovery 增加真实子进程 SIGKILL：Reservation、BUY Fill、Settlement 三个事务屏障均验证 SQLite 完整、外键正常、重启 exactly-once。
+- 最新验证：TypeScript 通过；32 个测试文件、388 项测试全部通过；`git diff --check`、仓库及桌面全部 `.command/.sh` zsh 语法通过。
 
 ## Current gate
 - 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
 - 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 针对短测中持续返回 `No orderbook exists` 的 Paper asset，明确不可交易市场的冻结/恢复或退避策略；当前会诚实生成 `COMPLETED_WITH_ERRORS`，不得把它冒充 Paper Stability PASS。
-- 无需重跑 Observe 24 小时；下一轮只需在修复上述 Paper 行情健康问题后执行 Paper 长周期验证，并检查错误总数、估值完整性与最终报告。
-- 后续单独补验有效 SELL、止损、Settlement/Redeem、Crash Recovery 和最终一致性；本轮 12 个 SELL 全为 Gap，未覆盖卖出生命周期。
-- 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。
+- 在当前 clean commit 上先运行 2 小时 Paper+Observe 短测；若自然数据没有可执行 BUY，报告必须保持覆盖不完整并按证据决定是否重跑。
+- 短测自动通过后运行独立 7 天 Paper 长测，重点检查真实 BUY/SELL、Market blocker、最终估值、Ledger/Position/PnL、恢复与报告完整性。
+- 无需重跑已通过的 Observe 24 小时；长周期 Paper、合规、合法部署环境和人工 Gate 全部通过后，才讨论真实 signer、认证 provider 和小额实盘授权。

@@ -418,7 +418,11 @@ export class OperationalRunner {
       now: input.now,
     });
     try {
-      const accountId = input.accountId ?? executor.createAccount("Operational Paper Validation");
+      const accountId = input.accountId ?? executor.createAccount(
+        "Operational Paper Validation",
+        undefined,
+        this.ensureOperationalPaperTarget(databasePath, input.operationalRunId, input.now),
+      );
       input.setPaperAccountId(accountId);
       store.bindPaperAccount({
         operationalRunId: input.operationalRunId,
@@ -434,6 +438,37 @@ export class OperationalRunner {
       return accountId;
     } finally {
       executor.close();
+    }
+  }
+
+  private ensureOperationalPaperTarget(
+    databasePath: string,
+    operationalRunId: string,
+    now: () => Date,
+  ): string {
+    const database = new DatabaseSync(databasePath);
+    try {
+      const targets = database.prepare(
+        `SELECT target_id
+         FROM monitor_targets
+         WHERE identity_status='IDENTITY_CONFIRMED'
+         ORDER BY created_at,target_id`,
+      ).all() as Array<{ target_id: string }>;
+      if (targets.length === 1) return targets[0]!.target_id;
+      if (targets.length > 1) throw new Error("OPERATIONAL_PAPER_TARGET_AMBIGUOUS");
+
+      const targetId = `operational-paper-target-${operationalRunId}`;
+      const timestamp = now().toISOString();
+      database.prepare(
+        `INSERT INTO monitor_targets(
+           target_id,wallet_address,identity_status,baseline_at,runtime_mode,
+           sync_status,created_at,updated_at
+         ) VALUES (?, '0x0000000000000000000000000000000000000000',
+           'IDENTITY_CONFIRMED', ?, 'OBSERVE_ONLY', 'SYNCED', ?, ?)`,
+      ).run(targetId, timestamp, timestamp, timestamp);
+      return targetId;
+    } finally {
+      database.close();
     }
   }
 
