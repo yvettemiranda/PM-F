@@ -1,8 +1,8 @@
 # Progress
 
 ## Current task
-- 重复成交身份及 fresh baseline Activity 游标缺陷已修复，新基准 90 秒 Observe 短测已通过。
-- 操作流程已收敛为桌面三个按钮：一键并行 Paper + Observe 24 小时、提前安全停止、自动选中最新结果。24 小时后会自动释放锁/防睡眠、生成唯一 ZIP 并在 Finder 选中；此轮长测尚未启动。
+- commit `ff1f77651919a167461e2338ae51f41b51521892` 上的 24 小时 Observe 已通过：`activeRuntimeMs=86400004`、5,300 次成功轮询、42 次失败均恢复、0 `MAJOR_DESYNC`、最终 `SYNCED`、`liveStabilityEligible=true`。
+- 联合验证仍未整体通过：原 24 小时 Paper 缺最终 JSON，且没有有效 SELL/止损/结算覆盖；但孤儿 PID 1300/1316 已安全停止，进程跟踪和收尾路径已修复。
 
 ## Completed
 - 修复 SQLite WAL 直接复制风险，Validation/Operational 改为 Online Backup；新增 snapshot retention，验证不会污染业务库或无限占用磁盘。
@@ -44,12 +44,25 @@
 - 最新验证：TypeScript 通过；28 个测试文件、335 项测试全部通过；`git diff --check` 通过。
 - 已仅删除隔离 Validation/Operational 任务的可再生 SQLite 快照、`.DS_Store` 和失效 FIFO，回收 3,153,285,120 bytes；主库、迁移备份、原 24 小时失败证据、90 秒通过证据及最新 Validation/Operational 报告均保留。
 - 操作入口语法、中文/空格路径、日志尾部刷盘、有界子进程停止、最新 ZIP/fallback 选择及严格 4 文件压缩包已通过独立 smoke 测试。
+- 2026-07-14 15:37:14 至 2026-07-15 15:37:14 的真实 Observe 长测已达到 24 小时 Gate：704 个新事件、566 个 Signal、56 个 Gap Signal 全部不可执行；5,188 次 `SYNCED`、112 次可恢复 `MINOR_DIFF`、0 `MAJOR_DESYNC`，无未恢复连接缺口或 checkpoint hash 不一致。
+- 本轮 Paper 数据库证据显示 566 个 Signal 全部且仅消费一次；345 个完全成交、2 个部分成交、108 个超时、47 个费率模型不可用，Reservation 归零、现金账本一致、无重复/孤立记录。但因 Paper 最终报告缺失，只能作为临时证据，不能通过 Paper Stability。
+- `operator_tsx` 现由后台 subshell 直接 `exec node --import tsx`；启动器记录 PID 与实际 worker PID 一致，并禁止前台误用。进程生命周期回归验证 TERM 可由 worker 接收、正常退出且无孤儿。
+- PaperRunner 已支持 Abort 中断间隔等待，并在各阶段间停止；Abort 后最终报告只做账本快照，不再发起盘口请求。真实双击入口短测在约 11 秒内完成 Paper/Observe 收尾，生成严格 4 文件 ZIP，无强杀、无残留进程、锁或 FIFO，数据库 `integrity_check=ok`。
+- Paper CLI 区分 `FAST_ABORT` 与 `FINAL_VALUATION`：人工 TERM 快速收尾并固定不能通过 Gate；Observe 满 24 小时后入口发送 USR1，Paper 停止循环后执行聚合最终估值。CLI 与联合入口都会拒绝 `INCOMPLETE`/未估值报告，避免把缺失 PnL 冒充完成。
+- Portfolio Projection 改为同一 asset+condition 聚合全部独立 Position 后只消费一次完整盘口深度，再按确定性比例分摊退出价值/费用；FROZEN 非零仓位不再漏算，部分/不可估值来源明确为 `PARTIAL_ORDERBOOK_EXIT_VWAP`/`UNAVAILABLE`。
+- Stop Loss 单轮按 asset+condition 复用盘口；Settlement 单轮按 condition+asset 复用结果，避免相反 outcome 串用。Paper 长跑错误详情限制为最近 100 条，同时保留 `errorCount/droppedErrorCount`。
+- 最新验证：Node `24.14.0`、pnpm `11.7.0` frozen install 通过；TypeScript 通过；30 个测试文件、351 项测试全部通过；全部操作入口 zsh 语法和 `git diff --check` 通过。
+- 隔离临时数据库上的真实 Paper CLI USR1 测试已通过：`shutdownMode=FINAL_VALUATION`、`status=COMPLETED`、`valuationStatus=COMPLETE`、exit 0；测试生成物已清理，`交给Codex/` 仅保留用户原 24 小时 ZIP。
+- 最终估值增加 30 秒全局预算；公开 CLOB orderbook/fee/resolution 请求支持外部 Abort，重试和 backoff 也可取消。USR1 后再发 TERM 的隔离实测会升级为 `FAST_ABORT/STOPPED_EARLY`、exit 1，不会等 45 秒强杀或误过 Gate。
+- 计划收尾取消在途 Paper 行情请求时，仅与该 AbortSignal reason 对应的取消会被视为正常停止；同时发生的普通业务错误仍计入 `errorCount`，避免健康任务因正常收尾时机假失败，也不会吞掉真实错误。
+- 最终并行规格/证据复审覆盖 PID、信号升级、30 秒估值预算、45 秒清理上界、报告与双重 Gate、盘口聚合及安全边界；已关闭全部发现项，未发现剩余 P0/P1/P2。
 
 ## Current gate
 - 系统达到“Production Ready Candidate 的技术候选”所需主体能力，但尚未完成长周期验收，也未获 Live 授权。
 - 自动验证不允许把 `liveAllowed` 改为 true；当前无 private key、真实 signer、真实订单或真实资金行为。
 
 ## Next steps
-- 双击桌面 `Polymarket验证_点这里/1_开始24小时验证.command`，同时重跑修复后 Observe 与 Paper；短测通过不替代 24 小时稳定性 Gate。
-- 结束后只需提供 Finder 自动选中的 `发给Codex_日期时间_PID.zip`，再执行 Crash Recovery 和最终一致性分析。
+- 针对短测中持续返回 `No orderbook exists` 的 Paper asset，明确不可交易市场的冻结/恢复或退避策略；当前会诚实生成 `COMPLETED_WITH_ERRORS`，不得把它冒充 Paper Stability PASS。
+- 无需重跑 Observe 24 小时；下一轮只需在修复上述 Paper 行情健康问题后执行 Paper 长周期验证，并检查错误总数、估值完整性与最终报告。
+- 后续单独补验有效 SELL、止损、Settlement/Redeem、Crash Recovery 和最终一致性；本轮 12 个 SELL 全为 Gap，未覆盖卖出生命周期。
 - 全部长周期、合规和人工 Gate 通过后，才讨论真实 signer、认证 provider 和小额实盘授权。

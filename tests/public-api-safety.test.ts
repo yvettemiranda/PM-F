@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PolymarketPublicApi } from "../src/adapters/polymarket-public.js";
 import { parseClobMarket, parsePublicActivity } from "../src/adapters/public-api-schema.js";
 
 describe("Polymarket public API safety", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("rejects unsafe request configuration", () => {
     expect(() => new PolymarketPublicApi({ timeoutMs: 0 })).toThrow("INVALID_REQUEST_TIMEOUT");
     expect(() => new PolymarketPublicApi({ maxRetries: -1 })).toThrow("INVALID_MAX_RETRIES");
@@ -82,5 +84,28 @@ describe("Polymarket public API safety", () => {
       size: 1,
       price: 0.5,
     }])).toThrow("API_SCHEMA_INVALID:activity[0]:trade_fields");
+  });
+
+  it("stops an in-flight public request when the caller aborts", async () => {
+    const fetchStub = vi.fn(async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => (
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })
+    ));
+    vi.stubGlobal("fetch", fetchStub);
+    const api = new PolymarketPublicApi({ timeoutMs: 3_000, maxRetries: 3 });
+    const controller = new AbortController();
+    const request = api.orderbook("asset", controller.signal)
+      .then(() => "COMPLETED", (error: unknown) => error instanceof Error ? error.message : String(error));
+
+    await Promise.resolve();
+    controller.abort(new Error("OPERATOR_STOP"));
+    const result = await Promise.race([
+      request,
+      new Promise<"TIMEOUT">((resolvePromise) => setTimeout(() => resolvePromise("TIMEOUT"), 100)),
+    ]);
+
+    expect(result).toBe("OPERATOR_STOP");
+    expect(fetchStub).toHaveBeenCalledTimes(1);
   });
 });

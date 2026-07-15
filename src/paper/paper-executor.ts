@@ -176,7 +176,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  async consumeSignal(accountId: string, signalId: string): Promise<string> {
+  async consumeSignal(accountId: string, signalId: string, signal?: AbortSignal): Promise<string> {
     const existing = this.database.prepare(
       "SELECT paper_execution_id FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id=?",
     ).get(accountId, signalId) as { paper_execution_id: string | null } | undefined;
@@ -184,13 +184,13 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const envelope = this.loadSignal(signalId);
     const executionId = this.createExecutionForSignal(accountId, envelope);
     const row = this.execution(executionId);
-    if (["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)) {
-      await this.attemptExecution(executionId);
+    if (!signal?.aborted && ["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)) {
+      await this.attemptExecution(executionId, signal);
     }
     return executionId;
   }
 
-  async consumeAvailableSignals(accountId: string): Promise<string[]> {
+  async consumeAvailableSignals(accountId: string, signal?: AbortSignal): Promise<string[]> {
     const account = this.accountRow(accountId);
     const checkpoint = this.database.prepare(
       "SELECT last_signal_created_at,last_signal_id FROM paper_consumer_checkpoints WHERE paper_account_id=?",
@@ -210,7 +210,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       checkpoint.last_signal_id,
     ) as Array<{ signal_id: string }>;
     const executions: string[] = [];
-    for (const row of rows) executions.push(await this.consumeSignal(accountId, row.signal_id));
+    for (const row of rows) {
+      if (signal?.aborted) break;
+      executions.push(await this.consumeSignal(accountId, row.signal_id, signal));
+    }
     return executions;
   }
 
@@ -340,17 +343,19 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return { mode: this.mode, frozenPositionCount, reason: input.reason };
   }
 
-  async attemptExecution(executionId: string): Promise<PaperExecutionState> {
+  async attemptExecution(executionId: string, signal?: AbortSignal): Promise<PaperExecutionState> {
     const execution = this.execution(executionId);
     if (!["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) return execution.state;
+    if (signal?.aborted) return execution.state;
     if (execution.execution_type === "TARGET_BUY" && execution.deadline_at && this.now().valueOf() > Date.parse(execution.deadline_at)) {
       this.expireBuy(execution);
       return "EXPIRED";
     }
     const [book, fee] = await Promise.all([
-      this.marketData.orderbook(execution.asset_id, execution.condition_id),
-      this.marketData.fee(execution.asset_id, execution.condition_id),
+      this.marketData.orderbook(execution.asset_id, execution.condition_id, signal),
+      this.marketData.fee(execution.asset_id, execution.condition_id, signal),
     ]);
+    if (signal?.aborted) return execution.state;
     if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null) {
       if (execution.execution_type === "TARGET_BUY") this.rejectAndRelease(execution, "FEE_MODEL_UNAVAILABLE");
       else this.updatePendingReason(execution, "FEE_MODEL_UNAVAILABLE");
@@ -366,20 +371,32 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       : this.attemptSell(execution, book, fee, age);
   }
 
-  async retryPending(accountId: string): Promise<void> {
+  async retryPending(accountId: string, signal?: AbortSignal): Promise<void> {
     const rows = this.database.prepare(
       `SELECT paper_execution_id FROM paper_executions
        WHERE paper_account_id=? AND state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
        ORDER BY created_at,paper_execution_id`,
     ).all(accountId) as Array<{ paper_execution_id: string }>;
-    for (const row of rows) await this.attemptExecution(row.paper_execution_id);
+    for (const row of rows) {
+      if (signal?.aborted) break;
+      await this.attemptExecution(row.paper_execution_id, signal);
+    }
   }
 
-  async checkStopLosses(accountId: string): Promise<string[]> {
+  async checkStopLosses(accountId: string, signal?: AbortSignal): Promise<string[]> {
     const positions = this.openPositions(accountId);
     const created: string[] = [];
+    const orderbooks = new Map<string, Promise<PaperOrderbookSnapshot>>();
     for (const position of positions) {
-      const book = await this.marketData.orderbook(position.asset_id, position.condition_id);
+      if (signal?.aborted) break;
+      const marketKey = `${position.asset_id}\u0000${position.condition_id.toLowerCase()}`;
+      let bookPromise = orderbooks.get(marketKey);
+      if (!bookPromise) {
+        bookPromise = this.marketData.orderbook(position.asset_id, position.condition_id, signal);
+        orderbooks.set(marketKey, bookPromise);
+      }
+      const book = await bookPromise;
+      if (signal?.aborted) break;
       const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
       if (age < 0 || age > RULESET.orderbookMaxAgeMs) continue;
       const currentSize = BigInt(position.current_size_micros);
@@ -391,14 +408,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       if (prior) continue;
       const executionId = hash([idempotency, position.ruleset_hash]);
       const now = this.now().toISOString();
-      const signal = this.loadSignal(position.signal_id);
+      const positionSignal = this.loadSignal(position.signal_id);
       this.database.exec("BEGIN IMMEDIATE");
       try {
         const risk = this.riskManager.recordSystemDecision({
           mode: this.mode,
           accountId,
           signalId: position.signal_id,
-          contextId: signal.context?.contextId ?? null,
+          contextId: positionSignal.context?.contextId ?? null,
           entityId: position.paper_position_id,
           executionType: "STOP_LOSS",
           decision: "ALLOW",
@@ -426,7 +443,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           capitalMode: null,
           deadline: null,
           reason: "STOP_LOSS_TRIGGERED",
-          contextId: signal.context?.contextId ?? null,
+          contextId: positionSignal.context?.contextId ?? null,
           riskDecisionId: risk.riskDecisionId,
           riskRejectReason: risk.riskRejectReason,
           rulesetHash: position.ruleset_hash,
@@ -445,22 +462,22 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         throw error;
       }
       created.push(executionId);
-      await this.attemptExecution(executionId);
+      await this.attemptExecution(executionId, signal);
     }
     return created;
   }
 
-  async processSettlements(accountId: string): Promise<string[]> {
-    return new SettlementService(this.marketData, this, this.now).process(accountId);
+  async processSettlements(accountId: string, signal?: AbortSignal): Promise<string[]> {
+    return new SettlementService(this.marketData, this, this.now).process(accountId, signal);
   }
 
-  async accountSnapshot(accountId: string): Promise<PaperAccountSnapshot> {
+  async accountSnapshot(accountId: string, signal?: AbortSignal): Promise<PaperAccountSnapshot> {
     return new PortfolioProjectionService(
       this.database,
       this.marketData,
       this.sourceVersion,
       this.now,
-    ).projectPaperAccount(accountId);
+    ).projectPaperAccount(accountId, signal);
   }
 
   settlementCandidates(accountId: string): SettlementCandidate[] {

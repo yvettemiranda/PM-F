@@ -87,9 +87,9 @@ export interface PaperResolutionSnapshot {
 }
 
 export interface PaperMarketDataProvider {
-  orderbook(assetId: string, conditionId: string): Promise<PaperOrderbookSnapshot>;
-  fee(assetId: string, conditionId: string): Promise<PaperFeeSnapshot>;
-  resolution(conditionId: string, assetId: string): Promise<PaperResolutionSnapshot>;
+  orderbook(assetId: string, conditionId: string, signal?: AbortSignal): Promise<PaperOrderbookSnapshot>;
+  fee(assetId: string, conditionId: string, signal?: AbortSignal): Promise<PaperFeeSnapshot>;
+  resolution(conditionId: string, assetId: string, signal?: AbortSignal): Promise<PaperResolutionSnapshot>;
 }
 
 export interface MatchedLevel {
@@ -119,6 +119,6 @@ export interface PaperAccountSnapshot {
   totalEquityMicros: string;
   valuationStatus: "COMPLETE" | "INCOMPLETE";
   unpricedPositionCount: number;
-  priceSource: "ORDERBOOK_EXIT_VWAP";
+  priceSource: "ORDERBOOK_EXIT_VWAP" | "PARTIAL_ORDERBOOK_EXIT_VWAP" | "UNAVAILABLE";
   priceTimestamp: string;
 }

@@ -1,21 +1,29 @@
 # Bugs And Risks
 
 ## Active blockers
-- 原 24 小时 Observe 失败证据继续保留；身份折叠与 Activity 游标缺陷已修复，真实 capture replay 和新基准短时对账已通过，但修复后的 24 小时 Observe 尚未完成，因此 Observe 稳定性 Gate 仍未通过。
-- 修复后的 24 小时 Observe + Paper 联合长测、Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
+- 原 24 小时运行仍缺 Paper JSON，无法证明当时 PaperRunner 错误为零；且没有任何 `executionEligible=true` 的 SELL，347 个模拟仓位全部 `OPEN`，正常卖出、止损、已实现 PnL、Settlement/Redeem 未被长测覆盖。
+- 修复后的真实短测中，一个未来到期且本地仍为 OPEN 的 asset 持续收到 CLOB `No orderbook exists` 404，Paper 报告为 `COMPLETED_WITH_ERRORS`。错误不会再导致报告无限膨胀，但在定义安全冻结/恢复或有界退避前，Paper Stability Gate 仍不能通过。
+- Crash Recovery 长测、长期 Ledger/Position/External State 一致性尚未执行；短时和零时长 smoke 不能替代 soak。
 - Data API 历史 offset 上限导致完整钱包历史不可得，历史 Replay 仍为 `INCOMPLETE`；缺历史 orderbook snapshot，不能声称历史 Paper execution/PnL 已验证。
 - 真实 geoblock/compliance、隔离钱包、安全凭据存储、真实只读余额/订单/成交/仓位 provider、人工授权和小额实盘前检查尚未完成。
 - 2026-07-13 最终只读复测官方 geoblock 返回 `BLOCKED (US/CA)`，CLOB clock offset 约 `1733ms` 且为 `UNSAFE`；当前环境明确不能用于 Live，必须在合法部署环境重新验证，禁止绕过。
 
 ## Active risks
+- Paper 公开行情请求现支持外部 Abort；最终估值有 30 秒总预算并可由后续 TERM 立即升级为快速停止。其他未接入该 signal 的非 Paper 公共采集仍依赖各自 timeout/有限重试，操作入口继续保留 45 秒强制清理上限。
+- 24 小时轮询收到约 536 万条 Trade 记录，其中识别 2,368,476 个重复事件，仅 704 个新事件。幂等与最终对账正确，但重复数据比例过高，容易增加 API 负载和超时；在 7–30 天长跑前应优化增量窗口/页量。
 - `@polymarket/clob-client-v2@1.0.8` 间接依赖 `elliptic@6.6.1`，`pnpm audit --prod` 报 1 个 LOW；公告所列修复版 6.6.2 尚未在 npm 发布，当前无法安全覆盖。官方 SDK 已是最新版，需持续关注上游更新。
 - Node 内置 `node:sqlite` 在 Node 24.14.0 仍输出 experimental warning；已锁定 Node 版本并有 Online Backup、事务、恢复和完整性测试，但长时间运行稳定性仍需 soak 证明。
 - 公开钱包成交依赖 Data API 增量轮询而非钱包 WebSocket；Activity/Trades/Positions 可短暂先后不一致。系统会保留 gap、MINOR_DIFF/MAJOR_DESYNC 和 reconciliation evidence，不得自动改仓掩盖差异。
 - CLOB orderbook 超过 2 秒会严格拒绝成交；这提高安全性但可能降低 Paper/未来 Live 成交率，必须用长期报告评估，不能为了成交率私自放宽。
 - 外部余额、订单、成交和仓位 provider 的生产实现仍需在真实部署环境接线与验收；当前 fake/disabled 测试只证明接口和状态机，不证明真实网络可用性。
-- 业务源库当前仍为 schema 2.4.0，未在本轮审计中原地修改。运行时准备会自动 backup-first，再迁移至 2.18.0，并做 integrity/FK/Live Gate 安全状态检查；第一次正式启动仍应观察迁移日志并保留自动备份。
+- 业务源库当前为 schema 2.18.0；短测前后 `integrity_check=ok`，仍保持 `PAPER + LIVE_DISABLED`。
 
 ## Resolved in current hardening
+- 联合入口原先记录后台 zsh/tsx 包装层 PID，TERM 后实际 Paper worker 会成为孤儿且缺报告；现改为后台 subshell 直接 exec Node worker，并用真实操作入口验证 Paper/Observe 均生成报告、四文件 ZIP 完整、无进程/锁/FIFO 残留。
+- Paper 快速停止后的 `INCOMPLETE` 账本快照曾可能仍标为 `COMPLETED`；现 CLI 使用独立完成状态，联合 Gate 再校验 `errorCount=0`、完整估值、零未估值仓位、VWAP 来源和 `FINAL_VALUATION` 关闭协议，人工快速停止不能误过 Gate。
+- Paper 停止原先可能卡在不可中断 interval、逐仓位重复盘口请求或最终全仓位网络估值；现已支持 Abort、按市场复用单轮快照、停止后账本-only 收尾，347 个仓位/4 个 asset 不再产生数百次重复请求。
+- Paper 计划收尾时取消在途请求曾会被计为运行错误，使完整最终估值也变成 `COMPLETED_WITH_ERRORS`；现只忽略可证明属于当前停机信号的取消，竞态中的普通业务错误仍保留，并有正反回归测试。
+- Portfolio Projection 原先对同一 asset 的每个独立 Position 重复使用完整盘口深度并漏掉 FROZEN，可能高估可退出价值；现按 asset+condition 汇总 size 匹配一次深度并确定性分摊，同时纳入 FROZEN。
 - 原联合入口的 Paper 会早于 Observe 结束、正常完成仍标记“提前停止”、信号崩溃可被吞成成功、`wait` 可无限阻塞、日志未刷盘就打包、Finder 可选错旧 ZIP 等操作缺陷已修复。现只有 Observe 报告明确 `liveStabilityEligible=true` 且 `activeRuntimeMs>=86400000`、Paper 安全报告通过时才显示正常结束。
 - 结果 ZIP 改为唯一名、临时写入、完整性校验和严格 4 项白名单；已排除 macOS AppleDouble/`__MACOSX`、SQLite、`.env`、账户 ID 和凭据。
 - 同一交易中两笔字段完全相同的真实成交曾被 v1.1 字段哈希折叠；现已使用兼容旧 key 的 occurrence 多重集身份修复。双源确认、数量歧义阻断、跨重启延迟确认 Gap 化、数据库保存和 Replay 均有回归测试，真实失败 capture 可稳定还原 3 个事件。

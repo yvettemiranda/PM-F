@@ -7,7 +7,7 @@ import { resolveSourceVersion } from "../infra/source-version.js";
 import { selectPaperAccount } from "../paper/paper-account-selection.js";
 import { PaperExecutor } from "../paper/paper-executor.js";
 import { PublicPaperMarketDataProvider } from "../paper/public-market-data.js";
-import { PaperRunner } from "../paper/paper-runner.js";
+import { PaperRunner, paperRunCompletionStatus } from "../paper/paper-runner.js";
 
 const args = process.argv.slice(2);
 const valueArg = (name: string): string | undefined => args.find((item) => item.startsWith(`--${name}=`))?.split("=")[1];
@@ -38,6 +38,9 @@ const writeTextAtomically = async (path: string, content: string): Promise<void>
 };
 
 const outputDirectory = resolve("data/paper");
+const FINAL_VALUATION_TIMEOUT_MS = 30_000;
+
+type PaperShutdownMode = "NATURAL" | "FAST_ABORT" | "FINAL_VALUATION";
 
 const main = async (): Promise<void> => {
   const defaultDatabasePath = resolve("data/phase0/phase0.sqlite");
@@ -59,8 +62,22 @@ const main = async (): Promise<void> => {
   const accountLookup = new DatabaseSync(databasePath, { readOnly: true });
   accountLookup.exec("PRAGMA busy_timeout=5000;");
   const controller = new AbortController();
-  process.once("SIGINT", () => controller.abort());
-  process.once("SIGTERM", () => controller.abort());
+  const finalValuationController = new AbortController();
+  let shutdownMode: PaperShutdownMode = "NATURAL";
+  const currentShutdownMode = (): PaperShutdownMode => shutdownMode;
+  const requestFastAbort = (): void => {
+    shutdownMode = "FAST_ABORT";
+    if (!controller.signal.aborted) controller.abort();
+    if (!finalValuationController.signal.aborted) finalValuationController.abort();
+  };
+  const requestFinalValuation = (): void => {
+    if (currentShutdownMode() !== "NATURAL") return;
+    shutdownMode = "FINAL_VALUATION";
+    controller.abort();
+  };
+  process.once("SIGINT", requestFastAbort);
+  process.once("SIGTERM", requestFastAbort);
+  process.once("SIGUSR1", requestFinalValuation);
 
   try {
     const persistedAccountId = await readOptionalText(accountIdFile);
@@ -98,18 +115,33 @@ const main = async (): Promise<void> => {
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
     console.log(JSON.stringify({ event: "PAPER_RUNNER_READY", ...ready }));
 
-    const report = await new PaperRunner(executor, {
+    let report = await new PaperRunner(executor, {
       accountId: selection.accountId,
       intervalMs: intervalSeconds * 1_000,
       ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
     }).run(controller.signal);
+    if (currentShutdownMode() === "FINAL_VALUATION") {
+      const finalValuationSignal = AbortSignal.any([
+        finalValuationController.signal,
+        AbortSignal.timeout(FINAL_VALUATION_TIMEOUT_MS),
+      ]);
+      report = {
+        ...report,
+        stoppedAt: new Date().toISOString(),
+        account: await executor.accountSnapshot(selection.accountId, finalValuationSignal),
+      };
+    }
     await mkdir(outputDirectory, { recursive: true });
     const output = resolve(outputDirectory, `paper-${selection.accountId}-${Date.now()}.json`);
+    const status = currentShutdownMode() === "FAST_ABORT"
+      ? "STOPPED_EARLY"
+      : paperRunCompletionStatus(report);
     const payload = {
       mode: "PAPER",
-      status: report.errors.length === 0 ? "COMPLETED" : "COMPLETED_WITH_ERRORS",
+      status,
       sourceCodeCommit: sourceVersion.commit,
       sourceCodeDirty: sourceVersion.dirty,
+      shutdownMode: currentShutdownMode(),
       accountSelection: selection,
       consumerCutoff,
       report,
@@ -123,8 +155,8 @@ const main = async (): Promise<void> => {
     };
     await writeFile(output, JSON.stringify(payload, null, 2));
     console.log(JSON.stringify({ ...payload, output }, null, 2));
-    if (report.errors.length > 0) {
-      console.error(`PAPER_RUN_COMPLETED_WITH_ERRORS:${report.errors.length}; report=${output}`);
+    if (status !== "COMPLETED") {
+      console.error(`PAPER_RUN_NOT_COMPLETE:${status}; errors=${report.errorCount}; report=${output}`);
       process.exitCode = 1;
     }
   } finally {

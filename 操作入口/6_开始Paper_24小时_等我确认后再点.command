@@ -38,6 +38,7 @@ finalize_combined_validation() {
     RESULT_PACKAGED=1
   fi
   rm -f "$RESULT_MARKER"
+  rm -f "$READY_FILE"
   reveal_codex_result
   return "$original_status"
 }
@@ -158,7 +159,7 @@ if ! operator_process_running "$OBSERVE_PID"; then
 
   PAPER_REPORT_OK=0
   if operator_process_running "$PAPER_PID"; then
-    if kill -TERM "$PAPER_PID" 2>/dev/null; then
+    if kill -USR1 "$PAPER_PID" 2>/dev/null; then
       operator_wait_child "$PAPER_PID" stopping || PAPER_EXIT_CODE=$?
       if (( PAPER_EXIT_CODE == 0 )); then
         PAPER_STATUS="STOPPED_AFTER_OBSERVE"
@@ -184,6 +185,11 @@ if ! operator_process_running "$OBSERVE_PID"; then
         process.exit(
           report?.mode === "PAPER"
           && report?.status === "COMPLETED"
+          && report?.shutdownMode === "FINAL_VALUATION"
+          && Number(report?.report?.errorCount) === 0
+          && report?.report?.account?.valuationStatus === "COMPLETE"
+          && Number(report?.report?.account?.unpricedPositionCount) === 0
+          && report?.report?.account?.priceSource === "ORDERBOOK_EXIT_VWAP"
           && safety.privateKeyLoaded === false
           && safety.authenticatedTradingClientPresent === false
           && Number(safety.realOrdersCreated) === 0

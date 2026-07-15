@@ -1,3 +1,4 @@
+import { setTimeout as wait } from "node:timers/promises";
 import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from "../domain/models.js";
 import { stableJson } from "../domain/versioning.js";
 import {
@@ -89,6 +90,10 @@ function assertPageLimit(name: string, value: number, maximum: number): number {
   return value;
 }
 
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("REQUEST_ABORTED");
+}
+
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -124,12 +129,22 @@ export class PolymarketPublicApi {
     }
   }
 
-  private async request<T>(url: string, init?: RequestInit, parse?: (value: unknown) => T): Promise<ApiCapture<T>> {
+  private async request<T>(
+    url: string,
+    init?: RequestInit,
+    parse?: (value: unknown) => T,
+    externalSignal?: AbortSignal,
+  ): Promise<ApiCapture<T>> {
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      if (externalSignal?.aborted) throw abortError(externalSignal);
       const started = performance.now();
       try {
-        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
+        const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+        const requestSignal = externalSignal
+          ? AbortSignal.any([externalSignal, timeoutSignal])
+          : timeoutSignal;
+        const response = await fetch(url, { ...init, signal: requestSignal });
         const body = await response.text();
         const latencyMs = Math.round((performance.now() - started) * 100) / 100;
         if (!response.ok) {
@@ -146,12 +161,19 @@ export class PolymarketPublicApi {
           };
         }
       } catch (error) {
+        if (externalSignal?.aborted) throw abortError(externalSignal);
         if (error instanceof HttpError && error.status !== 429 && error.status < 500) throw error;
         lastError = error;
         if (attempt === this.maxRetries) break;
       }
       const base = Math.min(this.maxBackoffMs, 250 * this.backoffFactor ** attempt);
-      await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * base)));
+      const backoffMs = Math.floor(Math.random() * base);
+      try {
+        await wait(backoffMs, undefined, externalSignal ? { signal: externalSignal } : undefined);
+      } catch {
+        if (externalSignal?.aborted) throw abortError(externalSignal);
+        throw new Error("REQUEST_BACKOFF_FAILED");
+      }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
@@ -278,20 +300,20 @@ export class PolymarketPublicApi {
     return this.request("https://clob.polymarket.com/time", undefined, parseClobTime);
   }
 
-  async orderbook(assetId: string): Promise<ApiCapture<ClobOrderbook>> {
-    return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`, undefined, parseClobOrderbook);
+  async orderbook(assetId: string, signal?: AbortSignal): Promise<ApiCapture<ClobOrderbook>> {
+    return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`, undefined, parseClobOrderbook, signal);
   }
 
   async feeRate(assetId: string): Promise<ApiCapture<{ base_fee: number }>> {
     return this.request(`https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`, undefined, parseFeeRate);
   }
 
-  async clobMarket(conditionId: string): Promise<ApiCapture<ClobMarket>> {
-    return this.request(`https://clob.polymarket.com/markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarket);
+  async clobMarket(conditionId: string, signal?: AbortSignal): Promise<ApiCapture<ClobMarket>> {
+    return this.request(`https://clob.polymarket.com/markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarket, signal);
   }
 
-  async clobMarketInfo(conditionId: string): Promise<ApiCapture<ClobMarketInfo>> {
-    return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarketInfo);
+  async clobMarketInfo(conditionId: string, signal?: AbortSignal): Promise<ApiCapture<ClobMarketInfo>> {
+    return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarketInfo, signal);
   }
 
   async contractCode(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {

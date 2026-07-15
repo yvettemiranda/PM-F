@@ -90,6 +90,9 @@ class FakeMarketData implements PaperMarketDataProvider {
   book: PaperOrderbookSnapshot;
   feeSnapshot: PaperFeeSnapshot;
   resolutionSnapshot: PaperResolutionSnapshot;
+  orderbookCalls = 0;
+  feeCalls = 0;
+  resolutionCalls = 0;
 
   constructor(private readonly clock: () => Date) {
     this.book = this.makeBook([{ price: "0.5", size: "10000" }], [{ price: "0.5", size: "10000" }]);
@@ -126,16 +129,25 @@ class FakeMarketData implements PaperMarketDataProvider {
     };
   }
 
-  async orderbook(): Promise<PaperOrderbookSnapshot> {
+  async orderbook(_assetId?: string, _conditionId?: string, _signal?: AbortSignal): Promise<PaperOrderbookSnapshot> {
+    this.orderbookCalls += 1;
     return this.book;
   }
 
   async fee(): Promise<PaperFeeSnapshot> {
+    this.feeCalls += 1;
     return { ...this.feeSnapshot, snapshotTime: this.clock().toISOString() };
   }
 
   async resolution(): Promise<PaperResolutionSnapshot> {
+    this.resolutionCalls += 1;
     return { ...this.resolutionSnapshot, snapshotTime: this.clock().toISOString() };
+  }
+
+  resetCallCounts(): void {
+    this.orderbookCalls = 0;
+    this.feeCalls = 0;
+    this.resolutionCalls = 0;
   }
 }
 
@@ -569,6 +581,67 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("reuses one market snapshot when valuing multiple positions in the same asset", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "value-a", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "value-b", createdAt: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "value-a");
+    await env.executor.consumeSignal(env.accountId, "value-b");
+    env.market.resetCallCounts();
+
+    await env.executor.accountSnapshot(env.accountId);
+
+    expect(env.market.orderbookCalls).toBe(1);
+    expect(env.market.feeCalls).toBe(1);
+    env.executor.close();
+  });
+
+  it("values same-asset positions against shared orderbook depth only once", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "depth-a", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "depth-b", createdAt: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "depth-a");
+    await env.executor.consumeSignal(env.accountId, "depth-b");
+    env.market.book = env.market.makeBook([], [
+      { price: "0.5", size: "200" },
+      { price: "0.25", size: "200" },
+    ]);
+
+    const snapshot = await env.executor.accountSnapshot(env.accountId);
+
+    expect(snapshot.positionValueMicros).toBe("145000000");
+    expect(snapshot.unrealizedPnlMicros).toBe("-45000000");
+    env.executor.close();
+  });
+
+  it("keeps frozen non-zero positions in the portfolio projection", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "frozen-value", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "frozen-value");
+    await env.executor.reconcile({ accountId: env.accountId, reason: "RECONCILIATION_MAJOR_DESYNC" });
+
+    const snapshot = await env.executor.accountSnapshot(env.accountId);
+
+    expect(snapshot.positionValueMicros).toBe("100000000");
+    expect(snapshot.unpricedPositionCount).toBe(0);
+    expect(snapshot.valuationStatus).toBe("COMPLETE");
+    env.executor.close();
+  });
+
+  it("reuses one orderbook when checking stop loss for multiple positions in the same asset", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stop-a", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stop-b", createdAt: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "stop-a");
+    await env.executor.consumeSignal(env.accountId, "stop-b");
+    env.market.resetCallCounts();
+
+    expect(await env.executor.checkStopLosses(env.accountId)).toEqual([]);
+
+    expect(env.market.orderbookCalls).toBe(1);
+    env.executor.close();
+  });
+
   it("rejects a historical sell when no Paper position exists", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "historical", createdAt: "2026-07-08T00:00:01.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "2" });
@@ -812,6 +885,59 @@ describe("PaperExecutor", () => {
     expect(report.consumedSignals).toBe(1);
     expect(report.errors).toEqual([]);
     env.executor.close();
+  });
+
+  it("writes an incomplete ledger-only report without market requests after shutdown is requested", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "shutdown-a", createdAt: "2026-07-08T00:00:01.000Z" });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "shutdown-b", createdAt: "2026-07-08T00:00:02.000Z" });
+    await env.executor.consumeSignal(env.accountId, "shutdown-a");
+    await env.executor.consumeSignal(env.accountId, "shutdown-b");
+    env.market.resetCallCounts();
+    const controller = new AbortController();
+    controller.abort();
+
+    const report = await new PaperRunner(env.executor, {
+      accountId: env.accountId,
+      intervalMs: 1_000,
+    }).run(controller.signal);
+
+    expect(report.cycles).toBe(0);
+    expect(report.account.valuationStatus).toBe("INCOMPLETE");
+    expect(report.account.unpricedPositionCount).toBe(2);
+    expect(report.account.priceSource).toBe("UNAVAILABLE");
+    expect(env.market.orderbookCalls).toBe(0);
+    expect(env.market.feeCalls).toBe(0);
+    env.executor.close();
+  });
+
+  it("cancels an in-flight portfolio valuation when shutdown is requested", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "cancel-value", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "cancel-value");
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolvePromise) => { requestStarted = resolvePromise; });
+    env.market.orderbook = async (_asset, _condition, signal) => {
+      requestStarted();
+      return await new Promise<PaperOrderbookSnapshot>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const controller = new AbortController();
+    const snapshotPromise = env.executor.accountSnapshot(env.accountId, controller.signal);
+
+    await started;
+    controller.abort(new Error("FINAL_VALUATION_TIMEOUT"));
+    const result = await Promise.race([
+      snapshotPromise,
+      new Promise<"TIMEOUT">((resolvePromise) => setTimeout(() => resolvePromise("TIMEOUT"), 100)),
+    ]);
+
+    env.executor.close();
+    expect(result).not.toBe("TIMEOUT");
+    if (result === "TIMEOUT") return;
+    expect(result.valuationStatus).toBe("INCOMPLETE");
+    expect(result.priceSource).toBe("UNAVAILABLE");
   });
 
   it("advances a reused account cutoff before Observe starts without backfilling downtime signals", async () => {

@@ -38,9 +38,9 @@ export interface ExecutionResolutionSnapshot {
 }
 
 export interface ExecutionMarketDataProvider {
-  orderbook(assetId: string, conditionId: string): Promise<ExecutionOrderbookSnapshot>;
-  fee(assetId: string, conditionId: string): Promise<ExecutionFeeSnapshot>;
-  resolution(conditionId: string, assetId: string): Promise<ExecutionResolutionSnapshot>;
+  orderbook(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionOrderbookSnapshot>;
+  fee(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionFeeSnapshot>;
+  resolution(conditionId: string, assetId: string, signal?: AbortSignal): Promise<ExecutionResolutionSnapshot>;
 }
 
 function sourceTime(value: string): string {
@@ -56,8 +56,8 @@ function sourceTime(value: string): string {
 export class PublicExecutionMarketDataProvider implements ExecutionMarketDataProvider {
   constructor(private readonly api = new PolymarketPublicApi()) {}
 
-  async orderbook(assetId: string, conditionId: string): Promise<ExecutionOrderbookSnapshot> {
-    const capture = await this.api.orderbook(assetId);
+  async orderbook(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionOrderbookSnapshot> {
+    const capture = await this.api.orderbook(assetId, signal);
     if (capture.data.asset_id !== assetId || capture.data.market.toLowerCase() !== conditionId.toLowerCase()) {
       throw new Error("ORDERBOOK_IDENTITY_MISMATCH");
     }
@@ -72,9 +72,9 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
     };
   }
 
-  async fee(assetId: string, conditionId: string): Promise<ExecutionFeeSnapshot> {
+  async fee(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionFeeSnapshot> {
     try {
-      const capture = await this.api.clobMarketInfo(conditionId);
+      const capture = await this.api.clobMarketInfo(conditionId, signal);
       const token = capture.data.t.find((item) => item.t === assetId);
       if (!token) throw new Error("FEE_ASSET_NOT_FOUND");
       const exponent = capture.data.fd ? Number(capture.data.fd.e) : 1;
@@ -100,7 +100,8 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
         sourceUrl: capture.url,
         snapshotTime: capture.fetchedAt,
       };
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return {
         assetId,
         status: "UNAVAILABLE",
@@ -113,8 +114,8 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
     }
   }
 
-  async resolution(conditionId: string, assetId: string): Promise<ExecutionResolutionSnapshot> {
-    const capture = await this.api.clobMarket(conditionId);
+  async resolution(conditionId: string, assetId: string, signal?: AbortSignal): Promise<ExecutionResolutionSnapshot> {
+    const capture = await this.api.clobMarket(conditionId, signal);
     const token = capture.data.tokens.find((item) => item.token_id === assetId);
     if (!token) throw new Error("RESOLUTION_ASSET_NOT_FOUND");
     const winnerKnown = capture.data.tokens.some((item) => item.winner === true);

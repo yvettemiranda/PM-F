@@ -38,7 +38,7 @@
 - 联合 24 小时结果自动写入被 Git 忽略的 `交给Codex/`；每轮 ZIP 只包含当轮 Observe JSON、Paper JSON、联合日志和中文摘要，不包含 SQLite、`.env`、账户 ID 或凭据。
 
 ## Remaining human gates
-- 完成 24 小时 Observe、长周期 Paper、Crash Recovery 长测与长期状态一致性验证。
+- 24 小时 Observe 已通过；仍需完成长周期 Paper、Crash Recovery 长测与长期状态一致性验证。
 - 补足可复现的历史 orderbook/Paper Replay 数据；当前历史 API offset 限制使 Replay 仍为 `INCOMPLETE`。
 - 在合规地区完成官方 geoblock/compliance 检查，准备隔离钱包、安全凭据存储和只读外部状态 provider。
 - 用户再次明确授权后，才可单独接入真实 signer/认证 CLOB client，并先做小额实盘前检查。

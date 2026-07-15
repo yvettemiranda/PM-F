@@ -22,14 +22,23 @@ export class SettlementService {
     private readonly now: () => Date,
   ) {}
 
-  async process(accountId: string): Promise<string[]> {
+  async process(accountId: string, signal?: AbortSignal): Promise<string[]> {
     const completed: string[] = [];
+    const resolutions = new Map<string, Promise<PaperResolutionSnapshot>>();
     for (const candidate of this.store.settlementCandidates(accountId)) {
+      if (signal?.aborted) break;
       if (this.now().valueOf() < Date.parse(candidate.marketEndTime)) continue;
       if (candidate.status !== "SETTLEMENT_PENDING") {
         this.store.markSettlementPending(candidate.positionId, "MARKET_END_REACHED");
       }
-      const resolution = await this.marketData.resolution(candidate.conditionId, candidate.assetId);
+      const marketKey = `${candidate.conditionId.toLowerCase()}\u0000${candidate.assetId}`;
+      let resolutionPromise = resolutions.get(marketKey);
+      if (!resolutionPromise) {
+        resolutionPromise = this.marketData.resolution(candidate.conditionId, candidate.assetId, signal);
+        resolutions.set(marketKey, resolutionPromise);
+      }
+      const resolution = await resolutionPromise;
+      if (signal?.aborted) break;
       if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) continue;
       completed.push(this.store.redeemSettledPosition(candidate.positionId, resolution));
     }

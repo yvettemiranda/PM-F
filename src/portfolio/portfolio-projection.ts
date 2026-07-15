@@ -48,40 +48,60 @@ export class PortfolioProjectionService {
     private readonly now: () => Date,
   ) {}
 
-  async projectPaperAccount(accountId: string): Promise<PaperAccountSnapshot> {
+  async projectPaperAccount(accountId: string, signal?: AbortSignal): Promise<PaperAccountSnapshot> {
     const account = this.account(accountId);
     const ledgerBalances = this.ledgerBalances(accountId);
     let positionValue = 0n;
     let unrealizedPnl = 0n;
     let unpricedPositionCount = 0;
+    let pricedPositionCount = 0;
     const priceTimestamp = this.now().toISOString();
+    const positions = this.positions(accountId).filter((position) => BigInt(position.current_size_micros) > 0n);
+    const positionsByMarket = new Map<string, ProjectionPositionRow[]>();
+    for (const position of positions) {
+      const marketKey = `${position.asset_id}\u0000${position.condition_id.toLowerCase()}`;
+      const group = positionsByMarket.get(marketKey) ?? [];
+      group.push(position);
+      positionsByMarket.set(marketKey, group);
+    }
 
-    for (const position of this.positions(accountId)) {
-      const size = BigInt(position.current_size_micros);
-      if (size === 0n) continue;
+    for (const group of positionsByMarket.values()) {
+      if (signal?.aborted) {
+        unpricedPositionCount += group.length;
+        continue;
+      }
       try {
+        const first = group[0]!;
         const [book, fee] = await Promise.all([
-          this.marketData.orderbook(position.asset_id, position.condition_id),
-          this.marketData.fee(position.asset_id, position.condition_id),
+          this.marketData.orderbook(first.asset_id, first.condition_id, signal),
+          this.marketData.fee(first.asset_id, first.condition_id, signal),
         ]);
+        if (signal?.aborted) {
+          unpricedPositionCount += group.length;
+          continue;
+        }
         if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null || fee.exponent === null) {
-          unpricedPositionCount += 1;
+          unpricedPositionCount += group.length;
           continue;
         }
         const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
         if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
-          unpricedPositionCount += 1;
+          unpricedPositionCount += group.length;
           continue;
         }
+        const totalSize = group.reduce(
+          (total, position) => total + BigInt(position.current_size_micros),
+          0n,
+        );
         const matched = matchPaperSell({
           bids: book.bids,
-          requestedSizeMicros: size,
+          requestedSizeMicros: totalSize,
           minimumPriceUnits: 0n,
           feeRatePpm: BigInt(fee.feeRatePpm),
           feeExponent: fee.exponent,
         });
         if (!matched.complete || matched.vwapPriceUnits === null) {
-          unpricedPositionCount += 1;
+          unpricedPositionCount += group.length;
           continue;
         }
         const bookId = this.orderbookId(book);
@@ -89,41 +109,62 @@ export class PortfolioProjectionService {
         this.saveMarketSnapshots(book, fee, age);
         const exitValue = BigInt(matched.filledNotionalMicros);
         const exitFee = BigInt(matched.feeMicros);
-        const positionUnrealized = calculateUnrealizedPnl({
-          exitValueMicros: exitValue,
-          estimatedExitFeeMicros: exitFee,
-          remainingCostMicros: BigInt(position.remaining_cost_micros),
-        });
         positionValue += exitValue - exitFee;
-        unrealizedPnl += positionUnrealized;
-        this.database.prepare(
-          `INSERT OR IGNORE INTO paper_unrealized_pnl_snapshots(
-            unrealized_pnl_snapshot_id,paper_account_id,paper_position_id,position_value_micros,
-            remaining_cost_micros,fee_micros,unrealized_pnl_micros,price_source,price_timestamp,
-            orderbook_snapshot_id,fee_snapshot_id,ruleset_hash,source_code_commit,source_code_dirty,
-            config_version,created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ORDERBOOK_EXIT_VWAP', ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          hash([accountId, position.paper_position_id, bookId, feeId, priceTimestamp]),
-          accountId,
-          position.paper_position_id,
-          (exitValue - exitFee).toString(),
-          position.remaining_cost_micros,
-          exitFee.toString(),
-          positionUnrealized.toString(),
-          book.marketSnapshotTime,
-          bookId,
-          feeId,
-          RULESET_HASH,
-          this.sourceVersion.commit,
-          this.sourceVersion.dirty ? 1 : 0,
-          VERSIONS.configVersion,
-          priceTimestamp,
-        );
+        let allocatedExitValue = 0n;
+        let allocatedExitFee = 0n;
+        group.forEach((position, index) => {
+          const size = BigInt(position.current_size_micros);
+          const isLast = index === group.length - 1;
+          const positionExitValue = isLast
+            ? exitValue - allocatedExitValue
+            : (exitValue * size) / totalSize;
+          const positionExitFee = isLast
+            ? exitFee - allocatedExitFee
+            : (exitFee * size) / totalSize;
+          allocatedExitValue += positionExitValue;
+          allocatedExitFee += positionExitFee;
+          const positionUnrealized = calculateUnrealizedPnl({
+            exitValueMicros: positionExitValue,
+            estimatedExitFeeMicros: positionExitFee,
+            remainingCostMicros: BigInt(position.remaining_cost_micros),
+          });
+          unrealizedPnl += positionUnrealized;
+          this.database.prepare(
+            `INSERT OR IGNORE INTO paper_unrealized_pnl_snapshots(
+              unrealized_pnl_snapshot_id,paper_account_id,paper_position_id,position_value_micros,
+              remaining_cost_micros,fee_micros,unrealized_pnl_micros,price_source,price_timestamp,
+              orderbook_snapshot_id,fee_snapshot_id,ruleset_hash,source_code_commit,source_code_dirty,
+              config_version,created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ORDERBOOK_EXIT_VWAP', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            hash([accountId, position.paper_position_id, bookId, feeId, priceTimestamp]),
+            accountId,
+            position.paper_position_id,
+            (positionExitValue - positionExitFee).toString(),
+            position.remaining_cost_micros,
+            positionExitFee.toString(),
+            positionUnrealized.toString(),
+            book.marketSnapshotTime,
+            bookId,
+            feeId,
+            RULESET_HASH,
+            this.sourceVersion.commit,
+            this.sourceVersion.dirty ? 1 : 0,
+            VERSIONS.configVersion,
+            priceTimestamp,
+          );
+        });
+        pricedPositionCount += group.length;
       } catch {
-        unpricedPositionCount += 1;
+        unpricedPositionCount += group.length;
       }
     }
+
+    const priceSource: PaperAccountSnapshot["priceSource"] = unpricedPositionCount === 0
+      ? "ORDERBOOK_EXIT_VWAP"
+      : pricedPositionCount === 0
+        ? "UNAVAILABLE"
+        : "PARTIAL_ORDERBOOK_EXIT_VWAP";
 
     const snapshot: PaperAccountSnapshot = {
       paperAccountId: accountId,
@@ -137,7 +178,7 @@ export class PortfolioProjectionService {
       totalEquityMicros: (ledgerBalances.cash + positionValue).toString(),
       valuationStatus: unpricedPositionCount === 0 ? "COMPLETE" : "INCOMPLETE",
       unpricedPositionCount,
-      priceSource: "ORDERBOOK_EXIT_VWAP",
+      priceSource,
       priceTimestamp,
     };
     this.saveProjection(snapshot);
@@ -170,7 +211,7 @@ export class PortfolioProjectionService {
     return this.database.prepare(
       `SELECT paper_position_id,asset_id,condition_id,current_size_micros,remaining_cost_micros
        FROM paper_positions
-       WHERE paper_account_id=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')
+       WHERE paper_account_id=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')
        ORDER BY created_at,paper_position_id`,
     ).all(accountId) as unknown as ProjectionPositionRow[];
   }

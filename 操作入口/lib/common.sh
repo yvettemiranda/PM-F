@@ -302,7 +302,12 @@ operator_stop_registered_sessions() {
 }
 
 operator_tsx() {
-  "$PROJECT_ROOT/node_modules/.bin/tsx" "$@"
+  if (( ZSH_SUBSHELL == 0 )); then
+    print -u2 "operator_tsx 只能作为后台 worker 启动。"
+    return 64
+  fi
+  cd "$PROJECT_ROOT"
+  exec node --import tsx "$@"
 }
 
 ensure_ready() {
