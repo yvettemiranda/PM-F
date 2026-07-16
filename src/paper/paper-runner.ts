@@ -31,8 +31,7 @@ export type PaperRunCompletionStatus =
   | "COMPLETED_WITH_ERRORS"
   | "COMPLETED_INCOMPLETE_VALUATION"
   | "COMPLETED_INCONSISTENT"
-  | "COMPLETED_WITH_SAFETY_BLOCKERS"
-  | "COMPLETED_INCOMPLETE_COVERAGE";
+  | "COMPLETED_WITH_SAFETY_BLOCKERS";
 
 export function paperRunCompletionStatus(report: PaperRunnerReport): PaperRunCompletionStatus {
   if (report.errorCount > 0) return "COMPLETED_WITH_ERRORS";
@@ -41,7 +40,6 @@ export function paperRunCompletionStatus(report: PaperRunnerReport): PaperRunCom
   if (report.account.valuationStatus !== "COMPLETE" || report.account.unpricedPositionCount !== 0) {
     return "COMPLETED_INCOMPLETE_VALUATION";
   }
-  if (report.acceptance.coverage.BUY === "NOT_OBSERVED") return "COMPLETED_INCOMPLETE_COVERAGE";
   return "COMPLETED";
 }
 
@@ -111,7 +109,10 @@ export class PaperRunner {
       droppedErrorCount: Math.max(0, errorCount - errors.length),
       errors,
       account,
-      acceptance: this.executor.acceptanceSummary(this.options.accountId),
+      acceptance: this.executor.acceptanceSummary(this.options.accountId, {
+        startAt: startedAt,
+        endAt: this.now().toISOString(),
+      }),
     };
   }
 

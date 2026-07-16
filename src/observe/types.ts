@@ -104,6 +104,7 @@ export interface SourceEventMultiplicityAmbiguity {
 
 export interface ObserveRunMetrics {
   observeRunId: string;
+  baselineRunId: string;
   startedAt: string;
   stoppedAt: string;
   durationMs: number;

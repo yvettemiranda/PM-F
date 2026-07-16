@@ -11,6 +11,8 @@ export interface FakeLiveMarketDataOptions {
   marketSnapshotTime?: string;
   bids?: ExecutionOrderbookLevel[];
   asks?: ExecutionOrderbookLevel[];
+  minOrderSize?: string;
+  tickSize?: string;
   feeStatus?: "AVAILABLE" | "UNAVAILABLE";
   feeRatePpm?: string;
   feeExponent?: number;
@@ -38,6 +40,8 @@ export class FakeLiveMarketDataProvider implements LiveMarketDataProvider {
       marketSnapshotTime: this.options.marketSnapshotTime ?? receivedAt,
       receivedAt,
       sourceUrl: "fake://live-orderbook",
+      minOrderSize: this.options.minOrderSize ?? "1",
+      tickSize: this.options.tickSize ?? "0.01",
       bids: this.options.bids ?? [{ price: "0.5", size: "1000000000000000000000000000000" }],
       asks: this.options.asks ?? [{ price: "0.5", size: "1000000000000000000000000000000" }],
     };

@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { buildPaperExecutionFunnel, type PaperExecutionFunnel } from "./paper-execution-funnel.js";
 import type { PaperMarketDataHealthState } from "./types.js";
 
 export type PaperLifecycleCoverageStatus = "OBSERVED_REAL" | "NOT_OBSERVED";
@@ -22,6 +23,7 @@ export interface PaperAcceptanceSummary {
   paperAccountId: string;
   targetId: string;
   generatedAt: string;
+  evidenceWindow: { startAt: string; endAt: string };
   consistency: {
     passed: boolean;
     cash: {
@@ -59,6 +61,7 @@ export interface PaperAcceptanceSummary {
     SETTLEMENT: PaperLifecycleCoverageStatus;
     REALIZED_PNL: PaperLifecycleCoverageStatus;
   };
+  funnel: PaperExecutionFunnel;
   marketData: {
     blockerCount: number;
     blockers: PaperMarketDataAcceptanceRecord[];
@@ -68,6 +71,7 @@ export interface PaperAcceptanceSummary {
 
 interface AccountRow {
   target_id: string | null;
+  signal_cutoff_at: string;
   cash_balance_micros: string;
   reserved_balance_micros: string;
   realized_pnl_micros: string;
@@ -120,6 +124,8 @@ function filledLifecycleObserved(
   accountId: string,
   executionType: "TARGET_BUY" | "TARGET_SELL" | "STOP_LOSS",
   side: "BUY" | "SELL",
+  startAt: string,
+  endAt: string,
 ): boolean {
   const rows = executionType === "TARGET_BUY"
     ? database.prepare(
@@ -129,8 +135,9 @@ function filledLifecycleObserved(
        JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id
        JOIN paper_positions p ON p.paper_position_id=f.paper_position_id
          AND p.opening_execution_id=e.paper_execution_id AND p.paper_account_id=e.paper_account_id
-       WHERE e.paper_account_id=? AND e.execution_type=? AND f.side=?`,
-    ).all(accountId, executionType, side)
+       WHERE e.paper_account_id=? AND e.execution_type=? AND f.side=?
+         AND f.created_at>=? AND f.created_at<=?`,
+    ).all(accountId, executionType, side, startAt, endAt)
     : database.prepare(
       `SELECT f.size_micros,ep.filled_size_micros allocation_size_micros
        FROM paper_fill_ledger f
@@ -138,8 +145,9 @@ function filledLifecycleObserved(
        JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id
        JOIN paper_execution_positions ep ON ep.paper_execution_id=e.paper_execution_id
        JOIN paper_positions p ON p.paper_position_id=ep.paper_position_id AND p.paper_account_id=e.paper_account_id
-       WHERE e.paper_account_id=? AND e.execution_type=? AND f.side=?`,
-    ).all(accountId, executionType, side);
+       WHERE e.paper_account_id=? AND e.execution_type=? AND f.side=?
+         AND f.created_at>=? AND f.created_at<=?`,
+    ).all(accountId, executionType, side, startAt, endAt);
   const evidence = rows as unknown as Array<{ size_micros: string; allocation_size_micros: string }>;
   return evidence.some((row) => {
     const size = parseInteger(row.size_micros, `paper_fill_ledger:${executionType}:size_micros`);
@@ -175,15 +183,27 @@ export class PaperAcceptanceSummaryService {
     this.now = options.now ?? (() => new Date());
   }
 
-  summarize(paperAccountId: string): PaperAcceptanceSummary {
+  summarize(
+    paperAccountId: string,
+    window: { startAt?: string; endAt?: string } = {},
+  ): PaperAcceptanceSummary {
     const database = new DatabaseSync(this.databasePath, { readOnly: true });
     database.exec("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;");
     try {
       const account = database.prepare(
-        `SELECT target_id,cash_balance_micros,reserved_balance_micros,realized_pnl_micros
+        `SELECT target_id,signal_cutoff_at,cash_balance_micros,reserved_balance_micros,realized_pnl_micros
          FROM paper_accounts WHERE paper_account_id=?`,
       ).get(paperAccountId) as AccountRow | undefined;
       if (!account) throw new Error(`PAPER_ACCOUNT_NOT_FOUND:${paperAccountId}`);
+      const requestedStartAt = window.startAt ?? account.signal_cutoff_at;
+      const startAt = Date.parse(requestedStartAt) > Date.parse(account.signal_cutoff_at)
+        ? requestedStartAt
+        : account.signal_cutoff_at;
+      const endAt = window.endAt ?? this.now().toISOString();
+      if (!Number.isFinite(Date.parse(startAt)) || !Number.isFinite(Date.parse(endAt))) {
+        throw new Error("PAPER_ACCEPTANCE_WINDOW_INVALID");
+      }
+      if (Date.parse(endAt) < Date.parse(startAt)) throw new Error("PAPER_ACCEPTANCE_WINDOW_REVERSED");
 
       const aggregateIssues: string[] = [];
       if (!account.target_id) aggregateIssues.push("ACCOUNT_TARGET_NOT_BOUND");
@@ -268,8 +288,9 @@ export class PaperAcceptanceSummaryService {
          JOIN paper_positions p ON p.paper_position_id=s.paper_position_id
            AND p.paper_account_id=e.paper_account_id
          WHERE e.paper_account_id=? AND e.execution_type='SETTLEMENT'
-           AND e.state='EXECUTED' AND p.status='REDEEMED'`,
-      ).get(paperAccountId) as { count: number }).count > 0;
+           AND e.state='EXECUTED' AND p.status='REDEEMED'
+           AND s.created_at>=? AND s.created_at<=?`,
+      ).get(paperAccountId, startAt, endAt) as { count: number }).count > 0;
       const realizedPnlObserved = (database.prepare(
         `SELECT count(*) count
          FROM paper_pnl_ledger pnl
@@ -277,8 +298,8 @@ export class PaperAcceptanceSummaryService {
            AND p.paper_account_id=pnl.paper_account_id
          JOIN paper_executions e ON e.paper_execution_id=pnl.paper_execution_id
            AND e.paper_account_id=pnl.paper_account_id
-         WHERE pnl.paper_account_id=?`,
-      ).get(paperAccountId) as { count: number }).count > 0;
+         WHERE pnl.paper_account_id=? AND pnl.created_at>=? AND pnl.created_at<=?`,
+      ).get(paperAccountId, startAt, endAt) as { count: number }).count > 0;
 
       const consistencyPassed = cashMatches
         && reservations.matches
@@ -289,6 +310,7 @@ export class PaperAcceptanceSummaryService {
         paperAccountId,
         targetId: account.target_id ?? "UNBOUND",
         generatedAt: this.now().toISOString(),
+        evidenceWindow: { startAt, endAt },
         consistency: {
           passed: consistencyPassed,
           cash: {
@@ -304,12 +326,20 @@ export class PaperAcceptanceSummaryService {
           aggregates: { total: aggregateIssues.length, details: aggregateIssues },
         },
         coverage: {
-          BUY: filledLifecycleObserved(database, paperAccountId, "TARGET_BUY", "BUY") ? "OBSERVED_REAL" : "NOT_OBSERVED",
-          SELL: filledLifecycleObserved(database, paperAccountId, "TARGET_SELL", "SELL") ? "OBSERVED_REAL" : "NOT_OBSERVED",
-          STOP_LOSS: filledLifecycleObserved(database, paperAccountId, "STOP_LOSS", "SELL") ? "OBSERVED_REAL" : "NOT_OBSERVED",
+          BUY: filledLifecycleObserved(database, paperAccountId, "TARGET_BUY", "BUY", startAt, endAt) ? "OBSERVED_REAL" : "NOT_OBSERVED",
+          SELL: filledLifecycleObserved(database, paperAccountId, "TARGET_SELL", "SELL", startAt, endAt) ? "OBSERVED_REAL" : "NOT_OBSERVED",
+          STOP_LOSS: filledLifecycleObserved(database, paperAccountId, "STOP_LOSS", "SELL", startAt, endAt) ? "OBSERVED_REAL" : "NOT_OBSERVED",
           SETTLEMENT: settlementObserved ? "OBSERVED_REAL" : "NOT_OBSERVED",
           REALIZED_PNL: realizedPnlObserved ? "OBSERVED_REAL" : "NOT_OBSERVED",
         },
+        funnel: buildPaperExecutionFunnel(
+          database,
+          paperAccountId,
+          account.target_id ?? "UNBOUND",
+          account.signal_cutoff_at,
+          startAt,
+          endAt,
+        ),
         marketData: {
           blockerCount: blockers.length,
           blockers,

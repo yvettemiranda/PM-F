@@ -49,6 +49,8 @@ export interface ExecutorInterface {
 export const EXECUTOR_REQUIRED_CONTEXT_FIELDS = [
   "capitalDecisionId",
   "targetTradeCapitalRatioPpm",
+  "capitalSizingRatio",
+  "capitalSizingRatioHash",
   "targetTradeTimestamp",
   "marketEndTime",
   "marketMetadataSnapshot",

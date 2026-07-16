@@ -1,4 +1,6 @@
 import type { CapitalConfidence, CapitalEstimateStatus } from "../services/capital-estimator.js";
+import type { ExactCapitalRatioSnapshot } from "../execution/capital-sizing.js";
+import type { PublicMarketDataCapture } from "../execution/market-data.js";
 
 export type PaperExecutionState =
   | "WAITING_EXECUTION"
@@ -34,6 +36,9 @@ export interface SignalExecutionContext {
   signalId: string;
   capitalDecisionId: string | null;
   targetTradeCapitalRatioPpm: string | null;
+  /** Null/absent only for immutable contexts created before exact sizing v1. */
+  capitalSizingRatio?: ExactCapitalRatioSnapshot | null;
+  capitalSizingRatioHash?: string | null;
   targetTradeTimestamp: string;
   marketEndTime: string;
   marketMetadataSnapshot: Record<string, unknown>;
@@ -78,8 +83,11 @@ export interface PaperOrderbookSnapshot {
   marketSnapshotTime: string;
   receivedAt: string;
   sourceUrl: string;
+  minOrderSize?: string;
+  tickSize?: string;
   bids: OrderbookLevel[];
   asks: OrderbookLevel[];
+  publicCapture?: PublicMarketDataCapture;
 }
 
 export interface PaperFeeSnapshot {
@@ -90,6 +98,7 @@ export interface PaperFeeSnapshot {
   exponent: number | null;
   sourceUrl: string;
   snapshotTime: string;
+  publicCapture?: PublicMarketDataCapture;
 }
 
 export interface PaperResolutionSnapshot {

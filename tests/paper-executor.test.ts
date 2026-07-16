@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
 import { EXECUTOR_REQUIRED_CONTEXT_FIELDS } from "../src/execution/types.js";
+import { buildExactCapitalRatio, capitalSizingHash } from "../src/execution/capital-sizing.js";
+import type { MarketOrderConstraintEvidence } from "../src/execution/market-order-constraints.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { LiveExecutorPlaceholder } from "../src/live/live-executor.js";
@@ -186,6 +188,8 @@ class FakeMarketData implements PaperMarketDataProvider {
       marketSnapshotTime: snapshotTime,
       receivedAt: this.clock().toISOString(),
       sourceUrl: "https://clob.test/book",
+      minOrderSize: "1",
+      tickSize: "0.01",
       asks,
       bids,
     };
@@ -254,6 +258,11 @@ function insertSignal(input: {
   targetPriceUnits?: string;
   marketEndTime?: string;
   ruleset?: TestRuleset;
+  exactSizing?: {
+    targetPriceUnits: string;
+    targetSizeMicros: string;
+    targetVisibleCapitalMicros: string;
+  };
 }): void {
   const db = new DatabaseSync(input.databasePath);
   db.exec("PRAGMA foreign_keys=ON");
@@ -265,28 +274,38 @@ function insertSignal(input: {
   const configVersion = input.ruleset?.configVersion ?? VERSIONS.configVersion;
   const metadataJson = stableJson({ tokens: [{ token_id: assetId, outcome: "Yes" }] });
   const metadataHash = createHash("sha256").update(metadataJson).digest("hex");
+  const exactRatio = input.exactSizing ? buildExactCapitalRatio(input.exactSizing) : null;
+  const exactRatioJson = exactRatio ? stableJson(exactRatio) : null;
+  const exactRatioHash = exactRatio ? capitalSizingHash(exactRatio) : null;
+  const targetPriceUnits = input.exactSizing?.targetPriceUnits ?? input.targetPriceUnits ?? "500000000000000000";
+  const targetSizeMicros = input.exactSizing?.targetSizeMicros ?? "10000000";
   db.prepare(
     `INSERT INTO raw_events(
       source_event_key,target_id,identity_version,source_type,source_transaction_hash,
       source_timestamp,asset_id,condition_id,side,price_units,size_micros,gap_event,
       is_combo,raw_json,created_at,event_classification
-    ) VALUES (?, ?, 'test', 'DATA_API_TRADE', ?, ?, ?, ?, ?, ?, '10000000', 0, 0, '{}', ?, 'STANDARD_TRADE')`,
-  ).run(sourceKey, input.targetId, `tx-${input.signalId}`, Math.floor(Date.parse(input.createdAt) / 1_000), assetId, conditionId, input.signalType === "TARGET_SELL" ? "SELL" : "BUY", input.targetPriceUnits ?? "500000000000000000", input.createdAt);
+    ) VALUES (?, ?, 'test', 'DATA_API_TRADE', ?, ?, ?, ?, ?, ?, ?, 0, 0, '{}', ?, 'STANDARD_TRADE')`,
+  ).run(sourceKey, input.targetId, `tx-${input.signalId}`, Math.floor(Date.parse(input.createdAt) / 1_000), assetId, conditionId, input.signalType === "TARGET_SELL" ? "SELL" : "BUY", targetPriceUnits, targetSizeMicros, input.createdAt);
   if (capitalId) {
     db.prepare(
       `INSERT INTO capital_estimates(
         capital_estimate_id,target_id,source_event_key,position_value_micros,wallet_balance_micros,
         target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+        capital_sizing_ratio_json,capital_sizing_ratio_hash,
         capital_estimate_status,capital_confidence,capital_estimate_reason,position_snapshot_time,
         wallet_balance_snapshot_time,target_trade_timestamp,fallback_amount_micros,schema_version,
         strategy_version,risk_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
         source_code_dirty,created_at
-      ) VALUES (?, ?, ?, '500000000', '500000000', '1000000000', '100000000', ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      ) VALUES (?, ?, ?, '500000000', '500000000', ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     ).run(
       capitalId,
       input.targetId,
       sourceKey,
-      input.ratioPpm ?? "100000",
+      input.exactSizing?.targetVisibleCapitalMicros ?? "1000000000",
+      exactRatio?.targetTradeAmountMicros ?? "100000000",
+      exactRatio?.legacyRatioPpm ?? input.ratioPpm ?? "100000",
+      exactRatioJson,
+      exactRatioHash,
       input.capitalStatus ?? "COMPLETE",
       input.confidence ?? "HIGH",
       input.createdAt,
@@ -310,7 +329,7 @@ function insertSignal(input: {
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '10000000', ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
     `idem-${input.signalId}`,
@@ -319,7 +338,8 @@ function insertSignal(input: {
     input.status ?? "PUBLISHED",
     assetId,
     conditionId,
-    input.targetPriceUnits ?? "500000000000000000",
+    targetPriceUnits,
+    targetSizeMicros,
     input.sellNumerator ?? null,
     input.sellDenominator ?? null,
     VERSIONS.schemaVersion,
@@ -338,15 +358,18 @@ function insertSignal(input: {
   db.prepare(
     `INSERT INTO signal_execution_contexts(
       context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+      capital_sizing_ratio_json,capital_sizing_ratio_hash,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
     input.signalId,
     capitalId,
-    input.signalType === "TARGET_SELL" ? null : input.ratioPpm ?? "100000",
+    input.signalType === "TARGET_SELL" ? null : exactRatio?.legacyRatioPpm ?? input.ratioPpm ?? "100000",
+    input.signalType === "TARGET_SELL" ? null : exactRatioJson,
+    input.signalType === "TARGET_SELL" ? null : exactRatioHash,
     input.createdAt,
     input.marketEndTime ?? new Date(Date.parse(input.createdAt) + 60 * 60 * 1_000).toISOString(),
     metadataJson,
@@ -526,8 +549,246 @@ afterEach(() => {
 });
 
 describe("PaperExecutor", () => {
+  it("preserves the real sub-1-ppm amount, then rejects it at CLOB amount precision without an order or fill", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = {
+      ...env.market.book,
+      minOrderSize: "5",
+      tickSize: "0.01",
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-sub-ppm",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "2460160",
+        targetVisibleCapitalMicros: "1261997070000",
+      },
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-sub-ppm");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const execution = db.prepare(
+      "SELECT requested_amount_micros,reason FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId) as { requested_amount_micros: string; reason: string };
+    const reservation = db.prepare(
+      "SELECT status,remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=?",
+    ).get(executionId) as { status: string; remaining_amount_micros: string };
+    const constraint = db.prepare(
+      `SELECT check_result,reason,proposed_amount_micros,normalized_order_amount_micros
+       FROM paper_market_constraint_evidence WHERE paper_execution_id=?`,
+    ).get(executionId) as Record<string, string>;
+    const risk = db.prepare(
+      `SELECT capital_sizing_decision_json FROM risk_decisions
+       WHERE risk_decision_id=(SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?)`,
+    ).get(executionId) as { capital_sizing_decision_json: string };
+    expect(execution).toEqual({
+      requested_amount_micros: "974",
+      reason: "ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION",
+    });
+    expect(reservation).toEqual({ status: "RELEASED", remaining_amount_micros: "0" });
+    expect(constraint).toMatchObject({
+      check_result: "REJECT",
+      reason: "ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION",
+      proposed_amount_micros: "974",
+      normalized_order_amount_micros: "0",
+    });
+    expect(JSON.parse(risk.capital_sizing_decision_json).calculatedAmountMicros).toBe("974");
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) count FROM paper_fill_ledger").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) count FROM paper_positions").get()).toEqual({ count: 0 });
+    db.close();
+    const snapshot = await env.executor.accountSnapshot(env.accountId);
+    expect(snapshot.cashBalanceMicros).toBe("1000000000");
+    expect(snapshot.reservedBalanceMicros).toBe("0");
+    env.executor.close();
+  });
+
+  it("rejects a BUY below min_order_size and releases its reservation without fabricating an order", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-below-market-min",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      ratioPpm: "1000",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-below-market-min");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const evidence = db.prepare(
+      "SELECT reason,derived_min_notional_micros FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
+    ).get(executionId) as { reason: string; derived_min_notional_micros: string };
+    expect(evidence).toEqual({ reason: "BELOW_MARKET_MIN_ORDER_SIZE", derived_min_notional_micros: "2550000" });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT status FROM paper_reservations WHERE paper_execution_id=?").get(executionId))
+      .toEqual({ status: "RELEASED" });
+    db.close();
+    env.executor.close();
+  });
+
+  it("fails closed instead of silently ignoring conflicting market-constraint evidence", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "constraint-evidence-conflict",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "constraint-evidence-conflict");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    const stored = database.prepare(
+      `SELECT evidence_json FROM paper_market_constraint_evidence
+       WHERE paper_execution_id=?`,
+    ).get(executionId) as { evidence_json: string };
+    database.close();
+    const evidence = JSON.parse(stored.evidence_json) as MarketOrderConstraintEvidence;
+    const { evidenceHash: _priorHash, ...payload } = evidence;
+    const changedPayload = { ...payload, reason: "CONFLICTING_EVIDENCE" };
+    const conflicting = {
+      ...changedPayload,
+      evidenceHash: createHash("sha256").update(stableJson(changedPayload)).digest("hex"),
+    } as MarketOrderConstraintEvidence;
+    const internal = env.executor as unknown as {
+      insertMarketConstraintEvidence(
+        execution: {
+          paper_execution_id: string;
+          attempt_count: number;
+          ruleset_hash: string;
+          config_version: string;
+        },
+        book: PaperOrderbookSnapshot,
+        value: MarketOrderConstraintEvidence,
+        now: string,
+      ): void;
+    };
+    expect(() => internal.insertMarketConstraintEvidence({
+      paper_execution_id: executionId,
+      attempt_count: 0,
+      ruleset_hash: RULESET_HASH,
+      config_version: VERSIONS.configVersion,
+    }, env.market.book, conflicting, env.getClock().toISOString()))
+      .toThrow(`PAPER_MARKET_CONSTRAINT_EVIDENCE_CONFLICT:${executionId}`);
+    env.executor.close();
+  });
+
+  it("keeps an undersized SELL in EXIT_PENDING without an order or position mutation", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-before-small-sell",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "buy-before-small-sell");
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "sell-below-market-min",
+      signalType: "TARGET_SELL",
+      sellNumerator: "1",
+      sellDenominator: "100",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "sell-below-market-min");
+    expect(env.executor.executionState(executionId)).toBe("EXIT_PENDING");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
+    expect(db.prepare(
+      "SELECT reason,proposed_size_micros,min_order_size_micros FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({
+      reason: "BELOW_MARKET_MIN_ORDER_SIZE",
+      proposed_size_micros: "2000000",
+      min_order_size_micros: "5000000",
+    });
+    expect(db.prepare("SELECT current_size_micros,status FROM paper_positions").get())
+      .toEqual({ current_size_micros: "200000000", status: "OPEN" });
+    db.close();
+    env.executor.close();
+  });
+
+  it("freezes safely when min_order_size is unavailable and resumes only after healthy recovery probes", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    const { minOrderSize: _missing, ...bookWithoutMinimum } = env.market.book;
+    env.market.book = bookWithoutMinimum;
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-minimum-unavailable",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-minimum-unavailable");
+    expect(env.executor.executionState(executionId)).toBe("WAITING_EXECUTION");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "FROZEN",
+      lastErrorCode: "MIN_ORDER_SIZE_UNAVAILABLE",
+    });
+    expect(count(env.databasePath, "paper_orders")).toBe(0);
+    const unavailableEvidence = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(unavailableEvidence.prepare(
+      `SELECT check_result,reason,proposed_amount_micros
+       FROM paper_market_constraint_evidence WHERE paper_execution_id=?`,
+    ).get(executionId)).toEqual({
+      check_result: "UNAVAILABLE",
+      reason: "MIN_ORDER_SIZE_UNAVAILABLE",
+      proposed_amount_micros: "100000000",
+    });
+    unavailableEvidence.close();
+
+    env.setClock(new Date("2026-07-08T00:00:05.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.5", size: "10000" }],
+      [{ price: "0.5", size: "10000" }],
+    );
+    await env.executor.recoverMarketData(env.accountId);
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("FROZEN");
+
+    env.setClock(new Date("2026-07-08T00:00:10.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.5", size: "10000" }],
+      [{ price: "0.5", size: "10000" }],
+    );
+    await env.executor.recoverMarketData(env.accountId);
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("HEALTHY");
+    await env.executor.retryPending(env.accountId);
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
   it("uses HIGH capital ratio and opens a position from a full FAK fill", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book.sourceUrl = `https://clob.polymarket.com/book?token_id=${assetId}`;
+    env.market.book.publicCapture = {
+      endpoint: "clob-orderbook",
+      requestUrl: env.market.book.sourceUrl,
+      fetchedAt: env.market.book.receivedAt,
+      latencyMs: 10,
+      httpStatus: 200,
+      payload: {
+        market: conditionId,
+        asset_id: assetId,
+        timestamp: String(Date.parse(env.market.book.marketSnapshotTime)),
+        hash: "public-capture-test",
+        bids: env.market.book.bids,
+        asks: env.market.book.asks,
+        min_order_size: env.market.book.minOrderSize,
+        tick_size: env.market.book.tickSize,
+      },
+    };
+    env.market.feeSnapshot.sourceUrl = `https://clob.polymarket.com/clob-markets/${conditionId}`;
+    env.market.feeSnapshot.publicCapture = {
+      endpoint: "clob-market-info",
+      requestUrl: env.market.feeSnapshot.sourceUrl,
+      fetchedAt: env.market.feeSnapshot.snapshotTime,
+      latencyMs: 10,
+      httpStatus: 200,
+      payload: { tbf: 0, mbf: 0, t: [{ t: assetId, o: "Yes" }], mts: 1, mos: 1 },
+    };
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "buy-high", createdAt: "2026-07-08T00:00:01.000Z" });
     const executionId = await env.executor.consumeSignal(env.accountId, "buy-high");
     expect(env.executor.executionState(executionId)).toBe("EXECUTED");
@@ -535,6 +796,11 @@ describe("PaperExecutor", () => {
     const snapshot = await env.executor.accountSnapshot(env.accountId);
     expect(snapshot.cashBalanceMicros).toBe("900000000");
     expect(snapshot.reservedBalanceMicros).toBe("0");
+    const captureDatabase = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((captureDatabase.prepare(
+      "SELECT count(*) count FROM api_captures WHERE endpoint IN ('clob-orderbook','clob-market-info')",
+    ).get() as { count: number }).count).toBe(2);
+    captureDatabase.close();
     env.executor.close();
   });
 
@@ -548,13 +814,34 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("rejects Gap and non-published signals", async () => {
+  it("keeps Gap and non-published signals outside the Paper execution layer", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "gap", createdAt: "2026-07-08T00:00:01.000Z", executionEligible: false });
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "draft", createdAt: "2026-07-08T00:00:02.000Z", status: "READY" });
-    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "gap"))).toBe("REJECTED");
-    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "draft"))).toBe("REJECTED");
+    await expect(env.executor.consumeSignal(env.accountId, "gap")).rejects.toThrow("GAP_EVENT");
+    await expect(env.executor.consumeSignal(env.accountId, "draft")).rejects.toThrow("SIGNAL_NOT_PUBLISHED");
+    expect(count(env.databasePath, "risk_decisions")).toBe(0);
+    expect(count(env.databasePath, "paper_executions")).toBe(0);
+    expect(count(env.databasePath, "paper_signal_consumptions")).toBe(0);
     expect(count(env.databasePath, "paper_positions")).toBe(0);
+    env.executor.close();
+  });
+
+  it("batch consumption ignores Gap Signals without blocking later eligible Signals", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "gap-batch", createdAt: "2026-07-08T00:00:01.000Z", executionEligible: false });
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "eligible-after-gap", createdAt: "2026-07-08T00:00:02.000Z" });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+
+    const executions = await env.executor.consumeAvailableSignals(env.accountId);
+
+    expect(executions).toHaveLength(1);
+    expect(env.executor.executionState(executions[0]!)).toBe("WAITING_EXECUTION");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare(
+      "SELECT count(*) count FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id='gap-batch'",
+    ).get(env.accountId) as { count: number }).count).toBe(0);
+    database.close();
     env.executor.close();
   });
 
@@ -1271,6 +1558,10 @@ describe("PaperExecutor", () => {
     expect(count(env.databasePath, "paper_orders")).toBe(0);
     expect(count(env.databasePath, "paper_fill_ledger")).toBe(0);
     expect(count(env.databasePath, "paper_positions")).toBe(0);
+    expect(await env.executor.cancelWaitingBuys(env.accountId, "PAPER_CAMPAIGN_SESSION_END")).toBe(1);
+    expect(env.executor.executionState(executionId)).toBe("CANCELLED");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
+    expect(await env.executor.cancelWaitingBuys(env.accountId, "PAPER_CAMPAIGN_SESSION_END")).toBe(0);
     env.executor.close();
   });
 
@@ -1560,6 +1851,8 @@ describe("PaperExecutor", () => {
     const contextColumnByField: Record<string, string> = {
       capitalDecisionId: "capital_decision_id",
       targetTradeCapitalRatioPpm: "target_trade_capital_ratio_ppm",
+      capitalSizingRatio: "capital_sizing_ratio_json",
+      capitalSizingRatioHash: "capital_sizing_ratio_hash",
       targetTradeTimestamp: "target_trade_timestamp",
       marketEndTime: "market_end_time",
       marketMetadataSnapshot: "market_metadata_snapshot_json",

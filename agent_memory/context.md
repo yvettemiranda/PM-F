@@ -1,44 +1,37 @@
 # Context
 
 ## Project
-- Workspace: `/Users/d4clt/Documents/Codex/2026-07-07/ni-k`。
-- Purpose: 全新独立的 Polymarket Copy Trading System；不复用旧版 PolymarketBot 的代码、数据库、页面、账本或交易逻辑。
-- Target wallet: `0x0c0e270cf879583d6a0142fc817e05b768d0434e`，仅授权读取公开数据。
+- 工作区：`/Users/d4clt/Documents/Codex/2026-07-07/ni-k`。
+- ni-k 是独立 Polymarket Copy Trading System，不复用旧版 PolymarketBot 的代码、数据库、页面、账本或交易逻辑。
+- 当前唯一目标钱包：`0x0c0e270cf879583d6a0142fc817e05b768d0434e`，仅访问公开数据。
 
 ## Architecture
-- 第一层：Wallet Identity、公开 Data/Gamma/CLOB/RPC 采集、Capture、Replay、Observe、Position Baseline/Projection、Capital Estimate、Signal 与不可变 Execution Context。
-- 第二层：Paper Account、Risk Manager、Paper Executor、完整深度 VWAP/FAK、Reservation、Position、Ledger、PnL、Settlement/Redeem、Portfolio Projection。
-- 第三层：Live Gate、Live Account/Wallet metadata、Live Signal Consumer、Live Executor、官方 CLOB adapter seam、Order/Fill/Position/Ledger、Settlement/Redeem、Reconciliation、Crash Recovery、Emergency Stop。
-- 横切能力：Ruleset Registry、不可变 Audit/State Transition/Settlement Event、SQLite migrations、Final Validation、Operational Validation、双击操作入口。
-- 日常 Paper 验收仅使用桌面 `Polymarket验证_点这里`：先运行 2 小时短测，同一 clean commit 自动通过后才允许运行 7 天长测；任务到时自动停止并生成脱敏 ZIP。
+- 第一层：Wallet Identity、公开数据 Capture、Replay、Observe、Position Baseline/Projection、Capital Estimate、Signal 与不可变 Execution Context。
+- 第二层：Paper Account、Risk Manager、Paper Executor、完整深度 VWAP/FAK、Reservation、Position、Ledger、Fee/PnL、Settlement/Redeem、Portfolio Projection。
+- 第三层：Live Gate 与 Live Executor 架构仅作安全占位和 Fake 验证；没有默认真实 signer、认证交易客户端或资金操作。
+- 当前新增 Paper Validation Campaign：固定账户、2 小时资格 Session、累计 72 小时、至少一次连续 12 小时、60 秒 checkpoint、暂停/恢复、不可变报告和三个双击入口。
 
 ## Current safety state
-- 默认且当前固定：`execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。
-- 没有用户可操作的 Live 启动入口；默认使用 Disabled/Fake signer、wallet、order、redeem adapters。
-- 禁止默认读取 private key/seed、真实 submit/cancel、approve、真实 redeem 或任何链上写操作。
-- Live 必须同时经过已登记 `Risk Decision=ALLOW`、不可变 Signal/Execution Context 校验、活动 Live Account/Wallet/authorized signer 绑定、完整 Live Gate、外部余额/仓位/订单证据、Audit、Ledger、Reconciliation 和幂等检查。
-- 程序不会自动升级模式；重启发现 `LIVE_ACTIVE` 时降级到 `PAPER + LIVE_ARMING` 并要求重新验证和人工确认。
+- 固定：`execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
+- 禁止 private key/seed、真实 signer、认证 CLOB submit/cancel、approve、真实 redeem 或任何链上写入。
+- Signal 与执行层严格分离；Paper/Live 只消费 `PUBLISHED && executionEligible=true` 的 Signal + immutable Execution Context。
+- Gap Signal 固定 `executionEligible=false`，不得补执行。
 
-## Core correctness rules
-- Signal 只描述目标钱包行为；Paper/Live 只消费 `PUBLISHED && executionEligible=true` 的 Signal + immutable Execution Context，禁止读取 raw event 重新决策。
-- Gap 行为可生成 Signal，但固定 `executionEligible=false/GAP_EVENT`；组合、无法识别、身份不确定事件不得进入执行层。
-- 价格/份额/资金使用定点整数；BUY 预算保守向上取整，SELL 分配使用确定性舍入，禁止浮点资金误差和超卖。
-- BUY 使用目标价 0.98—1.02、市场剩余时间等待公式、一次 FAK；SELL/止损使用完整深度可退出 VWAP，普通退出 10%、止损 15% 滑点保护。
-- 所有历史 Execution/Position/Settlement/PnL/State Transition 必须按自身 `ruleset_hash/config_version/source_code_commit` 解释；不得用当前配置覆盖历史规则。
-- 所有资金变化进入 Ledger，所有状态变化进入不可变 transition/audit，所有执行都有 idempotency key 和 `risk_decision_id`；`live_settlement_ledger` 仅是当前状态投影，`live_settlement_events` 才是不可变结算证据源。
-- Live signed order 必须重新校验 maker、signer、资产、方向、数量、限价、fee rate/exponent/model 和风险预算；完整 Order Intent 在外部提交前持久化并以 hash/trigger 固定，恢复时缺证据或 hash 不符直接冻结。
-- Live 启用前活动账户本金必须等于 Gate bankroll 配置，risk budget 不得超过配置总敞口，外部 pUSD 余额必须与 Live cash ledger 在容差内一致；每笔 BUY 重新检查单笔配置上限。
+## Current correctness baseline
+- Schema `2.21.0`：2.20.0 为精确金额和市场约束，2.21.0 为 Paper Campaign。
+- HIGH 比例金额使用 BigInt 精确分数，只在最终 pUSD micro 向下取整一次；旧 ppm 字段仅兼容历史。
+- `min_order_size` 按 shares 解释，tick/SDK 精度后再判断；低于限制不创建 Order/Fill/Position，不放大金额。
+- 官方 orderbook/fee 原始响应保存为内容寻址、append-only capture，并由快照 FK 绑定；`REAL_EXECUTION_REPLAY v2` 会重建官方响应、校验 URL/时间/内容和下单时点新鲜度，Fake/缺失 capture 不能成为真实执行证据。
+- Campaign 报告包含跨 Session 累计 Observe 指标、完整 Paper funnel、原因分布、完整性与 checkpoint 汇总。
+- Crash Recovery 由 CLI 与测试共用同一生产编排：验证进程、checkpoint 链、Observe/Paper cursor、Projection 与数据库完整性；先事务化释放等待 BUY、刷新 Portfolio、终止准确遗留 Observe，再决定恢复或保守阻断。清理前的结构性异常不可被清理后状态覆盖。
 
-## Validation baseline
-- Node `24.14.0`，pnpm `11.7.0`，schema `2.19.0`。
-- 最小证据：`pnpm install --frozen-lockfile`、`pnpm typecheck`、`pnpm test`、公开 API 实时契约采样、SQLite Online Backup 迁移演练、`integrity_check`、`foreign_key_check`、Final/Operational reports。
-- Validation/Operational 强制通过 SQLite Online Backup 在隔离 snapshot DB 运行；所有 validation type / operational mode 都拒绝 `--no-snapshot`，不得迁移或写入业务源库。
-- Final/Operational 最高自动状态分别是 `VALIDATION_FRAMEWORK_READY` / `OPERATIONAL_FRAMEWORK_READY`，且 `liveAllowed=false`；这些状态不等于 Live 已授权。
-- 当前业务源库保留旧 schema 供安全对照；最新 migration 已通过旧 schema fixture 和业务库 Online Backup 隔离演练。Observe/Paper 运行前会强制 `PAPER + LIVE_DISABLED`，需要迁移时先 Online Backup，再做完整性/外键检查。
-- Paper 验收结果自动写入被 Git 忽略的 `交给Codex/`；每轮 ZIP 只包含当轮 Observe、Paper、运行日志、隔离测试证明和中文摘要，不包含 SQLite、`.env`、账户 ID 或凭据。
+## Operator workflow
+- 用户只使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
+- 首次 clean commit 自动执行隔离验证、真实公开数据 Phase 0 与稳定 Replay，然后运行约 2 小时资格短测。
+- 资格通过后同一 Campaign/账户每次默认最多 12 小时，累计目标 72 小时；每次安全停止自动生成 Session 报告、Campaign 报告和脱敏 ZIP。
+- 首次资格短测若提前安全暂停，已验证健康时长计入 72 小时，但 `qualified` 仍为 false，下一次仍须完成独立完整的 2 小时资格 Session。
 
-## Remaining human gates
-- 24 小时 Observe 已通过；仍需完成长周期 Paper、Crash Recovery 长测与长期状态一致性验证。
-- 补足可复现的历史 orderbook/Paper Replay 数据；当前历史 API offset 限制使 Replay 仍为 `INCOMPLETE`。
-- 在合规地区完成官方 geoblock/compliance 检查，准备隔离钱包、安全凭据存储和只读外部状态 provider。
-- 用户再次明确授权后，才可单独接入真实 signer/认证 CLOB client，并先做小额实盘前检查。
+## Remaining gates
+- 当前实现尚未形成 clean commit，也尚未开始新的 2 小时资格 Session。
+- 资格通过后仍需累计 72 小时、至少一个连续 12 小时 Session，并补足关键场景覆盖。
+- Live 前仍需长期稳定性、Crash/重启验证、最终 reconciliation、合规地区 geoblock/clock 检查、隔离钱包与用户再次明确授权。

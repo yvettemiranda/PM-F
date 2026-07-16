@@ -6,14 +6,31 @@ export interface ExecutionOrderbookLevel {
   size: string;
 }
 
+/**
+ * Immutable public-response material carried from the unauthenticated API
+ * adapter to the Paper evidence store. Fake/disabled providers deliberately
+ * omit this field, so their snapshots can never qualify as real replay proof.
+ */
+export interface PublicMarketDataCapture {
+  endpoint: "clob-orderbook" | "clob-market-info";
+  requestUrl: string;
+  fetchedAt: string;
+  latencyMs: number;
+  httpStatus: number;
+  payload: unknown;
+}
+
 export interface ExecutionOrderbookSnapshot {
   assetId: string;
   conditionId: string;
   marketSnapshotTime: string;
   receivedAt: string;
   sourceUrl: string;
+  minOrderSize?: string;
+  tickSize?: string;
   bids: ExecutionOrderbookLevel[];
   asks: ExecutionOrderbookLevel[];
+  publicCapture?: PublicMarketDataCapture;
 }
 
 export interface ExecutionFeeSnapshot {
@@ -24,6 +41,7 @@ export interface ExecutionFeeSnapshot {
   exponent: number | null;
   sourceUrl: string;
   snapshotTime: string;
+  publicCapture?: PublicMarketDataCapture;
 }
 
 export interface ExecutionResolutionSnapshot {
@@ -98,8 +116,18 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
       marketSnapshotTime: sourceTime(capture.data.timestamp),
       receivedAt: capture.fetchedAt,
       sourceUrl: capture.url,
+      ...(capture.data.min_order_size === undefined ? {} : { minOrderSize: capture.data.min_order_size }),
+      ...(capture.data.tick_size === undefined ? {} : { tickSize: capture.data.tick_size }),
       bids: capture.data.bids,
       asks: capture.data.asks,
+      publicCapture: {
+        endpoint: "clob-orderbook",
+        requestUrl: capture.url,
+        fetchedAt: capture.fetchedAt,
+        latencyMs: capture.latencyMs,
+        httpStatus: capture.status,
+        payload: capture.data,
+      },
     };
   }
 
@@ -130,6 +158,14 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
         exponent,
         sourceUrl: capture.url,
         snapshotTime: capture.fetchedAt,
+        publicCapture: {
+          endpoint: "clob-market-info",
+          requestUrl: capture.url,
+          fetchedAt: capture.fetchedAt,
+          latencyMs: capture.latencyMs,
+          httpStatus: capture.status,
+          payload: capture.data,
+        },
       };
     } catch (error) {
       if (signal?.aborted) throw error;

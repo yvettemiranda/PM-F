@@ -6,6 +6,10 @@ import type { SourceVersion } from "../infra/source-version.js";
 import type { ExecutorMode } from "../execution/types.js";
 import { executionEnvelopeIntegrityError } from "../execution/signal-integrity.js";
 import type { PaperSignalEnvelope } from "../paper/types.js";
+import {
+  isBuyCapitalSizingDecisionValid,
+  type BuyCapitalSizingDecision,
+} from "../execution/capital-sizing.js";
 
 const PPM = 1_000_000n;
 
@@ -25,6 +29,7 @@ export interface RiskEvaluationInput {
   signal: PaperSignalEnvelope;
   requestedAmountMicros: bigint | null;
   requestedSizeMicros: bigint | null;
+  capitalSizingDecision?: BuyCapitalSizingDecision | null;
   now: string;
 }
 
@@ -158,8 +163,22 @@ export class RiskManager {
         if (ratioPpm === null) return fail("capital_decision", "CAPITAL_RATIO_UNAVAILABLE");
       }
       pass("capital_decision");
+      if (input.capitalSizingDecision) {
+        if (!isBuyCapitalSizingDecisionValid(input.capitalSizingDecision)) {
+          return fail("capital_sizing", "CAPITAL_SIZING_EVIDENCE_HASH_MISMATCH");
+        }
+        const sizedAmount = input.capitalSizingDecision.calculatedAmountMicros;
+        if (
+          input.requestedAmountMicros !== null
+          && sizedAmount !== input.requestedAmountMicros.toString()
+        ) return fail("capital_sizing", "CAPITAL_SIZING_AMOUNT_MISMATCH");
+        pass("capital_sizing", input.capitalSizingDecision.calculationVersion);
+      }
       if (input.requestedAmountMicros === null || input.requestedAmountMicros <= 0n) {
-        return fail("requested_amount", "BUY_AMOUNT_UNAVAILABLE");
+        return fail(
+          "requested_amount",
+          input.capitalSizingDecision?.reason ?? "BUY_AMOUNT_UNAVAILABLE",
+        );
       }
       const available = account.cashBalanceMicros - account.reservedBalanceMicros;
       if (input.requestedAmountMicros > available) return fail("account_balance", "INSUFFICIENT_AVAILABLE_CASH");
@@ -237,6 +256,7 @@ export class RiskManager {
       input.signal.signalId,
       input.requestedAmountMicros?.toString() ?? "NONE",
       input.requestedSizeMicros?.toString() ?? "NONE",
+      input.capitalSizingDecision?.evidenceHash ?? "NO_CAPITAL_SIZING_EVIDENCE",
       decision,
       riskReason,
       stableJson(checks),
@@ -255,6 +275,7 @@ export class RiskManager {
       riskRejectReason,
       requestedAmountMicros: input.requestedAmountMicros,
       requestedSizeMicros: input.requestedSizeMicros,
+      capitalSizingDecision: input.capitalSizingDecision ?? null,
       checks,
       rulesetHash: decisionRuleset.rulesetHash,
       configVersion: decisionRuleset.configVersion,
@@ -294,6 +315,7 @@ export class RiskManager {
     riskRejectReason: string | null;
     requestedAmountMicros: bigint | null;
     requestedSizeMicros: bigint | null;
+    capitalSizingDecision?: BuyCapitalSizingDecision | null;
     checks: RiskDecision["checks"];
     rulesetHash: string;
     configVersion: string;
@@ -305,9 +327,10 @@ export class RiskManager {
         `INSERT OR IGNORE INTO risk_decisions(
           risk_decision_id,executor_mode,paper_account_id,account_id,signal_id,context_id,decision,
           risk_reject_reason,requested_amount_micros,requested_size_micros,checks_json,
+          capital_sizing_decision_json,capital_sizing_decision_hash,
           schema_version,strategy_version,risk_version,ruleset_hash,source_code_commit,
           source_code_dirty,config_version,created_at,risk_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         input.riskDecisionId,
         input.mode,
@@ -320,6 +343,8 @@ export class RiskManager {
         input.requestedAmountMicros?.toString() ?? null,
         input.requestedSizeMicros?.toString() ?? null,
         stableJson(input.checks),
+        input.capitalSizingDecision ? stableJson(input.capitalSizingDecision) : null,
+        input.capitalSizingDecision?.evidenceHash ?? null,
         VERSIONS.schemaVersion,
         VERSIONS.strategyVersion,
         VERSIONS.riskVersion,
@@ -351,6 +376,7 @@ export class RiskManager {
           signalId: input.signalId,
           contextId: input.contextId,
           checks: input.checks,
+          capitalSizingDecisionHash: input.capitalSizingDecision?.evidenceHash ?? null,
         }),
       );
       this.database.exec("RELEASE SAVEPOINT risk_decision_write");

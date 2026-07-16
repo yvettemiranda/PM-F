@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { ObserveOnlyRunner } from "../observe/observe-runner.js";
@@ -19,6 +19,13 @@ const numberArg = (name: string, fallback: number): number => {
 const durationSeconds = numberArg("duration-seconds", 0);
 const pollSeconds = numberArg("poll-seconds", 15);
 const minimumSoakSeconds = numberArg("minimum-soak-seconds", 24 * 60 * 60);
+const valueArg = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
+const campaignId = valueArg("campaign-id") ?? null;
+const sessionId = valueArg("session-id") ?? null;
+const baselineRunId = valueArg("baseline-run-id");
+if (args.some((argument) => argument.startsWith("--baseline-run-id=")) && !baselineRunId?.trim()) {
+  throw new Error("Invalid --baseline-run-id: value is required");
+}
 if (pollSeconds <= 0) throw new Error("Invalid --poll-seconds: value must be greater than 0");
 const databasePath = resolve("data/phase0/phase0.sqlite");
 const sourceVersion = resolveSourceVersion();
@@ -28,6 +35,7 @@ console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePrepara
 const store = new ObserveStore(databasePath, sourceVersion);
 const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
   walletAddress: address,
+  ...(baselineRunId ? { baselineRunId } : {}),
   pollIntervalMs: pollSeconds * 1_000,
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
   signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),
@@ -60,6 +68,9 @@ try {
     sourceCodeDirty: sourceVersion.dirty,
     databasePreparation,
     mode: "OBSERVE_ONLY",
+    campaignId,
+    sessionId,
+    baselineRunId: metrics.baselineRunId,
     metrics,
     acceptance: {
       observeStatus: shortSoakPassed ? "SHORT_SOAK_PASSED" : "SHORT_SOAK_FAILED",
@@ -87,9 +98,10 @@ try {
       executionMode: null,
     },
   };
-  const outputDirectory = resolve("data/observe");
+  const explicitResult = valueArg("result-file");
+  const outputDirectory = explicitResult ? dirname(resolve(explicitResult)) : resolve("data/observe");
   await mkdir(outputDirectory, { recursive: true });
-  const output = resolve(outputDirectory, `observe-${metrics.observeRunId}.json`);
+  const output = explicitResult ? resolve(explicitResult) : resolve(outputDirectory, `observe-${metrics.observeRunId}.json`);
   await writeFile(output, JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ ...report, output }, null, 2));
 } finally {

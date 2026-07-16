@@ -20,6 +20,10 @@ OPERATOR_RESULT_ZIP=""
 OPERATOR_MANAGED_LOG_ACTIVE=0
 OPERATOR_MANAGED_LOG_FIFO=""
 OPERATOR_MANAGED_LOG_TEE_PID=""
+OPERATOR_CAMPAIGN_ID="${OPERATOR_CAMPAIGN_ID:-}"
+OPERATOR_SESSION_ID="${OPERATOR_SESSION_ID:-}"
+OPERATOR_REPORT_ID="${OPERATOR_REPORT_ID:-}"
+OPERATOR_ORPHAN_STOPPED=0
 
 title() {
   print ""
@@ -103,6 +107,116 @@ operator_process_running() {
   [[ -n "$state" && "$state" != Z* ]]
 }
 
+operator_process_matches_campaign_role() {
+  local pid="$1"
+  local role="$2"
+  local campaign_id="$3"
+  local session_id="$4"
+  local owner_token="${5:-}"
+  local command
+  [[ "$pid" == <-> && "$pid" != "$$" ]] || return 1
+  [[ "$campaign_id" == PC-* && "$session_id" == PS-* ]] || return 1
+  operator_process_running "$pid" || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$role" in
+    supervisor)
+      [[ -n "$owner_token" && "$owner_token" != "__NONE__" \
+        && "$owner_token" != *[^A-Za-z0-9._-]* \
+        && "$command" == *"$PROJECT_ROOT/src/cli/paper-campaign-run.ts"* \
+        && "$command" == *"--operator-owner-token=$owner_token"* ]]
+      ;;
+    paper)
+      [[ "$command" == *"$PROJECT_ROOT/src/cli/paper-run.ts"* \
+        && "$command" == *"--campaign-id=$campaign_id"* \
+        && "$command" == *"--session-id=$session_id"* ]]
+      ;;
+    observe)
+      [[ "$command" == *"$PROJECT_ROOT/src/cli/observe-only.ts"* \
+        && "$command" == *"--campaign-id=$campaign_id"* \
+        && "$command" == *"--session-id=$session_id"* ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+operator_wait_external_process() {
+  local pid="$1"
+  local max_attempts="${2:-900}"
+  local attempt=0
+  while operator_process_running "$pid" && (( attempt < max_attempts )); do
+    sleep 0.1
+    (( attempt += 1 ))
+  done
+  ! operator_process_running "$pid"
+}
+
+operator_stop_campaign_processes_from_pointer() {
+  local pointer_file="$1"
+  local metadata campaign_id session_id supervisor_pid paper_pid observe_pid owner_token
+  local supervisor_wait_ticks="${OPERATOR_ORPHAN_SUPERVISOR_WAIT_TICKS:-2100}"
+  local child_wait_ticks="${OPERATOR_ORPHAN_WAIT_TICKS:-900}"
+  local force_wait_ticks="${OPERATOR_ORPHAN_FORCE_WAIT_TICKS:-50}"
+  OPERATOR_ORPHAN_STOPPED=0
+  [[ -f "$pointer_file" ]] || return 0
+  metadata="$(node -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const fields = ["campaignId", "sessionId", "supervisorPid", "paperPid", "observePid", "operatorOwnerToken"];
+    process.stdout.write(fields.map((field) => String(value[field] ?? "__NONE__")).join("\t"));
+  ' "$pointer_file" 2>/dev/null)" || return 1
+  IFS=$'\t' read -r campaign_id session_id supervisor_pid paper_pid observe_pid owner_token <<< "$metadata"
+
+  if operator_process_matches_campaign_role "$supervisor_pid" supervisor "$campaign_id" "$session_id" "$owner_token"; then
+    print "发现仍在运行的 Campaign 管理进程 $supervisor_pid，先请求安全停止。"
+    kill -TERM "$supervisor_pid" 2>/dev/null || true
+    OPERATOR_ORPHAN_STOPPED=1
+    if ! operator_wait_external_process "$supervisor_pid" "$supervisor_wait_ticks"; then
+      print "Campaign 管理进程未在安全期限内退出，执行强制清理。"
+      kill -KILL "$supervisor_pid" 2>/dev/null || true
+      operator_wait_external_process "$supervisor_pid" "$force_wait_ticks" || true
+    fi
+  fi
+
+  if operator_process_matches_campaign_role "$observe_pid" observe "$campaign_id" "$session_id" "$owner_token"; then
+    print "收割遗留 Observe 进程 $observe_pid。"
+    kill -TERM "$observe_pid" 2>/dev/null || true
+    OPERATOR_ORPHAN_STOPPED=1
+    if ! operator_wait_external_process "$observe_pid" "$child_wait_ticks"; then
+      kill -KILL "$observe_pid" 2>/dev/null || true
+      operator_wait_external_process "$observe_pid" "$force_wait_ticks" || true
+    fi
+  fi
+
+  if operator_process_matches_campaign_role "$paper_pid" paper "$campaign_id" "$session_id" "$owner_token"; then
+    print "收割遗留 Paper 进程 $paper_pid（先请求最终估值）。"
+    kill -USR1 "$paper_pid" 2>/dev/null || true
+    OPERATOR_ORPHAN_STOPPED=1
+    if ! operator_wait_external_process "$paper_pid" "$child_wait_ticks"; then
+      kill -TERM "$paper_pid" 2>/dev/null || true
+      if ! operator_wait_external_process "$paper_pid" "$child_wait_ticks"; then
+        kill -KILL "$paper_pid" 2>/dev/null || true
+        operator_wait_external_process "$paper_pid" "$force_wait_ticks" || true
+      fi
+    fi
+  fi
+  local remaining=0
+  if operator_process_matches_campaign_role "$supervisor_pid" supervisor "$campaign_id" "$session_id" "$owner_token"; then
+    print "Campaign 管理进程 $supervisor_pid 仍在运行，拒绝继续恢复。"
+    remaining=1
+  fi
+  if operator_process_matches_campaign_role "$observe_pid" observe "$campaign_id" "$session_id" "$owner_token"; then
+    print "Observe 进程 $observe_pid 仍在运行，拒绝继续恢复。"
+    remaining=1
+  fi
+  if operator_process_matches_campaign_role "$paper_pid" paper "$campaign_id" "$session_id" "$owner_token"; then
+    print "Paper 进程 $paper_pid 仍在运行，拒绝继续恢复。"
+    remaining=1
+  fi
+  return "$remaining"
+}
+
 operator_record_is_active() {
   local record_file="$1"
   local record pid kind launcher command
@@ -111,7 +225,7 @@ operator_record_is_active() {
   IFS=$'\t' read -r pid kind launcher <<< "$record"
   [[ "$pid" == <-> ]] || return 1
   [[ "$launcher" == "$PROJECT_ROOT/操作入口/"*.command \
-    || "$launcher" == "$PROJECT_ROOT/操作入口/lib/run-paper-validation.sh" ]] || return 1
+    || "$launcher" == "$PROJECT_ROOT/操作入口/lib/run-paper-campaign.sh" ]] || return 1
   operator_process_running "$pid" || return 1
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [[ "$command" == *"${launcher:t}"* ]]
@@ -204,12 +318,12 @@ operator_wait_child() {
     kill -TERM "$pid" 2>/dev/null || true
   fi
 
-  while operator_process_running "$pid" && (( attempt < 450 )); do
+  while operator_process_running "$pid" && (( attempt < 2400 )); do
     sleep 0.1
     (( attempt += 1 ))
   done
   if operator_process_running "$pid"; then
-    print "进程 $pid 未能在 45 秒内安全停止，执行强制清理。"
+    print "进程 $pid 未能在 4 分钟内安全停止，执行强制清理。"
     kill -KILL "$pid" 2>/dev/null || true
     forced_kill=1
     attempt=0
@@ -245,12 +359,12 @@ operator_cleanup() {
   fi
   for pid in "${OPERATOR_CHILD_PIDS[@]}"; do
     attempt=0
-    while operator_process_running "$pid" && (( attempt < 450 )); do
+    while operator_process_running "$pid" && (( attempt < 2400 )); do
       sleep 0.1
       (( attempt += 1 ))
     done
     if operator_process_running "$pid"; then
-      print "进程 $pid 未能在 45 秒内安全停止，执行强制清理。"
+      print "进程 $pid 未能在 4 分钟内安全停止，执行强制清理。"
       kill -KILL "$pid" 2>/dev/null || true
       attempt=0
       while operator_process_running "$pid" && (( attempt < 50 )); do
@@ -291,6 +405,15 @@ operator_stop_registered_sessions() {
       OPERATOR_SESSIONS_STOPPED=1
     else
       print "清理已失效的运行记录：${record_file:t}"
+      record="$(/bin/cat "$record_file" 2>/dev/null || true)"
+      IFS=$'\t' read -r pid kind launcher <<< "$record"
+      if [[ "$kind" == "paper-campaign" ]]; then
+        operator_stop_campaign_processes_from_pointer \
+          "$DATA_DIR/operator/paper-campaign-latest.json" || true
+        if (( OPERATOR_ORPHAN_STOPPED == 1 )); then
+          OPERATOR_SESSIONS_STOPPED=1
+        fi
+      fi
       rm -f "$record_file"
     fi
   done
@@ -333,7 +456,15 @@ ensure_ready() {
     print "未找到 pnpm。请先安装 pnpm，或在 Terminal 中运行：corepack enable"
     exit 1
   fi
-  print "pnpm: $(pnpm -v)"
+  local expected_pnpm actual_pnpm
+  expected_pnpm="$(node -e 'const value=require("./package.json").packageManager||"";process.stdout.write(value.startsWith("pnpm@")?value.slice(5):"")')"
+  actual_pnpm="$(pnpm -v)"
+  if [[ -z "$expected_pnpm" || "$actual_pnpm" != "$expected_pnpm" ]]; then
+    print "当前 pnpm 版本不在冻结环境：$actual_pnpm"
+    print "本项目要求 pnpm $expected_pnpm。为避免累计验证环境漂移，本次拒绝启动。"
+    exit 1
+  fi
+  print "pnpm: $actual_pnpm"
 
   title "校验锁定依赖"
   pnpm install --frozen-lockfile
@@ -372,77 +503,24 @@ operator_copy_sanitized_observe_report() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node -e '
-    const fs = require("node:fs");
-    const [source, destination, projectRoot, homeDirectory] = process.argv.slice(1);
-    const visit = (value) => {
-      if (Array.isArray(value)) return value.map(visit);
-      if (value && typeof value === "object") {
-        return Object.fromEntries(Object.entries(value).map(([key, childValue]) => [key, visit(childValue)]));
-      }
-      if (typeof value !== "string") return value;
-      return value
-        .split(projectRoot).join("[PROJECT_ROOT]")
-        .split(homeDirectory).join("[HOME]");
-    };
-    const report = JSON.parse(fs.readFileSync(source, "utf8"));
-    fs.writeFileSync(destination, `${JSON.stringify(visit(report), null, 2)}\n`, { mode: 0o600 });
-  ' "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
+  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    json "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
 operator_copy_sanitized_paper_report() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node -e '
-    const fs = require("node:fs");
-    const [source, destination, projectRoot, homeDirectory] = process.argv.slice(1);
-    const redactedKeys = new Set(["accountId", "paperAccountId", "accountIdFile", "databasePath"]);
-    const report = JSON.parse(fs.readFileSync(source, "utf8"));
-    const accountIds = new Set();
-    const collectAccountIds = (value, key = "") => {
-      if (redactedKeys.has(key) && typeof value === "string" && value) accountIds.add(value);
-      if (Array.isArray(value)) value.forEach((item) => collectAccountIds(item));
-      else if (value && typeof value === "object") {
-        Object.entries(value).forEach(([childKey, childValue]) => collectAccountIds(childValue, childKey));
-      }
-    };
-    collectAccountIds(report);
-    const visit = (value, key = "") => {
-      if (redactedKeys.has(key)) return "[REDACTED]";
-      if (Array.isArray(value)) return value.map((item) => visit(item));
-      if (value && typeof value === "object") {
-        return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
-          childKey,
-          visit(childValue, childKey),
-        ]));
-      }
-      if (typeof value !== "string") return value;
-      let result = value
-        .split(projectRoot).join("[PROJECT_ROOT]")
-        .split(homeDirectory).join("[HOME]");
-      for (const accountId of accountIds) {
-        result = result.split(accountId).join("[REDACTED_PAPER_ACCOUNT_ID]");
-      }
-      return result;
-    };
-    fs.writeFileSync(destination, `${JSON.stringify(visit(report), null, 2)}\n`, { mode: 0o600 });
-  ' "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
+  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    json "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
 operator_copy_sanitized_log() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node -e '
-    const fs = require("node:fs");
-    const [source, destination, projectRoot, homeDirectory] = process.argv.slice(1);
-    let content = fs.readFileSync(source, "utf8")
-      .split(projectRoot).join("[PROJECT_ROOT]")
-      .split(homeDirectory).join("[HOME]")
-      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[REDACTED_UUID]");
-    fs.writeFileSync(destination, content, { mode: 0o600 });
-  ' "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
+  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    log "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
 operator_create_codex_bundle() {
@@ -542,6 +620,34 @@ operator_create_codex_bundle() {
     print "安全状态：本次仅为 Paper + Observe，不包含 private key、真实订单或链上写操作。"
   } > "$bundle_dir/请把整个ZIP发给Codex.txt"
 
+  local manifest_metadata
+  manifest_metadata="$(
+    OPERATOR_CAMPAIGN_ID="$OPERATOR_CAMPAIGN_ID" \
+    OPERATOR_SESSION_ID="$OPERATOR_SESSION_ID" \
+    OPERATOR_REPORT_ID="$OPERATOR_REPORT_ID" \
+    node --import tsx -e '
+      import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
+      const value = (name) => process.env[name] || null;
+      process.stdout.write(JSON.stringify({
+        campaignId: value("OPERATOR_CAMPAIGN_ID"),
+        sessionId: value("OPERATOR_SESSION_ID"),
+        reportId: value("OPERATOR_REPORT_ID"),
+        sourceCommit: process.argv[1],
+        schemaVersion: VERSIONS.schemaVersion,
+        rulesetHash: RULESET_HASH,
+        configVersion: VERSIONS.configVersion,
+        generatedAt: new Date().toISOString(),
+      }));
+    ' "$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || print UNKNOWN)"
+  )"
+  if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
+    included+=("bundle-manifest.json")
+  else
+    rm -f "$bundle_dir/bundle-manifest.json"
+    missing+=("诊断包 Manifest")
+  fi
+
   local archive_created=0 archive_entry_count=0 expected_archive_entry_count=$((${#included[@]} + 1))
   if command -v zip >/dev/null 2>&1; then
     if (cd "$bundle_dir" && zip -qrX "$bundle_zip_temporary" .); then
@@ -583,6 +689,239 @@ operator_create_codex_bundle() {
   print "结果已经自动整理好："
   print "$OPERATOR_RESULT_ZIP"
   print "你只需要把这个 ZIP（或结果文件夹）发给 Codex。"
+}
+
+operator_record_latest_campaign_result() {
+  local result_path="$1"
+  local pointer_file="$PROJECT_ROOT/交给Codex/.paper-campaign-latest-result"
+  local pointer_temporary="$pointer_file.$$.tmp"
+  print -r -- "$result_path" > "$pointer_temporary"
+  mv -f "$pointer_temporary" "$pointer_file"
+}
+
+operator_latest_campaign_result() {
+  local results_dir="$PROJECT_ROOT/交给Codex"
+  local pointer_file="$results_dir/.paper-campaign-latest-result"
+  local candidate=""
+  if [[ -f "$pointer_file" ]]; then
+    candidate="$(<"$pointer_file")"
+    if [[ "$candidate" == "$results_dir/"* && -e "$candidate" ]]; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  fi
+  local -a legacy_zips=("$results_dir"/Paper累计验证_*.zip(N.om))
+  if (( ${#legacy_zips[@]} > 0 )); then
+    print -r -- "$legacy_zips[1]"
+    return 0
+  fi
+  return 1
+}
+
+operator_create_campaign_bundle() {
+  local pointer_file="$1"
+  local log_file="$2"
+  local isolated_evidence_file="$3"
+  local metadata campaign_id session_id report_id session_report campaign_report run_result
+  local paper_report observe_report report_source_commit stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary
+  local archive_entry_count expected_archive_entry_count
+  local -a included=()
+  local -a missing=()
+
+  if [[ ! -f "$pointer_file" ]]; then
+    print "没有找到 Campaign 结果指针；保留日志供 Codex 排查。"
+    campaign_id="UNKNOWN"
+    session_id="UNKNOWN"
+    report_id="UNKNOWN"
+    session_report=""
+    campaign_report=""
+    run_result=""
+  else
+    metadata="$(node -e '
+      const fs = require("node:fs");
+      const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const fields = ["campaignId", "sessionId", "reportId", "sessionReportFile", "campaignReportFile", "runResultFile"];
+      process.stdout.write(fields.map((field) => String(value[field] ?? "")).join("\t"));
+    ' "$pointer_file")"
+    IFS=$'\t' read -r campaign_id session_id report_id session_report campaign_report run_result <<< "$metadata"
+  fi
+
+  if [[ -n "$run_result" && -f "$run_result" ]]; then
+    metadata="$(node -e '
+      const fs = require("node:fs");
+      const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      process.stdout.write([value.paperReportFile ?? "", value.observeReportFile ?? ""].join("\t"));
+    ' "$run_result")"
+    IFS=$'\t' read -r paper_report observe_report <<< "$metadata"
+  else
+    paper_report=""
+    observe_report=""
+  fi
+  report_source_commit="$(node -e '
+    const fs = require("node:fs");
+    for (const file of process.argv.slice(1)) {
+      if (!file || !fs.existsSync(file)) continue;
+      try {
+        const value = JSON.parse(fs.readFileSync(file, "utf8"));
+        const candidates = [
+          value.sourceCodeCommit,
+          value.session?.sourceVersion?.commit,
+          value.campaign?.sourceVersion?.commit,
+        ];
+        const commit = candidates.find((candidate) =>
+          typeof candidate === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(candidate.trim())
+        );
+        if (commit) {
+          process.stdout.write(commit.trim());
+          process.exit(0);
+        }
+      } catch {}
+    }
+  ' "$session_report" "$campaign_report" "$run_result" 2>/dev/null || true)"
+  [[ -n "$report_source_commit" ]] || report_source_commit="UNKNOWN"
+
+  stamp="$(date +%Y%m%d-%H%M%S)-$$"
+  bundle_root="$PROJECT_ROOT/交给Codex"
+  bundle_dir="$bundle_root/.paper-campaign-$stamp.tmp"
+  bundle_fallback="$bundle_root/Paper累计验证_${campaign_id}_${session_id}_${stamp}_未压缩"
+  bundle_zip="$bundle_root/Paper累计验证_${campaign_id}_${session_id}_$stamp.zip"
+  bundle_zip_temporary="$bundle_root/.Paper累计验证_$stamp.tmp.zip"
+  mkdir -p "$bundle_dir"
+
+  local source destination label
+  local -a sources=(
+    "$session_report"
+    "$campaign_report"
+    "$paper_report"
+    "$observe_report"
+    "$run_result"
+    "$isolated_evidence_file"
+  )
+  local -a destinations=(
+    "paper-session-report-redacted.json"
+    "paper-campaign-report-redacted.json"
+    "paper-report-redacted.json"
+    "observe-report-redacted.json"
+    "run-result-redacted.json"
+    "paper-isolated-verification.json"
+  )
+  local -a labels=(
+    "本次 Session 报告"
+    "累计 Campaign 报告"
+    "Paper 内部报告"
+    "Observe 内部报告"
+    "运行结果"
+    "隔离测试证明"
+  )
+  local index
+  for index in {1..6}; do
+    source="${sources[$index]}"
+    destination="${destinations[$index]}"
+    label="${labels[$index]}"
+    if [[ -n "$source" && -f "$source" ]]; then
+      if operator_copy_sanitized_observe_report "$source" "$bundle_dir/$destination"; then
+        included+=("$destination")
+      else
+        rm -f "$bundle_dir/$destination"
+        missing+=("$label（脱敏失败）")
+      fi
+    else
+      missing+=("$label")
+    fi
+  done
+  if [[ -f "$log_file" ]]; then
+    if operator_copy_sanitized_log "$log_file" "$bundle_dir/run-log-redacted.log"; then
+      included+=("run-log-redacted.log")
+    else
+      missing+=("运行日志（脱敏失败）")
+    fi
+  else
+    missing+=("运行日志")
+  fi
+
+  {
+    print "Polymarket Paper 累计验证结果"
+    print "Campaign：$campaign_id"
+    print "Session：$session_id"
+    print "Report：$report_id"
+    print "生成时间：$(date '+%Y-%m-%d %H:%M:%S %z')"
+    print "代码版本：$report_source_commit"
+    print ""
+    print "已包含："
+    if (( ${#included[@]} == 0 )); then
+      print -- "- 无"
+    else
+      local item
+      for item in "${included[@]}"; do print -- "- $item"; done
+    fi
+    if (( ${#missing[@]} > 0 )); then
+      print ""
+      print "未生成或未找到："
+      local missing_item
+      for missing_item in "${missing[@]}"; do print -- "- $missing_item"; done
+    fi
+    print ""
+    print "请把整个 ZIP 直接发给 Codex。"
+    print "报告副本已脱敏：内部账户 ID、本机绝对路径和 Observe UUID 不会原样导出。"
+    print "安全状态：execution_mode=PAPER，live_gate_state=LIVE_DISABLED，liveAllowed=false。"
+  } > "$bundle_dir/请把整个ZIP发给Codex.txt"
+
+  local manifest_metadata
+  manifest_metadata="$(
+    cd "$PROJECT_ROOT"
+    OPERATOR_CAMPAIGN_ID="$campaign_id" \
+    OPERATOR_SESSION_ID="$session_id" \
+    OPERATOR_REPORT_ID="$report_id" \
+    node --import tsx -e '
+      import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
+      process.stdout.write(JSON.stringify({
+        campaignId: process.env.OPERATOR_CAMPAIGN_ID || null,
+        sessionId: process.env.OPERATOR_SESSION_ID || null,
+        reportId: process.env.OPERATOR_REPORT_ID || null,
+        sourceCommit: process.argv[1],
+        schemaVersion: VERSIONS.schemaVersion,
+        rulesetHash: RULESET_HASH,
+        configVersion: VERSIONS.configVersion,
+        generatedAt: new Date().toISOString(),
+      }));
+    ' "$report_source_commit"
+  )"
+  if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
+    included+=("bundle-manifest.json")
+  else
+    rm -f "$bundle_dir/bundle-manifest.json"
+    missing+=("诊断包 Manifest")
+  fi
+
+  expected_archive_entry_count=$((${#included[@]} + 1))
+  if ! (cd "$bundle_dir" && zip -qrX "$bundle_zip_temporary" .); then
+    rm -f "$bundle_zip_temporary"
+    mv "$bundle_dir" "$bundle_fallback"
+    print "ZIP 压缩失败；本次结果文件夹保留在：$bundle_fallback"
+    OPERATOR_RESULT_ZIP="$bundle_fallback"
+    operator_record_latest_campaign_result "$OPERATOR_RESULT_ZIP"
+    return 1
+  fi
+  archive_entry_count="$(LC_ALL=C unzip -Z1 "$bundle_zip_temporary" | wc -l | tr -d '[:space:]')"
+  if ! unzip -tq "$bundle_zip_temporary" >/dev/null 2>&1 \
+    || [[ "$archive_entry_count" != "$expected_archive_entry_count" ]] \
+    || LC_ALL=C unzip -Z1 "$bundle_zip_temporary" | LC_ALL=C grep -Eq '(^|/)\._|^__MACOSX/|/$'; then
+    rm -f "$bundle_zip_temporary"
+    mv "$bundle_dir" "$bundle_fallback"
+    print "ZIP 完整性检查失败；本次结果文件夹保留在：$bundle_fallback"
+    OPERATOR_RESULT_ZIP="$bundle_fallback"
+    operator_record_latest_campaign_result "$OPERATOR_RESULT_ZIP"
+    return 1
+  fi
+  mv -f "$bundle_zip_temporary" "$bundle_zip"
+  rm -rf -- "$bundle_dir"
+  OPERATOR_RESULT_ZIP="$bundle_zip"
+  operator_record_latest_campaign_result "$OPERATOR_RESULT_ZIP"
+  print ""
+  print "结果已经自动整理好："
+  print "$OPERATOR_RESULT_ZIP"
+  print "你只需要把这个 ZIP 发给 Codex。"
 }
 
 open_codex_results() {

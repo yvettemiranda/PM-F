@@ -65,7 +65,13 @@ export class ObserveStore {
     this.database.exec("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
   }
 
-  startRun(walletAddress: string, pollIntervalMs: number, now: string, staleAfterMs: number): StartedObserveRun {
+  startRun(
+    walletAddress: string,
+    pollIntervalMs: number,
+    now: string,
+    staleAfterMs: number,
+    baselineRunId?: string,
+  ): StartedObserveRun {
     let baseline: ObserveBaseline;
     let checkpointRow: {
       checkpoint_id: string;
@@ -79,7 +85,7 @@ export class ObserveStore {
     const staleBefore = Date.parse(now) - staleAfterMs;
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      baseline = this.loadBaseline(walletAddress);
+      baseline = this.loadBaseline(walletAddress, baselineRunId);
       const target = this.database
         .prepare("SELECT target_id FROM monitor_targets WHERE wallet_address=?")
         .get(walletAddress.toLowerCase()) as { target_id: string } | undefined;
@@ -150,21 +156,28 @@ export class ObserveStore {
     };
   }
 
-  loadBaseline(walletAddress: string): ObserveBaseline {
+  loadBaseline(walletAddress: string, baselineRunId?: string): ObserveBaseline {
     const run = this.database
       .prepare(
         `SELECT b.baseline_run_id,b.target_id,b.wallet_address,b.snapshot_time
          FROM position_baseline_runs b
          WHERE b.wallet_address=? AND b.status='READY'
+           AND (? IS NULL OR b.baseline_run_id=?)
          ORDER BY b.snapshot_time DESC LIMIT 1`,
       )
-      .get(walletAddress.toLowerCase()) as {
+      .get(walletAddress.toLowerCase(), baselineRunId ?? null, baselineRunId ?? null) as {
         baseline_run_id: string;
         target_id: string;
         wallet_address: string;
         snapshot_time: string;
       } | undefined;
-    if (!run) throw new Error(`Ready position baseline not found: ${walletAddress}`);
+    if (!run) {
+      throw new Error(
+        baselineRunId
+          ? `OBSERVE_BASELINE_NOT_READY_OR_WALLET_MISMATCH:${baselineRunId}`
+          : `Ready position baseline not found: ${walletAddress}`,
+      );
+    }
     const items = this.database
       .prepare("SELECT asset_id,condition_id,size_micros FROM position_baseline_items WHERE baseline_run_id=? ORDER BY asset_id")
       .all(run.baseline_run_id) as Array<{ asset_id: string; condition_id: string; size_micros: string }>;
@@ -530,15 +543,25 @@ export class ObserveStore {
       .run(failed ? "FAILED" : "COMPLETED", stoppedAt, reason, stoppedAt, observeRunId);
   }
 
+  interruptAbandonedRun(observeRunId: string, stoppedAt: string, reason: string): boolean {
+    const result = this.database.prepare(
+      `UPDATE observe_runs
+       SET state='INTERRUPTED',stopped_at=?,stop_reason=?,last_heartbeat_at=?
+       WHERE observe_run_id=? AND state='RUNNING'`,
+    ).run(stoppedAt, reason, stoppedAt, observeRunId);
+    return Number(result.changes) === 1;
+  }
+
   runMetrics(observeRunId: string): ObserveRunMetrics {
     const row = this.database
       .prepare(
-        `SELECT started_at,COALESCE(stopped_at,last_heartbeat_at) stopped_at,poll_interval_ms,
+        `SELECT baseline_run_id,started_at,COALESCE(stopped_at,last_heartbeat_at) stopped_at,poll_interval_ms,
                 successful_polls,failed_polls,processed_events,emitted_signals,
                 duplicate_events,gap_events,reconciliation_count,recovered_from_checkpoint
          FROM observe_runs WHERE observe_run_id=?`,
       )
       .get(observeRunId) as {
+        baseline_run_id: string;
         started_at: string;
         stopped_at: string;
         poll_interval_ms: number;
@@ -585,6 +608,7 @@ export class ObserveStore {
       .get(runTarget.target_id);
     return {
       observeRunId,
+      baselineRunId: row.baseline_run_id,
       startedAt: row.started_at,
       stoppedAt: row.stopped_at,
       durationMs: Date.parse(row.stopped_at) - Date.parse(row.started_at),
@@ -712,11 +736,12 @@ export class ObserveStore {
         `INSERT OR IGNORE INTO capital_estimates(
           capital_estimate_id,target_id,source_event_key,position_value_micros,wallet_balance_micros,
           target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+          capital_sizing_ratio_json,capital_sizing_ratio_hash,
           capital_estimate_status,capital_confidence,capital_estimate_reason,position_snapshot_time,
           wallet_balance_snapshot_time,target_trade_timestamp,fallback_amount_micros,schema_version,
           strategy_version,risk_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
           source_code_dirty,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         estimate.capitalEstimateId,
@@ -727,6 +752,8 @@ export class ObserveStore {
         estimate.targetVisibleCapitalMicros,
         estimate.targetTradeAmountMicros,
         estimate.targetTradeCapitalRatioPpm,
+        estimate.capitalSizingRatio ? stableJson(estimate.capitalSizingRatio) : null,
+        estimate.capitalSizingRatioHash,
         estimate.capitalEstimateStatus,
         estimate.capitalConfidence,
         estimate.capitalEstimateReason,
@@ -746,6 +773,7 @@ export class ObserveStore {
     const stored = this.database.prepare(
       `SELECT target_id,source_event_key,position_value_micros,wallet_balance_micros,
               target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+              capital_sizing_ratio_json,capital_sizing_ratio_hash,
               capital_estimate_status,capital_confidence,capital_estimate_reason,
               position_snapshot_time,wallet_balance_snapshot_time,target_trade_timestamp,
               fallback_amount_micros,schema_version,strategy_version,risk_version,
@@ -760,6 +788,8 @@ export class ObserveStore {
       target_visible_capital_micros: estimate.targetVisibleCapitalMicros,
       target_trade_amount_micros: estimate.targetTradeAmountMicros,
       target_trade_capital_ratio_ppm: estimate.targetTradeCapitalRatioPpm,
+      capital_sizing_ratio_json: estimate.capitalSizingRatio ? stableJson(estimate.capitalSizingRatio) : null,
+      capital_sizing_ratio_hash: estimate.capitalSizingRatioHash,
       capital_estimate_status: estimate.capitalEstimateStatus,
       capital_confidence: estimate.capitalConfidence,
       capital_estimate_reason: estimate.capitalEstimateReason,
@@ -877,16 +907,19 @@ export class ObserveStore {
       .prepare(
         `INSERT INTO signal_execution_contexts(
           context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+          capital_sizing_ratio_json,capital_sizing_ratio_hash,
           target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
           market_metadata_hash,ruleset_hash,schema_version,signal_version,
           strategy_version,source_code_commit,source_code_dirty,config_version,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         bundle.context.contextId,
         bundle.context.signalId,
         bundle.context.capitalDecisionId,
         bundle.context.targetTradeCapitalRatioPpm,
+        bundle.context.capitalSizingRatio ? stableJson(bundle.context.capitalSizingRatio) : null,
+        bundle.context.capitalSizingRatioHash ?? null,
         bundle.context.targetTradeTimestamp,
         bundle.context.marketEndTime,
         JSON.stringify(bundle.context.marketMetadataSnapshot),

@@ -46,6 +46,8 @@ function createPreviousSchema(path: string): void {
     ["2.15.0", "020_live_authorized_signer.sql"],
     ["2.16.0", "021_live_order_intent_evidence.sql"],
     ["2.17.0", "022_live_gate_transition_immutability.sql"],
+    ["2.18.0", "023_live_settlement_events.sql"],
+    ["2.19.0", "024_paper_market_data_health.sql"],
   ];
   try {
     for (const [version, file] of migrations) {

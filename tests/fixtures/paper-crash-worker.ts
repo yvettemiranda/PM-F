@@ -20,6 +20,8 @@ const marketData: PaperMarketDataProvider = {
     marketSnapshotTime: nowIso,
     receivedAt: nowIso,
     sourceUrl: "fake://paper-process-crash/orderbook",
+    minOrderSize: "1",
+    tickSize: "0.01",
     asks: [{ price: "0.5", size: "10000" }],
     bids: [{ price: "0.5", size: "10000" }],
   }),

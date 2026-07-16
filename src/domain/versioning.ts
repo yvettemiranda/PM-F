@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.19.0",
+  schemaVersion: "2.21.0",
   signalVersion: "1.4.0",
-  strategyVersion: "2.0.0",
-  riskVersion: "1.4.0",
-  replayVersion: "1.6.0",
-  paperVersion: "1.3.0",
-  liveVersion: "1.2.0",
-  validationVersion: "1.0.0",
-  operationalVersion: "1.0.0",
-  rulesetVersion: "v1.3.0",
+  strategyVersion: "2.1.0",
+  riskVersion: "1.5.0",
+  replayVersion: "1.7.0",
+  paperVersion: "1.4.0",
+  liveVersion: "1.3.0",
+  validationVersion: "1.1.0",
+  operationalVersion: "1.1.0",
+  rulesetVersion: "v1.4.0",
   feeModelVersion: "clob-fd-v1",
-  configVersion: "v1.1.0",
+  configVersion: "v1.2.0",
 });
 
 export const RULESET = Object.freeze({

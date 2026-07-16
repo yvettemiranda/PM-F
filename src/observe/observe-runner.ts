@@ -22,6 +22,7 @@ const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
 export interface ObserveRunnerOptions {
   walletAddress: string;
+  baselineRunId?: string;
   pollIntervalMs: number;
   durationMs?: number;
   staleRunAfterMs?: number;
@@ -51,6 +52,7 @@ export class ObserveOnlyRunner {
   private readonly wait: (milliseconds: number) => Promise<void>;
   private started: StartedObserveRun | null = null;
   private gapActive = true;
+  private gapCutoffAt: string | null = null;
   private checkpointHashMismatch = false;
   private lastSuccessfulAt: string | null = null;
   private lastPollCompletedAt: string | null = null;
@@ -75,6 +77,7 @@ export class ObserveOnlyRunner {
       this.options.pollIntervalMs,
       now,
       this.options.staleRunAfterMs ?? Math.max(this.options.pollIntervalMs * 3, 30_000),
+      this.options.baselineRunId,
     );
     const existing = this.store.loadObservedEvents(this.started.baseline.baselineRunId);
     if (this.started.checkpoint) {
@@ -93,6 +96,10 @@ export class ObserveOnlyRunner {
     }
     this.lastSuccessfulAt = this.started.checkpoint?.createdAt ?? this.started.baseline.snapshotTime;
     this.gapActive = true;
+    // Only events that happened on or before startup belong to the offline
+    // window. An event arriving after this runner started but before its first
+    // successful poll is live data and must remain execution eligible.
+    this.gapCutoffAt = now;
     return this.started;
   }
 
@@ -126,6 +133,7 @@ export class ObserveOnlyRunner {
         > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
     ) {
       this.gapActive = true;
+      this.gapCutoffAt = pollStartedAt;
     }
     let recoveryFrom = this.gapActive ? (this.lastSuccessfulAt ?? started.gapFrom) : null;
     let snapshot;
@@ -140,6 +148,7 @@ export class ObserveOnlyRunner {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
       this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
+      this.gapCutoffAt = failedAt;
       return false;
     }
 
@@ -149,6 +158,7 @@ export class ObserveOnlyRunner {
         > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
     ) {
       this.gapActive = true;
+      this.gapCutoffAt = completedAt;
       recoveryFrom = this.lastSuccessfulAt ?? started.gapFrom;
       try {
         snapshot = await this.source.poll(
@@ -162,6 +172,7 @@ export class ObserveOnlyRunner {
         this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
         this.lastPollCompletedAt = failedAt;
         this.gapActive = true;
+        this.gapCutoffAt = failedAt;
         return false;
       }
     }
@@ -172,6 +183,7 @@ export class ObserveOnlyRunner {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error, "PROCESSING_FAILED");
       this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
+      this.gapCutoffAt = failedAt;
       return false;
     }
 
@@ -198,13 +210,16 @@ export class ObserveOnlyRunner {
       }
     }
     let ambiguousActivityOccurrences = 0;
+    const eventIsGap = (sourceTimestamp: number): boolean => this.gapActive
+      && (this.gapCutoffAt === null
+        || sourceTimestamp <= Math.floor(Date.parse(this.gapCutoffAt) / 1_000));
     const incoming: ObserveEvent[] = [
       ...multiplicity.trades
         .map(({ trade, sourceEventKey }): ObserveEvent => ({
           sourceEventKey,
           sourceType: "DATA_API_TRADE",
           sourceTimestamp: trade.timestamp,
-          isGap: this.gapActive,
+          isGap: eventIsGap(trade.timestamp),
           isCombo: false,
           activityConfirmed: false,
           trade,
@@ -223,7 +238,7 @@ export class ObserveOnlyRunner {
             sourceEventKey,
             sourceType: "DATA_API_TRADE",
             sourceTimestamp: trade.timestamp,
-            isGap: this.gapActive,
+            isGap: eventIsGap(trade.timestamp),
             isCombo: activity.isCombo === true,
             activityConfirmed: true,
             trade,
@@ -235,7 +250,7 @@ export class ObserveOnlyRunner {
             sourceEventKey: activityEventKey(activity),
             sourceType: "DATA_API_ACTIVITY",
             sourceTimestamp: activity.timestamp,
-            isGap: this.gapActive,
+            isGap: eventIsGap(activity.timestamp),
             isCombo: ["SPLIT", "MERGE", "CONVERSION"].includes(activity.type),
             activityConfirmed: true,
             activity,
@@ -370,6 +385,7 @@ export class ObserveOnlyRunner {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
       this.lastPollCompletedAt = completedAt;
       this.gapActive = true;
+      this.gapCutoffAt = completedAt;
       return false;
     }
     this.store.commitSuccessfulPoll({
@@ -393,6 +409,7 @@ export class ObserveOnlyRunner {
     this.lastSuccessfulAt = completedAt;
     this.lastPollCompletedAt = completedAt;
     this.gapActive = false;
+    this.gapCutoffAt = null;
     return true;
   }
 

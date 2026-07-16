@@ -15,6 +15,7 @@ import {
   RULESET,
   RULESET_HASH,
   RULESET_SNAPSHOT_JSON,
+  stableJson,
   VERSIONS,
 } from "../../domain/versioning.js";
 import type { ReplayReport } from "../../replay/replay-engine.js";
@@ -24,6 +25,7 @@ import type { PositionBaseline } from "../../services/position-baseline.js";
 import type { CapitalEstimate } from "../../services/capital-estimator.js";
 import type { GoldenExpectation, GoldenResult } from "../../services/golden-expectations.js";
 import { decodeCapturePayload, storeCompressedCapturePayload, type CapturePayloadRow } from "./capture-payload.js";
+import { capitalSizingHash } from "../../execution/capital-sizing.js";
 
 export class Phase0Database {
   private readonly database: DatabaseSync;
@@ -31,7 +33,7 @@ export class Phase0Database {
 
   constructor(path: string, sourceVersion = resolveSourceVersion()) {
     this.database = new DatabaseSync(path);
-    this.database.exec("PRAGMA recursive_triggers=ON;");
+    this.database.exec("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=5000;");
     this.sourceVersion = sourceVersion;
   }
 
@@ -435,6 +437,46 @@ export class Phase0Database {
         throw error;
       }
     }
+    const exactSizingAndMarketConstraintsApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.20.0");
+    if (!exactSizingAndMarketConstraintsApplied) {
+      const exactSizingAndMarketConstraintsSql = readFileSync(
+        new URL("./025_exact_sizing_and_market_constraints.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(exactSizingAndMarketConstraintsSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.20.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const paperValidationCampaignApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.21.0");
+    if (!paperValidationCampaignApplied) {
+      const paperValidationCampaignSql = readFileSync(
+        new URL("./026_paper_validation_campaign.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(paperValidationCampaignSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.21.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
@@ -823,17 +865,25 @@ export class Phase0Database {
   }
 
   saveCapitalEstimate(targetId: string, sourceEventKeyValue: string | null, estimate: CapitalEstimate): void {
+    if ((estimate.capitalSizingRatio === null) !== (estimate.capitalSizingRatioHash === null)) {
+      throw new Error("CAPITAL_SIZING_RATIO_PAIR_REQUIRED");
+    }
+    if (estimate.capitalSizingRatio
+      && capitalSizingHash(estimate.capitalSizingRatio) !== estimate.capitalSizingRatioHash) {
+      throw new Error("CAPITAL_SIZING_RATIO_HASH_MISMATCH");
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO capital_estimates(
           capital_estimate_id, target_id, source_event_key, position_value_micros,
           wallet_balance_micros, target_visible_capital_micros, target_trade_amount_micros,
-          target_trade_capital_ratio_ppm, capital_estimate_status, capital_confidence,
+          target_trade_capital_ratio_ppm, capital_sizing_ratio_json, capital_sizing_ratio_hash,
+          capital_estimate_status, capital_confidence,
           capital_estimate_reason, position_snapshot_time, wallet_balance_snapshot_time,
           target_trade_timestamp, fallback_amount_micros, schema_version, strategy_version,
           risk_version, ruleset_snapshot_json, ruleset_hash, source_code_commit,
           source_code_dirty, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         estimate.capitalEstimateId,
@@ -844,6 +894,8 @@ export class Phase0Database {
         estimate.targetVisibleCapitalMicros,
         estimate.targetTradeAmountMicros,
         estimate.targetTradeCapitalRatioPpm,
+        estimate.capitalSizingRatio ? stableJson(estimate.capitalSizingRatio) : null,
+        estimate.capitalSizingRatioHash,
         estimate.capitalEstimateStatus,
         estimate.capitalConfidence,
         estimate.capitalEstimateReason,
@@ -863,6 +915,7 @@ export class Phase0Database {
     const existing = this.database.prepare(
       `SELECT target_id,source_event_key,position_value_micros,wallet_balance_micros,
               target_visible_capital_micros,target_trade_amount_micros,target_trade_capital_ratio_ppm,
+              capital_sizing_ratio_json,capital_sizing_ratio_hash,
               capital_estimate_status,capital_confidence,capital_estimate_reason,
               position_snapshot_time,wallet_balance_snapshot_time,target_trade_timestamp,
               fallback_amount_micros
@@ -876,6 +929,8 @@ export class Phase0Database {
       target_visible_capital_micros: estimate.targetVisibleCapitalMicros,
       target_trade_amount_micros: estimate.targetTradeAmountMicros,
       target_trade_capital_ratio_ppm: estimate.targetTradeCapitalRatioPpm,
+      capital_sizing_ratio_json: estimate.capitalSizingRatio ? stableJson(estimate.capitalSizingRatio) : null,
+      capital_sizing_ratio_hash: estimate.capitalSizingRatioHash,
       capital_estimate_status: estimate.capitalEstimateStatus,
       capital_confidence: estimate.capitalConfidence,
       capital_estimate_reason: estimate.capitalEstimateReason,

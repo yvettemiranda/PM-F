@@ -106,7 +106,11 @@ class QueueSource implements ObserveDataSource {
   }
 }
 
-function setup(baselinePositions: PublicPosition[] = [position("100")]): { databasePath: string; targetId: string } {
+function setup(baselinePositions: PublicPosition[] = [position("100")]): {
+  databasePath: string;
+  targetId: string;
+  baselineRunId: string;
+} {
   const directory = mkdtempSync(join(tmpdir(), "ni-k-observe-"));
   directories.push(directory);
   const databasePath = join(directory, "phase0.sqlite");
@@ -134,7 +138,7 @@ function setup(baselinePositions: PublicPosition[] = [position("100")]): { datab
   });
   database.savePositionBaseline(baseline);
   database.close();
-  return { databasePath, targetId };
+  return { databasePath, targetId, baselineRunId: baseline.baselineRunId };
 }
 
 function addBaseline(databasePath: string, snapshotTime: string, positions: PublicPosition[]): string {
@@ -170,6 +174,31 @@ afterEach(() => {
 });
 
 describe("ObserveOnlyRunner", () => {
+  it("marks one exactly identified abandoned run as interrupted", () => {
+    const env = setup();
+    const store = new ObserveStore(env.databasePath, sourceVersion);
+    const started = store.startRun(wallet, 15_000, baselineTime, 30_000, env.baselineRunId);
+    expect(store.interruptAbandonedRun(
+      started.observeRunId,
+      "2026-07-08T00:00:05.000Z",
+      "PAPER_CAMPAIGN_CRASH_RECOVERY",
+    )).toBe(true);
+    expect(store.interruptAbandonedRun(
+      started.observeRunId,
+      "2026-07-08T00:00:06.000Z",
+      "PAPER_CAMPAIGN_CRASH_RECOVERY",
+    )).toBe(false);
+    store.close();
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT state,stop_reason FROM observe_runs WHERE observe_run_id=?",
+    ).get(started.observeRunId)).toEqual({
+      state: "INTERRUPTED",
+      stop_reason: "PAPER_CAMPAIGN_CRASH_RECOVERY",
+    });
+    database.close();
+  });
+
   it("runs continuously, sorts input, and does not duplicate events or signals", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
@@ -788,6 +817,38 @@ describe("ObserveOnlyRunner", () => {
     store.close();
   });
 
+  it("keeps an event after runner startup eligible even when it arrives in the first poll", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const postStartTrade = trade({
+      transactionHash: "0xpost-start-first-poll",
+      timestamp: baselineSecond + 61,
+    });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([snapshot([postStartTrade], [position("110")], "2026-07-08T00:01:02.000Z")]),
+      { walletAddress: wallet, pollIntervalMs: 1_000, now: () => now },
+    );
+
+    runner.start();
+    now = new Date("2026-07-08T00:01:02.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, "2026-07-08T00:01:02.000Z", "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT execution_eligible,execution_block_reason,event_classification
+       FROM signals WHERE producer_mode='OBSERVE_ONLY'`,
+    ).get()).toEqual({
+      execution_eligible: 1,
+      execution_block_reason: null,
+      event_classification: "STANDARD_TRADE",
+    });
+    check.close();
+  });
+
   it("recovers a checkpoint after restart and marks downtime events as gaps", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
@@ -890,6 +951,39 @@ describe("ObserveOnlyRunner", () => {
     expect(started.gapFrom).toBe(newBaselineTime);
     secondStore.stopRun(started.observeRunId, now.toISOString(), "TEST_COMPLETE");
     secondStore.close();
+  });
+
+  it("uses an explicitly bound baseline even when a newer baseline exists", () => {
+    const { databasePath, baselineRunId } = setup();
+    addBaseline(databasePath, "2026-07-08T00:01:30.000Z", [position("250")]);
+    const now = new Date("2026-07-08T00:02:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([]),
+      {
+        walletAddress: wallet,
+        baselineRunId,
+        pollIntervalMs: 1_000,
+        staleRunAfterMs: 1_000,
+        now: () => now,
+      },
+    );
+
+    const started = runner.start();
+    expect(started.baseline.baselineRunId).toBe(baselineRunId);
+    store.stopRun(started.observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(started.observeRunId).baselineRunId).toBe(baselineRunId);
+    store.close();
+
+    const invalidStore = new ObserveStore(databasePath, sourceVersion);
+    const invalid = new ObserveOnlyRunner(
+      invalidStore,
+      new QueueSource([]),
+      { walletAddress: wallet, baselineRunId: "missing-baseline", pollIntervalMs: 1_000, now: () => now },
+    );
+    expect(() => invalid.start()).toThrow("OBSERVE_BASELINE_NOT_READY_OR_WALLET_MISMATCH:missing-baseline");
+    invalidStore.close();
   });
 
   it("sorts a 3-1-2 response and reaches the correct final projection", async () => {
@@ -1199,11 +1293,29 @@ describe("ObserveOnlyRunner", () => {
 
     const check = new DatabaseSync(databasePath);
     const context = check.prepare(
-      `SELECT c.target_trade_capital_ratio_ppm,ce.source_event_key
+      `SELECT c.target_trade_capital_ratio_ppm,ce.source_event_key,
+              c.capital_sizing_ratio_json context_sizing_json,
+              c.capital_sizing_ratio_hash context_sizing_hash,
+              ce.capital_sizing_ratio_json estimate_sizing_json,
+              ce.capital_sizing_ratio_hash estimate_sizing_hash
        FROM signal_execution_contexts c JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id`,
-    ).get() as { target_trade_capital_ratio_ppm: string; source_event_key: string };
+    ).get() as {
+      target_trade_capital_ratio_ppm: string;
+      source_event_key: string;
+      context_sizing_json: string;
+      context_sizing_hash: string;
+      estimate_sizing_json: string;
+      estimate_sizing_hash: string;
+    };
     expect(BigInt(context.target_trade_capital_ratio_ppm)).toBeGreaterThan(0n);
     expect(context.source_event_key).toBeTruthy();
+    expect(context.context_sizing_json).toBe(context.estimate_sizing_json);
+    expect(context.context_sizing_hash).toBe(context.estimate_sizing_hash);
+    expect(JSON.parse(context.context_sizing_json)).toMatchObject({
+      calculationVersion: "EXACT_RATIONAL_V1",
+      targetPriceUnits: "500000000000000000",
+      targetSizeMicros: "10000000",
+    });
     expect(() => check.prepare("UPDATE signal_execution_contexts SET market_end_time=?").run("2099-01-01T00:00:00Z")).toThrow("immutable");
     check.close();
   });

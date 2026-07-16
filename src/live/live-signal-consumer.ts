@@ -5,6 +5,11 @@ import type { SourceVersion } from "../infra/source-version.js";
 import type { PaperSignalEnvelope } from "../paper/types.js";
 import { RiskManager } from "../risk/risk-manager.js";
 import type { LiveExecutor } from "./live-executor.js";
+import {
+  calculateBuyCapitalSizing,
+  type BuyCapitalSizingDecision,
+  type ExactCapitalRatioSnapshot,
+} from "../execution/capital-sizing.js";
 
 export interface LiveSignalConsumptionResult {
   signalId: string;
@@ -68,12 +73,12 @@ export class LiveSignalConsumer {
     const results: LiveSignalConsumptionResult[] = [];
     for (const row of rows) {
       let loaded: LoadedLiveSignal;
-      let requested: { amount: bigint | null; size: bigint | null };
+      let requested: { amount: bigint | null; size: bigint | null; capitalSizingDecision: BuyCapitalSizingDecision | null };
       try {
         loaded = this.loadSignal(row.signal_id, row.signal_sequence);
         requested = loaded.signal.signalType === "TARGET_BUY"
-          ? { amount: this.buyAmount(accountId, loaded.signal), size: null }
-          : { amount: null, size: this.sellSize(accountId, loaded.signal) };
+          ? { ...this.buyAmount(accountId, loaded.signal), size: null }
+          : { amount: null, size: this.sellSize(accountId, loaded.signal), capitalSizingDecision: null };
       } catch (error) {
         const reason = error instanceof Error ? error.message : "LIVE_SIGNAL_PREPARATION_FAILED";
         this.recordQuarantine(accountId, row.signal_id, row.signal_sequence, "PRE_RISK_VALIDATION", reason);
@@ -92,6 +97,7 @@ export class LiveSignalConsumer {
         signal,
         requestedAmountMicros: requested.amount,
         requestedSizeMicros: requested.size,
+        capitalSizingDecision: requested.capitalSizingDecision,
         now: this.now().toISOString(),
       });
       let result: { executionId: string; state: string };
@@ -355,17 +361,14 @@ export class LiveSignalConsumer {
     }
   }
 
-  private buyAmount(accountId: string, signal: PaperSignalEnvelope): bigint | null {
-    const capital = signal.capitalDecision;
-    if (!capital || capital.confidence === "LOW" || capital.status === "FAILED") return null;
-    if (capital.confidence === "MEDIUM") return BigInt(capital.fallbackAmountMicros);
-    if (capital.status !== "COMPLETE") return null;
-    const ratioPpm = signal.context?.targetTradeCapitalRatioPpm ?? capital.ratioPpm;
-    if (ratioPpm === null || !/^\d+$/.test(ratioPpm)) return null;
+  private buyAmount(accountId: string, signal: PaperSignalEnvelope): {
+    amount: bigint | null;
+    capitalSizingDecision: BuyCapitalSizingDecision;
+  } {
     const account = this.database.prepare(
       "SELECT initial_bankroll_micros FROM live_accounts WHERE live_account_id=?",
     ).get(accountId) as { initial_bankroll_micros: string } | undefined;
-    if (!account) return null;
+    if (!account) throw new Error(`LIVE_ACCOUNT_NOT_FOUND:${accountId}`);
     const cashRows = this.database.prepare(
       "SELECT cash_delta_micros,reserved_delta_micros FROM live_cash_ledger WHERE live_account_id=?",
     ).all(accountId) as unknown as Array<{ cash_delta_micros: string; reserved_delta_micros: string }>;
@@ -374,8 +377,19 @@ export class LiveSignalConsumer {
       reserved: total.reserved + BigInt(row.reserved_delta_micros),
     }), { cash: BigInt(account.initial_bankroll_micros), reserved: 0n });
     const available = projection.cash > projection.reserved ? projection.cash - projection.reserved : 0n;
-    const amount = (available * BigInt(ratioPpm)) / 1_000_000n;
-    return amount > 0n ? amount : null;
+    const capitalSizingDecision = calculateBuyCapitalSizing({
+      accountCapitalMicros: available,
+      capitalDecision: signal.capitalDecision,
+      exactRatio: signal.context?.capitalSizingRatio ?? null,
+      exactRatioHash: signal.context?.capitalSizingRatioHash ?? null,
+    });
+    return {
+      amount: capitalSizingDecision.result === "CALCULATED"
+        && capitalSizingDecision.calculatedAmountMicros !== null
+        ? BigInt(capitalSizingDecision.calculatedAmountMicros)
+        : null,
+      capitalSizingDecision,
+    };
   }
 
   private sellSize(accountId: string, signal: PaperSignalEnvelope): bigint | null {
@@ -585,6 +599,7 @@ export class LiveSignalConsumer {
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               s.ruleset_hash signal_ruleset_hash,
               c.context_id,c.signal_id context_signal_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
               c.source_code_commit context_source_code_commit,
@@ -635,6 +650,10 @@ export class LiveSignalConsumer {
       signalId: row.signal_id as string,
       capitalDecisionId: row.capital_decision_id as string | null,
       targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
+      capitalSizingRatio: row.capital_sizing_ratio_json
+        ? JSON.parse(row.capital_sizing_ratio_json as string) as ExactCapitalRatioSnapshot
+        : null,
+      capitalSizingRatioHash: row.capital_sizing_ratio_hash as string | null,
       targetTradeTimestamp: row.target_trade_timestamp as string,
       marketEndTime: row.market_end_time as string,
       marketMetadataSnapshot: metadata!,

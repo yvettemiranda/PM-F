@@ -44,12 +44,32 @@ export function buildSignalExecutionContext(input: {
     tokens: input.market.tokens,
   };
   const metadataHash = createHash("sha256").update(stableJson(metadata)).digest("hex");
+  const capitalSizingRatio = input.signal.signalType === "TARGET_BUY"
+    ? input.capitalDecision?.capitalSizingRatio ?? null
+    : null;
+  const capitalSizingRatioHash = input.signal.signalType === "TARGET_BUY"
+    ? input.capitalDecision?.capitalSizingRatioHash ?? null
+    : null;
+  if (
+    input.signal.signalType === "TARGET_BUY"
+    && input.capitalDecision?.capitalConfidence === "HIGH"
+    && input.capitalDecision.capitalEstimateStatus === "COMPLETE"
+    && (!capitalSizingRatio || !capitalSizingRatioHash)
+  ) throw new Error(`CAPITAL_SIZING_RATIO_REQUIRED:${input.signal.signalId}`);
+  if (
+    capitalSizingRatio
+    && (
+      capitalSizingRatio.targetPriceUnits !== input.signal.targetPriceUnits
+      || capitalSizingRatio.targetSizeMicros !== input.signal.targetSizeMicros
+    )
+  ) throw new Error(`CAPITAL_SIZING_SIGNAL_MISMATCH:${input.signal.signalId}`);
   const identity = [
     input.signal.signalId,
     input.capitalDecision?.capitalEstimateId ?? "NONE",
     String(trade.timestamp),
     input.market.end_date_iso,
     metadataHash,
+    capitalSizingRatioHash ?? "NO_EXACT_CAPITAL_RATIO",
     RULESET_HASH,
   ].join("|");
   return {
@@ -59,6 +79,8 @@ export function buildSignalExecutionContext(input: {
     targetTradeCapitalRatioPpm: input.signal.signalType === "TARGET_BUY"
       ? input.capitalDecision?.targetTradeCapitalRatioPpm ?? null
       : null,
+    capitalSizingRatio,
+    capitalSizingRatioHash,
     targetTradeTimestamp: new Date(trade.timestamp * 1_000).toISOString(),
     marketEndTime: input.market.end_date_iso,
     marketMetadataSnapshot: metadata,

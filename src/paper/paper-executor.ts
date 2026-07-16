@@ -9,6 +9,18 @@ import {
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import { isOrderbookUnavailableError } from "../execution/market-data.js";
+import {
+  evaluateBuyMarketConstraint,
+  evaluateSellMarketConstraint,
+  orderbookConstraintAvailability,
+  parseMarketOrderConstraints,
+  type MarketOrderConstraintEvidence,
+} from "../execution/market-order-constraints.js";
+import {
+  calculateBuyCapitalSizing,
+  type BuyCapitalSizingDecision,
+  type ExactCapitalRatioSnapshot,
+} from "../execution/capital-sizing.js";
 import type {
   ExecutorBalanceQuery,
   ExecutorExecutionResult,
@@ -21,6 +33,10 @@ import type {
 import { assertExecutionEnvelopeIntegrity } from "../execution/signal-integrity.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
+import {
+  assertPaperMarketSnapshotCaptureBinding,
+  persistPublicMarketCapture,
+} from "../infra/sqlite/public-market-capture.js";
 import { calculateRealizedPnl } from "../pnl/pnl-model.js";
 import { PortfolioProjectionService } from "../portfolio/portfolio-projection.js";
 import { PaperAcceptanceSummaryService, type PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
@@ -39,6 +55,8 @@ import type {
   PaperResolutionSnapshot,
   PaperSignalEnvelope,
 } from "./types.js";
+
+export const PAPER_CONSUMER_CUTOFF_SIGNAL_SENTINEL = "\u{10FFFF}";
 
 const PPM = 1_000_000n;
 
@@ -223,6 +241,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     ).get(accountId, signalId) as { paper_execution_id: string | null } | undefined;
     if (existing?.paper_execution_id) return existing.paper_execution_id;
     const envelope = this.loadSignal(signalId);
+    if (envelope.status !== "PUBLISHED") throw new Error("SIGNAL_NOT_PUBLISHED");
+    if (!envelope.executionEligible) {
+      throw new Error(envelope.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE");
+    }
     const executionId = this.createExecutionForSignal(accountId, envelope);
     const row = this.execution(executionId);
     if (!signal?.aborted && ["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)) {
@@ -241,6 +263,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       `SELECT s.signal_id FROM signals s
        JOIN raw_events r ON r.source_event_key=s.source_event_key
        WHERE r.target_id=? AND s.created_at>=? AND s.status='PUBLISHED'
+         AND s.execution_eligible=1
          AND s.created_at<=?
          AND (? IS NULL OR s.created_at>? OR (s.created_at=? AND s.signal_id>?))
        ORDER BY s.created_at,s.signal_id`,
@@ -274,7 +297,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (!normalizedReason) throw new Error("PAPER_CONSUMER_CUTOFF_REASON_REQUIRED");
     const account = this.accountRow(accountId);
     if (account.status !== "ACTIVE") throw new Error(`PAPER_ACCOUNT_NOT_ACTIVE:${accountId}`);
-    const checkpointSignalSentinel = "\u{10FFFF}";
+    const checkpointSignalSentinel = PAPER_CONSUMER_CUTOFF_SIGNAL_SENTINEL;
     const auditedAt = this.now().toISOString();
 
     this.database.exec("BEGIN IMMEDIATE");
@@ -369,6 +392,22 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
+  /**
+   * Safe Session shutdown boundary: waiting BUYs are not carried across an
+   * offline gap. Each cancellation uses the normal transactional Reservation
+   * release path; existing Positions and pending exits are intentionally kept.
+   */
+  async cancelWaitingBuys(accountId: string, reason: string): Promise<number> {
+    const rows = this.database.prepare(
+      `SELECT paper_execution_id FROM paper_executions
+       WHERE paper_account_id=? AND execution_type='TARGET_BUY'
+         AND state='WAITING_EXECUTION'
+       ORDER BY created_at,paper_execution_id`,
+    ).all(accountId) as Array<{ paper_execution_id: string }>;
+    for (const row of rows) await this.cancelExecution(row.paper_execution_id, reason);
+    return rows.length;
+  }
+
   async getPosition(query: ExecutorPositionQuery): Promise<unknown> {
     if (query.positionId) return this.position(query.positionId);
     return this.database.prepare(
@@ -410,8 +449,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return this.marketDataHealthSnapshot(row);
   }
 
-  acceptanceSummary(accountId: string): PaperAcceptanceSummary {
-    return new PaperAcceptanceSummaryService(this.databasePath, { now: this.now }).summarize(accountId);
+  acceptanceSummary(
+    accountId: string,
+    window: { startAt?: string; endAt?: string } = {},
+  ): PaperAcceptanceSummary {
+    return new PaperAcceptanceSummaryService(this.databasePath, { now: this.now }).summarize(accountId, window);
   }
 
   async recoverMarketData(accountId: string, signal?: AbortSignal): Promise<void> {
@@ -440,6 +482,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
         if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
           this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, "ORDERBOOK_STALE", `Orderbook age ${String(age)}ms`);
+          continue;
+        }
+        const constraintError = orderbookConstraintAvailability({
+          minOrderSize: book.minOrderSize,
+          tickSize: book.tickSize,
+        });
+        if (constraintError) {
+          this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, constraintError, constraintError);
           continue;
         }
         if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null || fee.exponent === null) {
@@ -527,6 +577,21 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.updatePendingReason(execution, "ORDERBOOK_STALE");
       return execution.state;
     }
+    const constraintError = orderbookConstraintAvailability({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
+    });
+    if (constraintError) {
+      this.recordMarketDataFailure(
+        execution.paper_account_id,
+        execution.asset_id,
+        execution.condition_id,
+        constraintError,
+        constraintError,
+      );
+      this.recordUnavailableMarketConstraint(execution, book, fee, age, constraintError);
+      return execution.state;
+    }
     if (!this.recordMarketDataSuccess(execution.paper_account_id, execution.asset_id, execution.condition_id)) {
       return execution.state;
     }
@@ -598,6 +663,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           "ORDERBOOK_STALE",
           `Orderbook age ${String(age)}ms during stop-loss check`,
         );
+        continue;
+      }
+      const constraintError = orderbookConstraintAvailability({
+        minOrderSize: book.minOrderSize,
+        tickSize: book.tickSize,
+      });
+      if (constraintError) {
+        this.recordMarketDataFailure(accountId, first.asset_id, first.condition_id, constraintError, constraintError);
         continue;
       }
       for (const position of group) {
@@ -801,6 +874,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           signal,
           requestedAmountMicros: capital.amount,
           requestedSizeMicros: null,
+          capitalSizingDecision: capital.evidence,
           now,
         });
         if (risk.decision === "REJECT") {
@@ -864,28 +938,25 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     amount: bigint | null;
     mode: "PROPORTIONAL" | "FIXED_FALLBACK" | null;
     rejectReason: string | null;
+    evidence: BuyCapitalSizingDecision;
   } {
     const capital = signal.capitalDecision;
-    if (!capital || capital.confidence === "LOW" || capital.status === "FAILED") {
-      return { amount: null, mode: null, rejectReason: "CAPITAL_CONFIDENCE_LOW" };
-    }
     const available = BigInt(account.cash_balance_micros) - BigInt(account.reserved_balance_micros);
-    let amount: bigint;
-    let mode: "PROPORTIONAL" | "FIXED_FALLBACK";
-    if (capital.status === "COMPLETE" && capital.confidence === "HIGH") {
-      const ratioPpm = signal.context?.targetTradeCapitalRatioPpm ?? capital.ratioPpm;
-      if (ratioPpm === null) return { amount: null, mode: null, rejectReason: "CAPITAL_RATIO_UNAVAILABLE" };
-      amount = (available * BigInt(ratioPpm)) / PPM;
-      mode = "PROPORTIONAL";
-    } else if (capital.confidence === "MEDIUM") {
-      amount = BigInt(capital.fallbackAmountMicros);
-      mode = "FIXED_FALLBACK";
-    } else {
-      return { amount: null, mode: null, rejectReason: "CAPITAL_DECISION_UNSUPPORTED" };
-    }
-    if (amount <= 0n) return { amount: null, mode: null, rejectReason: "BUY_AMOUNT_ZERO" };
-    if (amount > available) return { amount: null, mode: null, rejectReason: "INSUFFICIENT_AVAILABLE_CASH" };
-    return { amount, mode, rejectReason: null };
+    const evidence = calculateBuyCapitalSizing({
+      accountCapitalMicros: available,
+      capitalDecision: capital,
+      exactRatio: signal.context?.capitalSizingRatio ?? null,
+      exactRatioHash: signal.context?.capitalSizingRatioHash ?? null,
+    });
+    const amount = evidence.result === "CALCULATED" && evidence.calculatedAmountMicros !== null
+      ? BigInt(evidence.calculatedAmountMicros)
+      : null;
+    return {
+      amount,
+      mode: evidence.capitalMode,
+      rejectReason: evidence.reason,
+      evidence,
+    };
   }
 
   private buyDeadline(signal: PaperSignalEnvelope): string {
@@ -973,16 +1044,26 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const bounds = this.database.prepare(
       "SELECT price_limit_lower_units,price_limit_upper_units FROM paper_executions WHERE paper_execution_id=?",
     ).get(execution.paper_execution_id) as { price_limit_lower_units: string; price_limit_upper_units: string };
+    const constraint = evaluateBuyMarketConstraint({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
+      requestedAmountMicros: BigInt(reservation.remaining_amount_micros),
+      upperPriceUnits: BigInt(bounds.price_limit_upper_units),
+    });
+    if (constraint.result !== "PASS") {
+      this.rejectBuyForMarketConstraint(execution, book, fee, age, constraint);
+      return "REJECTED";
+    }
     const matched = matchPaperBuy({
       asks: book.asks,
-      reservationMicros: BigInt(reservation.remaining_amount_micros),
+      reservationMicros: BigInt(constraint.normalizedOrderAmountMicros!),
       lowerPriceUnits: BigInt(bounds.price_limit_lower_units),
-      upperPriceUnits: BigInt(bounds.price_limit_upper_units),
+      upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
     });
     if (BigInt(matched.filledSizeMicros) === 0n) {
-      this.recordNoFillAttempt(execution, book, fee, "PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY", age);
+      this.recordNoFillAttempt(execution, book, fee, "PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY", age, constraint);
       return "WAITING_EXECUTION";
     }
     const now = this.now().toISOString();
@@ -998,6 +1079,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, constraint, now);
       this.insertOrder(orderId, execution, "BUY", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
       this.database.prepare(
         `INSERT INTO paper_positions(
@@ -1105,13 +1187,30 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       ? rules.maxSlippagePpm
       : rules.followSellMaxSlippagePpm;
     const minimum = ratio(target, 1_000_000 - slippage);
-    const matched = matchPaperSell({ bids: book.bids, requestedSizeMicros: remaining, minimumPriceUnits: minimum, feeRatePpm: BigInt(fee.feeRatePpm!), feeExponent: fee.exponent! });
+    const constraint = evaluateSellMarketConstraint({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
+      requestedSizeMicros: remaining,
+      minimumPriceUnits: minimum,
+    });
+    if (constraint.result !== "PASS") {
+      this.keepSellPendingForMarketConstraint(execution, book, fee, age, constraint);
+      return execution.state;
+    }
+    const matched = matchPaperSell({
+      bids: book.bids,
+      requestedSizeMicros: BigInt(constraint.normalizedOrderSizeMicros!),
+      minimumPriceUnits: BigInt(constraint.effectivePriceUnits!),
+      feeRatePpm: BigInt(fee.feeRatePpm!),
+      feeExponent: fee.exponent!,
+    });
     if (BigInt(matched.filledSizeMicros) === 0n) {
-      this.recordNoFillAttempt(execution, book, fee, "SLIPPAGE_OR_LIQUIDITY_LIMIT", age);
+      this.recordNoFillAttempt(execution, book, fee, "SLIPPAGE_OR_LIQUIDITY_LIMIT", age, constraint);
       return execution.state;
     }
     const now = this.now().toISOString();
-    const finalState: PaperExecutionState = matched.complete ? "EXECUTED"
+    const executionComplete = alreadyFilled + BigInt(matched.filledSizeMicros) >= requested;
+    const finalState: PaperExecutionState = executionComplete ? "EXECUTED"
       : execution.execution_type === "STOP_LOSS" ? "STOP_EXIT_PENDING" : "EXIT_PENDING";
     const orderId = hash([execution.paper_execution_id, execution.attempt_count + 1, "FAK"]);
     const bookId = this.orderbookId(book);
@@ -1119,6 +1218,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, constraint, now);
       this.insertOrder(orderId, execution, "SELL", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
       this.insertFills(orderId, execution.paper_execution_id, null, "SELL", matched, now);
       this.insertFeeLedger(execution.paper_execution_id, orderId, feeId, matched.feeMicros, now);
@@ -1131,11 +1231,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         (alreadyFilled + BigInt(matched.filledSizeMicros)).toString(),
         (BigInt(execution.filled_notional_micros) + BigInt(matched.filledNotionalMicros)).toString(),
         (BigInt(execution.fee_micros) + BigInt(matched.feeMicros)).toString(),
-        matched.complete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING",
+        executionComplete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING",
         now,
         execution.paper_execution_id,
       );
-      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, finalState, matched.complete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING", now);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, finalState, executionComplete ? "SELL_COMPLETED" : "SELL_PARTIAL_PENDING", now);
       this.database.exec("COMMIT");
       return finalState;
     } catch (error) {
@@ -1507,6 +1607,129 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
+  private rejectBuyForMarketConstraint(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+    age: number,
+    evidence: MarketOrderConstraintEvidence,
+  ): void {
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, evidence, now);
+      this.releaseReservation(execution, evidence.reason, now);
+      this.database.prepare(
+        "UPDATE paper_executions SET state='REJECTED',reason=?,updated_at=? WHERE paper_execution_id=?",
+      ).run(evidence.reason, now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, "REJECTED", evidence.reason, now);
+      this.audit("PAPER_EXECUTION", execution.paper_execution_id, "REJECTED", evidence.reason, now, {
+        marketConstraintEvidenceHash: evidence.evidenceHash,
+        requestedAmountMicros: evidence.proposedAmountMicros,
+        normalizedOrderAmountMicros: evidence.normalizedOrderAmountMicros,
+        minOrderSizeMicros: evidence.minOrderSizeMicros,
+      });
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private keepSellPendingForMarketConstraint(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+    age: number,
+    evidence: MarketOrderConstraintEvidence,
+  ): void {
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, evidence, now);
+      this.database.prepare("UPDATE paper_executions SET reason=?,updated_at=? WHERE paper_execution_id=?")
+        .run(evidence.reason, now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, execution.state, evidence.reason, now);
+      this.audit("PAPER_EXECUTION", execution.paper_execution_id, "EXIT_WAITING", evidence.reason, now, {
+        marketConstraintEvidenceHash: evidence.evidenceHash,
+        requestedSizeMicros: evidence.proposedSizeMicros,
+        minOrderSizeMicros: evidence.minOrderSizeMicros,
+      });
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private recordUnavailableMarketConstraint(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+    age: number,
+    reason: string,
+  ): void {
+    let evidence: MarketOrderConstraintEvidence;
+    if (execution.execution_type === "TARGET_BUY") {
+      const reservation = this.database.prepare(
+        "SELECT remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=? AND status='ACTIVE'",
+      ).get(execution.paper_execution_id) as { remaining_amount_micros: string } | undefined;
+      const bounds = this.database.prepare(
+        "SELECT price_limit_upper_units FROM paper_executions WHERE paper_execution_id=?",
+      ).get(execution.paper_execution_id) as { price_limit_upper_units: string | null } | undefined;
+      if (!reservation || !bounds?.price_limit_upper_units) {
+        throw new Error("PAPER_MARKET_CONSTRAINT_CONTEXT_UNAVAILABLE");
+      }
+      evidence = evaluateBuyMarketConstraint({
+        minOrderSize: book.minOrderSize,
+        tickSize: book.tickSize,
+        requestedAmountMicros: BigInt(reservation.remaining_amount_micros),
+        upperPriceUnits: BigInt(bounds.price_limit_upper_units),
+      });
+    } else {
+      const requested = BigInt(execution.requested_size_micros ?? "0");
+      const remaining = requested - BigInt(execution.filled_size_micros);
+      const target = BigInt(execution.target_price_units ?? "0");
+      const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+      if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
+      const slippage = execution.execution_type === "STOP_LOSS"
+        ? rules.maxSlippagePpm
+        : rules.followSellMaxSlippagePpm;
+      evidence = evaluateSellMarketConstraint({
+        minOrderSize: book.minOrderSize,
+        tickSize: book.tickSize,
+        requestedSizeMicros: remaining,
+        minimumPriceUnits: ratio(target, 1_000_000 - slippage),
+      });
+    }
+    if (evidence.result !== "UNAVAILABLE" || evidence.reason !== reason) {
+      throw new Error(`PAPER_MARKET_CONSTRAINT_EVIDENCE_MISMATCH:${reason}:${evidence.reason}`);
+    }
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, evidence, now);
+      this.database.prepare("UPDATE paper_executions SET reason=?,updated_at=? WHERE paper_execution_id=?")
+        .run(reason, now, execution.paper_execution_id);
+      this.transition("PAPER_EXECUTION", execution.paper_execution_id, execution.state, execution.state, reason, now);
+      this.audit("PAPER_EXECUTION", execution.paper_execution_id, "MARKET_CONSTRAINT_UNAVAILABLE", reason, now, {
+        marketConstraintEvidenceHash: evidence.evidenceHash,
+        marketDataState: this.getMarketDataHealth(
+          execution.paper_account_id,
+          execution.asset_id,
+          execution.condition_id,
+        ).state,
+      });
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private releaseReservation(execution: ExecutionRow, reason: string, now: string): void {
     const reservation = this.database.prepare(
       "SELECT reservation_id,remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=? AND status='ACTIVE'",
@@ -1534,7 +1757,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     ).run(randomUUID(), execution.paper_account_id, execution.paper_execution_id, (-amount).toString(), account.cash_balance_micros, reservedAfter.toString(), hash([execution.paper_execution_id, "RELEASE", reason]), now);
   }
 
-  private recordNoFillAttempt(execution: ExecutionRow, book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, reason: string, age: number): void {
+  private recordNoFillAttempt(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+    reason: string,
+    age: number,
+    constraint?: MarketOrderConstraintEvidence,
+  ): void {
     const now = this.now().toISOString();
     const bookId = this.orderbookId(book);
     const feeId = this.feeId(fee);
@@ -1542,6 +1772,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.saveMarketSnapshots(book, fee, age);
+      if (constraint) this.insertMarketConstraintEvidence(execution, book, constraint, now);
       const empty = { levels: [], filledSizeMicros: "0", filledNotionalMicros: "0", feeMicros: "0", vwapPriceUnits: null, complete: false };
       this.insertOrder(orderId, execution, execution.execution_type === "TARGET_BUY" ? "BUY" : "SELL", "NO_FILL", empty, bookId, feeId, reason, now);
       this.database.prepare("UPDATE paper_executions SET attempt_count=attempt_count+1,reason=?,updated_at=? WHERE paper_execution_id=?")
@@ -1559,22 +1790,159 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   private saveMarketSnapshots(book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): void {
-    const payload = { bids: book.bids, asks: book.asks };
+    const orderbookCaptureId = persistPublicMarketCapture(this.database, book.publicCapture, {
+      endpoint: "clob-orderbook",
+      requestUrl: book.sourceUrl,
+      fetchedAt: book.receivedAt,
+    });
+    const feeCaptureId = persistPublicMarketCapture(this.database, fee.publicCapture, {
+      endpoint: "clob-market-info",
+      requestUrl: fee.sourceUrl,
+      fetchedAt: fee.snapshotTime,
+    });
+    const payload = {
+      bids: book.bids,
+      asks: book.asks,
+      minOrderSize: book.minOrderSize ?? null,
+      tickSize: book.tickSize ?? null,
+    };
+    const parsed = parseMarketOrderConstraints({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
+    });
+    const orderbookSnapshotId = this.orderbookId(book);
     this.database.prepare(
       `INSERT OR IGNORE INTO paper_orderbook_snapshots(
         orderbook_snapshot_id,asset_id,condition_id,market_snapshot_time,received_at,
-        data_age_ms,payload_hash,bids_json,asks_json,source_url,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(this.orderbookId(book), book.assetId, book.conditionId, book.marketSnapshotTime, book.receivedAt, age, createHash("sha256").update(stableJson(payload)).digest("hex"), JSON.stringify(book.bids), JSON.stringify(book.asks), book.sourceUrl, this.now().toISOString());
+        data_age_ms,payload_hash,bids_json,asks_json,source_url,min_order_size,
+        min_order_size_micros,tick_size,tick_size_units,source_capture_id,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      orderbookSnapshotId,
+      book.assetId,
+      book.conditionId,
+      book.marketSnapshotTime,
+      book.receivedAt,
+      age,
+      createHash("sha256").update(stableJson(payload)).digest("hex"),
+      JSON.stringify(book.bids),
+      JSON.stringify(book.asks),
+      book.sourceUrl,
+      book.minOrderSize ?? null,
+      "error" in parsed ? null : parsed.minOrderSizeMicros.toString(),
+      book.tickSize ?? null,
+      "error" in parsed ? null : parsed.tickSizeUnits.toString(),
+      orderbookCaptureId,
+      this.now().toISOString(),
+    );
+    assertPaperMarketSnapshotCaptureBinding(
+      this.database,
+      "paper_orderbook_snapshots",
+      "orderbook_snapshot_id",
+      orderbookSnapshotId,
+      orderbookCaptureId,
+    );
+    const feeSnapshotId = this.feeId(fee);
     this.database.prepare(
       `INSERT OR IGNORE INTO paper_fee_snapshots(
-        fee_snapshot_id,asset_id,fee_rate_ppm,base_fee,fee_exponent,status,source_url,snapshot_time,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(this.feeId(fee), fee.assetId, fee.feeRatePpm, fee.baseFee, fee.exponent, fee.status, fee.sourceUrl, fee.snapshotTime, this.now().toISOString());
+        fee_snapshot_id,asset_id,fee_rate_ppm,base_fee,fee_exponent,status,source_url,
+        snapshot_time,source_capture_id,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      feeSnapshotId, fee.assetId, fee.feeRatePpm, fee.baseFee, fee.exponent,
+      fee.status, fee.sourceUrl, fee.snapshotTime, feeCaptureId, this.now().toISOString(),
+    );
+    assertPaperMarketSnapshotCaptureBinding(
+      this.database,
+      "paper_fee_snapshots",
+      "fee_snapshot_id",
+      feeSnapshotId,
+      feeCaptureId,
+    );
   }
 
   private orderbookId(book: PaperOrderbookSnapshot): string {
-    return hash([book.assetId, book.marketSnapshotTime, stableJson({ bids: book.bids, asks: book.asks })]);
+    return hash([book.assetId, book.marketSnapshotTime, book.receivedAt, book.sourceUrl, stableJson({
+      bids: book.bids,
+      asks: book.asks,
+      minOrderSize: book.minOrderSize ?? null,
+      tickSize: book.tickSize ?? null,
+    })]);
+  }
+
+  private insertMarketConstraintEvidence(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    evidence: MarketOrderConstraintEvidence,
+    now: string,
+  ): void {
+    const evidenceJson = stableJson(evidence);
+    const evidenceId = hash([
+      execution.paper_execution_id,
+      this.orderbookId(book),
+      evidence.side,
+      evidence.evidenceHash,
+    ]);
+    const inserted = this.database.prepare(
+      `INSERT OR IGNORE INTO paper_market_constraint_evidence(
+        market_constraint_evidence_id,paper_execution_id,orderbook_snapshot_id,attempt_sequence,side,
+        check_result,reason,min_order_size,min_order_size_micros,tick_size,tick_size_units,
+        proposed_amount_micros,normalized_order_amount_micros,proposed_size_micros,
+        normalized_order_size_micros,
+        effective_price_units,derived_min_notional_micros,price_rounding,evidence_json,
+        evidence_hash,ruleset_hash,source_code_commit,source_code_dirty,config_version,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      evidenceId,
+      execution.paper_execution_id,
+      this.orderbookId(book),
+      execution.attempt_count + 1,
+      evidence.side,
+      evidence.result,
+      evidence.reason,
+      evidence.minOrderSize,
+      evidence.minOrderSizeMicros,
+      evidence.tickSize,
+      evidence.tickSizeUnits,
+      evidence.proposedAmountMicros,
+      evidence.normalizedOrderAmountMicros,
+      evidence.proposedSizeMicros,
+      evidence.normalizedOrderSizeMicros,
+      evidence.effectivePriceUnits,
+      evidence.derivedMinNotionalMicros,
+      evidence.priceRounding,
+      evidenceJson,
+      evidence.evidenceHash,
+      execution.ruleset_hash,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      execution.config_version,
+      now,
+    );
+    if (Number(inserted.changes) === 0) {
+      const existing = this.database.prepare(
+        `SELECT market_constraint_evidence_id,evidence_json,evidence_hash
+         FROM paper_market_constraint_evidence
+         WHERE paper_execution_id=? AND attempt_sequence=? AND orderbook_snapshot_id=? AND side=?`,
+      ).get(
+        execution.paper_execution_id,
+        execution.attempt_count + 1,
+        this.orderbookId(book),
+        evidence.side,
+      ) as {
+        market_constraint_evidence_id: string;
+        evidence_json: string;
+        evidence_hash: string;
+      } | undefined;
+      if (
+        !existing
+        || existing.market_constraint_evidence_id !== evidenceId
+        || existing.evidence_json !== evidenceJson
+        || existing.evidence_hash !== evidence.evidenceHash
+      ) {
+        throw new Error(`PAPER_MARKET_CONSTRAINT_EVIDENCE_CONFLICT:${execution.paper_execution_id}`);
+      }
+    }
   }
 
   private feeId(fee: PaperFeeSnapshot): string {
@@ -2029,6 +2397,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
               s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
               c.source_code_commit context_source_code_commit,
@@ -2061,6 +2430,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         signalId: row.signal_id as string,
         capitalDecisionId: row.capital_decision_id as string | null,
         targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
+        capitalSizingRatio: row.capital_sizing_ratio_json
+          ? JSON.parse(row.capital_sizing_ratio_json as string) as ExactCapitalRatioSnapshot
+          : null,
+        capitalSizingRatioHash: row.capital_sizing_ratio_hash as string | null,
         targetTradeTimestamp: row.target_trade_timestamp as string,
         marketEndTime: row.market_end_time as string,
         marketMetadataSnapshot: JSON.parse(row.market_metadata_snapshot_json as string),

@@ -15,6 +15,7 @@ import { PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS, scaledToDecimal } from "../doma
 import { RULESET, RULESET_HASH } from "../domain/versioning.js";
 import { registeredExecutionRules, registeredStopLossRules } from "../domain/ruleset-registry.js";
 import { executableSellVwap, matchExecutionBuy, matchExecutionSell, type ExecutionMatchResult } from "../execution/orderbook-matching.js";
+import { evaluateBuyMarketConstraint, evaluateSellMarketConstraint } from "../execution/market-order-constraints.js";
 import type { ExecutionFeeSnapshot, ExecutionOrderbookSnapshot } from "../execution/market-data.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
 import { DisabledOrderAdapter } from "./disabled-order-adapter.js";
@@ -1770,11 +1771,32 @@ export class LiveExecutor implements ExecutorInterface {
     const feeRate = BigInt(fee.feeRatePpm);
     if (side === "BUY") {
       const budget = BigInt(approval.requested_amount_micros!);
+      const constraint = evaluateBuyMarketConstraint({
+        minOrderSize: book.minOrderSize,
+        tickSize: book.tickSize,
+        requestedAmountMicros: budget,
+        upperPriceUnits: upper!,
+      });
+      if (constraint.result !== "PASS") {
+        return {
+          book,
+          fee,
+          ageMs,
+          match: emptyMatch(),
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: constraint.effectivePriceUnits ?? upper!.toString(),
+          outcome: "REJECT",
+          reason: constraint.reason,
+        };
+      }
+      const normalizedBudget = BigInt(constraint.normalizedOrderAmountMicros!);
       const match = matchExecutionBuy({
         asks: book.asks,
-        reservationMicros: budget,
+        reservationMicros: normalizedBudget,
         lowerPriceUnits: lower!,
-        upperPriceUnits: upper!,
+        upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
         feeRatePpm: feeRate,
         feeExponent: fee.exponent,
       });
@@ -1801,7 +1823,7 @@ export class LiveExecutor implements ExecutorInterface {
           price: scaledToDecimal(observedLimit, PRICE_SCALE_DIGITS),
           size: scaledToDecimal(BigInt(match.filledSizeMicros), SHARE_SCALE_DIGITS),
         }],
-        reservationMicros: budget,
+        reservationMicros: normalizedBudget,
         lowerPriceUnits: observedLimit,
         upperPriceUnits: observedLimit,
         feeRatePpm: feeRate,
@@ -1823,10 +1845,31 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const remaining = BigInt(execution.requested_size_micros ?? "0") - BigInt(execution.filled_size_micros);
     if (remaining <= 0n) throw new Error("LIVE_SELL_REMAINING_SIZE_INVALID");
-    const match = matchExecutionSell({
-      bids: book.bids,
+    const constraint = evaluateSellMarketConstraint({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
       requestedSizeMicros: remaining,
       minimumPriceUnits: sellMinimum!,
+    });
+    if (constraint.result !== "PASS") {
+      return {
+        book,
+        fee,
+        ageMs,
+        match: emptyMatch(),
+        orderMatch: emptyMatch(),
+        lowerPriceUnits: sellMinimum!.toString(),
+        upperPriceUnits: null,
+        limitPriceUnits: constraint.effectivePriceUnits ?? sellMinimum!.toString(),
+        outcome: "WAIT",
+        reason: constraint.reason,
+      };
+    }
+    const effectiveSellMinimum = BigInt(constraint.effectivePriceUnits!);
+    const match = matchExecutionSell({
+      bids: book.bids,
+      requestedSizeMicros: BigInt(constraint.normalizedOrderSizeMicros!),
+      minimumPriceUnits: effectiveSellMinimum,
       feeRatePpm: feeRate,
       feeExponent: fee.exponent,
     });
@@ -1846,11 +1889,11 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const orderMatch = matchExecutionSell({
       bids: [{
-        price: scaledToDecimal(sellMinimum!, PRICE_SCALE_DIGITS),
+        price: scaledToDecimal(effectiveSellMinimum, PRICE_SCALE_DIGITS),
         size: scaledToDecimal(BigInt(match.filledSizeMicros), SHARE_SCALE_DIGITS),
       }],
       requestedSizeMicros: BigInt(match.filledSizeMicros),
-      minimumPriceUnits: sellMinimum!,
+      minimumPriceUnits: effectiveSellMinimum,
       feeRatePpm: feeRate,
       feeExponent: fee.exponent,
     });
@@ -1860,9 +1903,9 @@ export class LiveExecutor implements ExecutorInterface {
       ageMs,
       match,
       orderMatch,
-      lowerPriceUnits: sellMinimum!.toString(),
+      lowerPriceUnits: effectiveSellMinimum.toString(),
       upperPriceUnits: null,
-      limitPriceUnits: sellMinimum!.toString(),
+      limitPriceUnits: effectiveSellMinimum.toString(),
       outcome: "ALLOW",
       reason: "LIVE_SELL_MARKET_CHECK_ALLOW",
     };

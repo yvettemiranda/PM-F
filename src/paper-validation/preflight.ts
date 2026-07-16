@@ -1,0 +1,292 @@
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { stableJson } from "../domain/versioning.js";
+import type { SourceVersion } from "../infra/source-version.js";
+import { computeCoreCompatibilityHash } from "./core-compatibility.js";
+import type { CoreCompatibilityManifest } from "./types.js";
+
+const ACTIVE_CAMPAIGN_STATES = new Set(["QUALIFYING", "RUNNING", "PAUSED", "INCOMPLETE_COVERAGE"]);
+const TERMINAL_CAMPAIGN_STATES = new Set(["PASSED", "BLOCKED", "FROZEN"]);
+
+interface PreMigrationCampaignRow {
+  campaign_id: string;
+  core_compatibility_hash: string;
+  config_version: string;
+  created_at: string;
+  state: string | null;
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function tableExists(database: DatabaseSync, tableName: string): boolean {
+  return Boolean(database.prepare(
+    "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name=?",
+  ).get(tableName));
+}
+
+function assertSafeDatabase(database: DatabaseSync): void {
+  const safety = database.prepare(
+    "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+  ).get() as { execution_mode: string; live_gate_state: string } | undefined;
+  if (!safety || safety.execution_mode !== "PAPER" || safety.live_gate_state !== "LIVE_DISABLED") {
+    throw new Error(
+      `PAPER_CAMPAIGN_UNSAFE_DATABASE:${safety?.execution_mode ?? "MISSING"}:${safety?.live_gate_state ?? "MISSING"}`,
+    );
+  }
+}
+
+function campaignRows(database: DatabaseSync): PreMigrationCampaignRow[] {
+  return database.prepare(
+    `SELECT c.campaign_id,c.core_compatibility_hash,c.config_version,c.created_at,
+            (SELECT t.to_state FROM paper_validation_transitions t
+             WHERE t.entity_type='CAMPAIGN' AND t.campaign_id=c.campaign_id
+             ORDER BY t.sequence DESC LIMIT 1) state
+     FROM paper_validation_campaigns c
+     ORDER BY c.created_at DESC,c.campaign_id DESC`,
+  ).all() as unknown as PreMigrationCampaignRow[];
+}
+
+function selectedCampaign(database: DatabaseSync): PreMigrationCampaignRow | null {
+  const rows = campaignRows(database);
+  const active = rows.filter((candidate) => candidate.state && ACTIVE_CAMPAIGN_STATES.has(candidate.state));
+  if (active.length > 1) throw new Error("MULTIPLE_ACTIVE_PAPER_CAMPAIGNS_BEFORE_MIGRATION");
+  return active[0] ?? rows[0] ?? null;
+}
+
+function assertKnownCampaignState(row: PreMigrationCampaignRow): asserts row is PreMigrationCampaignRow & { state: string } {
+  if (!row.state || (!ACTIVE_CAMPAIGN_STATES.has(row.state) && !TERMINAL_CAMPAIGN_STATES.has(row.state))) {
+    throw new Error(`PAPER_CAMPAIGN_STATE_INVALID_BEFORE_MIGRATION:${row.campaign_id}:${row.state ?? "MISSING"}`);
+  }
+}
+
+function insertFreezeTransition(database: DatabaseSync, input: {
+  entityType: "CAMPAIGN" | "SESSION";
+  campaignId: string;
+  sessionId: string | null;
+  fromState: string;
+  toState: "FROZEN" | "BLOCKED";
+  reason: string;
+  evidence: Record<string, unknown>;
+  coreCompatibilityHash: string;
+  configVersion: string;
+  sourceVersion: SourceVersion;
+  idempotencyKey: string;
+  now: string;
+}): void {
+  const existing = database.prepare(
+    `SELECT entity_type,campaign_id,session_id,from_state,to_state,reason,evidence_json,
+            core_compatibility_hash,source_code_commit,source_code_dirty,config_version,created_at
+     FROM paper_validation_transitions WHERE idempotency_key=?`,
+  ).get(input.idempotencyKey) as {
+    entity_type: string;
+    campaign_id: string;
+    session_id: string | null;
+    from_state: string | null;
+    to_state: string;
+    reason: string;
+    evidence_json: string;
+    core_compatibility_hash: string;
+    source_code_commit: string;
+    source_code_dirty: number;
+    config_version: string;
+    created_at: string;
+  } | undefined;
+  const evidenceJson = stableJson(input.evidence);
+  const semanticPayload = {
+    entityType: input.entityType,
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    fromState: input.fromState,
+    toState: input.toState,
+    reason: input.reason,
+    evidenceJson,
+    coreCompatibilityHash: input.coreCompatibilityHash,
+    sourceCodeCommit: input.sourceVersion.commit,
+    sourceCodeDirty: input.sourceVersion.dirty,
+    configVersion: input.configVersion,
+    createdAt: input.now,
+  };
+  if (existing) {
+    const existingPayload = {
+      entityType: existing.entity_type,
+      campaignId: existing.campaign_id,
+      sessionId: existing.session_id,
+      fromState: existing.from_state,
+      toState: existing.to_state,
+      reason: existing.reason,
+      evidenceJson: existing.evidence_json,
+      coreCompatibilityHash: existing.core_compatibility_hash,
+      sourceCodeCommit: existing.source_code_commit,
+      sourceCodeDirty: existing.source_code_dirty === 1,
+      configVersion: existing.config_version,
+      createdAt: existing.created_at,
+    };
+    if (stableJson(existingPayload) !== stableJson(semanticPayload)) {
+      throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_IDEMPOTENCY_CONFLICT");
+    }
+    return;
+  }
+  const sequenceColumn = input.entityType === "CAMPAIGN" ? "campaign_id" : "session_id";
+  const sequenceValue = input.entityType === "CAMPAIGN" ? input.campaignId : input.sessionId;
+  const next = database.prepare(
+    `SELECT coalesce(max(sequence),0)+1 next FROM paper_validation_transitions
+     WHERE entity_type=? AND ${sequenceColumn}=?`,
+  ).get(input.entityType, sequenceValue) as { next: number };
+  const evidenceHash = sha256(input.evidence);
+  const transitionId = `pvt-${sha256([input.idempotencyKey, semanticPayload]).slice(0, 32)}`;
+  database.prepare(
+    `INSERT INTO paper_validation_transitions(
+      transition_id,entity_type,campaign_id,session_id,from_state,to_state,reason,
+      sequence,evidence_json,evidence_hash,core_compatibility_hash,source_code_commit,
+      source_code_dirty,config_version,idempotency_key,created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    transitionId,
+    input.entityType,
+    input.campaignId,
+    input.sessionId,
+    input.fromState,
+    input.toState,
+    input.reason,
+    next.next,
+    evidenceJson,
+    evidenceHash,
+    input.coreCompatibilityHash,
+    input.sourceVersion.commit,
+    input.sourceVersion.dirty ? 1 : 0,
+    input.configVersion,
+    input.idempotencyKey,
+    input.now,
+  );
+}
+
+/** Read-only guard that must run before any migration or evidence refresh. */
+export function assertPaperCampaignPreMigrationCompatible(input: {
+  databasePath: string;
+  manifest: CoreCompatibilityManifest;
+}): { campaignId: string | null; campaignState: string | null } {
+  if (!existsSync(input.databasePath)) return { campaignId: null, campaignState: null };
+  const database = new DatabaseSync(input.databasePath, { readOnly: true });
+  database.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=5000;");
+  try {
+    const safetyTableExists = tableExists(database, "live_gate_state");
+    if (safetyTableExists) assertSafeDatabase(database);
+    if (!tableExists(database, "paper_validation_campaigns")) return { campaignId: null, campaignState: null };
+    if (!safetyTableExists) throw new Error("PAPER_CAMPAIGN_UNSAFE_DATABASE:MISSING:MISSING");
+    const row = selectedCampaign(database);
+    if (!row) return { campaignId: null, campaignState: null };
+    assertKnownCampaignState(row);
+    const currentHash = computeCoreCompatibilityHash(input.manifest);
+    if (ACTIVE_CAMPAIGN_STATES.has(row.state) && row.core_compatibility_hash !== currentHash) {
+      throw new Error(`ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:${row.campaign_id}`);
+    }
+    return { campaignId: row.campaign_id, campaignState: row.state };
+  } finally {
+    database.close();
+  }
+}
+
+/**
+ * Explicitly freezes an incompatible Campaign using only the already-installed
+ * Campaign tables. It intentionally does not initialize the database or run a
+ * migration, so callers can preserve old evidence before preparing a new core.
+ */
+export function freezePaperCampaignPreMigrationMismatch(input: {
+  databasePath: string;
+  manifest: CoreCompatibilityManifest;
+  sourceVersion: SourceVersion;
+  now: string;
+}): { campaignId: string | null; campaignState: string | null; frozen: boolean } {
+  if (!existsSync(input.databasePath)) return { campaignId: null, campaignState: null, frozen: false };
+  if (input.sourceVersion.dirty || !input.sourceVersion.commit.trim() || input.sourceVersion.commit === "UNCOMMITTED") {
+    throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_REQUIRES_CLEAN_SOURCE");
+  }
+  if (!Number.isFinite(Date.parse(input.now))) throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_TIME_INVALID");
+  const database = new DatabaseSync(input.databasePath);
+  database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+  try {
+    if (!tableExists(database, "paper_validation_campaigns")) {
+      return { campaignId: null, campaignState: null, frozen: false };
+    }
+    for (const requiredTable of [
+      "live_gate_state",
+      "paper_validation_sessions",
+      "paper_validation_transitions",
+    ]) {
+      if (!tableExists(database, requiredTable)) {
+        throw new Error(`PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_SCHEMA_INCOMPLETE:${requiredTable}`);
+      }
+    }
+    const currentHash = computeCoreCompatibilityHash(input.manifest);
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      assertSafeDatabase(database);
+      const row = selectedCampaign(database);
+      if (!row) {
+        database.exec("COMMIT");
+        return { campaignId: null, campaignState: null, frozen: false };
+      }
+      assertKnownCampaignState(row);
+      if (!ACTIVE_CAMPAIGN_STATES.has(row.state) || row.core_compatibility_hash === currentHash) {
+        database.exec("COMMIT");
+        return { campaignId: row.campaign_id, campaignState: row.state, frozen: false };
+      }
+      const evidence = {
+        expected: row.core_compatibility_hash,
+        actual: currentHash,
+        preMigration: true,
+      };
+      if (row.state === "RUNNING") {
+        const runningSessions = database.prepare(
+          `SELECT s.session_id,
+                  (SELECT t.to_state FROM paper_validation_transitions t
+                   WHERE t.entity_type='SESSION' AND t.session_id=s.session_id
+                   ORDER BY t.sequence DESC LIMIT 1) state
+           FROM paper_validation_sessions s WHERE s.campaign_id=?`,
+        ).all(row.campaign_id) as unknown as Array<{ session_id: string; state: string }>;
+        const running = runningSessions.filter((session) => session.state === "RUNNING");
+        if (running.length !== 1) {
+          throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_RUNNING_SESSION_INVALID");
+        }
+        insertFreezeTransition(database, {
+          entityType: "SESSION",
+          campaignId: row.campaign_id,
+          sessionId: running[0]!.session_id,
+          fromState: "RUNNING",
+          toState: "BLOCKED",
+          reason: "CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION",
+          evidence,
+          coreCompatibilityHash: row.core_compatibility_hash,
+          configVersion: row.config_version,
+          sourceVersion: input.sourceVersion,
+          idempotencyKey: `SESSION:${running[0]!.session_id}:PRE_MIGRATION_CORE_MISMATCH:${currentHash}`,
+          now: input.now,
+        });
+      }
+      insertFreezeTransition(database, {
+        entityType: "CAMPAIGN",
+        campaignId: row.campaign_id,
+        sessionId: null,
+        fromState: row.state,
+        toState: "FROZEN",
+        reason: "CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION",
+        evidence,
+        coreCompatibilityHash: row.core_compatibility_hash,
+        configVersion: row.config_version,
+        sourceVersion: input.sourceVersion,
+        idempotencyKey: `CAMPAIGN:${row.campaign_id}:PRE_MIGRATION_CORE_MISMATCH:${currentHash}`,
+        now: input.now,
+      });
+      database.exec("COMMIT");
+      return { campaignId: row.campaign_id, campaignState: "FROZEN", frozen: true };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+}

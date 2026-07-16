@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import type { IdentityStatus, PublicPosition, SyncStatus } from "../domain/models.js";
 import { RULESET, RULESET_HASH, stableJson } from "../domain/versioning.js";
+import {
+  buildExactCapitalRatio,
+  capitalSizingHash,
+  type ExactCapitalRatioSnapshot,
+} from "../execution/capital-sizing.js";
 
 export type CapitalEstimateStatus = "COMPLETE" | "INCOMPLETE" | "FAILED";
 export type CapitalConfidence = "HIGH" | "MEDIUM" | "LOW";
@@ -13,6 +18,8 @@ export interface CapitalEstimate {
   targetVisibleCapitalMicros: string | null;
   targetTradeAmountMicros: string | null;
   targetTradeCapitalRatioPpm: string | null;
+  capitalSizingRatio: ExactCapitalRatioSnapshot | null;
+  capitalSizingRatioHash: string | null;
   capitalEstimateStatus: CapitalEstimateStatus;
   capitalConfidence: CapitalConfidence;
   capitalEstimateReason: string;
@@ -30,6 +37,16 @@ function tradeValueMicros(price: number | string, size: number | string): bigint
   const priceUnits = decimalToScaled(price, PRICE_SCALE_DIGITS);
   const sizeMicros = decimalToScaled(size, SHARE_SCALE_DIGITS);
   return (priceUnits * sizeMicros) / 10n ** BigInt(PRICE_SCALE_DIGITS);
+}
+
+function tradeFixedValues(price: number | string, size: number | string): {
+  priceUnits: bigint;
+  sizeMicros: bigint;
+} {
+  return {
+    priceUnits: decimalToScaled(price, PRICE_SCALE_DIGITS),
+    sizeMicros: decimalToScaled(size, SHARE_SCALE_DIGITS),
+  };
 }
 
 export function estimateTargetCapital(input: {
@@ -63,6 +80,7 @@ export function estimateTargetCapital(input: {
   let reason: string;
   let visibleCapital: bigint | null = null;
   let ratioPpm: bigint | null = null;
+  let capitalSizingRatio: ExactCapitalRatioSnapshot | null = null;
 
   if (input.identityStatus !== "IDENTITY_CONFIRMED" || input.syncStatus === "MAJOR_DESYNC") {
     status = "FAILED";
@@ -79,7 +97,15 @@ export function estimateTargetCapital(input: {
       status = "COMPLETE";
       confidence = "HIGH";
       reason = "POSITION_AND_PUSD_BALANCE_FRESH";
-      if (tradeAmount !== null && visibleCapital > 0n) ratioPpm = (tradeAmount * 1_000_000n) / visibleCapital;
+      if (input.targetTrade && visibleCapital > 0n) {
+        const trade = tradeFixedValues(input.targetTrade.price, input.targetTrade.size);
+        capitalSizingRatio = buildExactCapitalRatio({
+          targetPriceUnits: trade.priceUnits.toString(),
+          targetSizeMicros: trade.sizeMicros.toString(),
+          targetVisibleCapitalMicros: visibleCapital.toString(),
+        });
+        ratioPpm = BigInt(capitalSizingRatio.legacyRatioPpm);
+      }
     }
   } else {
     status = "INCOMPLETE";
@@ -101,6 +127,8 @@ export function estimateTargetCapital(input: {
     targetVisibleCapitalMicros: visibleCapital?.toString() ?? null,
     targetTradeAmountMicros: tradeAmount?.toString() ?? null,
     targetTradeCapitalRatioPpm: ratioPpm?.toString() ?? null,
+    capitalSizingRatio,
+    capitalSizingRatioHash: capitalSizingRatio ? capitalSizingHash(capitalSizingRatio) : null,
     capitalEstimateStatus: status,
     capitalConfidence: confidence,
     capitalEstimateReason: reason,
@@ -117,6 +145,8 @@ export function estimateTargetCapital(input: {
     targetVisibleCapitalMicros: visibleCapital?.toString() ?? null,
     targetTradeAmountMicros: tradeAmount?.toString() ?? null,
     targetTradeCapitalRatioPpm: ratioPpm?.toString() ?? null,
+    capitalSizingRatio,
+    capitalSizingRatioHash: capitalSizingRatio ? capitalSizingHash(capitalSizingRatio) : null,
     capitalEstimateStatus: status,
     capitalConfidence: confidence,
     capitalEstimateReason: reason,

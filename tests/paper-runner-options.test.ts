@@ -26,6 +26,10 @@ const acceptanceSummary: PaperAcceptanceSummary = {
   paperAccountId: "paper",
   targetId: "target",
   generatedAt: "2026-07-15T00:00:00.000Z",
+  evidenceWindow: {
+    startAt: "2026-07-15T00:00:00.000Z",
+    endAt: "2026-07-15T02:00:00.000Z",
+  },
   consistency: {
     passed: true,
     cash: {
@@ -53,6 +57,18 @@ const acceptanceSummary: PaperAcceptanceSummary = {
     STOP_LOSS: "NOT_OBSERVED",
     SETTLEMENT: "NOT_OBSERVED",
     REALIZED_PNL: "NOT_OBSERVED",
+  },
+  funnel: {
+    signals: { buy: 0, sell: 0, published: 0, executionEligible: 0, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
+    capital: { high: 0, medium: 0, low: 0, unknown: 0, sizingDecisionCount: 0, sizingRejectReasons: {}, sizingEvidence: [] },
+    risk: { allow: 0, reject: 0, rejectReasons: {} },
+    execution: { total: 0, waiting: 0, rejectedBeforeOrder: 0, rejectedBeforeOrderReasons: {}, marketConstraintRejects: 0, marketConstraintRejectReasons: {}, expired: 0, cancelled: 0, exitPending: 0, stopExitPending: 0, orders: 0, zeroFillOrders: 0, partialFillOrders: 0, fullFillOrders: 0, fills: 0 },
+    positions: { total: 0, open: 0, partiallyClosed: 0, frozen: 0, settlementPending: 0, closed: 0, redeemed: 0 },
+    reservations: { total: 0, active: 0, consumed: 0, released: 0, activeMicros: "0", releasedMicros: "0" },
+    fees: { entries: 0, totalMicros: "0" },
+    pnl: { realizedEntries: 0, settlementEntries: 0, realizedMicros: "0", unrealizedMicros: "0" },
+    lifecycle: { stopLossExecutions: 0, settlementExecutions: 0, redeemedPositions: 0 },
+    stage: { BUY: "NO_SIGNAL", SELL: "NO_SIGNAL" },
   },
   marketData: { blockerCount: 0, blockers: [], records: [] },
 };
@@ -290,6 +306,6 @@ describe("PaperRunner options", () => {
         ...acceptanceSummary,
         coverage: { ...acceptanceSummary.coverage, BUY: "NOT_OBSERVED" },
       },
-    })).toBe("COMPLETED_INCOMPLETE_COVERAGE");
+    })).toBe("COMPLETED");
   });
 });

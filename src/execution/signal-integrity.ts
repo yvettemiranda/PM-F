@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
+import { buildExactCapitalRatio, capitalSizingHash } from "./capital-sizing.js";
 import type { PaperSignalEnvelope, SignalExecutionContext } from "../paper/types.js";
 
 interface SignalIntegrityRow {
@@ -23,6 +24,8 @@ interface SignalIntegrityRow {
   context_signal_id: string;
   capital_decision_id: string | null;
   target_trade_capital_ratio_ppm: string | null;
+  capital_sizing_ratio_json: string | null;
+  capital_sizing_ratio_hash: string | null;
   target_trade_timestamp: string;
   market_end_time: string;
   market_metadata_snapshot_json: string;
@@ -53,7 +56,8 @@ export function executionEnvelopeIntegrityError(
             s.ruleset_hash signal_ruleset_hash,s.source_code_commit signal_source_code_commit,
             s.source_code_dirty signal_source_code_dirty,s.capital_estimate_id,
             c.context_id,c.signal_id context_signal_id,c.capital_decision_id,
-            c.target_trade_capital_ratio_ppm,c.target_trade_timestamp,c.market_end_time,
+            c.target_trade_capital_ratio_ppm,c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
+            c.target_trade_timestamp,c.market_end_time,
             c.market_metadata_snapshot_json,c.market_metadata_hash,
             c.ruleset_hash context_ruleset_hash,c.source_code_commit context_source_code_commit,
             c.source_code_dirty context_source_code_dirty,c.config_version,c.created_at context_created_at
@@ -85,10 +89,34 @@ export function executionEnvelopeIntegrityError(
   } catch {
     return "EXECUTION_CONTEXT_METADATA_INVALID";
   }
+  if (
+    context.capitalSizingRatio
+    && (!context.capitalSizingRatioHash || capitalSizingHash(context.capitalSizingRatio) !== context.capitalSizingRatioHash)
+  ) return "EXECUTION_CONTEXT_CAPITAL_SIZING_HASH_MISMATCH";
+  if (context.capitalSizingRatio) {
+    if (
+      context.capitalSizingRatio.targetPriceUnits !== signal.targetPriceUnits
+      || context.capitalSizingRatio.targetSizeMicros !== signal.targetSizeMicros
+    ) return "EXECUTION_CONTEXT_CAPITAL_SIZING_SIGNAL_MISMATCH";
+    try {
+      const rebuilt = buildExactCapitalRatio({
+        targetPriceUnits: context.capitalSizingRatio.targetPriceUnits,
+        targetSizeMicros: context.capitalSizingRatio.targetSizeMicros,
+        targetVisibleCapitalMicros: context.capitalSizingRatio.targetVisibleCapitalMicros,
+      });
+      if (stableJson(rebuilt) !== stableJson(context.capitalSizingRatio)) {
+        return "EXECUTION_CONTEXT_CAPITAL_SIZING_CONTENT_MISMATCH";
+      }
+    } catch {
+      return "EXECUTION_CONTEXT_CAPITAL_SIZING_INVALID";
+    }
+  }
   const contextMatches = row.context_id === context.contextId
     && row.context_signal_id === context.signalId
     && row.capital_decision_id === context.capitalDecisionId
     && row.target_trade_capital_ratio_ppm === context.targetTradeCapitalRatioPpm
+    && row.capital_sizing_ratio_json === (context.capitalSizingRatio ? stableJson(context.capitalSizingRatio) : null)
+    && row.capital_sizing_ratio_hash === (context.capitalSizingRatioHash ?? null)
     && row.target_trade_timestamp === context.targetTradeTimestamp
     && row.market_end_time === context.marketEndTime
     && metadataMatches
@@ -109,13 +137,15 @@ export function executionEnvelopeIntegrityError(
   } else {
     const capital = database.prepare(
       `SELECT capital_estimate_status,capital_confidence,target_trade_capital_ratio_ppm,
-              fallback_amount_micros
+              fallback_amount_micros,capital_sizing_ratio_json,capital_sizing_ratio_hash
        FROM capital_estimates WHERE capital_estimate_id=?`,
     ).get(row.capital_decision_id) as {
       capital_estimate_status: string;
       capital_confidence: string;
       target_trade_capital_ratio_ppm: string | null;
       fallback_amount_micros: string;
+      capital_sizing_ratio_json: string | null;
+      capital_sizing_ratio_hash: string | null;
     } | undefined;
     if (
       !capital
@@ -124,6 +154,8 @@ export function executionEnvelopeIntegrityError(
       || capital.capital_confidence !== signal.capitalDecision.confidence
       || capital.target_trade_capital_ratio_ppm !== signal.capitalDecision.ratioPpm
       || capital.fallback_amount_micros !== signal.capitalDecision.fallbackAmountMicros
+      || capital.capital_sizing_ratio_json !== row.capital_sizing_ratio_json
+      || capital.capital_sizing_ratio_hash !== row.capital_sizing_ratio_hash
     ) return "SIGNAL_CAPITAL_DECISION_MISMATCH";
   }
   return null;

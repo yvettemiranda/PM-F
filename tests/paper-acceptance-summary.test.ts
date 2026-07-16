@@ -211,12 +211,38 @@ describe("PaperAcceptanceSummaryService", () => {
       SETTLEMENT: "NOT_OBSERVED",
       REALIZED_PNL: "NOT_OBSERVED",
     });
+    expect(summary.funnel).toMatchObject({
+      signals: { buy: 0, sell: 0, executionEligible: 0, gap: 0, unconsumedEligible: 0 },
+      risk: { allow: 0, reject: 0 },
+      execution: { orders: 0, fills: 0 },
+      stage: { BUY: "NO_SIGNAL", SELL: "NO_SIGNAL" },
+    });
     expect(summary.marketData).toEqual({ blockerCount: 0, blockers: [], records: [] });
 
     const after = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((after.prepare("SELECT count(*) count FROM paper_cash_ledger").get() as { count: number }).count)
       .toBe(ledgerRowsBefore);
     after.close();
+  });
+
+  it("distinguishes an eligible BUY Signal that has not reached Risk or Order", () => {
+    const env = setup();
+    const database = new DatabaseSync(env.databasePath);
+    insertPublishedSignalForTarget(database, env.targetId, "signal-awaiting-paper");
+    database.close();
+
+    const summary = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId);
+
+    expect(summary.funnel.signals).toMatchObject({
+      buy: 1,
+      sell: 0,
+      published: 1,
+      executionEligible: 1,
+      unconsumedEligible: 1,
+    });
+    expect(summary.funnel.stage.BUY).toBe("WAITING_EXECUTION");
+    expect(summary.funnel.risk).toMatchObject({ allow: 0, reject: 0 });
+    expect(summary.funnel.execution).toMatchObject({ orders: 0, fills: 0 });
   });
 
   it("reports account-scoped ledger, reservation, negative-value, and market-data blockers", () => {
@@ -430,6 +456,30 @@ describe("PaperAcceptanceSummaryService", () => {
       REALIZED_PNL: "OBSERVED_REAL",
     });
     expect(summary.consistency.aggregates.details).toContain("FEE_EVIDENCE:order-buy-execution");
+  });
+
+  it("does not attribute an earlier Session's execution evidence to a later Session window", () => {
+    const env = setup();
+    const database = new DatabaseSync(env.databasePath);
+    database.exec("PRAGMA foreign_keys=OFF");
+    insertExecution(database, "buy-execution", "TARGET_BUY", "100", "50");
+    insertPosition(database);
+    insertFill(database, "buy-execution", "BUY", "position-test");
+    database.close();
+
+    const summary = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId, {
+      startAt: "2026-07-15T00:00:01.000Z",
+      endAt: "2026-07-15T00:01:00.000Z",
+    });
+
+    expect(summary.coverage.BUY).toBe("NOT_OBSERVED");
+    expect(summary.funnel.execution.orders).toBe(0);
+    expect(summary.funnel.execution.fills).toBe(0);
+    expect(summary.funnel.positions.total).toBe(0);
+    expect(summary.evidenceWindow).toEqual({
+      startAt: "2026-07-15T00:00:01.000Z",
+      endAt: "2026-07-15T00:01:00.000Z",
+    });
   });
 
   it("keeps the account target immutable and reports historical execution target drift", () => {

@@ -2165,7 +2165,42 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("keeps live fill and execution totals exact above Number.MAX_SAFE_INTEGER", async () => {
+  it("uses the shared CLOB precision/minimum preflight before the fake Live order path", async () => {
+    const env = setup();
+    const approved = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-buy-below-clob-precision",
+      riskDecisionId: "risk-live-buy-below-clob-precision",
+      decision: "ALLOW",
+      requestedAmountMicros: "974",
+      requestedSizeMicros: null,
+    });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const result = await executor.executeBuy({
+      accountId,
+      signal: approved.signal,
+      context: approved.context,
+      riskDecisionId: "risk-live-buy-below-clob-precision",
+    });
+    expect(result.state).toBe("REJECTED");
+    const check = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(check.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 0 });
+    expect(check.prepare("SELECT state,reason FROM live_executions WHERE live_execution_id=?").get(result.executionId))
+      .toEqual({ state: "REJECTED", reason: "ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION" });
+    expect(check.prepare(
+      `SELECT entry_type,remaining_after_micros FROM live_reservation_ledger
+       WHERE live_execution_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+    ).get(result.executionId)).toEqual({ entry_type: "RELEASE", remaining_after_micros: "0" });
+    check.close();
+    executor.close();
+  });
+
+  it("fails closed before the fake Live adapter for an SDK-unsupported tick size", async () => {
     const env = setup();
     const approvedAmount = "5000000";
     const large = insertSignalAndRisk(env.databasePath, env.targetId, {
@@ -2180,6 +2215,8 @@ describe("LiveExecutor", () => {
       orderAdapter: new SplitFillOrderAdapter(),
       marketDataProvider: new FakeLiveMarketDataProvider({
         now: () => new Date(now),
+        minOrderSize: "1",
+        tickSize: "0.000000000000000001",
         bids: [{ price: "0.000000000000000001", size: "10000000000000000000" }],
         asks: [{ price: "0.000000000000000001", size: "10000000000000000000" }],
       }),
@@ -2191,15 +2228,15 @@ describe("LiveExecutor", () => {
       riskDecisionId: "risk-live-buy-large-integer",
     });
 
-    expect(result.state).toBe("EXECUTED");
+    expect(result.state).toBe("REJECTED");
     const check = new DatabaseSync(env.databasePath, { readOnly: true });
-    const totals = check.prepare(
-      "SELECT filled_size_micros,filled_notional_micros FROM live_executions WHERE live_execution_id=?",
-    ).get(result.executionId) as { filled_size_micros: string; filled_notional_micros: string };
-    expect(totals).toEqual({
-      filled_size_micros: "5000000000000000000000000",
-      filled_notional_micros: approvedAmount,
+    expect(check.prepare(
+      "SELECT state,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(result.executionId)).toEqual({
+      state: "REJECTED",
+      reason: "TICK_SIZE_UNSUPPORTED_BY_CLOB_SDK",
     });
+    expect(check.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 0 });
     check.close();
     executor.close();
   });

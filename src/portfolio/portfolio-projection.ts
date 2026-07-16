@@ -2,8 +2,13 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { RULESET, stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
+import {
+  assertPaperMarketSnapshotCaptureBinding,
+  persistPublicMarketCapture,
+} from "../infra/sqlite/public-market-capture.js";
 import { calculateUnrealizedPnl } from "../pnl/pnl-model.js";
 import { isOrderbookUnavailableError } from "../execution/market-data.js";
+import { orderbookConstraintAvailability, parseMarketOrderConstraints } from "../execution/market-order-constraints.js";
 import { matchPaperSell } from "../paper/matching.js";
 import type {
   PaperAccountSnapshot,
@@ -140,6 +145,21 @@ export class PortfolioProjectionService {
             first.condition_id,
             "ORDERBOOK_STALE",
             `Orderbook age ${String(age)}ms`,
+          );
+          unpricedPositionCount += group.length;
+          continue;
+        }
+        const constraintError = orderbookConstraintAvailability({
+          minOrderSize: book.minOrderSize,
+          tickSize: book.tickSize,
+        });
+        if (constraintError) {
+          this.marketHealth?.onFailure(
+            accountId,
+            first.asset_id,
+            first.condition_id,
+            constraintError,
+            constraintError,
           );
           unpricedPositionCount += group.length;
           continue;
@@ -359,14 +379,35 @@ export class PortfolioProjectionService {
   }
 
   private saveMarketSnapshots(book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): void {
-    const payload = { bids: book.bids, asks: book.asks };
+    const orderbookCaptureId = persistPublicMarketCapture(this.database, book.publicCapture, {
+      endpoint: "clob-orderbook",
+      requestUrl: book.sourceUrl,
+      fetchedAt: book.receivedAt,
+    });
+    const feeCaptureId = persistPublicMarketCapture(this.database, fee.publicCapture, {
+      endpoint: "clob-market-info",
+      requestUrl: fee.sourceUrl,
+      fetchedAt: fee.snapshotTime,
+    });
+    const payload = {
+      bids: book.bids,
+      asks: book.asks,
+      minOrderSize: book.minOrderSize ?? null,
+      tickSize: book.tickSize ?? null,
+    };
+    const constraints = parseMarketOrderConstraints({
+      minOrderSize: book.minOrderSize,
+      tickSize: book.tickSize,
+    });
+    const orderbookSnapshotId = this.orderbookId(book);
     this.database.prepare(
       `INSERT OR IGNORE INTO paper_orderbook_snapshots(
         orderbook_snapshot_id,asset_id,condition_id,market_snapshot_time,received_at,
-        data_age_ms,payload_hash,bids_json,asks_json,source_url,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        data_age_ms,payload_hash,bids_json,asks_json,source_url,min_order_size,
+        min_order_size_micros,tick_size,tick_size_units,source_capture_id,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      this.orderbookId(book),
+      orderbookSnapshotId,
       book.assetId,
       book.conditionId,
       book.marketSnapshotTime,
@@ -376,14 +417,28 @@ export class PortfolioProjectionService {
       JSON.stringify(book.bids),
       JSON.stringify(book.asks),
       book.sourceUrl,
+      book.minOrderSize ?? null,
+      "error" in constraints ? null : constraints.minOrderSizeMicros.toString(),
+      book.tickSize ?? null,
+      "error" in constraints ? null : constraints.tickSizeUnits.toString(),
+      orderbookCaptureId,
       this.now().toISOString(),
     );
+    assertPaperMarketSnapshotCaptureBinding(
+      this.database,
+      "paper_orderbook_snapshots",
+      "orderbook_snapshot_id",
+      orderbookSnapshotId,
+      orderbookCaptureId,
+    );
+    const feeSnapshotId = this.feeId(fee);
     this.database.prepare(
       `INSERT OR IGNORE INTO paper_fee_snapshots(
-        fee_snapshot_id,asset_id,fee_rate_ppm,base_fee,fee_exponent,status,source_url,snapshot_time,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        fee_snapshot_id,asset_id,fee_rate_ppm,base_fee,fee_exponent,status,source_url,
+        snapshot_time,source_capture_id,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      this.feeId(fee),
+      feeSnapshotId,
       fee.assetId,
       fee.feeRatePpm,
       fee.baseFee,
@@ -391,12 +446,25 @@ export class PortfolioProjectionService {
       fee.status,
       fee.sourceUrl,
       fee.snapshotTime,
+      feeCaptureId,
       this.now().toISOString(),
+    );
+    assertPaperMarketSnapshotCaptureBinding(
+      this.database,
+      "paper_fee_snapshots",
+      "fee_snapshot_id",
+      feeSnapshotId,
+      feeCaptureId,
     );
   }
 
   private orderbookId(book: PaperOrderbookSnapshot): string {
-    return hash([book.assetId, book.marketSnapshotTime, stableJson({ bids: book.bids, asks: book.asks })]);
+    return hash([book.assetId, book.marketSnapshotTime, book.receivedAt, book.sourceUrl, stableJson({
+      bids: book.bids,
+      asks: book.asks,
+      minOrderSize: book.minOrderSize ?? null,
+      tickSize: book.tickSize ?? null,
+    })]);
   }
 
   private feeId(fee: PaperFeeSnapshot): string {

@@ -372,6 +372,8 @@ export class LiveStore {
       marketSnapshotTime: input.book.marketSnapshotTime,
       receivedAt: input.book.receivedAt,
       sourceUrl: input.book.sourceUrl,
+      minOrderSize: input.book.minOrderSize ?? null,
+      tickSize: input.book.tickSize ?? null,
       bids: input.book.bids,
       asks: input.book.asks,
     };

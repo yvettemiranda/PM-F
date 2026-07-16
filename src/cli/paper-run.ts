@@ -54,6 +54,9 @@ const main = async (): Promise<void> => {
         : `${databasePath}.paper-account-id`),
   );
   const readyFile = valueArg("ready-file") ? resolve(valueArg("ready-file")!) : undefined;
+  const resultFile = valueArg("result-file") ? resolve(valueArg("result-file")!) : undefined;
+  const campaignId = valueArg("campaign-id") ?? null;
+  const sessionId = valueArg("session-id") ?? null;
   const sourceVersion = resolveSourceVersion();
   const databasePreparation = await prepareRuntimeDatabase({ databasePath, sourceVersion });
   console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePreparation }));
@@ -125,6 +128,8 @@ const main = async (): Promise<void> => {
       accountIdFile,
       databasePath,
       databasePreparation,
+      campaignId,
+      sessionId,
       readyAt: new Date().toISOString(),
     };
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
@@ -137,12 +142,17 @@ const main = async (): Promise<void> => {
     });
     let report = await runner.run(controller.signal);
     let finalDrainConsumedSignals = 0;
+    let cancelledWaitingBuyCount = 0;
     if (currentShutdownMode() === "FINAL_VALUATION") {
       const finalValuationSignal = AbortSignal.any([
         finalValuationController.signal,
         AbortSignal.timeout(FINAL_VALUATION_TIMEOUT_MS),
       ]);
       finalDrainConsumedSignals = await runner.finalDrain(finalValuationSignal);
+      cancelledWaitingBuyCount = await executor.cancelWaitingBuys(
+        selection.accountId,
+        "PAPER_CAMPAIGN_SESSION_END",
+      );
       const account = await executor.accountSnapshot(selection.accountId, finalValuationSignal);
       report = {
         ...report,
@@ -150,11 +160,14 @@ const main = async (): Promise<void> => {
         cycles: report.cycles + 1,
         consumedSignals: report.consumedSignals + finalDrainConsumedSignals,
         account,
-        acceptance: executor.acceptanceSummary(selection.accountId),
+        acceptance: executor.acceptanceSummary(selection.accountId, {
+          startAt: report.startedAt,
+          endAt: new Date().toISOString(),
+        }),
       };
     }
     await mkdir(outputDirectory, { recursive: true });
-    const output = resolve(outputDirectory, `paper-${selection.accountId}-${Date.now()}.json`);
+    const output = resultFile ?? resolve(outputDirectory, `paper-${selection.accountId}-${Date.now()}.json`);
     const status = currentShutdownMode() === "FAST_ABORT"
       ? "STOPPED_EARLY"
       : paperRunCompletionStatus(report);
@@ -164,9 +177,12 @@ const main = async (): Promise<void> => {
       sourceCodeCommit: sourceVersion.commit,
       sourceCodeDirty: sourceVersion.dirty,
       shutdownMode: currentShutdownMode(),
+      campaignId,
+      sessionId,
       accountSelection: selection,
       consumerCutoff,
       finalDrainConsumedSignals,
+      cancelledWaitingBuyCount,
       report,
       safety: {
         privateKeyLoaded: false,
@@ -176,7 +192,7 @@ const main = async (): Promise<void> => {
         liveExecutorPresent: false,
       },
     };
-    await writeFile(output, JSON.stringify(payload, null, 2));
+    await writeTextAtomically(output, `${JSON.stringify(payload, null, 2)}\n`);
     console.log(JSON.stringify({ ...payload, output }, null, 2));
     if (status !== "COMPLETED") {
       console.error(`PAPER_RUN_NOT_COMPLETE:${status}; errors=${report.errorCount}; report=${output}`);
@@ -197,7 +213,8 @@ try {
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   await mkdir(outputDirectory, { recursive: true });
-  const output = resolve(outputDirectory, `paper-failed-${Date.now()}.json`);
+  const explicitResult = valueArg("result-file");
+  const output = explicitResult ? resolve(explicitResult) : resolve(outputDirectory, `paper-failed-${Date.now()}.json`);
   const failure = {
     mode: "PAPER",
     status: "FAILED",
@@ -210,7 +227,7 @@ try {
       chainWrites: 0,
     },
   };
-  await writeFile(output, JSON.stringify(failure, null, 2));
+  await writeTextAtomically(output, `${JSON.stringify(failure, null, 2)}\n`);
   console.error(JSON.stringify({ ...failure, output }, null, 2));
   process.exitCode = 1;
 }
