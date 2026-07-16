@@ -73,9 +73,14 @@ trap 'operator_request_stop INT' INT
 trap 'operator_request_stop TERM' TERM
 trap 'operator_request_stop HUP' HUP
 
-ensure_ready
+if ! operator_stop_campaign_processes_from_pointer "$POINTER_FILE"; then
+  print "无法确认或停止上次异常运行的进程；为避免旧进程继续写库，本次拒绝继续。"
+  print "请双击“2_安全暂停并生成报告”，再把窗口结果交给 Codex。"
+  exit 1
+fi
 abort_if_stop_requested
-ensure_phase0_database
+
+ensure_ready
 abort_if_stop_requested
 
 if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]]; then
@@ -83,12 +88,28 @@ if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]]; then
   print "请把窗口内容交给 Codex，不要自行清理数据库。"
   exit 1
 fi
+operator_start_keep_awake
+ensure_phase0_database
+abort_if_stop_requested
 
 cd "$PROJECT_ROOT"
-node --import tsx src/cli/paper-campaign-preflight.ts
+PREFLIGHT_OUTPUT="$(node --import tsx src/cli/paper-campaign-preflight.ts)"
+print -r -- "$PREFLIGHT_OUTPUT"
+PREFLIGHT_CAMPAIGN_ID="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
+  const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
+  if (value.campaignId === null) process.stdout.write("__NONE__");
+  else if (typeof value.campaignId === "string" && /^PC-/.test(value.campaignId)) process.stdout.write(value.campaignId);
+  else process.exit(2);
+')"
 abort_if_stop_requested
 if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
   --file="$ISOLATED_EVIDENCE_FILE" >/dev/null 2>&1; then
+  if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" ]]; then
+    print "已有 Campaign $PREFLIGHT_CAMPAIGN_ID，但隔离证据缺失、损坏或版本不匹配。"
+    print "为保护崩溃恢复游标，本次不会先刷新 Phase 0 数据，也不会改写数据库。"
+    print "请把本次诊断包交给 Codex 处理。"
+    exit 1
+  fi
   title "首次运行：自动完成隔离验证"
   print "只使用 Paper、Replay、Fake/Disabled Adapter；不会连接真实资金。"
   pnpm typecheck
@@ -126,7 +147,6 @@ if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
 fi
 
 abort_if_stop_requested
-operator_start_keep_awake
 title "自然数据运行"
 print "第一次自动运行约 2 小时；短测通过后，每次自动运行最多 12 小时。"
 print "可以随时双击“2_安全暂停并生成报告”。"

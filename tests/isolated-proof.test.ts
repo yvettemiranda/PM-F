@@ -27,12 +27,32 @@ function artifacts() {
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      captureStatus: "COMPLETE",
+      apiContractStatus: "PASSED",
+      apiSchemaErrorCount: 0,
+      apiWarnings: [],
+      tradeHistoryComplete: true,
+      activityHistoryComplete: true,
+      positionHistoryComplete: true,
+      tradeHistoryStopCategory: "END_OF_DATA",
+      activityHistoryStopCategory: "END_OF_DATA",
+      positionHistoryStopCategory: "END_OF_DATA",
       replayStatus: "PASSED",
+      replayIncompleteReasons: [],
+      ambiguousEvents: 0,
       replayHash,
     })}`,
     replayResultContent: `replay output\n${JSON.stringify({
       captureRunId,
       sourceCodeCommit: commit,
+      sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      tradeHistoryComplete: true,
+      activityHistoryComplete: true,
+      positionHistoryComplete: true,
+      replayStatus: "PASSED",
+      replayIncompleteReasons: [],
       replayHash,
       storedReplayHashes: [replayHash, replayHash],
       stable: true,
@@ -46,6 +66,8 @@ describe("isolated verification proof artifacts", () => {
     expect(proofs).toMatchObject({
       captureRunId,
       replayHash,
+      phase0ReplayStatus: "PASSED",
+      acceptedIncompleteReasons: [],
       passedTestFileCount: 2,
       passedTestCount: 3,
     });
@@ -68,10 +90,124 @@ describe("isolated verification proof artifacts", () => {
     mismatchedReplay.replayResultContent = JSON.stringify({
       captureRunId,
       sourceCodeCommit: commit,
+      sourceCodeDirty: false,
       replayHash: "d".repeat(64),
       storedReplayHashes: ["d".repeat(64)],
       stable: true,
     });
     expect(() => verifyIsolatedProofArtifacts(mismatchedReplay)).toThrow("CAPTURE_REPLAY_PROOF_INVALID");
+  });
+
+  it("accepts only the exact stable Phase 0 limitations produced by source offset caps", () => {
+    const limited = artifacts();
+    const reasons = [
+      "HISTORICAL_CAPITAL_SNAPSHOTS_MISSING",
+      "GOLDEN_EXPECTATIONS_MISSING",
+      "STARTING_POSITION_BASELINE_MISSING",
+      "TRADE_HISTORY_TRUNCATED",
+      "ACTIVITY_HISTORY_TRUNCATED",
+    ];
+    limited.phase0ResultContent = `phase0 output\n${JSON.stringify({
+      captureRunId,
+      sourceCodeCommit: commit,
+      sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      captureStatus: "COMPLETE",
+      apiContractStatus: "INCOMPLETE",
+      apiSchemaErrorCount: 0,
+      apiWarnings: [
+        "TRADE_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT",
+        "ACTIVITY_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT",
+      ],
+      tradeHistoryComplete: false,
+      activityHistoryComplete: false,
+      positionHistoryComplete: true,
+      tradeHistoryStopCategory: "SOURCE_OFFSET_LIMIT",
+      activityHistoryStopCategory: "SOURCE_OFFSET_LIMIT",
+      positionHistoryStopCategory: "END_OF_DATA",
+      replayStatus: "INCOMPLETE",
+      replayIncompleteReasons: reasons,
+      ambiguousEvents: 0,
+      replayHash,
+    })}`;
+    limited.replayResultContent = `replay output\n${JSON.stringify({
+      captureRunId,
+      sourceCodeCommit: commit,
+      sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      tradeHistoryComplete: false,
+      activityHistoryComplete: false,
+      positionHistoryComplete: true,
+      replayStatus: "INCOMPLETE",
+      replayIncompleteReasons: reasons,
+      replayHash,
+      storedReplayHashes: [replayHash],
+      stable: true,
+    })}`;
+
+    expect(verifyIsolatedProofArtifacts(limited)).toMatchObject({
+      phase0ReplayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
+      acceptedIncompleteReasons: reasons,
+    });
+  });
+
+  it("rejects unknown limitations, schema failures, pagination mismatches, or replay disagreement", () => {
+    const phase0 = {
+      captureRunId,
+      sourceCodeCommit: commit,
+      sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      captureStatus: "COMPLETE",
+      apiContractStatus: "INCOMPLETE",
+      apiSchemaErrorCount: 0,
+      apiWarnings: ["TRADE_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT"],
+      tradeHistoryComplete: false,
+      activityHistoryComplete: true,
+      positionHistoryComplete: true,
+      tradeHistoryStopCategory: "SOURCE_OFFSET_LIMIT",
+      activityHistoryStopCategory: "END_OF_DATA",
+      positionHistoryStopCategory: "END_OF_DATA",
+      replayStatus: "INCOMPLETE",
+      replayIncompleteReasons: [
+        "HISTORICAL_CAPITAL_SNAPSHOTS_MISSING",
+        "GOLDEN_EXPECTATIONS_MISSING",
+        "STARTING_POSITION_BASELINE_MISSING",
+        "TRADE_HISTORY_TRUNCATED",
+      ],
+      ambiguousEvents: 0,
+      replayHash,
+    };
+    const replay = {
+      captureRunId,
+      sourceCodeCommit: commit,
+      sourceCodeDirty: false,
+      identityStatus: "IDENTITY_CONFIRMED",
+      tradeHistoryComplete: false,
+      activityHistoryComplete: true,
+      positionHistoryComplete: true,
+      replayStatus: "INCOMPLETE",
+      replayIncompleteReasons: phase0.replayIncompleteReasons,
+      replayHash,
+      storedReplayHashes: [replayHash],
+      stable: true,
+    };
+
+    for (const mutate of [
+      (value: typeof phase0) => ({ ...value, replayIncompleteReasons: [...value.replayIncompleteReasons, "AMBIGUOUS_DUPLICATE_EVENTS"] }),
+      (value: typeof phase0) => ({ ...value, apiContractStatus: "FAILED", apiSchemaErrorCount: 1 }),
+      (value: typeof phase0) => ({ ...value, tradeHistoryStopCategory: "HTTP_400" }),
+      (value: typeof phase0) => ({ ...value, apiWarnings: [] }),
+      (value: typeof phase0) => ({ ...value, positionHistoryComplete: false, positionHistoryStopCategory: "SOURCE_OFFSET_LIMIT" }),
+    ]) {
+      const invalid = artifacts();
+      invalid.phase0ResultContent = JSON.stringify(mutate(phase0));
+      invalid.replayResultContent = JSON.stringify(replay);
+      expect(() => verifyIsolatedProofArtifacts(invalid)).toThrow("PHASE0_VALIDATION_PROOF_INVALID");
+    }
+
+    const mismatch = artifacts();
+    mismatch.phase0ResultContent = JSON.stringify(phase0);
+    mismatch.replayResultContent = JSON.stringify({ ...replay, replayIncompleteReasons: [] });
+    expect(() => verifyIsolatedProofArtifacts(mismatch)).toThrow("CAPTURE_REPLAY_PROOF_INVALID");
   });
 });

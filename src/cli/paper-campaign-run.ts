@@ -300,6 +300,17 @@ function observeOperationalMetrics(report: ObserveCampaignReport): ObserveOperat
   };
 }
 
+function summarizeIsolatedEvidence(isolated: IsolatedVerificationEvidence) {
+  return {
+    verificationStatus: isolated.status,
+    phase0ReplayStatus: isolated.proofs.phase0ReplayStatus,
+    acceptedIncompleteReasons: isolated.proofs.acceptedIncompleteReasons,
+    artifactHash: isolated.artifactHash,
+    sourceCodeCommit: isolated.sourceCodeCommit,
+    coreCompatibilityHash: isolated.coreCompatibilityHash,
+  };
+}
+
 async function recoverInterrupted(
   service: PaperValidationCampaignService,
   snapshot: CampaignSnapshot,
@@ -373,6 +384,7 @@ async function recoverInterrupted(
     databaseContinuity: reportContinuity,
     recoveryCleanup: reportCleanup,
     coverage,
+    isolatedEvidence: summarizeIsolatedEvidence(isolated),
     checkpointEvidence: reportCheckpointEvidence,
     safety: {
       executionMode: "PAPER",
@@ -395,6 +407,7 @@ async function recoverInterrupted(
     cumulativeOperationalMetrics: finalized.campaign.operationalMetrics,
     latestIntegrity: integrity,
     latestPaperAcceptance: acceptance,
+    isolatedEvidence: summarizeIsolatedEvidence(isolated),
     safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
   });
   const stoppedAt = finalized.session.stoppedAt;
@@ -903,6 +916,7 @@ async function main(): Promise<void> {
       observe: observeReport,
       integrity,
       coverage,
+      isolatedEvidence: summarizeIsolatedEvidence(isolated),
       replayEvidence: replayEvidence.map((artifact) => ({
         source: artifact.source,
         coverage: artifact.coverage,
@@ -929,6 +943,7 @@ async function main(): Promise<void> {
       cumulativeOperationalMetrics: finalized.campaign.operationalMetrics,
       latestIntegrity: integrity,
       latestPaperAcceptance: paperReport?.report.acceptance ?? null,
+      isolatedEvidence: summarizeIsolatedEvidence(isolated),
       safety: {
         executionMode: "PAPER",
         liveGateState: "LIVE_DISABLED",

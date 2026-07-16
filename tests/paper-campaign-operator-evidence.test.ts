@@ -31,6 +31,8 @@ const proofHashes = (passedTestFileCount: number) => ({
   replayResultSha256: "3".repeat(64),
   captureRunId: "4".repeat(64),
   replayHash: "5".repeat(64),
+  phase0ReplayStatus: "PASSED" as const,
+  acceptedIncompleteReasons: [],
   passedTestFileCount,
   passedTestCount: 1,
 });
@@ -181,6 +183,16 @@ describe("Paper Campaign operator evidence", () => {
       proofs: { ...evidence.proofs, passedTestFileCount: 0 },
     });
     expect(verifyIsolatedVerificationEvidence(prooflessEvidence, "a".repeat(64))).toBe(false);
+    const reasonlessIncomplete = buildIsolatedVerificationEvidence({
+      ...evidence,
+      replayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
+      proofs: {
+        ...evidence.proofs,
+        phase0ReplayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
+        acceptedIncompleteReasons: [],
+      },
+    });
+    expect(verifyIsolatedVerificationEvidence(reasonlessIncomplete, "a".repeat(64))).toBe(false);
   });
 
   it("keeps natural and isolated coverage sources distinct", () => {

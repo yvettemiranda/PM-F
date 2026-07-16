@@ -127,6 +127,7 @@ export function buildCurrentCoreCompatibilityManifest(projectRoot: string): Core
         ...migrations,
         "src/infra/sqlite/capture-payload.ts",
         "src/infra/sqlite/database.ts",
+        "src/infra/sqlite/phase0-validation-database.ts",
         "src/infra/sqlite/runtime-database-preparation.ts",
       ]),
       runtimeEnvironment: hashValue({

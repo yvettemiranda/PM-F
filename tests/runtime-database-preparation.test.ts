@@ -1,11 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { VERSIONS } from "../src/domain/versioning.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
-import { prepareRuntimeDatabase } from "../src/infra/sqlite/runtime-database-preparation.js";
+import {
+  prepareRuntimeDatabase,
+  RUNTIME_CURRENT_REQUIRED_TRIGGERS,
+  RUNTIME_SCHEMA_MIGRATION_VERSIONS,
+} from "../src/infra/sqlite/runtime-database-preparation.js";
+import { preparePhase0ValidationDatabase } from "../src/infra/sqlite/phase0-validation-database.js";
 
 const directories: string[] = [];
 const sourceVersion: SourceVersion = { commit: "runtime-preparation-test", dirty: false };
@@ -68,6 +73,45 @@ function createPreviousSchema(path: string): void {
 }
 
 describe("runtime database preparation", () => {
+  it("keeps the current safety-trigger registry synchronized with every migration trigger", () => {
+    const sqliteDirectory = join(process.cwd(), "src", "infra", "sqlite");
+    const migrationTriggers = readdirSync(sqliteDirectory)
+      .filter((name) => /^\d{3}_.+\.sql$/.test(name))
+      .flatMap((name) => [...readFileSync(join(sqliteDirectory, name), "utf8").matchAll(/^CREATE TRIGGER\s+(\S+)/gm)]
+        .map((match) => match[1]!))
+      .sort();
+
+    expect([...RUNTIME_CURRENT_REQUIRED_TRIGGERS].sort()).toEqual(migrationTriggers);
+  });
+
+  it("forces Phase 0 validation through backup-first preparation", async () => {
+    const root = directory();
+    const databasePath = join(root, "data", "phase0", "phase0.sqlite");
+    const backupDirectory = join(root, "backups");
+    createPreviousSchema(databasePath);
+
+    const prepared = await preparePhase0ValidationDatabase({
+      databasePath,
+      backupDirectory,
+      sourceVersion,
+    });
+    prepared.database.close();
+
+    expect(prepared.preparation.migrated).toBe(true);
+    expect(prepared.preparation.backupPath).not.toBeNull();
+    const backup = new DatabaseSync(prepared.preparation.backupPath!, { readOnly: true });
+    expect(backup.prepare("SELECT 1 ok FROM schema_migrations WHERE version=?")
+      .get(VERSIONS.schemaVersion)).toBeUndefined();
+    expect(backup.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    backup.close();
+    const current = new DatabaseSync(databasePath, { readOnly: true });
+    expect(current.prepare("SELECT 1 ok FROM schema_migrations WHERE version=?")
+      .get(VERSIONS.schemaVersion)).toBeDefined();
+    expect(current.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    expect(current.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    current.close();
+  });
+
   it("initializes a new runtime database without pretending a migration backup exists", async () => {
     const root = directory();
     const databasePath = join(root, "new", "phase0.sqlite");
@@ -76,6 +120,10 @@ describe("runtime database preparation", () => {
     const database = new DatabaseSync(databasePath, { readOnly: true });
     expect(database.prepare("SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'").get())
       .toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
+    const actualVersions = (database.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: string }>)
+      .map((row) => row.version)
+      .sort();
+    expect(actualVersions).toEqual([...RUNTIME_SCHEMA_MIGRATION_VERSIONS].sort());
     database.close();
   });
 
@@ -117,6 +165,90 @@ describe("runtime database preparation", () => {
 
     await expect(prepareRuntimeDatabase({ databasePath, sourceVersion }))
       .rejects.toThrow("RUNTIME_DATABASE_UNSAFE_MODE:LIVE:LIVE_ACTIVE");
+  });
+
+  it("rejects a non-contiguous migration history before applying any missing migration", async () => {
+    const root = directory();
+    const databasePath = join(root, "non-contiguous.sqlite");
+    createPreviousSchema(databasePath);
+    const database = new DatabaseSync(databasePath);
+    database.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (?,?)")
+      .run(VERSIONS.schemaVersion, "2026-07-16T00:00:00.000Z");
+    database.close();
+
+    await expect(prepareRuntimeDatabase({ databasePath, sourceVersion }))
+      .rejects.toThrow("RUNTIME_DATABASE_MIGRATION_HISTORY_NON_CONTIGUOUS");
+
+    const unchanged = new DatabaseSync(databasePath, { readOnly: true });
+    expect(unchanged.prepare("SELECT 1 ok FROM schema_migrations WHERE version='2.20.0'").get())
+      .toBeUndefined();
+    expect(unchanged.prepare(
+      "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='paper_validation_campaigns'",
+    ).get()).toBeUndefined();
+    unchanged.close();
+  });
+
+  it("rejects an unknown future migration without opening it as the current schema", async () => {
+    const root = directory();
+    const databasePath = join(root, "future.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const database = new DatabaseSync(databasePath);
+    database.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (?,?)")
+      .run("9.9.0", "2026-07-16T00:00:00.000Z");
+    database.close();
+
+    await expect(prepareRuntimeDatabase({ databasePath, sourceVersion }))
+      .rejects.toThrow("RUNTIME_DATABASE_UNKNOWN_MIGRATION_VERSION:9.9.0");
+  });
+
+  it("rejects a current marker set when a required schema object is missing", async () => {
+    const root = directory();
+    const databasePath = join(root, "missing-current-object.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const database = new DatabaseSync(databasePath);
+    database.exec("DROP TABLE paper_validation_reports");
+    database.close();
+
+    await expect(prepareRuntimeDatabase({ databasePath, sourceVersion }))
+      .rejects.toThrow("RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:table:paper_validation_reports");
+  });
+
+  it("rejects a post-Live-Gate prefix with a missing safety table before backup or migration", async () => {
+    const root = directory();
+    const databasePath = join(root, "missing-prefix-safety.sqlite");
+    const backupDirectory = join(root, "backups");
+    createPreviousSchema(databasePath);
+    const database = new DatabaseSync(databasePath);
+    database.exec("DROP TABLE live_gate_state");
+    database.close();
+
+    await expect(prepareRuntimeDatabase({ databasePath, backupDirectory, sourceVersion }))
+      .rejects.toThrow("RUNTIME_DATABASE_SAFETY_STATE_TABLE_MISSING");
+
+    expect(existsSync(backupDirectory)).toBe(false);
+    const unchanged = new DatabaseSync(databasePath, { readOnly: true });
+    expect(unchanged.prepare("SELECT 1 ok FROM schema_migrations WHERE version='2.20.0'").get())
+      .toBeUndefined();
+    expect(unchanged.prepare(
+      "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='paper_validation_campaigns'",
+    ).get()).toBeUndefined();
+    unchanged.close();
+  });
+
+  it("rejects every missing immutable or state-machine trigger in the current schema", async () => {
+    const root = directory();
+    const intactDatabasePath = join(root, "intact-current.sqlite");
+    await prepareRuntimeDatabase({ databasePath: intactDatabasePath, sourceVersion });
+    for (const trigger of RUNTIME_CURRENT_REQUIRED_TRIGGERS) {
+      const databasePath = join(root, `${trigger}.sqlite`);
+      copyFileSync(intactDatabasePath, databasePath);
+      const database = new DatabaseSync(databasePath);
+      database.exec(`DROP TRIGGER ${trigger}`);
+      database.close();
+
+      await expect(prepareRuntimeDatabase({ databasePath, sourceVersion }))
+        .rejects.toThrow(`RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:trigger:${trigger}`);
+    }
   });
 
   it("rejects a current-schema database whose Live Gate safety table is missing", async () => {

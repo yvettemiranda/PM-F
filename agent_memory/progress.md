@@ -21,15 +21,18 @@
 ## Verification completed
 - Node `24.14.0`、pnpm `11.9.0`。
 - `pnpm typecheck` 通过。
-- 全量测试：43 个文件、463 项通过。
-- Campaign 隔离测试：19 个文件、290 项通过。
+- 全量测试：43 个文件、473 项通过。
+- Campaign 隔离测试：19 个文件、300 项通过。
 - 旧业务库副本依次迁移至 2.20.0/2.21.0：`integrity_check=ok`、0 外键问题、两类市场快照均有 capture FK、5 张 Campaign 表存在。
 - 全部 `.command/.sh` zsh 语法与 `git diff --check` 通过。
-- 独立 Standards/Spec/Operator 多轮复审已关闭游标跳跃、二次崩溃报告、快照不可变、累计口径、按钮 cwd、结果指针、Portfolio 旧快照和清理前 Observe 结构异常问题；最终结论无剩余 P0/P1/P2。
+- 当前库版本准备改为 backup-first、连续 migration 前缀验证，并核对全部 109 个安全触发器；未知未来版本、缺失历史 marker/触发器/关键表列均 fail closed。
+- Phase 0 资格证据只接受完整 `PASSED`，或精确列举且相互匹配的 `INCOMPLETE_KNOWN_LIMITATIONS`；不会把 Data API 历史限制冒充完整 Replay。
+- 独立启动流、运行时 Schema、报告/Replay 三路复审已关闭启动顺序、遗留进程、历史回放诚实性和 current schema 防护问题；最终无剩余 P0/P1。
+- 第一次实际启动在创建 Campaign 前因 pnpm 版本不一致安全拒绝；第二次在创建 Campaign 前因旧 Phase 0 完整通过口径不可满足安全拒绝，均未创建账户、Session 或累计时长。
+- 旧启动曾在 backup-first 修复前把实际库由 2.19 增量迁移至 2.21；迁移仅新增对象，但不存在迁移前备份。已保存只读事后取证快照及 manifest，明确记录该限制，不伪造回滚证据。
 
 ## Next steps
-1. pnpm 冻结版本已与当前 Codex 运行环境从 `11.7.0` 对齐到 `11.9.0`；第一次启动在创建 Campaign 前按预期 fail closed，未产生模拟数据、未计时。
-2. 重新执行冻结安装、类型检查、全量/隔离测试和脚本检查，提交环境对齐修复。
-3. clean commit 上自动刷新真实公开数据、执行稳定 Replay 与隔离 proof。
-4. 启动同一目标钱包、固定 1000 pUSD 账户的 2 小时资格 Session。
-5. 检查 Session/Campaign 报告和脱敏 ZIP；通过才开放后续累计长测。
+1. 提交本轮 Phase 0 证据、数据库准备和启动顺序加固，形成 clean commit。
+2. clean commit 上自动刷新真实公开数据、执行稳定 Replay 与 19 文件隔离 proof。
+3. 启动同一目标钱包、固定 1000 pUSD 账户的 2 小时资格 Session。
+4. 检查 Session/Campaign 报告、数据库完整性和脱敏 ZIP；通过才开放后续累计长测。

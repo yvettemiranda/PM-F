@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from "../domain/models.js";
-import { Phase0Database } from "../infra/sqlite/database.js";
+import { preparePhase0ValidationDatabase } from "../infra/sqlite/phase0-validation-database.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { ReplayEngine } from "../replay/replay-engine.js";
 import { buildWalletIdentityReport } from "../services/wallet-identity.js";
@@ -9,8 +9,10 @@ const captureRunId = process.argv.slice(2).find((argument) => /^[a-f0-9]{64}$/.t
 if (!captureRunId) throw new Error("Usage: pnpm phase05:replay-capture -- <capture-run-id>");
 
 const sourceVersion = resolveSourceVersion();
-const database = new Phase0Database(resolve("data/phase0/phase0.sqlite"), sourceVersion);
-database.initialize();
+const { database } = await preparePhase0ValidationDatabase({
+  databasePath: resolve("data/phase0/phase0.sqlite"),
+  sourceVersion,
+});
 try {
   const captureRun = database.loadCaptureRun(captureRunId);
   if (sourceVersion.dirty) throw new Error("Current source tree is dirty; deterministic capture replay is blocked");
@@ -43,6 +45,9 @@ try {
     relayerWalletDeployed: (walletPayloads[0] as { deployed?: boolean } | undefined)?.deployed ?? null,
     tradeHistoryComplete: database.captureEndpointWasComplete(captureRunId, "data-trades"),
   });
+  const tradeHistoryComplete = database.captureEndpointWasComplete(captureRunId, "data-trades");
+  const activityHistoryComplete = database.captureEndpointWasComplete(captureRunId, "data-activity");
+  const positionHistoryComplete = database.captureEndpointWasComplete(captureRunId, "data-positions");
   const replay = new ReplayEngine().run({
     walletAddress: captureRun.walletAddress,
     identityStatus: identity.status,
@@ -51,8 +56,8 @@ try {
     hasCapitalSnapshots: false,
     hasGoldenExpectations: false,
     hasPositionBaseline: false,
-    tradeHistoryComplete: database.captureEndpointWasComplete(captureRunId, "data-trades"),
-    activityHistoryComplete: database.captureEndpointWasComplete(captureRunId, "data-activity"),
+    tradeHistoryComplete,
+    activityHistoryComplete,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
@@ -62,6 +67,13 @@ try {
     captureRunId,
     manifestHash: captureRun.manifestHash,
     sourceCodeCommit: sourceVersion.commit,
+    sourceCodeDirty: sourceVersion.dirty,
+    identityStatus: identity.status,
+    tradeHistoryComplete,
+    activityHistoryComplete,
+    positionHistoryComplete,
+    replayStatus: replay.status,
+    replayIncompleteReasons: replay.incompleteReasons,
     replayHash: replay.reportHash,
     storedReplayHashes: storedHashes,
     stable,

@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { PolymarketPublicApi, type ApiCapture } from "../adapters/polymarket-public.js";
-import { Phase0Database } from "../infra/sqlite/database.js";
+import { preparePhase0ValidationDatabase } from "../infra/sqlite/phase0-validation-database.js";
 import { ReplayEngine } from "../replay/replay-engine.js";
 import { buildWalletIdentityReport } from "../services/wallet-identity.js";
 import { validateApiContract } from "../services/api-contract.js";
@@ -119,8 +119,11 @@ const manifest = buildCaptureManifest({
   sources: manifestSources,
 });
 
-const database = new Phase0Database(resolve(outputDirectory, "phase0.sqlite"), sourceVersion);
-database.initialize();
+const databasePath = resolve(outputDirectory, "phase0.sqlite");
+const { database, preparation: databasePreparation } = await preparePhase0ValidationDatabase({
+  databasePath,
+  sourceVersion,
+});
 database.saveIdentity(identity);
 
 const captures: Array<[string, ApiCapture<unknown>]> = [
@@ -254,6 +257,7 @@ const envelope = {
     itemCount: baseline.items.length,
   },
   capitalEstimate,
+  databasePreparation,
   interruptedJobs,
   replayJobId,
   replayRunId,
@@ -274,9 +278,18 @@ console.log(
       identityStatus: identity.status,
       walletType: identity.walletType,
       apiContractStatus: apiContractReport.status,
+      apiSchemaErrorCount: apiContractReport.schemaErrors.length,
+      apiWarnings: apiContractReport.warnings,
       captureRunId: manifest.captureRunId,
+      captureStatus: manifest.status,
       sourceCodeCommit: sourceVersion.commit,
       sourceCodeDirty: sourceVersion.dirty,
+      tradeHistoryComplete: trades.historyComplete,
+      activityHistoryComplete: activity.historyComplete,
+      positionHistoryComplete: positionHistory.historyComplete,
+      tradeHistoryStopCategory: finalPaginationStatus(trades.historyComplete, trades.stopReason),
+      activityHistoryStopCategory: finalPaginationStatus(activity.historyComplete, activity.stopReason),
+      positionHistoryStopCategory: finalPaginationStatus(positionHistory.historyComplete, positionHistory.stopReason),
       baselineItems: baseline.items.length,
       capitalConfidence: capitalEstimate.capitalConfidence,
       goldenCandidateCount: goldenCandidates.length,
@@ -285,6 +298,8 @@ console.log(
       activity: activity.rows.length,
       positions: positions.data.length,
       replayStatus: replay.status,
+      replayIncompleteReasons: replay.incompleteReasons,
+      ambiguousEvents: replay.metrics.ambiguousEvents,
       replayHash: replay.reportHash,
       duplicateRows: replay.metrics.duplicateRows,
       buySignals: replay.metrics.buySignals,

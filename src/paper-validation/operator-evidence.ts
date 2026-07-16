@@ -82,7 +82,7 @@ export interface IsolatedVerificationEvidence {
   generatedAt: string;
   coverage: PaperValidationScenario[];
   testFiles: string[];
-  replayStatus: "PASSED";
+  replayStatus: "PASSED" | "INCOMPLETE_KNOWN_LIMITATIONS";
   proofs: IsolatedVerificationProofs;
   safety: {
     executionMode: "PAPER";
@@ -149,7 +149,7 @@ export function verifyIsolatedVerificationEvidence(
   return evidence.status === "PASSED"
     && evidence.coreCompatibilityHash === expectedCoreCompatibilityHash
     && evidence.sourceCodeCommit.trim().length > 0
-    && evidence.replayStatus === "PASSED"
+    && evidence.replayStatus === evidence.proofs.phase0ReplayStatus
     && evidence.testFiles.length === PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length
     && evidence.testFiles.every((file, index) => file === PAPER_CAMPAIGN_ISOLATED_TEST_FILES[index])
     && isolatedVerificationProofsAreWellFormed(evidence.proofs)

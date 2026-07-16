@@ -16,6 +16,10 @@
 
 ## Resolved in current implementation
 - 首次资格启动发现仓库冻结 pnpm `11.7.0`、当前 Codex 运行时为 `11.9.0`；入口在 Campaign 创建前安全拒绝，现已将冻结版本对齐为 `11.9.0`，未混入任何运行时长或模拟数据。
+- 旧 Phase 0 校验把三个必然缺失的历史输入和 Data API offset 限制一律视为不可启动；现仅允许精确、可核验的已知不完整原因，并在全部报告中明确保留 `phase0ReplayStatus`，未知原因仍 fail closed。
+- Phase 0/Replay 数据库准备改为先备份、再迁移、后校验；current schema 会核对连续 marker、关键表列、唯一索引和全部 109 个安全触发器。
+- 启动器会在 Node/pnpm/依赖检查和任何数据库访问前收割指针绑定的遗留进程，避免环境失败时旧进程继续写库。
+- 2026-07-16 的旧启动在 backup-first 修复前把实际库从 2.19 增量迁移至 2.21；不存在迁移前备份，不能声称可恢复。已保存事后快照 `data/operator/backups/phase0-post-migration-incident-20260716T065024Z.sqlite` 和 manifest，迁移内容经核验为新增对象、当前库完整性正常。
 - 小于 1 ppm 的有效比例不再因整数 ppm 提前截断为 0。
 - `min_order_size`/tick 已进入共享快照、执行前判断和不可变证据；不会自动放大金额。
 - 报告不再用“BUY 未观察到”掩盖已收到但不可执行/被拒绝的 BUY。

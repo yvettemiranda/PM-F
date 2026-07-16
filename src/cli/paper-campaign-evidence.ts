@@ -79,7 +79,7 @@ if (command === "write-passed") {
     generatedAt: new Date().toISOString(),
     coverage: deterministicCoverage,
     testFiles: [...PAPER_CAMPAIGN_ISOLATED_TEST_FILES],
-    replayStatus: "PASSED",
+    replayStatus: proofs.phase0ReplayStatus,
     proofs,
     safety: {
       executionMode: "PAPER",
@@ -91,13 +91,25 @@ if (command === "write-passed") {
     },
   });
   await writeAtomically(output, evidence);
-  console.log(JSON.stringify({ status: "PASSED", output, artifactHash: evidence.artifactHash }));
+  console.log(JSON.stringify({
+    status: "PASSED",
+    output,
+    artifactHash: evidence.artifactHash,
+    phase0ReplayStatus: evidence.proofs.phase0ReplayStatus,
+    acceptedIncompleteReasons: evidence.proofs.acceptedIncompleteReasons,
+  }));
 } else if (command === "verify") {
   const evidence = JSON.parse(await readFile(output, "utf8")) as IsolatedVerificationEvidence;
   if (!verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash)) {
     throw new Error("ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
   }
-  console.log(JSON.stringify({ status: "PASSED", output, artifactHash: evidence.artifactHash }));
+  console.log(JSON.stringify({
+    status: "PASSED",
+    output,
+    artifactHash: evidence.artifactHash,
+    phase0ReplayStatus: evidence.proofs.phase0ReplayStatus,
+    acceptedIncompleteReasons: evidence.proofs.acceptedIncompleteReasons,
+  }));
 } else {
   throw new Error(`UNKNOWN_PAPER_CAMPAIGN_EVIDENCE_COMMAND:${command}`);
 }

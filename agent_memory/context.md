@@ -32,6 +32,6 @@
 - 首次资格短测若提前安全暂停，已验证健康时长计入 72 小时，但 `qualified` 仍为 false，下一次仍须完成独立完整的 2 小时资格 Session。
 
 ## Remaining gates
-- Paper 精度与累计验证主体已形成 clean commit；pnpm 冻结版本对齐修复正在提交，新的 2 小时资格 Session 尚未开始。
+- Paper 精度与累计验证主体已形成 clean commit；Phase 0 证据诚实性、数据库 backup-first/current schema 全量保护及启动顺序加固已完成回归，正在提交，新的 2 小时资格 Session 尚未开始。
 - 资格通过后仍需累计 72 小时、至少一个连续 12 小时 Session，并补足关键场景覆盖。
 - Live 前仍需长期稳定性、Crash/重启验证、最终 reconciliation、合规地区 geoblock/clock 检查、隔离钱包与用户再次明确授权。

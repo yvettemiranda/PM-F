@@ -120,9 +120,50 @@ describe("Paper Campaign operator shell", () => {
     }
   });
 
+  it("reaps live Paper and Observe workers even when their supervisor is already gone", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-stale-supervisor-"));
+    temporaryDirectories.push(directory);
+    const campaignId = "PC-STALE";
+    const sessionId = "PS-STALE";
+    const paper = sleepingProcess("src/cli/paper-run.ts", campaignId, sessionId);
+    const observe = sleepingProcess("src/cli/observe-only.ts", campaignId, sessionId);
+    const pointer = join(directory, "pointer.json");
+    writeFileSync(pointer, JSON.stringify({
+      campaignId,
+      sessionId,
+      supervisorPid: 999_999,
+      paperPid: paper.pid,
+      observePid: observe.pid,
+      operatorOwnerToken: "stale-owner",
+    }));
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      const stopped = spawnSync("zsh", [
+        "-c",
+        `PROJECT_ROOT="$1"
+         source "$1/操作入口/lib/common.sh"
+         OPERATOR_ORPHAN_WAIT_TICKS=20
+         OPERATOR_ORPHAN_FORCE_WAIT_TICKS=20
+         operator_stop_campaign_processes_from_pointer "$2"`,
+        "zsh",
+        projectRoot,
+        pointer,
+      ], { cwd: projectRoot, encoding: "utf8", timeout: 10_000 });
+      expect(stopped.status, stopped.stderr).toBe(0);
+      await Promise.all([exited(paper), exited(observe)]);
+    } finally {
+      for (const child of [paper, observe]) {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
+    }
+  });
+
   it("keeps the active lock through fixed-pointer packaging and uses report commit evidence", () => {
     const launcher = readFileSync(resolve(projectRoot, "操作入口/lib/run-paper-campaign.sh"), "utf8");
     const common = readFileSync(resolve(projectRoot, "操作入口/lib/common.sh"), "utf8");
+    const phase0 = readFileSync(resolve(projectRoot, "src/cli/phase0-validate.ts"), "utf8");
+    const campaignRunner = readFileSync(resolve(projectRoot, "src/cli/paper-campaign-run.ts"), "utf8");
+    const campaignEvidence = readFileSync(resolve(projectRoot, "src/cli/paper-campaign-evidence.ts"), "utf8");
     const finishStart = launcher.indexOf("finish_campaign_launcher() {");
     const bundleAt = launcher.indexOf("operator_create_campaign_bundle", finishStart);
     const releaseAt = launcher.indexOf('rm -f "$saved_session_file"', finishStart);
@@ -137,6 +178,21 @@ describe("Paper Campaign operator shell", () => {
     expect(common).toContain('print "代码版本：$report_source_commit"');
     expect(common).toContain('\' "$report_source_commit"');
     expect(common).toContain('"$actual_pnpm" != "$expected_pnpm"');
+    expect(phase0).toContain("preparePhase0ValidationDatabase");
+    expect(phase0).not.toContain("database.initialize()");
+    expect(campaignRunner.match(/isolatedEvidence: summarizeIsolatedEvidence\(isolated\)/g)).toHaveLength(4);
+    expect(campaignRunner).toContain("acceptedIncompleteReasons: isolated.proofs.acceptedIncompleteReasons");
+    expect(campaignEvidence).toContain("phase0ReplayStatus: evidence.proofs.phase0ReplayStatus");
+    const firstOrphanCleanup = launcher.indexOf('if ! operator_stop_campaign_processes_from_pointer "$POINTER_FILE"');
+    expect(firstOrphanCleanup).toBeGreaterThanOrEqual(0);
+    expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("ensure_ready"));
+    expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("ensure_phase0_database"));
+    expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("paper-campaign-preflight.ts"));
+    expect(launcher.indexOf("operator_start_keep_awake")).toBeLessThan(launcher.indexOf("ensure_phase0_database"));
+    const existingCampaignGuard = launcher.indexOf('if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" ]]');
+    expect(existingCampaignGuard).toBeGreaterThan(launcher.indexOf("paper-campaign-preflight.ts"));
+    expect(existingCampaignGuard).toBeLessThan(launcher.indexOf('title "首次运行：自动完成隔离验证"'));
+    expect(launcher).toContain("为保护崩溃恢复游标，本次不会先刷新 Phase 0 数据");
     for (const name of [
       "2_安全暂停并生成报告.command",
       "3_查看进度和打开最新结果.command",
