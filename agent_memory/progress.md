@@ -19,7 +19,7 @@
 - 资格短测提前安全暂停的健康时间按最终规则累计，但不能拼成资格通过；三个入口支持任意 Finder cwd，ZIP 失败会显式指向本次可见未压缩结果而非旧包。
 
 ## Verification completed
-- Node `24.14.0`、pnpm `11.7.0`。
+- Node `24.14.0`、pnpm `11.9.0`。
 - `pnpm typecheck` 通过。
 - 全量测试：43 个文件、463 项通过。
 - Campaign 隔离测试：19 个文件、290 项通过。
@@ -28,8 +28,8 @@
 - 独立 Standards/Spec/Operator 多轮复审已关闭游标跳跃、二次崩溃报告、快照不可变、累计口径、按钮 cwd、结果指针、Portfolio 旧快照和清理前 Observe 结构异常问题；最终结论无剩余 P0/P1/P2。
 
 ## Next steps
-1. 处理最终复审发现（如有），再次运行匹配验证。
-2. 检查工作树、创建 clean commit。
+1. pnpm 冻结版本已与当前 Codex 运行环境从 `11.7.0` 对齐到 `11.9.0`；第一次启动在创建 Campaign 前按预期 fail closed，未产生模拟数据、未计时。
+2. 重新执行冻结安装、类型检查、全量/隔离测试和脚本检查，提交环境对齐修复。
 3. clean commit 上自动刷新真实公开数据、执行稳定 Replay 与隔离 proof。
 4. 启动同一目标钱包、固定 1000 pUSD 账户的 2 小时资格 Session。
 5. 检查 Session/Campaign 报告和脱敏 ZIP；通过才开放后续累计长测。
