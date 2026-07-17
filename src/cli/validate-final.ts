@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { ValidationRunner } from "../validation/validation-runner.js";
+import { resolveValidationScopeFromDatabase } from "../validation/scoped-invariants.js";
 import type { ValidationType } from "../validation/types.js";
 
 const args = process.argv.slice(2);
@@ -23,9 +24,16 @@ if (!allowedTypes.includes(type)) {
 const databasePath = resolve(valueArg("database") ?? "data/phase0/phase0.sqlite");
 const outputDirectory = resolve(valueArg("output-directory") ?? "data/validation");
 const useSnapshot = !flag("no-snapshot");
+const campaignId = valueArg("campaign-id");
+const campaignSessionId = valueArg("session-id");
+if (!campaignId || !campaignSessionId) {
+  throw new Error("VALIDATION_SCOPE_REQUIRED:--campaign-id and --session-id must both be provided");
+}
+const scope = resolveValidationScopeFromDatabase(databasePath, campaignId, campaignSessionId);
 
 const result = await new ValidationRunner().run({
   sourceDatabasePath: databasePath,
+  scope,
   outputDirectory,
   validationType: type,
   useSnapshot,
@@ -36,6 +44,7 @@ console.log(JSON.stringify({
   frameworkSessionStatus: result.report.session.status,
   finalReadinessStatus: result.report.finalResult.finalReadinessStatus,
   liveAllowed: result.report.finalResult.liveAllowed,
+  scope: result.report.scope,
   blockingFailures: result.report.finalResult.blockingFailures,
   warnings: result.report.finalResult.warnings,
   jsonReportPath: result.jsonReportPath,

@@ -13,11 +13,11 @@ import {
   type InterruptedDatabaseContinuity,
   type InterruptedSessionRecoveryDecision,
 } from "./crash-recovery.js";
+import { collectCheckpointEvidence } from "./checkpoint-evidence.js";
 import {
-  collectCheckpointEvidence,
   validateFinalCampaignIntegrity,
   type FinalIntegrityEvidence,
-} from "./operator-evidence.js";
+} from "./final-integrity.js";
 import type {
   CampaignSnapshot,
   CheckpointEvidence,
@@ -65,7 +65,14 @@ export async function prepareInterruptedRuntimeRecovery(input: {
     .summarize(input.snapshot.paperAccountId);
   let integrity = validateFinalCampaignIntegrity({
     databasePath: input.databasePath,
-    paperAccountId: input.snapshot.paperAccountId,
+    scope: {
+      campaignId: input.snapshot.campaignId,
+      sessionId: input.session.sessionId,
+      accountId: input.snapshot.paperAccountId,
+      targetId: input.snapshot.targetId,
+      baselineRunId: input.snapshot.baselineRunId,
+      coreHash: input.snapshot.coreCompatibilityHash,
+    },
     acceptance,
   });
   let processInspectionError = input.processInspectionError ?? null;
@@ -92,6 +99,11 @@ export async function prepareInterruptedRuntimeRecovery(input: {
     databasePath: input.databasePath,
     targetId: input.snapshot.targetId,
     paperAccountId: input.snapshot.paperAccountId,
+    scope: {
+      campaignId: input.snapshot.campaignId,
+      sessionId: input.session.sessionId,
+      baselineRunId: input.snapshot.baselineRunId,
+    },
     observeActive: false,
     paperActive: false,
     detail: { recoveryForSessionId: input.session.sessionId },
@@ -176,13 +188,25 @@ export async function prepareInterruptedRuntimeRecovery(input: {
       .summarize(input.snapshot.paperAccountId);
     integrity = validateFinalCampaignIntegrity({
       databasePath: input.databasePath,
-      paperAccountId: input.snapshot.paperAccountId,
+      scope: {
+        campaignId: input.snapshot.campaignId,
+        sessionId: input.session.sessionId,
+        accountId: input.snapshot.paperAccountId,
+        targetId: input.snapshot.targetId,
+        baselineRunId: input.snapshot.baselineRunId,
+        coreHash: input.snapshot.coreCompatibilityHash,
+      },
       acceptance,
     });
     checkpointEvidence = collectCheckpointEvidence({
       databasePath: input.databasePath,
       targetId: input.snapshot.targetId,
       paperAccountId: input.snapshot.paperAccountId,
+      scope: {
+        campaignId: input.snapshot.campaignId,
+        sessionId: input.session.sessionId,
+        baselineRunId: input.snapshot.baselineRunId,
+      },
       observeActive: false,
       paperActive: false,
       detail: { recoveryForSessionId: input.session.sessionId },

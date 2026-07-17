@@ -11,6 +11,7 @@ import type {
   ValidationSessionStatus,
   ValidationType,
 } from "./types.js";
+import type { ValidationScope } from "./scoped-invariants.js";
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -42,6 +43,7 @@ export function buildValidationReport(input: {
   inputSnapshotHash: string;
   dbSnapshotHash: string;
   checks: ValidationCheckResult[];
+  scope: ValidationScope;
 }): ValidationRunReport {
   const state = statusFor(input.checks);
   const blockingFailures = input.checks
@@ -52,6 +54,7 @@ export function buildValidationReport(input: {
     .map((check) => `${check.checkType}:${check.checkName}:${check.reason}`);
   const resultStatus = state.status === "FAILED" ? "FAIL" : warnings.length > 0 ? "INCOMPLETE" : "PASS";
   const reportWithoutHash = {
+    scope: input.scope,
     session: {
       id: input.sessionId,
       validationType: input.validationType,
@@ -150,6 +153,15 @@ function markdownReport(report: ValidationRunReport): string {
 - Ruleset: ${report.system.rulesetHash}
 - Validation: ${report.system.validationVersion}
 - Report Hash: ${report.system.reportHash}
+
+## Campaign Scope
+
+- Campaign: ${report.scope.campaignId}
+- Campaign Session: ${report.scope.sessionId}
+- Paper Account: ${report.scope.accountId}
+- Target: ${report.scope.targetId}
+- Baseline: ${report.scope.baselineRunId}
+- Core Compatibility Hash: ${report.scope.coreHash}
 
 ## Final Result
 

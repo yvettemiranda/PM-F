@@ -54,6 +54,7 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
       const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_BUY");
       signals.push({
         signalId: id,
+        targetId: baseline.targetId,
         signalIdempotencyKey: id,
         sourceEventKey: event.sourceEventKey,
         signalType: "TARGET_BUY",
@@ -81,6 +82,7 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
       const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_SELL");
       signals.push({
         signalId: id,
+        targetId: baseline.targetId,
         signalIdempotencyKey: id,
         sourceEventKey: event.sourceEventKey,
         signalType: "TARGET_SELL",

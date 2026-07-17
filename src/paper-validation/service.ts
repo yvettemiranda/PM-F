@@ -336,7 +336,9 @@ export class PaperValidationCampaignService {
     const snapshot = this.campaignSnapshot(input.campaignId);
     const sessionKind = snapshot.qualified ? "LONG_RUNNING" : "QUALIFYING";
     const defaultDuration = sessionKind === "QUALIFYING"
-      ? snapshot.qualifyingRuntimeMs
+      // The first healthy run can satisfy both the two-hour qualification gate
+      // and the twelve-hour continuity gate without an artificial restart.
+      ? Math.max(snapshot.qualifyingRuntimeMs, snapshot.requiredContinuousRuntimeMs)
       : this.defaultLongSessionDuration(snapshot);
     const plannedDurationMs = input.plannedDurationMs ?? defaultDuration;
     assertPositiveSafeInteger(plannedDurationMs, "PLANNED_DURATION_MS");

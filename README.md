@@ -29,16 +29,13 @@
 
 ## 本机验证
 
-如果不熟悉命令行，优先使用仓库里的 `操作入口/` 文件夹：
+不熟悉命令行时，只使用仓库里的 `操作入口/` 文件夹；旧的 `点这里运行/` 已移除，避免误点失效入口：
 
-1. 双击 `1_先点我_检查环境.command`
-2. 没有报错后，双击 `2_开始Observe_24小时.command`
-3. 运行结束后，双击 `4_打开报告文件夹.command`
-4. 把 `data/observe/` 最新的 `observe-*.json` 和 `data/operator/logs/` 最新日志发给 Codex 分析
+1. 双击 `1_开始或继续Paper累计验证.command`。第一次默认最多连续运行 12 小时；满 2 小时记录资格里程碑但不强制重启，继续到 12 小时可同时满足连续门槛。后续继续使用同一个 Campaign 和 1000 pUSD 模拟账户累计验证时间。
+2. 想暂停或关机时，双击 `2_安全暂停并生成报告.command`。它会停止 Observe、让 Paper 安全收尾，并自动生成报告和诊断 ZIP。
+3. 双击 `3_查看进度和打开最新结果.command`。Finder 会选中应发给 Codex 的最新 ZIP，无需手工寻找数据库或日志。
 
-需要运行 Paper 时，双击 `6_开始Paper_24小时_等我确认后再点.command`。这个入口会先恢复固定的 Paper 模拟账户及其消费 checkpoint，然后再同时启动 Observe，确保运行期间持续产生新的 Signal。正常停止后会分别生成 Observe 和 Paper 报告；重启入口不会创建一批互不关联的模拟账户，也不会重复消费已经处理过的 Signal。
-
-长期入口会使用 macOS `caffeinate` 防止系统睡眠（屏幕仍可关闭），并在 `data/operator/run/` 保存本次入口的精确进程记录。`3_停止当前运行.command` 只向这些已登记的本项目任务发送安全停止信号，不再按进程名称扫描其他项目。每次启动都会通过 frozen lockfile 校验依赖；同一时间只允许一个长期入口运行。Observe/Paper 启动前还会检查数据库是否固定为 `PAPER + LIVE_DISABLED`；如需迁移，会先用 SQLite Online Backup 保存最多 3 个迁移前备份，再执行 migration、`integrity_check` 和 `foreign_key_check`。
+长期入口会使用 macOS `caffeinate` 防止系统睡眠（屏幕仍可关闭），并在 `data/operator/run/` 保存本次入口的精确进程记录。安全暂停只向这些已登记的本项目任务发送停止信号，不按进程名称扫描其他项目。每次启动都会通过 frozen lockfile 校验依赖；同一时间只允许一个长期入口运行。Observe/Paper 启动前还会检查数据库是否固定为 `PAPER + LIVE_DISABLED`；如需迁移，会先用 SQLite Online Backup 保存最多 3 个迁移前备份，再执行 migration、`integrity_check` 和 `foreign_key_check`。
 
 `操作入口/` 中没有 Live 入口，不会读取私钥，不会创建真实订单。
 
@@ -50,7 +47,7 @@ pnpm phase0:validate -- 0x目标地址
 pnpm phase05:replay-capture -- capture_run_id
 pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=15
 pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
-pnpm validate:final -- --type=all
+pnpm validate:final -- --type=all --campaign-id=PC-... --session-id=PS-...
 pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 ```
 
@@ -62,9 +59,9 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
 
-`validate:final` 默认通过 SQLite Online Backup 把 `data/phase0/phase0.sqlite` 的一致性快照写入 `data/validation/<session-id>/` 后运行；源库即使处于 WAL 模式也不会漏掉已提交数据，验证过程不会污染业务库。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；存在未运行项、警告或历史数据不足时，顶层结果明确为 `INCOMPLETE`，不会用 framework session 的 `PASSED` 冒充最终验收通过。无论结果如何，`liveAllowed` 均固定为 `false`。真实资金前仍必须实际执行长周期 Paper Validation、24 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。
+`validate:final` 必须显式指定同一个 `campaign-id` 和 `session-id`，并通过 SQLite Online Backup 把 `data/phase0/phase0.sqlite` 的一致性快照写入 `data/validation/<validation-session-id>/` 后运行；它不会把旧 Campaign、其他账户或其他目标钱包的数据混进本次结论。源库即使处于 WAL 模式也不会漏掉已提交数据，验证过程不会污染业务库。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；存在未运行项、警告或历史数据不足时，顶层结果明确为 `INCOMPLETE`，不会用 framework session 的 `PASSED` 冒充最终验收通过。无论结果如何，`liveAllowed` 均固定为 `false`。真实资金前仍必须实际执行长周期 Paper Validation、24 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。
 
-`operational:validate` 默认同样使用 SQLite Online Backup 在 `data/operational/<run-id>/` 建立一致性快照，避免污染业务库。可选 `--mode=health_monitor|consistency_monitor|observe_only|paper_validation|crash_recovery`。其中：
+`operational:validate` 默认同样使用 SQLite Online Backup 在 `data/operational/<run-id>/` 建立一致性快照，避免污染业务库。可选 `--mode=health_monitor|consistency_monitor|observe_only|paper_validation|crash_recovery`。`consistency_monitor` 和 `crash_recovery` 只有在同时提供 `--campaign-id=PC-... --session-id=PS-...` 时才会运行账户、账本和恢复检查；缺少明确作用域时只记录 `EXPLICIT_CAMPAIGN_SCOPE_REQUIRED`，不会拿全库旧数据冒充本次结论。其中：
 
 - `health_monitor` 只记录心跳、数据库健康和 checkpoint。
 - `observe_only` 只记录 shadow risk observation，不写正式 `risk_decisions`，不进入 Paper/Live。

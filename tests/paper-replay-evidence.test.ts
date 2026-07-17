@@ -62,6 +62,7 @@ function fixture() {
   });
   database.saveCaptureManifest(targetId, manifest);
   const report = new ReplayEngine().run({
+    targetId,
     walletAddress: wallet,
     identityStatus: "IDENTITY_CONFIRMED",
     trades: [trade],
@@ -194,13 +195,13 @@ function seedExecutionEvidence(input: {
 
   database.prepare(
     `INSERT INTO signal_execution_contexts(
-      context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+      context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
-    contextId, signal.signal_id, targetTime, "2026-07-16T01:00:00.000Z", metadata,
+    contextId, input.targetId, signal.signal_id, targetTime, "2026-07-16T01:00:00.000Z", metadata,
     metadataHash, RULESET_HASH, VERSIONS.schemaVersion, VERSIONS.signalVersion,
     VERSIONS.strategyVersion, sourceVersion.commit, VERSIONS.configVersion, orderTime,
   );

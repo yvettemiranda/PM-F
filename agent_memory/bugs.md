@@ -1,7 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
-- 市场数据修复后的新核心 2 小时 Paper 资格 Session 尚未执行，因此新 Campaign 尚未 qualified，累计长测尚未开放。
+- 稳定化核心的新 Campaign 尚未执行，因此资格里程碑、连续 12 小时和累计 72 小时自然运行都尚未通过。
 - 旧 Campaign `PC-6D45BA731F325AA7370D` 已 BLOCKED；其 12 小时失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
 - 即使资格通过，仍需累计有效运行 72 小时、至少一个连续 12 小时 Session，并满足最终一致性与覆盖门槛。
 - 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景可能需要继续运行或使用明确标注的同版本隔离证据；不能伪装成自然行情。
@@ -16,6 +16,11 @@
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
 
 ## Resolved in current implementation
+- `coreCompatibilityHash` 已只覆盖实际 Paper 行为、运行编排、恢复、安全和 Schema 合同；Live-only/纯报告/说明/打包变化不再误伤 Campaign，canonical serializer、runtime policy 与 checkpoint 等真实语义变化不会漏掉。
+- Validation/Operational/Paper 最终检查已统一到当前 Campaign/Session/Account/Target/Core；Signal/Execution Context 固化 target，Paper/Risk 不再靠 raw event 推导执行身份。
+- Execution→Risk、当前状态→Transition、关键动作→Audit、资金/仓位/幂等/orphan 已有确定性 scoped invariant；旧数据不能替当前 Session 制造通过。
+- Observe 与 Campaign/Session 精确绑定且 provenance 不可改；Crash Recovery 只终止当前绑定 Observe，同目标 standalone Observe 保持 RUNNING 并触发保守阻断。
+- 操作面已收敛为桌面三个按钮，旧 `点这里运行/` 入口删除，README 和桌面说明统一为首次最多 12 小时、2 小时只记里程碑。
 - 2026-07-17 的 12 小时运行发现：官方显式零费率未被接受、慢 fee 请求会让先取回的盘口变旧、源端内容 timestamp 在盘口不变化时可能长期不更新、无暴露市场冻结会误伤整场。上述四项已修复并补真实公开接口只读验证。
 - Orderbook freshness 现使用收到时间、收到后的等待时间及公开请求 latency 的保守总和；raw 源时间仅作不可变审计和未来时间异常检查。
 - 无暴露市场异常降为 quarantine；存在 Position、WAITING/EXIT/STOP pending 或 active Reservation 时仍保守 blocker。

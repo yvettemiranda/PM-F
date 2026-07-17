@@ -33,6 +33,7 @@ export interface PaperMarketDataHealthSnapshot {
 
 export interface SignalExecutionContext {
   contextId: string;
+  targetId: string;
   signalId: string;
   capitalDecisionId: string | null;
   targetTradeCapitalRatioPpm: string | null;
@@ -52,6 +53,7 @@ export interface SignalExecutionContext {
 
 export interface PaperSignalEnvelope {
   signalId: string;
+  targetId: string;
   signalType: "TARGET_BUY" | "TARGET_SELL";
   status: string;
   executionEligible: boolean;
@@ -70,6 +72,12 @@ export interface PaperSignalEnvelope {
     ratioPpm: string | null;
     fallbackAmountMicros: string;
   } | null;
+}
+
+export interface PaperSignalConsumptionScope {
+  campaignId: string;
+  sessionId: string;
+  coreCompatibilityHash: string;
 }
 
 export interface OrderbookLevel {

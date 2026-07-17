@@ -122,7 +122,8 @@ finish_campaign_launcher() {
       "$ISOLATED_EVIDENCE_FILE" \
       "$TEST_RESULTS_FILE" \
       "$PHASE0_RESULT_FILE" \
-      "$REPLAY_RESULT_FILE" || true
+      "$REPLAY_RESULT_FILE" \
+      "$STAMP" || true
     RESULT_PACKAGED=1
   fi
   rm -f "$POINTER_MARKER" "$pointer_snapshot"
@@ -227,10 +228,10 @@ fi
 
 abort_if_stop_requested
 title "自然数据运行"
-print "第一次自动运行约 2 小时；短测通过后，每次自动运行最多 12 小时。"
+print "第一次默认连续运行最多 12 小时；满 2 小时会留下资格里程碑，不会为了出报告而强制重启。"
 print "可以随时双击“2_安全暂停并生成报告”。"
-print "注意：首次资格短测若提前安全暂停，已验证的健康时长仍计入 72 小时；下次仍需完成整段 2 小时资格短测。"
-print "资格短测通过后，后续每段已安全收尾的有效时间也会继续累计。"
+print "满 2 小时后如需暂停，安全收尾可完成资格判断；直接运行到 12 小时还能同时满足连续运行门槛。"
+print "不足 2 小时提前暂停时，已验证的健康时长仍计入 72 小时，但资格门槛尚未完成。"
 print "全程固定 PAPER + LIVE_DISABLED，不读取私钥，不创建真实订单。"
 
 if ! operator_stop_campaign_processes_from_pointer "$POINTER_FILE"; then

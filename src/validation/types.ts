@@ -34,6 +34,7 @@ export interface ValidationValidatorContext {
   databasePath: string;
   sourceVersion: SourceVersion;
   now: () => Date;
+  scope: ValidationScope;
 }
 
 export interface ValidationValidator {
@@ -50,12 +51,14 @@ export interface ValidationArtifact {
 
 export interface ValidationRunOptions {
   sourceDatabasePath: string;
+  scope: ValidationScope;
   outputDirectory?: string;
   validationType?: ValidationType;
   useSnapshot?: boolean;
 }
 
 export interface ValidationRunReport {
+  scope: ValidationScope;
   session: {
     id: string;
     validationType: ValidationType;
@@ -90,3 +93,4 @@ export interface ValidationRunReport {
   };
 }
 import type { SourceVersion } from "../infra/source-version.js";
+import type { ValidationScope } from "./scoped-invariants.js";

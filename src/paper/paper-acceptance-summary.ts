@@ -718,9 +718,8 @@ export class PaperAcceptanceSummaryService {
       `SELECT e.paper_execution_id
        FROM paper_executions e
        LEFT JOIN signals s ON s.signal_id=e.signal_id
-       LEFT JOIN raw_events r ON r.source_event_key=s.source_event_key
        WHERE e.paper_account_id=? AND e.signal_id IS NOT NULL
-         AND (r.target_id IS NULL OR r.target_id<>?)
+         AND (s.target_id IS NULL OR s.target_id<>?)
        ORDER BY e.paper_execution_id`,
     ).all(paperAccountId, targetId) as unknown as Array<{ paper_execution_id: string }>;
     return rows.map((row) => `EXECUTION_TARGET:${row.paper_execution_id}`);

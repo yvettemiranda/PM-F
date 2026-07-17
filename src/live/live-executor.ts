@@ -1628,9 +1628,9 @@ export class LiveExecutor implements ExecutorInterface {
   } {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
-              c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash,c.source_code_commit,c.source_code_dirty,
               c.config_version,c.created_at context_created_at
@@ -1639,6 +1639,7 @@ export class LiveExecutor implements ExecutorInterface {
        WHERE s.signal_id=?`,
     ).get(signalId) as {
       signal_id: string;
+      target_id: string;
       signal_type: "TARGET_BUY" | "TARGET_SELL";
       status: string;
       execution_eligible: number;
@@ -1651,6 +1652,7 @@ export class LiveExecutor implements ExecutorInterface {
       sell_ratio_denominator: string | null;
       created_at: string;
       context_id: string;
+      context_target_id: string;
       capital_decision_id: string | null;
       target_trade_capital_ratio_ppm: string | null;
       target_trade_timestamp: string;
@@ -1670,6 +1672,7 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const context: SignalExecutionContext = {
       contextId: row.context_id,
+      targetId: row.context_target_id,
       signalId: row.signal_id,
       capitalDecisionId: row.capital_decision_id,
       targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm,
@@ -1687,6 +1690,7 @@ export class LiveExecutor implements ExecutorInterface {
       context,
       signal: {
         signalId: row.signal_id,
+        targetId: row.target_id,
         signalType: row.signal_type,
         status: row.status,
         executionEligible: row.execution_eligible === 1,

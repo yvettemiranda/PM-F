@@ -595,10 +595,10 @@ export class LiveSignalConsumer {
   private loadSignal(signalId: string, signalSequence: number): LoadedLiveSignal {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               s.ruleset_hash signal_ruleset_hash,
-              c.context_id,c.signal_id context_signal_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.context_id,c.target_id context_target_id,c.signal_id context_signal_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
@@ -647,6 +647,7 @@ export class LiveSignalConsumer {
     }
     const context = row.context_id ? {
       contextId: row.context_id as string,
+      targetId: row.context_target_id as string,
       signalId: row.signal_id as string,
       capitalDecisionId: row.capital_decision_id as string | null,
       targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
@@ -666,6 +667,7 @@ export class LiveSignalConsumer {
     } : null;
     const signal: PaperSignalEnvelope = {
       signalId: row.signal_id as string,
+      targetId: row.target_id as string,
       signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
       status: row.status as string,
       executionEligible: (row.execution_eligible as number) !== 0,

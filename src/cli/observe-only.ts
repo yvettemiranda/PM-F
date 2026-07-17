@@ -22,6 +22,9 @@ const minimumSoakSeconds = numberArg("minimum-soak-seconds", 24 * 60 * 60);
 const valueArg = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
 const campaignId = valueArg("campaign-id") ?? null;
 const sessionId = valueArg("session-id") ?? null;
+if ((campaignId === null) !== (sessionId === null)) {
+  throw new Error("OBSERVE_CAMPAIGN_SCOPE_INCOMPLETE:--campaign-id and --session-id must both be provided");
+}
 const baselineRunId = valueArg("baseline-run-id");
 if (args.some((argument) => argument.startsWith("--baseline-run-id=")) && !baselineRunId?.trim()) {
   throw new Error("Invalid --baseline-run-id: value is required");
@@ -36,6 +39,7 @@ const store = new ObserveStore(databasePath, sourceVersion);
 const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
   walletAddress: address,
   ...(baselineRunId ? { baselineRunId } : {}),
+  ...(campaignId && sessionId ? { campaignId, campaignSessionId: sessionId } : {}),
   pollIntervalMs: pollSeconds * 1_000,
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
   signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),

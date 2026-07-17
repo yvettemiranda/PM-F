@@ -37,6 +37,7 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
         settlementPnl: "f",
         schema: "g",
         runtimeEnvironment: "h",
+        paperRules: "i",
       },
     },
     sourceVersion: { commit: "commit", dirty: false },

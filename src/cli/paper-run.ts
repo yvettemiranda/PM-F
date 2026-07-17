@@ -8,6 +8,17 @@ import { selectPaperAccount } from "../paper/paper-account-selection.js";
 import { PaperExecutor } from "../paper/paper-executor.js";
 import { PublicPaperMarketDataProvider } from "../paper/public-market-data.js";
 import { PaperRunner, paperRunCompletionStatus } from "../paper/paper-runner.js";
+import {
+  advancePaperSessionCutoff,
+  assertPaperCampaignRuntimeBinding,
+  finalizePaperSession,
+  paperCampaignScope,
+  paperRunnerOptions,
+} from "../paper/paper-session-runtime.js";
+import {
+  buildCurrentCoreCompatibilityManifest,
+  computeCoreCompatibilityHash,
+} from "../paper-validation/core-compatibility.js";
 
 const args = process.argv.slice(2);
 const valueArg = (name: string): string | undefined => args.find((item) => item.startsWith(`--${name}=`))?.split("=")[1];
@@ -58,6 +69,10 @@ const main = async (): Promise<void> => {
   const campaignId = valueArg("campaign-id") ?? null;
   const sessionId = valueArg("session-id") ?? null;
   const sourceVersion = resolveSourceVersion();
+  const coreCompatibilityHash = computeCoreCompatibilityHash(
+    buildCurrentCoreCompatibilityManifest(resolve(".")),
+  );
+  const campaignScope = paperCampaignScope(campaignId, sessionId, coreCompatibilityHash);
   const databasePreparation = await prepareRuntimeDatabase({ databasePath, sourceVersion });
   console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePreparation }));
 
@@ -83,8 +98,17 @@ const main = async (): Promise<void> => {
   process.once("SIGUSR1", requestFinalValuation);
 
   try {
+    const campaignBinding = campaignScope
+      ? assertPaperCampaignRuntimeBinding(accountLookup, campaignScope, sourceVersion)
+      : null;
     const persistedAccountId = await readOptionalText(accountIdFile);
     const explicitAccountId = valueArg("account-id");
+    if (campaignBinding && hasFlag("new-account")) {
+      throw new Error("PAPER_CAMPAIGN_NEW_ACCOUNT_FORBIDDEN");
+    }
+    if (campaignBinding && explicitAccountId && explicitAccountId !== campaignBinding.paperAccountId) {
+      throw new Error("PAPER_CAMPAIGN_FIXED_ACCOUNT_MISMATCH");
+    }
     const targetWallet = valueArg("target-wallet")?.trim().toLowerCase();
     const target = targetWallet
       ? accountLookup.prepare(
@@ -92,10 +116,15 @@ const main = async (): Promise<void> => {
       ).get(targetWallet) as { target_id: string } | undefined
       : undefined;
     if (targetWallet && !target) throw new Error(`PAPER_TARGET_WALLET_NOT_CONFIRMED:${targetWallet}`);
+    if (campaignBinding && target && target.target_id !== campaignBinding.targetId) {
+      throw new Error("PAPER_CAMPAIGN_TARGET_BINDING_MISMATCH");
+    }
     const selection = selectPaperAccount({
-      ...(explicitAccountId ? { explicitAccountId } : {}),
+      ...((campaignBinding?.paperAccountId ?? explicitAccountId)
+        ? { explicitAccountId: campaignBinding?.paperAccountId ?? explicitAccountId! }
+        : {}),
       ...(persistedAccountId ? { persistedAccountId } : {}),
-      forceNew: hasFlag("new-account"),
+      forceNew: campaignBinding ? false : hasFlag("new-account"),
       accountExists: (accountId) => Boolean(accountLookup.prepare(
         `SELECT 1 present FROM paper_accounts
          WHERE paper_account_id=? AND status='ACTIVE' AND target_id IS NOT NULL
@@ -109,10 +138,10 @@ const main = async (): Promise<void> => {
     });
     accountLookup.close();
     await writeTextAtomically(accountIdFile, `${selection.accountId}\n`);
-    const consumerCutoff = executor.advanceConsumerCutoff(
+    const consumerCutoff = advancePaperSessionCutoff(
+      executor,
       selection.accountId,
       new Date().toISOString(),
-      "PAPER_RUNNER_SESSION_START",
     );
 
     const ready = {
@@ -135,11 +164,12 @@ const main = async (): Promise<void> => {
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
     console.log(JSON.stringify({ event: "PAPER_RUNNER_READY", ...ready }));
 
-    const runner = new PaperRunner(executor, {
+    const runner = new PaperRunner(executor, paperRunnerOptions({
       accountId: selection.accountId,
       intervalMs: intervalSeconds * 1_000,
       ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
-    });
+      campaignScope,
+    }));
     let report = await runner.run(controller.signal);
     let finalDrainConsumedSignals = 0;
     let cancelledWaitingBuyCount = 0;
@@ -148,23 +178,16 @@ const main = async (): Promise<void> => {
         finalValuationController.signal,
         AbortSignal.timeout(FINAL_VALUATION_TIMEOUT_MS),
       ]);
-      finalDrainConsumedSignals = await runner.finalDrain(finalValuationSignal);
-      cancelledWaitingBuyCount = await executor.cancelWaitingBuys(
-        selection.accountId,
-        "PAPER_CAMPAIGN_SESSION_END",
-      );
-      const account = await executor.accountSnapshot(selection.accountId, finalValuationSignal);
-      report = {
-        ...report,
-        stoppedAt: new Date().toISOString(),
-        cycles: report.cycles + 1,
-        consumedSignals: report.consumedSignals + finalDrainConsumedSignals,
-        account,
-        acceptance: executor.acceptanceSummary(selection.accountId, {
-          startAt: report.startedAt,
-          endAt: new Date().toISOString(),
-        }),
-      };
+      const finalized = await finalizePaperSession({
+        runner,
+        executor,
+        accountId: selection.accountId,
+        report,
+        signal: finalValuationSignal,
+      });
+      report = finalized.report;
+      finalDrainConsumedSignals = finalized.finalDrainConsumedSignals;
+      cancelledWaitingBuyCount = finalized.cancelledWaitingBuyCount;
     }
     await mkdir(outputDirectory, { recursive: true });
     const output = resultFile ?? resolve(outputDirectory, `paper-${selection.accountId}-${Date.now()}.json`);

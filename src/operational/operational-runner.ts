@@ -13,6 +13,7 @@ import { resolveSourceVersion, type SourceVersion } from "../infra/source-versio
 import { pruneCompletedRunSnapshots } from "../infra/run-snapshot-retention.js";
 import { prepareValidationDatabaseSnapshot } from "../validation/database-snapshot.js";
 import { check } from "../validation/checks.js";
+import { resolveValidationScope, type ValidationScope } from "../validation/scoped-invariants.js";
 import type { ValidationCheckResult } from "../validation/types.js";
 import { OperationalConsistencyMonitor } from "./consistency-monitor.js";
 import { recordOperationalError } from "./error-monitor.js";
@@ -81,6 +82,37 @@ function parseOptionalTimestamp(value: string | null | undefined): number | null
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function assertOperationalBindings(
+  databasePath: string,
+  scope: ValidationScope | undefined,
+  paperAccountId: string | undefined,
+): void {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  database.exec("PRAGMA query_only=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+  try {
+    if (scope) {
+      const resolved = resolveValidationScope(database, scope.campaignId, scope.sessionId);
+      if (
+        resolved.accountId !== scope.accountId
+        || resolved.targetId !== scope.targetId
+        || resolved.baselineRunId !== scope.baselineRunId
+        || resolved.coreHash !== scope.coreHash
+      ) throw new Error("OPERATIONAL_VALIDATION_SCOPE_BINDING_INVALID");
+      if (paperAccountId && paperAccountId !== resolved.accountId) {
+        throw new Error("OPERATIONAL_SCOPE_PAPER_ACCOUNT_MISMATCH");
+      }
+    }
+    if (paperAccountId) {
+      const exists = database.prepare(
+        "SELECT 1 present FROM paper_accounts WHERE paper_account_id=?",
+      ).get(paperAccountId);
+      if (!exists) throw new Error(`OPERATIONAL_PAPER_ACCOUNT_NOT_FOUND:${paperAccountId}`);
+    }
+  } finally {
+    database.close();
+  }
+}
+
 export class OperationalRunner {
   constructor(
     private readonly sourceVersion: SourceVersion = resolveSourceVersion(),
@@ -93,6 +125,13 @@ export class OperationalRunner {
     const mode = options.mode ?? "HEALTH_MONITOR_ONLY";
     const useSnapshot = options.useSnapshot ?? true;
     if (!useSnapshot) throw new Error("OPERATIONAL_SNAPSHOT_REQUIRED");
+    if (
+      options.validationScope
+      && options.paperAccountId
+      && options.validationScope.accountId !== options.paperAccountId
+    ) {
+      throw new Error("OPERATIONAL_SCOPE_PAPER_ACCOUNT_MISMATCH");
+    }
     const outputDirectory = resolve(options.outputDirectory ?? "data/operational");
     const operationalRunId = `operational-${randomUUID()}`;
     const validationSessionId = `operational-validation-${randomUUID()}`;
@@ -104,25 +143,34 @@ export class OperationalRunner {
       useSnapshot,
       sourceVersion: this.sourceVersion,
     });
+    assertOperationalBindings(
+      snapshot.workingDatabasePath,
+      options.validationScope,
+      options.paperAccountId,
+    );
     const store = new OperationalStore(snapshot.workingDatabasePath);
     try {
       const lock = new OperationalLock(store, now);
       let status: OperationalRunStatus = "COMPLETED";
       let finalStatus: OperationalFinalStatus = "OPERATIONAL_FRAMEWORK_READY";
-      let paperAccountId: string | null = options.paperAccountId ?? null;
+      let paperAccountId: string | null = mode === "PAPER_VALIDATION_OPERATIONAL"
+        ? options.validationScope?.accountId ?? options.paperAccountId ?? null
+        : options.paperAccountId ?? null;
       const checks: ValidationCheckResult[] = [];
+      let runStarted = false;
       try {
         store.startRun({
-        operationalRunId,
-        validationSessionId,
-        mode,
-        startedAt,
-        sourceVersion: this.sourceVersion,
-        workingDatabasePath: snapshot.workingDatabasePath,
-        sourceDatabasePath: snapshot.sourceDatabasePath,
-        paperAccountId,
-        targetWallet: options.targetWallet ?? null,
-      });
+          operationalRunId,
+          validationSessionId,
+          mode,
+          startedAt,
+          sourceVersion: this.sourceVersion,
+          workingDatabasePath: snapshot.workingDatabasePath,
+          sourceDatabasePath: snapshot.sourceDatabasePath,
+          paperAccountId,
+          targetWallet: options.targetWallet ?? null,
+        });
+        runStarted = true;
         lock.acquire(`operational:${mode}`, operationalRunId);
         await this.runLoop({
         mode,
@@ -135,6 +183,7 @@ export class OperationalRunner {
         durationMs: options.durationMs ?? 0,
         pollIntervalMs: options.pollIntervalMs ?? 1_000,
         checks,
+        ...(options.validationScope ? { validationScope: options.validationScope } : {}),
         paperAccountId,
         setPaperAccountId: (value) => {
           paperAccountId = value;
@@ -146,6 +195,7 @@ export class OperationalRunner {
           mode,
           store,
           includeCrashRecovery: true,
+          ...(options.validationScope ? { scope: options.validationScope } : {}),
         }));
         } else if (mode !== "HEALTH_MONITOR_ONLY" && mode !== "CONSISTENCY_MONITOR_ONLY") {
           checks.push(...await new OperationalConsistencyMonitor(snapshot.workingDatabasePath, this.sourceVersion, now).run({
@@ -153,6 +203,7 @@ export class OperationalRunner {
           mode,
           store,
           includeCrashRecovery: false,
+          ...(options.validationScope ? { scope: options.validationScope } : {}),
         }));
         }
         checks.push(...this.coverageChecks({
@@ -164,6 +215,7 @@ export class OperationalRunner {
           now,
         }));
       } catch (error) {
+        if (!runStarted) throw error;
         status = "FAILED";
         finalStatus = "OPERATIONAL_FAILED";
         recordOperationalError({
@@ -265,6 +317,7 @@ export class OperationalRunner {
     durationMs: number;
     pollIntervalMs: number;
     checks: ValidationCheckResult[];
+    validationScope?: ValidationScope;
     paperAccountId: string | null;
     setPaperAccountId: (value: string) => void;
   }): Promise<void> {
@@ -337,6 +390,7 @@ export class OperationalRunner {
     durationMs: number;
     pollIntervalMs: number;
     checks: ValidationCheckResult[];
+    validationScope?: ValidationScope;
     paperAccountId: string | null;
     setPaperAccountId: (value: string) => void;
   }): Promise<void> {
@@ -384,6 +438,7 @@ export class OperationalRunner {
         mode: input.mode,
         store: input.store,
         includeCrashRecovery: false,
+        ...(input.validationScope ? { scope: input.validationScope } : {}),
       });
       input.checks.splice(0, input.checks.length, ...checks);
       input.store.recordCheckpoint({

@@ -28,6 +28,7 @@ export interface ObserveEvent {
 
 export interface ObserveSignal {
   signalId: string;
+  targetId: string;
   signalIdempotencyKey: string;
   sourceEventKey: string;
   signalType: "TARGET_BUY" | "TARGET_SELL";

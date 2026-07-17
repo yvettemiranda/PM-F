@@ -173,6 +173,7 @@ let goldenCandidates;
 let goldenResults;
 try {
   replay = new ReplayEngine().run({
+    targetId,
     walletAddress: address,
     identityStatus: identity.status,
     trades: trades.rows,

@@ -232,6 +232,51 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("stores an unchanged position projection once and references it from later checkpoints", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      snapshot([], [position("100")], "2026-07-08T00:01:10.000Z"),
+      snapshot([], [position("100")], "2026-07-08T00:01:20.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    const checkpoints = check.prepare(
+      `SELECT position_projection_json,position_projection_hash,projection_snapshot_hash
+       FROM observe_checkpoints ORDER BY created_at,checkpoint_id`,
+    ).all() as Array<{
+      position_projection_json: string;
+      position_projection_hash: string;
+      projection_snapshot_hash: string;
+    }>;
+    const snapshots = check.prepare(
+      "SELECT projection_snapshot_hash,projection_json FROM observe_projection_snapshots",
+    ).all() as Array<{ projection_snapshot_hash: string; projection_json: string }>;
+    check.close();
+
+    expect(checkpoints).toHaveLength(3);
+    expect(new Set(checkpoints.map((row) => row.position_projection_hash)).size).toBe(1);
+    expect(checkpoints.every((row) => row.position_projection_json === "")).toBe(true);
+    expect(checkpoints.every((row) => row.projection_snapshot_hash === row.position_projection_hash)).toBe(true);
+    expect(snapshots).toHaveLength(1);
+    expect(JSON.parse(snapshots[0]!.projection_json)).toBeInstanceOf(Array);
+  });
+
   it("anchors the Activity cursor at the position baseline when no events exist", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
@@ -354,8 +399,12 @@ describe("ObserveOnlyRunner", () => {
          FROM signals WHERE producer_mode='OBSERVE_ONLY' ORDER BY signal_id`,
       ).all();
       const checkpoint = check.prepare(
-        `SELECT replay_state,position_projection_hash,position_projection_json
-         FROM observe_checkpoints WHERE observe_run_id=? ORDER BY created_at DESC LIMIT 1`,
+        `SELECT replay_state,c.position_projection_hash,
+                COALESCE(NULLIF(c.position_projection_json,''),s.projection_json) position_projection_json
+         FROM observe_checkpoints c
+         LEFT JOIN observe_projection_snapshots s
+           ON s.projection_snapshot_hash=c.projection_snapshot_hash
+         WHERE c.observe_run_id=? ORDER BY c.created_at DESC LIMIT 1`,
       ).get(observeRunId);
       check.close();
       return {
@@ -890,6 +939,7 @@ describe("ObserveOnlyRunner", () => {
     firstStore.close();
 
     const corrupt = new DatabaseSync(databasePath);
+    corrupt.exec("DROP TRIGGER observe_checkpoints_no_update");
     corrupt.prepare("UPDATE observe_checkpoints SET position_projection_hash='corrupt'").run();
     corrupt.close();
 
@@ -1293,13 +1343,19 @@ describe("ObserveOnlyRunner", () => {
 
     const check = new DatabaseSync(databasePath);
     const context = check.prepare(
-      `SELECT c.target_trade_capital_ratio_ppm,ce.source_event_key,
+      `SELECT c.target_id context_target_id,s.target_id signal_target_id,ce.target_id capital_target_id,
+              c.target_trade_capital_ratio_ppm,ce.source_event_key,
               c.capital_sizing_ratio_json context_sizing_json,
               c.capital_sizing_ratio_hash context_sizing_hash,
               ce.capital_sizing_ratio_json estimate_sizing_json,
               ce.capital_sizing_ratio_hash estimate_sizing_hash
-       FROM signal_execution_contexts c JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id`,
+       FROM signal_execution_contexts c
+       JOIN signals s ON s.signal_id=c.signal_id
+       JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id`,
     ).get() as {
+      context_target_id: string;
+      signal_target_id: string;
+      capital_target_id: string;
       target_trade_capital_ratio_ppm: string;
       source_event_key: string;
       context_sizing_json: string;
@@ -1307,6 +1363,8 @@ describe("ObserveOnlyRunner", () => {
       estimate_sizing_json: string;
       estimate_sizing_hash: string;
     };
+    expect(context.context_target_id).toBe(context.signal_target_id);
+    expect(context.context_target_id).toBe(context.capital_target_id);
     expect(BigInt(context.target_trade_capital_ratio_ppm)).toBeGreaterThan(0n);
     expect(context.source_event_key).toBeTruthy();
     expect(context.context_sizing_json).toBe(context.estimate_sizing_json);

@@ -792,6 +792,7 @@ export function buildReplayValidationEvidenceArtifact(
     );
     if (
       signal.source_event_key !== input.sourceEventKey
+      || signal.target_id !== event.target_id
       || signal.capture_run_id !== event.capture_run_id
       || signal.status !== "PUBLISHED"
       || signal.execution_eligible !== 1
@@ -809,7 +810,11 @@ export function buildReplayValidationEvidenceArtifact(
         "EXECUTION_CONTEXT",
       )
       : null;
-    if (context && (context.source_code_commit !== input.sourceCodeCommit || context.source_code_dirty !== 0)) {
+    if (context && (
+      context.target_id !== signal.target_id
+      || context.source_code_commit !== input.sourceCodeCommit
+      || context.source_code_dirty !== 0
+    )) {
       throw new Error("REPLAY_EVIDENCE_CONTEXT_SOURCE_VERSION_MISMATCH");
     }
     const sourceBinding: SourceBinding = {

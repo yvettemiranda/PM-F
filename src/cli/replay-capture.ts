@@ -49,6 +49,7 @@ try {
   const activityHistoryComplete = database.captureEndpointWasComplete(captureRunId, "data-activity");
   const positionHistoryComplete = database.captureEndpointWasComplete(captureRunId, "data-positions");
   const replay = new ReplayEngine().run({
+    targetId: captureRun.targetId,
     walletAddress: captureRun.walletAddress,
     identityStatus: identity.status,
     trades,

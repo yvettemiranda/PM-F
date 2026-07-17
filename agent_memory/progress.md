@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- 修复 `UNKNOWN_UNKNOWN` 启动包暴露的 Phase 0 临时分页边界歧义、旧 proof 误打包与失败证据 provenance/脱敏问题；完成 clean commit 后重新运行真实 2 小时资格 Session。
+- 最终候选版稳定化已完成，期间没有启动新的 2/12 小时自然运行；下一步只需由用户双击入口启动新核心 Campaign。
 - 全程固定 `PAPER + LIVE_DISABLED`；旧失败报告只读保留。
 
 ## Completed implementation
@@ -28,14 +28,17 @@
 - 隔离 proof 打包校验同时绑定报告的 source commit、报告的 coreCompatibilityHash 与当前核心；任一缺失、冲突或不匹配均排除 proof，不生成互相矛盾的 manifest/证据组合。
 - 两条诊断打包路径在 manifest 安全扫描失败时都会删除临时副本并返回失败，不发布 ZIP、也不保留可能含泄漏的 fallback；HTTPS URL 仅保护 origin/path，query/fragment 内明文或百分号编码的本机路径仍会被扫描和脱敏。
 - 首次隔离 proof 的公开 Phase 0 改为最多 3 次独立新抓取；任一原始结果存在 ambiguous event、Replay 不稳定或 proof 校验失败都不会合并、接受或放宽，只保留逐次证据并重试，三次失败即在 Campaign 创建前阻断。
+- 新增 2.22-2.24 三个 fail-closed migration：Signal/Execution Context 固化 target，Observe projection 采用内容寻址快照，Campaign Observe 精确绑定且 provenance/checkpoint append-only；历史回填不一致会在迁移前拒绝。
+- Paper 消费在推进 cutoff 前验证当前实际 core、clean source、固定 Account/Target/Baseline 和 Campaign/Session RUNNING；只消费当前 Session 对应 Observe 产生的 Signal。
+- 最终完整性检查按 Campaign/Session/Account/Target/Core 限定 Risk、Execution、Position、Ledger、Transition、Audit 和 orphan；旧 Campaign 或独立 Observe 不会污染当前验收。
+- `coreCompatibilityHash` 拆分为实际 Paper 行为合同：纳入 canonical JSON、Paper rules、运行编排、checkpoint、crash recovery、final integrity、安全子进程和 Paper Schema contract；排除 Live-only migration 与纯展示/打包改动。
+- 第一次资格运行改为最多 12 小时，2 小时只记录里程碑、不自动停止，避免“修一次、重跑一次”的人工循环。
 
 ## Verification completed
 - Node `24.14.0`、pnpm `11.9.0`。
 - `pnpm typecheck` 通过。
-- 本轮最终全量验证：43 个测试文件、499 项全部通过；包含真实子进程停止、遗留进程收割、SIGKILL Crash Recovery、诊断包 proof/provenance 双版本绑定、路径脱敏/manifest fail-closed 与 Phase 0 有界重试策略测试，无跳过项。
-- 旧业务库副本依次迁移至 2.20.0/2.21.0：`integrity_check=ok`、0 外键问题、两类市场快照均有 capture FK、5 张 Campaign 表存在。
-- 全部 `.command/.sh` zsh 语法与 `git diff --check` 通过。
-- 当前库版本准备改为 backup-first、连续 migration 前缀验证，并核对全部 109 个安全触发器；未知未来版本、缺失历史 marker/触发器/关键表列均 fail closed。
+- 本轮最新全量验证：47 个测试文件、539 项全部通过；`pnpm typecheck`、`git diff --check` 和全部 `.command/.sh` zsh 语法检查通过。
+- 当前运行库准备固定为 backup-first、连续 migration 前缀验证，并核对完整安全触发器注册表；未知未来版本、缺失历史 marker/触发器/关键表列均 fail closed。
 - Phase 0 资格证据只接受完整 `PASSED`，或精确列举且相互匹配的 `INCOMPLETE_KNOWN_LIMITATIONS`；不会把 Data API 历史限制冒充完整 Replay。
 - 独立启动流、运行时 Schema、报告/Replay 三路复审已关闭启动顺序、遗留进程、历史回放诚实性和 current schema 防护问题；最终无剩余 P0/P1。
 - 第一次实际启动在创建 Campaign 前因 pnpm 版本不一致安全拒绝；第二次在创建 Campaign 前因旧 Phase 0 完整通过口径不可满足安全拒绝，均未创建账户、Session 或累计时长。
@@ -47,9 +50,11 @@
 - 诊断路径脱敏与 manifest fail-closed 回归通过；HTTPS URL 不会被误改或误拒绝，相关诊断/打包测试 16 项通过，TypeScript 检查通过。
 - Manifest provenance、UNKNOWN 启动失败包、报告版本证据及冲突/null 口径回归通过；诊断/打包测试共 17 项通过，TypeScript、zsh 语法与 diff check 通过。
 - HTTPS query/fragment 路径脱敏与 scanner 回归 10 项通过；legacy/Campaign manifest 失败端到端不发布结果的 shell 回归通过；TypeScript、zsh 语法与 diff check 通过。
+- 真实业务库通过只读 Online Backup 复制后演练 2.21.0→2.24.0：`integrity_check=ok`、0 外键异常、0 target/source/context 错配、0 缺失 Projection Snapshot、0 非法 Observe 绑定、0 active Reservation；安全状态仍为 `PAPER + LIVE_DISABLED`。源数据库 SHA-256 前后完全相同。
+- 独立 RC 复审确认无 P0/P1 阻断；尚未验证的只有新核心实际 12 小时/72 小时自然运行。
 
 ## Next steps
-1. 本轮修复已形成 clean commit；下一步不再改核心代码。
-2. 用户双击“1_开始或继续Paper累计验证”；入口只读保留旧 BLOCKED Campaign，自动执行最多 3 次公开数据/Replay/proof 保守验证，通过后创建带 lineage 的新 1000 pUSD Campaign。
-3. 自动运行完整 2 小时资格 Session；不要手工中断，结束后由入口自动生成报告与诊断 ZIP。
-4. Codex 复核 ZIP；通过后才开始每次最多 12 小时的累计 Session，最终目标仍为 72 小时且至少一次连续 12 小时。
+1. 形成 clean Release Candidate commit，保持交易核心冻结。
+2. 用户双击桌面“1_开始或继续Paper累计验证.command”，建议第一次直接运行满 12 小时。
+3. 自动或手工安全停止后，用第三个按钮定位 ZIP 并交给 Codex；先分析本次结果，再继续累计到 72 小时。
+4. 72 小时与场景覆盖全部通过前，不进入 Live 准备。

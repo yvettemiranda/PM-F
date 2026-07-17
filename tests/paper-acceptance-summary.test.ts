@@ -144,17 +144,18 @@ function insertPublishedSignalForTarget(
   ).run(sourceKey, targetId, `tx-${signalId}`, timestamp);
   database.prepare(
     `INSERT INTO signals(
-      signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+      signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
       condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
       sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?,?,?,'TARGET_BUY','PUBLISHED','asset-acceptance','condition-acceptance',
+    ) VALUES (?,?,?,?,'TARGET_BUY','PUBLISHED','asset-acceptance','condition-acceptance',
       '500000000000000000','100',NULL,NULL,'ACCEPTANCE_TEST',?,?,?,?,?,?,?,?,?,1,NULL,
       'STANDARD_TRADE',NULL,0,'OBSERVE_ONLY')`,
   ).run(
     signalId,
+    targetId,
     `idem-${signalId}`,
     sourceKey,
     VERSIONS.schemaVersion,

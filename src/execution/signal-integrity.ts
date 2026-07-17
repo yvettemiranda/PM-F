@@ -5,6 +5,7 @@ import { buildExactCapitalRatio, capitalSizingHash } from "./capital-sizing.js";
 import type { PaperSignalEnvelope, SignalExecutionContext } from "../paper/types.js";
 
 interface SignalIntegrityRow {
+  signal_target_id: string;
   signal_type: string;
   status: string;
   execution_eligible: number;
@@ -21,6 +22,7 @@ interface SignalIntegrityRow {
   signal_source_code_dirty: number;
   capital_estimate_id: string | null;
   context_id: string;
+  context_target_id: string;
   context_signal_id: string;
   capital_decision_id: string | null;
   target_trade_capital_ratio_ppm: string | null;
@@ -49,13 +51,14 @@ export function executionEnvelopeIntegrityError(
 ): string | null {
   if (!signal.context || signal.context.contextId !== context.contextId) return "SIGNAL_CONTEXT_INPUT_MISMATCH";
   if (signal.signalId !== context.signalId) return "SIGNAL_CONTEXT_SIGNAL_ID_MISMATCH";
+  if (signal.targetId !== context.targetId) return "SIGNAL_CONTEXT_TARGET_ID_MISMATCH";
   const row = database.prepare(
-    `SELECT s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
+    `SELECT s.target_id signal_target_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
             s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
             s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
             s.ruleset_hash signal_ruleset_hash,s.source_code_commit signal_source_code_commit,
             s.source_code_dirty signal_source_code_dirty,s.capital_estimate_id,
-            c.context_id,c.signal_id context_signal_id,c.capital_decision_id,
+            c.context_id,c.target_id context_target_id,c.signal_id context_signal_id,c.capital_decision_id,
             c.target_trade_capital_ratio_ppm,c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
             c.target_trade_timestamp,c.market_end_time,
             c.market_metadata_snapshot_json,c.market_metadata_hash,
@@ -66,7 +69,8 @@ export function executionEnvelopeIntegrityError(
      WHERE s.signal_id=?`,
   ).get(signal.signalId) as SignalIntegrityRow | undefined;
   if (!row) return "SIGNAL_OR_CONTEXT_NOT_FOUND";
-  const signalMatches = row.signal_type === signal.signalType
+  const signalMatches = row.signal_target_id === signal.targetId
+    && row.signal_type === signal.signalType
     && row.status === signal.status
     && (row.execution_eligible === 1) === signal.executionEligible
     && row.execution_block_reason === signal.executionBlockReason
@@ -112,6 +116,7 @@ export function executionEnvelopeIntegrityError(
     }
   }
   const contextMatches = row.context_id === context.contextId
+    && row.context_target_id === context.targetId
     && row.context_signal_id === context.signalId
     && row.capital_decision_id === context.capitalDecisionId
     && row.target_trade_capital_ratio_ppm === context.targetTradeCapitalRatioPpm
@@ -128,6 +133,7 @@ export function executionEnvelopeIntegrityError(
     && row.config_version === context.configVersion
     && row.context_created_at === context.createdAt;
   if (!contextMatches) return "EXECUTION_CONTEXT_IMMUTABLE_FIELDS_MISMATCH";
+  if (row.signal_target_id !== row.context_target_id) return "SIGNAL_CONTEXT_TARGET_ID_MISMATCH";
   if (
     row.signal_source_code_commit !== row.context_source_code_commit
     || row.signal_source_code_dirty !== row.context_source_code_dirty

@@ -29,6 +29,7 @@ describe("Golden Expectations", () => {
       { proxyWallet: wallet, transactionHash: "0xyield", timestamp: 103, type: "YIELD" },
     ];
     const replay = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades,

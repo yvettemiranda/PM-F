@@ -757,6 +757,7 @@ operator_create_campaign_bundle() {
   local isolated_test_results_file="${4:-}"
   local phase0_evidence_file="${5:-}"
   local replay_evidence_file="${6:-}"
+  local launch_stamp="${7:-}"
   local metadata campaign_id session_id report_id session_report campaign_report run_result
   local paper_report observe_report report_source_commit report_core_compatibility_hash source_provenance stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary
   local archive_entry_count expected_archive_entry_count
@@ -876,33 +877,60 @@ operator_create_campaign_bundle() {
     missing+=("隔离测试证明")
   fi
 
-  # 这些路径均带本次 launcher 的 STAMP；存在时才导出，避免从旧运行捞取证据。
-  local -a launch_evidence_sources=(
-    "$isolated_test_results_file"
-    "$phase0_evidence_file"
-    "$replay_evidence_file"
-  )
-  local -a launch_evidence_destinations=(
-    "paper-isolated-test-results-redacted.json"
-    "paper-phase0-validation-redacted.json"
-    "paper-replay-validation-redacted.json"
-  )
-  local -a launch_evidence_labels=(
-    "本次隔离测试结果"
-    "本次 Phase 0 验证证据"
-    "本次 Replay 验证证据"
-  )
-  for index in {1..3}; do
-    source="${launch_evidence_sources[$index]}"
-    destination="${launch_evidence_destinations[$index]}"
-    label="${launch_evidence_labels[$index]}"
-    if [[ -n "$source" && -f "$source" ]]; then
-      if operator_copy_sanitized_observe_report "$source" "$bundle_dir/$destination"; then
-        included+=("$destination")
-      else
-        rm -f "$bundle_dir/$destination"
-        missing+=("$label（脱敏失败）")
-      fi
+  # 隔离测试只有一份；Phase 0/Replay 会保留本次启动的每一次独立尝试，避免
+  # 诊断包只展示最后一次结果而掩盖前序失败。严格使用本次 STAMP，不扫描旧运行。
+  if [[ -n "$isolated_test_results_file" && -f "$isolated_test_results_file" ]]; then
+    destination="paper-isolated-test-results-redacted.json"
+    if operator_copy_sanitized_observe_report "$isolated_test_results_file" "$bundle_dir/$destination"; then
+      included+=("$destination")
+    else
+      rm -f "$bundle_dir/$destination"
+      missing+=("本次隔离测试结果（脱敏失败）")
+    fi
+  fi
+
+  local evidence_directory=""
+  local -a phase0_attempt_sources=()
+  local -a replay_attempt_sources=()
+  if [[ -n "$phase0_evidence_file" ]]; then
+    evidence_directory="${phase0_evidence_file:h}"
+  elif [[ -n "$replay_evidence_file" ]]; then
+    evidence_directory="${replay_evidence_file:h}"
+  fi
+  if [[ "$launch_stamp" =~ '^[0-9]{8}-[0-9]{6}-[0-9]+$' && -d "$evidence_directory" ]]; then
+    phase0_attempt_sources=("$evidence_directory"/paper-campaign-phase0-"$launch_stamp"-attempt-*.json(N.n))
+    replay_attempt_sources=("$evidence_directory"/paper-campaign-replay-"$launch_stamp"-attempt-*.json(N.n))
+  else
+    [[ -n "$phase0_evidence_file" && -f "$phase0_evidence_file" ]] && phase0_attempt_sources+=("$phase0_evidence_file")
+    [[ -n "$replay_evidence_file" && -f "$replay_evidence_file" ]] && replay_attempt_sources+=("$replay_evidence_file")
+  fi
+
+  local attempt_number=0
+  for source in "${phase0_attempt_sources[@]}"; do
+    (( attempt_number += 1 ))
+    local source_attempt="${${source:t}##*-attempt-}"
+    source_attempt="${source_attempt%.json}"
+    [[ "$source_attempt" == <-> ]] || source_attempt="$attempt_number"
+    destination="paper-phase0-validation-attempt-$source_attempt-redacted.json"
+    if operator_copy_sanitized_observe_report "$source" "$bundle_dir/$destination"; then
+      included+=("$destination")
+    else
+      rm -f "$bundle_dir/$destination"
+      missing+=("本次 Phase 0 第 $source_attempt 次验证证据（脱敏失败）")
+    fi
+  done
+  attempt_number=0
+  for source in "${replay_attempt_sources[@]}"; do
+    (( attempt_number += 1 ))
+    local source_attempt="${${source:t}##*-attempt-}"
+    source_attempt="${source_attempt%.json}"
+    [[ "$source_attempt" == <-> ]] || source_attempt="$attempt_number"
+    destination="paper-replay-validation-attempt-$source_attempt-redacted.json"
+    if operator_copy_sanitized_observe_report "$source" "$bundle_dir/$destination"; then
+      included+=("$destination")
+    else
+      rm -f "$bundle_dir/$destination"
+      missing+=("本次 Replay 第 $source_attempt 次验证证据（脱敏失败）")
     fi
   done
   if [[ -f "$log_file" ]]; then

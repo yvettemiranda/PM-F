@@ -144,17 +144,18 @@ function insertSignal(
   );
   database.prepare(
     `INSERT INTO signals(
-      signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+      signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
       condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
       sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, 'TARGET_BUY', 'PUBLISHED', ?, ?, '500000000000000000',
+    ) VALUES (?, ?, ?, ?, 'TARGET_BUY', 'PUBLISHED', ?, ?, '500000000000000000',
       '10000000', NULL, NULL, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL,
       'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     signalId,
+    targetId,
     `idem-${signalId}`,
     sourceEventKey,
     assetId,
@@ -172,13 +173,14 @@ function insertSignal(
   );
   database.prepare(
     `INSERT INTO signal_execution_contexts(
-      context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+      context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, ?, '100000', ?, '2026-07-11T00:00:00.000Z', '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, '100000', ?, '2026-07-11T00:00:00.000Z', '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
+    targetId,
     signalId,
     capitalId,
     createdAt,
@@ -193,6 +195,7 @@ function insertSignal(
   );
   return {
     signalId,
+    targetId,
     signalType: "TARGET_BUY",
     status: "PUBLISHED",
     executionEligible: true,
@@ -206,6 +209,7 @@ function insertSignal(
     createdAt,
     context: {
       contextId,
+      targetId,
       signalId,
       capitalDecisionId: capitalId,
       targetTradeCapitalRatioPpm: "100000",

@@ -26,6 +26,7 @@ export function buildSignalExecutionContext(input: {
   sourceVersion?: SourceVersion;
   createdAt: string;
 }): SignalExecutionContext {
+  if (!input.signal.targetId.trim()) throw new Error(`SIGNAL_TARGET_ID_REQUIRED:${input.signal.signalId}`);
   const trade = input.event.trade;
   if (!trade) throw new Error(`Signal source trade missing: ${input.signal.signalId}`);
   if (!input.market.end_date_iso) throw new Error(`MARKET_END_TIME_UNAVAILABLE:${input.signal.conditionId}`);
@@ -65,6 +66,7 @@ export function buildSignalExecutionContext(input: {
   ) throw new Error(`CAPITAL_SIZING_SIGNAL_MISMATCH:${input.signal.signalId}`);
   const identity = [
     input.signal.signalId,
+    input.signal.targetId,
     input.capitalDecision?.capitalEstimateId ?? "NONE",
     String(trade.timestamp),
     input.market.end_date_iso,
@@ -74,6 +76,7 @@ export function buildSignalExecutionContext(input: {
   ].join("|");
   return {
     contextId: createHash("sha256").update(identity).digest("hex"),
+    targetId: input.signal.targetId,
     signalId: input.signal.signalId,
     capitalDecisionId: input.capitalDecision?.capitalEstimateId ?? null,
     targetTradeCapitalRatioPpm: input.signal.signalType === "TARGET_BUY"

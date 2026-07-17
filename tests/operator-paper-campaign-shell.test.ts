@@ -68,6 +68,7 @@ function isolatedEvidence(sourceCodeCommit: string, coreCompatibilityHash: strin
 function campaignBundleFixture(input: {
   evidenceSourceCommit: string;
   evidenceCoreCompatibilityHash: string;
+  attempts?: number;
 }) {
   const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-proof-bundle-"));
   temporaryDirectories.push(directory);
@@ -91,6 +92,19 @@ function campaignBundleFixture(input: {
   writeFileSync(phase0, JSON.stringify({ status: "INCOMPLETE", run: "current" }));
   writeFileSync(replay, JSON.stringify({ stable: true, run: "current" }));
   writeFileSync(log, "current launch failed safely\n");
+  const launchStamp = input.attempts === undefined ? "" : "20260717-120000-123";
+  if (input.attempts !== undefined) {
+    for (let attempt = 1; attempt <= input.attempts; attempt += 1) {
+      writeFileSync(
+        join(evidenceDirectory, `paper-campaign-phase0-${launchStamp}-attempt-${attempt}.json`),
+        JSON.stringify({ status: attempt === input.attempts ? "PASSED" : "INCOMPLETE", attempt }),
+      );
+      writeFileSync(
+        join(evidenceDirectory, `paper-campaign-replay-${launchStamp}-attempt-${attempt}.json`),
+        JSON.stringify({ stable: attempt === input.attempts, attempt }),
+      );
+    }
+  }
   const expectedCurrentSourceVersion = resolveSourceVersion(directory);
   const expectedCurrentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(directory));
 
@@ -98,7 +112,7 @@ function campaignBundleFixture(input: {
     "-c",
     `PROJECT_ROOT="$1"
      source "$2/操作入口/lib/common.sh"
-     operator_create_campaign_bundle "$3" "$4" "$5" "$6" "$7" "$8"`,
+     operator_create_campaign_bundle "$3" "$4" "$5" "$6" "$7" "$8" "$9"`,
     "zsh",
     directory,
     projectRoot,
@@ -108,6 +122,7 @@ function campaignBundleFixture(input: {
     testResults,
     phase0,
     replay,
+    launchStamp,
   ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
   expect(bundled.status, bundled.stderr).toBe(0);
   const zipName = readdirSync(join(directory, "交给Codex")).find((name) => name.endsWith(".zip"));
@@ -455,8 +470,8 @@ describe("Paper Campaign operator shell", () => {
       expect(bundled.entries).not.toContain("paper-isolated-verification.json");
       expect(bundled.entries).toEqual(expect.arrayContaining([
         "paper-isolated-test-results-redacted.json",
-        "paper-phase0-validation-redacted.json",
-        "paper-replay-validation-redacted.json",
+        "paper-phase0-validation-attempt-1-redacted.json",
+        "paper-replay-validation-attempt-1-redacted.json",
         "run-log-redacted.log",
       ]));
       expect(bundled.manifest).toMatchObject({
@@ -468,6 +483,30 @@ describe("Paper Campaign operator shell", () => {
         coreCompatibilityHash: bundled.expectedCurrentCoreHash,
       });
     }
+  });
+
+  it("packages every Phase0 and Replay attempt from the current launch only", () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).stdout.trim();
+    const currentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(projectRoot));
+    const bundled = campaignBundleFixture({
+      evidenceSourceCommit: currentCommit,
+      evidenceCoreCompatibilityHash: currentCoreHash,
+      attempts: 3,
+    });
+
+    expect(bundled.entries).toEqual(expect.arrayContaining([
+      "paper-phase0-validation-attempt-1-redacted.json",
+      "paper-phase0-validation-attempt-2-redacted.json",
+      "paper-phase0-validation-attempt-3-redacted.json",
+      "paper-replay-validation-attempt-1-redacted.json",
+      "paper-replay-validation-attempt-2-redacted.json",
+      "paper-replay-validation-attempt-3-redacted.json",
+    ]));
+    expect(bundled.entries.filter((name) => name.startsWith("paper-phase0-validation-attempt-"))).toHaveLength(3);
+    expect(bundled.entries.filter((name) => name.startsWith("paper-replay-validation-attempt-"))).toHaveLength(3);
   });
 
   it("includes isolated proof only when source commit and core compatibility both match", () => {

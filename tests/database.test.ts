@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,9 +8,12 @@ import type { PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import { ReplayEngine } from "../src/replay/replay-engine.js";
 import { sourceEventKey } from "../src/domain/idempotency.js";
+import { stableJson } from "../src/domain/versioning.js";
 import { estimateTargetCapital } from "../src/services/capital-estimator.js";
+import { assertObserveProjectionSnapshotMigrationPreflight } from "../src/infra/sqlite/migration-preflight.js";
 
 const wallet = "0x0000000000000000000000000000000000000001";
+const replayTargetId = createHash("sha256").update(wallet).digest("hex");
 const directories: string[] = [];
 
 function workspace(): { directory: string; databasePath: string } {
@@ -34,6 +38,7 @@ function trade(overrides: Partial<PublicTrade> = {}): PublicTrade {
 
 function passedReport(trades: PublicTrade[]) {
   return new ReplayEngine().run({
+    targetId: replayTargetId,
     walletAddress: wallet,
     identityStatus: "IDENTITY_CONFIRMED",
     trades,
@@ -48,6 +53,63 @@ afterEach(() => {
 });
 
 describe("Phase0Database", () => {
+  it("verifies every legacy Observe projection against canonical stableJson SHA-256", () => {
+    const { databasePath } = workspace();
+    const database = new DatabaseSync(databasePath);
+    database.exec(`CREATE TABLE observe_checkpoints(
+      checkpoint_id TEXT PRIMARY KEY,
+      position_projection_json TEXT NOT NULL,
+      position_projection_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+    const projection = { z: 2, assets: [{ tracked: "10", asset: "a" }] };
+    const projectionJson = JSON.stringify(projection);
+    const canonicalHash = createHash("sha256").update(stableJson(projection)).digest("hex");
+    database.prepare(
+      `INSERT INTO observe_checkpoints(
+        checkpoint_id,position_projection_json,position_projection_hash,created_at
+      ) VALUES (?,?,?,?)`,
+    ).run("checkpoint-valid", projectionJson, canonicalHash, "2026-07-17T00:00:00.000Z");
+
+    expect(() => assertObserveProjectionSnapshotMigrationPreflight(database)).not.toThrow();
+    database.prepare(
+      "UPDATE observe_checkpoints SET position_projection_hash=? WHERE checkpoint_id=?",
+    ).run("0".repeat(64), "checkpoint-valid");
+    expect(() => assertObserveProjectionSnapshotMigrationPreflight(database))
+      .toThrow("MIGRATION_028_PROJECTION_HASH_MISMATCH:checkpoint-valid");
+    database.close();
+  });
+
+  it("fails closed when historical Observe checkpoints reuse a projection hash for different payloads", () => {
+    const { databasePath } = workspace();
+    const database = new DatabaseSync(databasePath);
+    database.exec(`CREATE TABLE observe_checkpoints(
+      checkpoint_id TEXT PRIMARY KEY,
+      position_projection_json TEXT NOT NULL,
+      position_projection_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+    const insert = database.prepare(
+      `INSERT INTO observe_checkpoints(
+        checkpoint_id,position_projection_json,position_projection_hash,created_at
+      ) VALUES (?,?,?,?)`,
+    );
+    insert.run("checkpoint-a", '[{"asset":"a"}]', "same-hash", "2026-07-17T00:00:00.000Z");
+    insert.run("checkpoint-b", '[{"asset":"b"}]', "same-hash", "2026-07-17T00:01:00.000Z");
+    const migration = readFileSync(
+      new URL("../src/infra/sqlite/028_observe_projection_snapshots.sql", import.meta.url),
+      "utf8",
+    );
+
+    database.exec("BEGIN IMMEDIATE");
+    expect(() => database.exec(migration)).toThrow(/CHECK constraint failed/);
+    database.exec("ROLLBACK");
+    expect(database.prepare(
+      "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='observe_projection_snapshots'",
+    ).get()).toBeUndefined();
+    database.close();
+  });
+
   it("keeps raw events, signals, and signal transitions idempotent across repeated replay saves", () => {
     const { databasePath } = workspace();
     const trades = [trade(), trade({ transactionHash: "0x2", price: "0.6" })];
@@ -75,6 +137,7 @@ describe("Phase0Database", () => {
     const trades = [first, { ...first }];
     const activity = trades.map((item) => ({ ...item, type: "TRADE" }));
     const report = new ReplayEngine().run({
+      targetId: replayTargetId,
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades,
@@ -151,6 +214,7 @@ describe("Phase0Database", () => {
     const { databasePath } = workspace();
     const trades = [trade()];
     const report = new ReplayEngine().run({
+      targetId: replayTargetId,
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades,

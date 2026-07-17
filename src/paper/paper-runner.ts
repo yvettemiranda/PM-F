@@ -1,6 +1,6 @@
 import type { PaperExecutor } from "./paper-executor.js";
 import type { PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
-import type { PaperAccountSnapshot } from "./types.js";
+import type { PaperAccountSnapshot, PaperSignalConsumptionScope } from "./types.js";
 
 const DEFAULT_REPORT_DETAIL_LIMIT = 100;
 
@@ -9,6 +9,7 @@ export interface PaperRunnerOptions {
   intervalMs?: number;
   durationMs?: number;
   reportDetailLimit?: number;
+  signalScope?: PaperSignalConsumptionScope;
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
 }
@@ -139,7 +140,11 @@ export class PaperRunner {
     await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
     await runStage(async () => this.executor.retryPending(this.options.accountId, signal));
     await runStage(async () => {
-      consumedSignals += (await this.executor.consumeAvailableSignals(this.options.accountId, signal)).length;
+      consumedSignals += (await this.executor.consumeAvailableSignals(
+        this.options.accountId,
+        signal,
+        this.options.signalScope,
+      )).length;
     });
     return consumedSignals;
   }

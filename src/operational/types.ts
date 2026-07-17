@@ -1,4 +1,5 @@
 import type { ValidationCheckResult } from "../validation/types.js";
+import type { ValidationScope } from "../validation/scoped-invariants.js";
 
 export type OperationalMode =
   | "OBSERVE_ONLY_OPERATIONAL"
@@ -27,6 +28,7 @@ export interface OperationalRunOptions {
   useSnapshot?: boolean;
   targetWallet?: string;
   paperAccountId?: string;
+  validationScope?: ValidationScope;
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
 }

@@ -20,7 +20,7 @@ import {
   inspectInterruptedDatabaseContinuity,
   validationCheckpointChainBlockers,
 } from "../src/paper-validation/crash-recovery.js";
-import { collectCheckpointEvidence } from "../src/paper-validation/operator-evidence.js";
+import { collectCheckpointEvidence } from "../src/paper-validation/checkpoint-evidence.js";
 import {
   assertPaperCampaignPreMigrationCompatible,
   freezePaperCampaignPreMigrationMismatch,
@@ -73,6 +73,7 @@ function manifest(): CoreCompatibilityManifest {
       settlementPnl: componentHash("settlementPnl"),
       schema: componentHash("schema"),
       runtimeEnvironment: componentHash("runtimeEnvironment"),
+      paperRules: componentHash("paperRules"),
     },
   };
 }
@@ -91,7 +92,6 @@ function fixture(): Fixture {
   const captureId = "campaign-position-capture";
   const captureRunId = "campaign-capture-run";
   const baselineRunId = "campaign-baseline";
-  const accountId = "campaign-paper-account";
   database.prepare(
     `INSERT INTO api_captures(
       capture_id,endpoint,request_url,fetched_at,latency_ms,http_status,payload_sha256,
@@ -143,40 +143,17 @@ function fixture(): Fixture {
     sourceVersion.commit,
     now,
   );
-  const initialBalance = String(RULESET.paperInitialBalanceMicros);
-  database.prepare(
-    `INSERT INTO paper_accounts(
-      paper_account_id,name,target_id,status,initial_balance_micros,cash_balance_micros,
-      reserved_balance_micros,realized_pnl_micros,signal_cutoff_at,schema_version,
-      strategy_version,risk_version,paper_version,ruleset_snapshot_json,ruleset_hash,
-      source_code_commit,source_code_dirty,created_at,updated_at
-    ) VALUES (?, 'Campaign Test', ?, 'ACTIVE', ?, ?, '0', '0', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-  ).run(
-    accountId,
-    targetId,
-    initialBalance,
-    initialBalance,
-    now,
-    VERSIONS.schemaVersion,
-    VERSIONS.strategyVersion,
-    VERSIONS.riskVersion,
-    VERSIONS.paperVersion,
-    RULESET_SNAPSHOT_JSON,
-    RULESET_HASH,
-    sourceVersion.commit,
-    now,
-    now,
-  );
-  database.prepare(
-    `INSERT INTO paper_cash_ledger(
-      cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
-      reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
-    ) VALUES ('campaign-deposit', ?, NULL, 'INITIAL_DEPOSIT', ?, '0', ?, '0', 'campaign-deposit', ?)`,
-  ).run(accountId, initialBalance, initialBalance, now);
-  database.prepare(
-    "INSERT INTO paper_consumer_checkpoints(paper_account_id,last_signal_created_at,last_signal_id,updated_at) VALUES (?,NULL,NULL,?)",
-  ).run(accountId, now);
   database.close();
+  const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), {
+    sourceVersion,
+    now: () => new Date(now),
+  });
+  const accountId = executor.createAccount(
+    "Campaign Test",
+    BigInt(RULESET.paperInitialBalanceMicros),
+    targetId,
+  );
+  executor.close();
   const service = new PaperValidationCampaignService(databasePath);
   // Thousands of one-minute heartbeat transactions are intentional here. The
   // production store remains synchronous=FULL; this temp-only database avoids
@@ -382,13 +359,25 @@ function processListing(): string {
   return execFileSync("/bin/ps", ["-axo", "pid=,command="], { encoding: "utf8" });
 }
 
-async function seedInterruptedRuntimeState(input: Fixture, observedAt: string): Promise<{
+async function seedInterruptedRuntimeState(
+  input: Fixture,
+  observedAt: string,
+  campaignId: string,
+  sessionId: string,
+): Promise<{
   observeRunId: string;
   waitingExecutionId: string;
   pendingExitExecutionId: string;
 }> {
   const observeStore = new ObserveStore(input.databasePath, sourceVersion);
-  const observeRunId = observeStore.startRun(wallet, 15_000, observedAt, 60_000, input.baselineRunId).observeRunId;
+  const observeRunId = observeStore.startRun(
+    wallet,
+    15_000,
+    observedAt,
+    60_000,
+    input.baselineRunId,
+    { campaignId, sessionId },
+  ).observeRunId;
   observeStore.close();
 
   // Persist a pre-reservation projection. The simulated crash below leaves it
@@ -554,6 +543,8 @@ describe("PaperValidationCampaignService", () => {
     const observe = new ObserveOnlyRunner(observeStore, source, {
       walletAddress: wallet,
       baselineRunId: input.baselineRunId,
+      campaignId: campaign.campaignId,
+      campaignSessionId: session.sessionId,
       pollIntervalMs: 15_000,
       now: () => new Date(fetchedAt),
       wait: async () => undefined,
@@ -570,6 +561,11 @@ describe("PaperValidationCampaignService", () => {
       databasePath: input.databasePath,
       targetId: input.targetId,
       paperAccountId: input.accountId,
+      scope: {
+        campaignId: campaign.campaignId,
+        sessionId: session.sessionId,
+        baselineRunId: input.baselineRunId,
+      },
       observeActive: true,
       paperActive: true,
     });
@@ -594,6 +590,11 @@ describe("PaperValidationCampaignService", () => {
         databasePath: input.databasePath,
         targetId: input.targetId,
         paperAccountId: input.accountId,
+        scope: {
+          campaignId: campaign.campaignId,
+          sessionId: session.sessionId,
+          baselineRunId: input.baselineRunId,
+        },
         observeActive: false,
         paperActive: false,
       }),
@@ -611,6 +612,11 @@ describe("PaperValidationCampaignService", () => {
         databasePath: input.databasePath,
         targetId: input.targetId,
         paperAccountId: input.accountId,
+        scope: {
+          campaignId: campaign.campaignId,
+          sessionId: session.sessionId,
+          baselineRunId: input.baselineRunId,
+        },
         observeActive: false,
         paperActive: false,
       }),
@@ -1058,6 +1064,7 @@ describe("PaperValidationCampaignService", () => {
       qualified: false,
     });
     const qualifying = startSession(input, campaign.campaignId, 0, "PS-QUALIFYING");
+    expect(qualifying.plannedDurationMs).toBe(12 * 60 * 60 * 1_000);
     recordHealthySession(input, qualifying, 0, 2);
     const qualifyingObserveMetrics = observeMetrics(2, 0);
     const finalized = finalizeHealthy(input, qualifying, at(2), {}, qualifyingObserveMetrics);
@@ -1121,7 +1128,7 @@ describe("PaperValidationCampaignService", () => {
     });
     const retry = startSession(input, campaign.campaignId, 2, "PS-Q-EARLY-RETRY");
     expect(retry.sessionKind).toBe("QUALIFYING");
-    expect(retry.plannedDurationMs).toBe(2 * 60 * 60 * 1_000);
+    expect(retry.plannedDurationMs).toBe(12 * 60 * 60 * 1_000);
     input.service.close();
   });
 
@@ -1318,7 +1325,12 @@ describe("PaperValidationCampaignService", () => {
     const input = fixture();
     const campaign = createCampaign(input);
     const session = startSession(input, campaign.campaignId, 0, "PS-FROZEN-CLEANUP");
-    const seeded = await seedInterruptedRuntimeState(input, atMinute(0));
+    const seeded = await seedInterruptedRuntimeState(
+      input,
+      atMinute(0),
+      campaign.campaignId,
+      session.sessionId,
+    );
     input.service.recordCheckpoint({
       sessionId: session.sessionId,
       checkpointKind: "START",
@@ -1428,6 +1440,7 @@ describe("PaperValidationCampaignService", () => {
       atMinute(0),
       60_000,
       input.baselineRunId,
+      { campaignId: campaign.campaignId, sessionId: session.sessionId },
     ).observeRunId;
     observeStore.close();
     const secondRunId = "OBSERVE-RUN-SECOND";
@@ -1437,13 +1450,14 @@ describe("PaperValidationCampaignService", () => {
         poll_interval_ms,started_at,last_heartbeat_at,stopped_at,stop_reason,
         successful_polls,failed_polls,processed_events,emitted_signals,duplicate_events,
         gap_events,reconciliation_count,schema_version,signal_version,strategy_version,
-        risk_version,ruleset_hash,source_code_commit,source_code_dirty,created_at
+        risk_version,ruleset_hash,source_code_commit,source_code_dirty,created_at,
+        campaign_id,campaign_session_id
       )
       SELECT ?,target_id,baseline_run_id,state,recovered_from_checkpoint,poll_interval_ms,
         started_at,last_heartbeat_at,stopped_at,stop_reason,successful_polls,failed_polls,
         processed_events,emitted_signals,duplicate_events,gap_events,reconciliation_count,
         schema_version,signal_version,strategy_version,risk_version,ruleset_hash,
-        source_code_commit,source_code_dirty,created_at
+        source_code_commit,source_code_dirty,created_at,campaign_id,campaign_session_id
       FROM observe_runs WHERE observe_run_id=?`,
     ).run(secondRunId, firstRunId);
     input.service.recordCheckpoint({
@@ -1488,6 +1502,97 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
+  it("leaves an unbound standalone Observe running and blocks crash recovery", async () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const session = startSession(input, campaign.campaignId, 0, "PS-UNBOUND-OBSERVE");
+    const observeStore = new ObserveStore(input.databasePath, sourceVersion);
+    const campaignRunId = observeStore.startRun(
+      wallet,
+      15_000,
+      atMinute(0),
+      60_000,
+      input.baselineRunId,
+      { campaignId: campaign.campaignId, sessionId: session.sessionId },
+    ).observeRunId;
+    observeStore.close();
+    const standaloneRunId = "OBSERVE-RUN-STANDALONE";
+    input.service.store.database.prepare(
+      `INSERT INTO observe_runs(
+        observe_run_id,target_id,baseline_run_id,state,recovered_from_checkpoint,
+        poll_interval_ms,started_at,last_heartbeat_at,stopped_at,stop_reason,
+        successful_polls,failed_polls,processed_events,emitted_signals,duplicate_events,
+        gap_events,reconciliation_count,schema_version,signal_version,strategy_version,
+        risk_version,ruleset_hash,source_code_commit,source_code_dirty,created_at,
+        campaign_id,campaign_session_id
+      )
+      SELECT ?,target_id,baseline_run_id,state,recovered_from_checkpoint,poll_interval_ms,
+        started_at,last_heartbeat_at,stopped_at,stop_reason,successful_polls,failed_polls,
+        processed_events,emitted_signals,duplicate_events,gap_events,reconciliation_count,
+        schema_version,signal_version,strategy_version,risk_version,ruleset_hash,
+        source_code_commit,source_code_dirty,created_at,NULL,NULL
+      FROM observe_runs WHERE observe_run_id=?`,
+    ).run(standaloneRunId, campaignRunId);
+    const scope = {
+      campaignId: campaign.campaignId,
+      sessionId: session.sessionId,
+      baselineRunId: input.baselineRunId,
+    };
+    input.service.recordCheckpoint({
+      sessionId: session.sessionId,
+      checkpointKind: "START",
+      observedAt: atMinute(0),
+      idempotencyKey: "unbound-observe-start",
+      evidence: collectCheckpointEvidence({
+        databasePath: input.databasePath,
+        targetId: input.targetId,
+        paperAccountId: input.accountId,
+        scope,
+        observeActive: true,
+        paperActive: true,
+      }),
+    });
+    input.service.recordCheckpoint({
+      sessionId: session.sessionId,
+      checkpointKind: "HEARTBEAT",
+      observedAt: atMinute(1),
+      idempotencyKey: "unbound-observe-heartbeat",
+      evidence: collectCheckpointEvidence({
+        databasePath: input.databasePath,
+        targetId: input.targetId,
+        paperAccountId: input.accountId,
+        scope,
+        observeActive: true,
+        paperActive: true,
+      }),
+    });
+
+    const prepared = await prepareInterruptedRuntimeRecovery({
+      databasePath: input.databasePath,
+      snapshot: input.service.campaignSnapshot(campaign.campaignId),
+      session,
+      checkpoints: input.service.store.checkpoints(session.sessionId),
+      sourceVersion,
+      observedAt: atMinute(2),
+      processListing: "",
+    });
+
+    expect(prepared.cleanup.interruptedObserveRunIds).toEqual([campaignRunId]);
+    expect(prepared.continuity.blockers).toContain("RECOVERY_UNBOUND_RUNNING_OBSERVE_RUN");
+    expect(prepared.decision.confirmed).toBe(false);
+    expect(prepared.decision.blockers).toContain("RECOVERY_UNBOUND_RUNNING_OBSERVE_RUN");
+    expect(input.service.store.database.prepare(
+      "SELECT state,stop_reason FROM observe_runs WHERE observe_run_id=?",
+    ).get(campaignRunId)).toEqual({
+      state: "INTERRUPTED",
+      stop_reason: "PAPER_CAMPAIGN_CRASH_RECOVERY",
+    });
+    expect(input.service.store.database.prepare(
+      "SELECT state,stop_reason FROM observe_runs WHERE observe_run_id=?",
+    ).get(standaloneRunId)).toEqual({ state: "RUNNING", stop_reason: null });
+    input.service.close();
+  });
+
   it("never erases a heartbeat-to-Observe binding mismatch during cleanup", async () => {
     const input = fixture();
     const campaign = createCampaign(input);
@@ -1525,6 +1630,8 @@ describe("PaperValidationCampaignService", () => {
     const observe = new ObserveOnlyRunner(observeStore, source, {
       walletAddress: wallet,
       baselineRunId: input.baselineRunId,
+      campaignId: campaign.campaignId,
+      campaignSessionId: session.sessionId,
       pollIntervalMs: 15_000,
       now: () => new Date(fetchedAt),
       wait: async () => undefined,
@@ -1538,6 +1645,7 @@ describe("PaperValidationCampaignService", () => {
       atMinute(2),
       60_000,
       input.baselineRunId,
+      { campaignId: campaign.campaignId, sessionId: session.sessionId },
     ).observeRunId;
     observeStore.close();
     input.service.recordCheckpoint({

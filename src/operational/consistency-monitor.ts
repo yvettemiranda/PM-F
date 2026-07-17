@@ -2,6 +2,8 @@ import type { SourceVersion } from "../infra/source-version.js";
 import { CrashRecoveryValidation } from "../validation/crash-recovery-validation.js";
 import { PaperConsistencyValidation } from "../validation/paper-consistency-validation.js";
 import { ReconciliationValidation } from "../validation/reconciliation-validation.js";
+import { check } from "../validation/checks.js";
+import type { ValidationScope } from "../validation/scoped-invariants.js";
 import type { ValidationCheckResult } from "../validation/types.js";
 import type { OperationalStore } from "./operational-store.js";
 import type { OperationalMode } from "./types.js";
@@ -18,7 +20,21 @@ export class OperationalConsistencyMonitor {
     mode: OperationalMode;
     store: OperationalStore;
     includeCrashRecovery?: boolean;
+    scope?: ValidationScope;
   }): Promise<ValidationCheckResult[]> {
+    if (!input.scope) {
+      const result = check({
+        checkType: "PAPER_CONSISTENCY",
+        checkName: "operational_campaign_scope",
+        status: "SKIPPED",
+        blocking: false,
+        reason: "EXPLICIT_CAMPAIGN_SCOPE_REQUIRED",
+        metrics: { evidenceLevel: "NOT_RUN" },
+        now: this.now,
+      });
+      input.store.recordConsistencyCheck(input.operationalRunId, result, this.now().toISOString());
+      return [result];
+    }
     const validators = [
       new PaperConsistencyValidation(),
       new ReconciliationValidation(),
@@ -30,6 +46,7 @@ export class OperationalConsistencyMonitor {
         databasePath: this.databasePath,
         sourceVersion: this.sourceVersion,
         now: this.now,
+        scope: input.scope,
       });
       for (const check of results) {
         input.store.recordConsistencyCheck(input.operationalRunId, check, this.now().toISOString());
@@ -49,4 +66,3 @@ export class OperationalConsistencyMonitor {
     return checks;
   }
 }
-

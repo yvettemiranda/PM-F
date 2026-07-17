@@ -327,15 +327,16 @@ function insertSignal(input: {
   }
   db.prepare(
     `INSERT INTO signals(
-      signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+      signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
       condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
       sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
+    input.targetId,
     `idem-${input.signalId}`,
     sourceKey,
     input.signalType ?? "TARGET_BUY",
@@ -361,14 +362,15 @@ function insertSignal(input: {
   );
   db.prepare(
     `INSERT INTO signal_execution_contexts(
-      context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+      context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       capital_sizing_ratio_json,capital_sizing_ratio_hash,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
+    input.targetId,
     input.signalId,
     capitalId,
     input.signalType === "TARGET_SELL" ? null : exactRatio?.legacyRatioPpm ?? input.ratioPpm ?? "100000",
@@ -493,9 +495,9 @@ function loadPaperSignal(databasePath: string, signalId: string) {
   const db = new DatabaseSync(databasePath, { readOnly: true });
   const row = db.prepare(
     `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-            s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+            s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
             s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
-            c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+            c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
             c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
             c.market_metadata_hash,c.ruleset_hash,c.source_code_commit,
             c.source_code_dirty,c.config_version,c.created_at context_created_at,
@@ -509,6 +511,7 @@ function loadPaperSignal(databasePath: string, signalId: string) {
   db.close();
   const context = {
     contextId: row.context_id as string,
+    targetId: row.context_target_id as string,
     signalId: row.signal_id as string,
     capitalDecisionId: row.capital_decision_id as string | null,
     targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
@@ -524,6 +527,7 @@ function loadPaperSignal(databasePath: string, signalId: string) {
   };
   return {
     signalId: row.signal_id as string,
+    targetId: row.target_id as string,
     signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
     status: row.status as string,
     executionEligible: (row.execution_eligible as number) !== 0,
@@ -1920,6 +1924,7 @@ describe("PaperExecutor", () => {
       accountId: env.accountId,
       signal: {
         signalId: "contract",
+        targetId: env.targetId,
         signalType: "TARGET_BUY",
         status: "PUBLISHED",
         executionEligible: true,
@@ -1933,6 +1938,7 @@ describe("PaperExecutor", () => {
         createdAt: "2026-07-08T00:00:01.000Z",
         context: {
           contextId: context.context_id as string,
+          targetId: context.target_id as string,
           signalId: "contract",
           capitalDecisionId: context.capital_decision_id as string | null,
           targetTradeCapitalRatioPpm: context.target_trade_capital_ratio_ppm as string | null,
@@ -1950,6 +1956,7 @@ describe("PaperExecutor", () => {
       },
       context: {
         contextId: context.context_id as string,
+        targetId: context.target_id as string,
         signalId: "contract",
         capitalDecisionId: context.capital_decision_id as string | null,
         targetTradeCapitalRatioPpm: context.target_trade_capital_ratio_ppm as string | null,

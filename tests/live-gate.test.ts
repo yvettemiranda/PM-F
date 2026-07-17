@@ -240,17 +240,18 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   ).run(sourceKey, targetId, `tx-${input.signalId}`, assetId, conditionId, createdAt);
   db.prepare(
     `INSERT INTO signals(
-      signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+      signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
       condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
       sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, 'PUBLISHED', ?, ?, '500000000000000000',
+    ) VALUES (?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, '500000000000000000',
       '10000000', NULL, NULL, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL,
       'STANDARD_TRADE', NULL, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
+    targetId,
     `idem-${input.signalId}`,
     sourceKey,
     input.signalType ?? "TARGET_BUY",
@@ -269,13 +270,14 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   const contextId = `context-${input.signalId}`;
   db.prepare(
     `INSERT INTO signal_execution_contexts(
-      context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+      context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, NULL, '100000', ?, ?, '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, NULL, '100000', ?, ?, '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
+    targetId,
     input.signalId,
     createdAt,
     input.marketEndTime ?? "2026-07-10T00:00:00.000Z",

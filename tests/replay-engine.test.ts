@@ -19,6 +19,7 @@ describe("ReplayEngine", () => {
   it("deduplicates exact rows but preserves distinct fills", () => {
     const first = trade({});
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first, { ...first }, trade({ size: "20" })],
@@ -37,6 +38,7 @@ describe("ReplayEngine", () => {
   it("does not let one Activity row confirm a second identical Trades occurrence", () => {
     const first = trade({});
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first, { ...first }],
@@ -57,6 +59,7 @@ describe("ReplayEngine", () => {
     const first = trade({});
     const activityTrade = { ...first, type: "TRADE" };
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first, { ...first }],
@@ -77,6 +80,7 @@ describe("ReplayEngine", () => {
   it("replays an Activity-only TRADE instead of silently dropping it", () => {
     const activityTrade = { ...trade({ transactionHash: "0xactivity-only" }), type: "TRADE" };
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [],
@@ -99,6 +103,7 @@ describe("ReplayEngine", () => {
   it("marks an Activity-only duplicate as ambiguous instead of silently hiding it", () => {
     const activityTrade = { ...trade({ transactionHash: "0xactivity-duplicate" }), type: "TRADE" };
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [],
@@ -120,6 +125,7 @@ describe("ReplayEngine", () => {
     const first = trade({ transactionHash: "0xactivity-confirmed-duplicate" });
     const activityTrade = { ...first, type: "TRADE" };
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first],
@@ -150,6 +156,7 @@ describe("ReplayEngine", () => {
     const trades = [repeatedSell, { ...repeatedSell }, aggregateSell];
     const activity = trades.map((item) => ({ ...item, type: "TRADE" }));
     const input = {
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED" as const,
       positionBaseline: [{ asset: "asset-1", size: "62851.16" }],
@@ -179,6 +186,7 @@ describe("ReplayEngine", () => {
 
   it("computes sell ratio before applying the sell", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [
@@ -197,6 +205,7 @@ describe("ReplayEngine", () => {
 
   it("records a gap behavior signal that is never execution eligible", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [trade({ timestamp: 100 })],
@@ -215,6 +224,7 @@ describe("ReplayEngine", () => {
 
   it("consumes post-baseline tracked shares before historical baseline shares", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       positionBaseline: [{ asset: "asset-1", size: "100" }],
@@ -236,6 +246,7 @@ describe("ReplayEngine", () => {
 
   it("does not turn a gap buy into a later executable tracked position", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [
@@ -255,6 +266,7 @@ describe("ReplayEngine", () => {
 
   it("is deterministic", () => {
     const input = {
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED" as const,
       trades: [trade({ transactionHash: "0xb", timestamp: 101 }), trade({ transactionHash: "0xa", timestamp: 100 })],
@@ -267,6 +279,7 @@ describe("ReplayEngine", () => {
 
   it("sorts out-of-order 3-1-2 input before projecting positions", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [
@@ -286,6 +299,7 @@ describe("ReplayEngine", () => {
 
   it("blocks replay signal generation when identity is unknown", () => {
     const report = new ReplayEngine().run({
+      targetId: "target-1",
       walletAddress: wallet,
       identityStatus: "IDENTITY_UNKNOWN",
       trades: [trade({})],

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { OperationalRunner } from "../operational/operational-runner.js";
 import type { OperationalMode, OperationalRunOptions } from "../operational/types.js";
+import { resolveValidationScopeFromDatabase } from "../validation/scoped-invariants.js";
 
 const args = process.argv.slice(2);
 const valueArg = (name: string): string | undefined => args.find((item) => item.startsWith(`--${name}=`))?.split("=")[1];
@@ -45,6 +46,18 @@ const targetWallet = valueArg("target-wallet");
 const paperAccountId = valueArg("paper-account-id");
 if (targetWallet) runOptions.targetWallet = targetWallet;
 if (paperAccountId) runOptions.paperAccountId = paperAccountId;
+const campaignId = valueArg("campaign-id");
+const campaignSessionId = valueArg("session-id");
+if ((campaignId && !campaignSessionId) || (!campaignId && campaignSessionId)) {
+  throw new Error("OPERATIONAL_SCOPE_INCOMPLETE:--campaign-id and --session-id must both be provided");
+}
+if (campaignId && campaignSessionId) {
+  runOptions.validationScope = resolveValidationScopeFromDatabase(
+    databasePath,
+    campaignId,
+    campaignSessionId,
+  );
+}
 
 const result = await new OperationalRunner().run(runOptions);
 

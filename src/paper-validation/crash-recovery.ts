@@ -5,7 +5,7 @@ import { projectObserveEvents } from "../observe/position-projector.js";
 import type { ObserveBaseline, ObserveEvent } from "../observe/types.js";
 import type { PaperAcceptanceSummary } from "../paper/paper-acceptance-summary.js";
 import { PAPER_CONSUMER_CUTOFF_SIGNAL_SENTINEL } from "../paper/paper-executor.js";
-import type { FinalIntegrityEvidence } from "./operator-evidence.js";
+import type { FinalIntegrityEvidence } from "./final-integrity.js";
 import type { CheckpointEvidence, ValidationCheckpoint } from "./types.js";
 
 export type CampaignRuntimeProcessRole = "SUPERVISOR" | "PAPER" | "OBSERVE";
@@ -183,12 +183,18 @@ export function inspectInterruptedDatabaseContinuity(input: {
     const projected = observeProjection(database, input.baselineRunId);
     if (projected.baseline.targetId !== input.targetId) blockers.push("RECOVERY_BASELINE_TARGET_MISMATCH");
     const currentObserve = database.prepare(
-      `SELECT checkpoint_id,target_id,baseline_run_id,observe_run_id,created_at,
-              last_processed_timestamp,last_processed_event_id,replay_state,
-              position_projection_json,position_projection_hash,capital_snapshot_id
-       FROM observe_checkpoints WHERE target_id=? AND baseline_run_id=?
-       ORDER BY created_at DESC,checkpoint_id DESC LIMIT 1`,
-    ).get(input.targetId, input.baselineRunId) as {
+      `SELECT c.checkpoint_id,c.target_id,c.baseline_run_id,c.observe_run_id,c.created_at,
+              c.last_processed_timestamp,c.last_processed_event_id,c.replay_state,
+              COALESCE(NULLIF(c.position_projection_json,''),s.projection_json) position_projection_json,
+              c.position_projection_hash,c.capital_snapshot_id
+       FROM observe_checkpoints c
+       JOIN observe_runs o ON o.observe_run_id=c.observe_run_id
+       LEFT JOIN observe_projection_snapshots s
+         ON s.projection_snapshot_hash=c.projection_snapshot_hash
+       WHERE c.target_id=? AND c.baseline_run_id=?
+         AND o.campaign_id=? AND o.campaign_session_id=?
+       ORDER BY c.created_at DESC,c.checkpoint_id DESC LIMIT 1`,
+    ).get(input.targetId, input.baselineRunId, input.campaignId, input.sessionId) as {
       checkpoint_id: string;
       target_id: string;
       baseline_run_id: string;
@@ -203,11 +209,13 @@ export function inspectInterruptedDatabaseContinuity(input: {
     } | undefined;
     const previousObserveId = input.latestCheckpoint?.evidence.observeCheckpointId ?? null;
     const previousObserve = previousObserveId ? database.prepare(
-      `SELECT checkpoint_id,target_id,baseline_run_id,observe_run_id,created_at,
-              position_projection_hash,capital_snapshot_id,last_processed_timestamp,
-              last_processed_event_id
-       FROM observe_checkpoints WHERE checkpoint_id=?`,
-    ).get(previousObserveId) as {
+      `SELECT c.checkpoint_id,c.target_id,c.baseline_run_id,c.observe_run_id,c.created_at,
+              c.position_projection_hash,c.capital_snapshot_id,c.last_processed_timestamp,
+              c.last_processed_event_id
+       FROM observe_checkpoints c
+       JOIN observe_runs o ON o.observe_run_id=c.observe_run_id
+       WHERE c.checkpoint_id=? AND o.campaign_id=? AND o.campaign_session_id=?`,
+    ).get(previousObserveId, input.campaignId, input.sessionId) as {
       checkpoint_id: string;
       target_id: string;
       baseline_run_id: string;
@@ -400,11 +408,19 @@ export function inspectInterruptedDatabaseContinuity(input: {
        FROM paper_executions WHERE paper_account_id=?`,
     ).get(input.paperAccountId) as { waiting_buy_count: number | null; pending_exit_count: number | null };
     const runningObserveRows = database.prepare(
-      `SELECT observe_run_id,baseline_run_id,started_at FROM observe_runs
+      `SELECT observe_run_id,baseline_run_id,started_at,campaign_id,campaign_session_id FROM observe_runs
        WHERE target_id=? AND state='RUNNING' ORDER BY started_at,observe_run_id`,
-    ).all(input.targetId) as Array<{ observe_run_id: string; baseline_run_id: string; started_at: string }>;
+    ).all(input.targetId) as Array<{
+      observe_run_id: string;
+      baseline_run_id: string;
+      started_at: string;
+      campaign_id: string | null;
+      campaign_session_id: string | null;
+    }>;
     const abandonedObserveRunIds = runningObserveRows
-      .filter((row) => row.baseline_run_id === input.baselineRunId && Date.parse(row.started_at) >= Date.parse(input.sessionStartedAt))
+      .filter((row) => row.baseline_run_id === input.baselineRunId
+        && row.campaign_id === input.campaignId
+        && row.campaign_session_id === input.sessionId)
       .map((row) => row.observe_run_id);
     if (runningObserveRows.some((row) => !abandonedObserveRunIds.includes(row.observe_run_id))) {
       blockers.push("RECOVERY_UNBOUND_RUNNING_OBSERVE_RUN");

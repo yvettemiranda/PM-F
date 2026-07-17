@@ -91,6 +91,7 @@ export interface CoreCompatibilityManifest {
     settlementPnl: string;
     schema: string;
     runtimeEnvironment: string;
+    paperRules: string;
   };
 }
 

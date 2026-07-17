@@ -26,6 +26,7 @@ import type { CapitalEstimate } from "../../services/capital-estimator.js";
 import type { GoldenExpectation, GoldenResult } from "../../services/golden-expectations.js";
 import { decodeCapturePayload, storeCompressedCapturePayload, type CapturePayloadRow } from "./capture-payload.js";
 import { capitalSizingHash } from "../../execution/capital-sizing.js";
+import { assertObserveProjectionSnapshotMigrationPreflight } from "./migration-preflight.js";
 
 export class Phase0Database {
   private readonly database: DatabaseSync;
@@ -471,6 +472,67 @@ export class Phase0Database {
         this.database
           .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
           .run("2.21.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const signalTargetBindingApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.22.0");
+    if (!signalTargetBindingApplied) {
+      const signalTargetBindingSql = readFileSync(
+        new URL("./027_signal_target_binding.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(signalTargetBindingSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.22.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const observeProjectionSnapshotsApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.23.0");
+    if (!observeProjectionSnapshotsApplied) {
+      const observeProjectionSnapshotsSql = readFileSync(
+        new URL("./028_observe_projection_snapshots.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        assertObserveProjectionSnapshotMigrationPreflight(this.database);
+        this.database.exec(observeProjectionSnapshotsSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.23.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const observeCampaignBindingApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.24.0");
+    if (!observeCampaignBindingApplied) {
+      const observeCampaignBindingSql = readFileSync(
+        new URL("./029_observe_campaign_binding.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(observeCampaignBindingSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.24.0", new Date().toISOString());
         this.database.exec("COMMIT");
       } catch (error) {
         this.database.exec("ROLLBACK");
@@ -1118,6 +1180,7 @@ export class Phase0Database {
 
   loadCaptureRun(captureRunId: string): {
     captureRunId: string;
+    targetId: string;
     walletAddress: string;
     manifestHash: string;
     sourceCodeCommit: string;
@@ -1125,19 +1188,22 @@ export class Phase0Database {
   } {
     const row = this.database
       .prepare(
-        `SELECT capture_run_id, wallet_address, manifest_hash, source_code_commit, source_code_dirty
+        `SELECT capture_run_id, target_id, wallet_address, manifest_hash, source_code_commit, source_code_dirty
          FROM capture_runs WHERE capture_run_id=? AND status='COMPLETE'`,
       )
       .get(captureRunId) as {
         capture_run_id: string;
+        target_id: string | null;
         wallet_address: string;
         manifest_hash: string;
         source_code_commit: string;
         source_code_dirty: number;
       } | undefined;
     if (!row) throw new Error(`Complete capture run not found: ${captureRunId}`);
+    if (!row.target_id) throw new Error(`Capture run target missing: ${captureRunId}`);
     return {
       captureRunId: row.capture_run_id,
+      targetId: row.target_id,
       walletAddress: row.wallet_address,
       manifestHash: row.manifest_hash,
       sourceCodeCommit: row.source_code_commit,
@@ -1292,18 +1358,20 @@ export class Phase0Database {
 
       const insertSignal = this.database.prepare(
         `INSERT OR IGNORE INTO signals(
-          signal_id, signal_idempotency_key, source_event_key, signal_type, status,
+          signal_id, target_id, signal_idempotency_key, source_event_key, signal_type, status,
           asset_id, condition_id, target_price_units, target_size_micros,
           sell_ratio_numerator, sell_ratio_denominator, reason,
           schema_version, signal_version, strategy_version, risk_version, replay_version,
           ruleset_snapshot_json, ruleset_hash, source_code_commit, created_at,
           execution_eligible, execution_block_reason, event_classification,
           capture_run_id, source_code_dirty, capital_estimate_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const signal of report.signals) {
+        if (signal.targetId !== targetId) throw new Error(`REPLAY_SIGNAL_TARGET_MISMATCH:${signal.signalId}`);
         insertSignal.run(
           signal.signalId,
+          signal.targetId,
           signal.signalIdempotencyKey,
           signal.sourceEventKey,
           signal.signalType,

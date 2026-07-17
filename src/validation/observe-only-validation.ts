@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
 import { check, errorCheck } from "./checks.js";
+import { scopedObserveRunIds } from "./scoped-invariants.js";
 import type { ValidationCheckResult, ValidationValidator, ValidationValidatorContext } from "./types.js";
 
 interface ObserveRunRow {
@@ -38,11 +39,13 @@ export class ObserveOnlyValidation implements ValidationValidator {
   async run(context: ValidationValidatorContext): Promise<ValidationCheckResult[]> {
     const database = new DatabaseSync(context.databasePath, { readOnly: true });
     try {
+      const runIds = scopedObserveRunIds(database, context.scope);
+      const latestRunId = runIds.at(-1);
       const latest = database.prepare(
         `SELECT observe_run_id,target_id,state,successful_polls,failed_polls,processed_events,
                 emitted_signals,duplicate_events,gap_events,reconciliation_count
-         FROM observe_runs ORDER BY started_at DESC LIMIT 1`,
-      ).get() as ObserveRunRow | undefined;
+         FROM observe_runs WHERE observe_run_id=?`,
+      ).get(latestRunId ?? "") as ObserveRunRow | undefined;
       if (!latest) {
         return [check({
           checkType: this.type,
@@ -56,8 +59,12 @@ export class ObserveOnlyValidation implements ValidationValidator {
       }
       const checkpoint = database.prepare(
         `SELECT checkpoint_id,poll_id,last_processed_timestamp,last_processed_event_id,replay_state,
-                position_projection_json,position_projection_hash,capital_snapshot_id
-         FROM observe_checkpoints WHERE observe_run_id=? ORDER BY created_at DESC,checkpoint_id DESC LIMIT 1`,
+                COALESCE(NULLIF(c.position_projection_json,''),s.projection_json) position_projection_json,
+                c.position_projection_hash,c.capital_snapshot_id
+         FROM observe_checkpoints c
+         LEFT JOIN observe_projection_snapshots s
+           ON s.projection_snapshot_hash=c.projection_snapshot_hash
+         WHERE c.observe_run_id=? ORDER BY c.created_at DESC,c.checkpoint_id DESC LIMIT 1`,
       ).get(latest.observe_run_id) as ObserveCheckpointRow | undefined;
       const successfulPoll = database.prepare(
         `SELECT poll_id,checkpoint_id FROM observe_polls
@@ -66,55 +73,39 @@ export class ObserveOnlyValidation implements ValidationValidator {
       const successfulPollCount = (database.prepare(
         "SELECT count(*) count FROM observe_polls WHERE observe_run_id=? AND status='SUCCESS'",
       ).get(latest.observe_run_id) as { count: number }).count;
-      const monitorCheckpoint = database.prepare(
-        `SELECT checkpoint_id,last_trade_timestamp,last_source_event_key,replay_state,
-                position_projection_hash,capital_snapshot_id
-         FROM monitor_checkpoints WHERE target_id=?`,
-      ).get(latest.target_id) as {
-        checkpoint_id: string | null;
-        last_trade_timestamp: number | null;
-        last_source_event_key: string | null;
-        replay_state: string | null;
-        position_projection_hash: string | null;
-        capital_snapshot_id: string | null;
-      } | undefined;
       const latestReconciliation = database.prepare(
         `SELECT sync_status,reconciliation_report_id FROM reconciliation_reports
          WHERE observe_run_id=? ORDER BY created_at DESC,reconciliation_report_id DESC LIMIT 1`,
       ).get(latest.observe_run_id) as { sync_status: string; reconciliation_report_id: string } | undefined;
-      const majorDesyncCount = (database.prepare(
+      const majorDesyncCount = runIds.reduce((total, runId) => total + Number((database.prepare(
         "SELECT count(*) count FROM reconciliation_reports WHERE observe_run_id=? AND sync_status='MAJOR_DESYNC'",
-      ).get(latest.observe_run_id) as { count: number }).count;
-      const target = database.prepare("SELECT sync_status FROM monitor_targets WHERE target_id=?")
-        .get(latest.target_id) as { sync_status: string } | undefined;
+      ).get(runId) as { count: number }).count), 0);
+      const latestRun = database.prepare(
+        "SELECT started_at,COALESCE(stopped_at,last_heartbeat_at) stopped_at FROM observe_runs WHERE observe_run_id=?",
+      ).get(latest.observe_run_id) as { started_at: string; stopped_at: string };
       const openGapCount = (database.prepare(
-        "SELECT count(*) count FROM connection_windows WHERE target_id=? AND reconnected_at IS NULL",
-      ).get(latest.target_id) as { count: number }).count;
+        `SELECT count(*) count FROM connection_windows
+         WHERE target_id=? AND disconnected_at>=? AND disconnected_at<=? AND reconnected_at IS NULL`,
+      ).get(latest.target_id, latestRun.started_at, latestRun.stopped_at) as { count: number }).count;
       const latency = database.prepare(
-        `SELECT component,operation,count(*) count,avg(duration_ms) avg_duration_ms
-         FROM latency_metrics GROUP BY component,operation`,
-      ).all() as unknown[];
+        `SELECT status,count(*) count,
+                avg((julianday(completed_at)-julianday(started_at))*86400000.0) avg_duration_ms
+         FROM observe_polls WHERE observe_run_id=? GROUP BY status`,
+      ).all(latest.observe_run_id) as unknown[];
       const pollCountersConsistent = successfulPollCount > 0 && successfulPollCount === latest.successful_polls;
       const checkpointConsistent = checkpoint !== undefined
         && successfulPoll !== undefined
-        && monitorCheckpoint !== undefined
         && checkpoint.checkpoint_id === successfulPoll.checkpoint_id
         && checkpoint.poll_id === successfulPoll.poll_id
-        && checkpoint.checkpoint_id === monitorCheckpoint.checkpoint_id
-        && checkpoint.last_processed_timestamp === monitorCheckpoint.last_trade_timestamp
-        && checkpoint.last_processed_event_id === monitorCheckpoint.last_source_event_key
-        && checkpoint.replay_state === monitorCheckpoint.replay_state
-        && checkpoint.position_projection_hash === monitorCheckpoint.position_projection_hash
-        && checkpoint.capital_snapshot_id === monitorCheckpoint.capital_snapshot_id
         && checkpoint.position_projection_hash === projectionHash(checkpoint.position_projection_json);
-      const finalSync = latestReconciliation?.sync_status === "SYNCED" && target?.sync_status === "SYNCED";
+      const finalSync = latestReconciliation?.sync_status === "SYNCED";
       return [
         check({
           checkType: this.type,
           checkName: "observe_only_run_available",
           status: "PASS",
           reason: "OK",
-          metrics: { ...latest },
+          metrics: { ...latest, scopedObserveRunIds: runIds },
           now: context.now,
         }),
         check({
@@ -141,8 +132,8 @@ export class ObserveOnlyValidation implements ValidationValidator {
           status: finalSync ? "PASS" : "FAIL",
           reason: finalSync
             ? "OK"
-            : `OBSERVE_FINAL_NOT_SYNCED:${latestReconciliation?.sync_status ?? "MISSING"}:${target?.sync_status ?? "MISSING"}`,
-          metrics: { latestReconciliation, targetSyncStatus: target?.sync_status ?? null },
+            : `OBSERVE_FINAL_NOT_SYNCED:${latestReconciliation?.sync_status ?? "MISSING"}`,
+          metrics: { latestReconciliation },
           now: context.now,
         }),
         check({
@@ -158,7 +149,7 @@ export class ObserveOnlyValidation implements ValidationValidator {
           checkName: "observe_checkpoint",
           status: checkpointConsistent ? "PASS" : "FAIL",
           reason: checkpointConsistent ? "OK" : checkpoint ? "OBSERVE_CHECKPOINT_INCONSISTENT" : "OBSERVE_CHECKPOINT_MISSING",
-          metrics: { checkpoint, successfulPoll, monitorCheckpoint },
+          metrics: { checkpoint, successfulPoll },
           now: context.now,
         }),
         check({

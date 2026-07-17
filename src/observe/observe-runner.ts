@@ -23,6 +23,8 @@ const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 export interface ObserveRunnerOptions {
   walletAddress: string;
   baselineRunId?: string;
+  campaignId?: string;
+  campaignSessionId?: string;
   pollIntervalMs: number;
   durationMs?: number;
   staleRunAfterMs?: number;
@@ -71,6 +73,9 @@ export class ObserveOnlyRunner {
       if (this.checkpointHashMismatch) throw new Error("CHECKPOINT_PROJECTION_HASH_MISMATCH");
       return this.started;
     }
+    if (Boolean(this.options.campaignId) !== Boolean(this.options.campaignSessionId)) {
+      throw new Error("OBSERVE_CAMPAIGN_SCOPE_INCOMPLETE");
+    }
     const now = this.now().toISOString();
     this.started = this.store.startRun(
       this.options.walletAddress,
@@ -78,6 +83,9 @@ export class ObserveOnlyRunner {
       now,
       this.options.staleRunAfterMs ?? Math.max(this.options.pollIntervalMs * 3, 30_000),
       this.options.baselineRunId,
+      this.options.campaignId && this.options.campaignSessionId
+        ? { campaignId: this.options.campaignId, sessionId: this.options.campaignSessionId }
+        : undefined,
     );
     const existing = this.store.loadObservedEvents(this.started.baseline.baselineRunId);
     if (this.started.checkpoint) {

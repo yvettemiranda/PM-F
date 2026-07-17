@@ -71,6 +71,7 @@ export class ObserveStore {
     now: string,
     staleAfterMs: number,
     baselineRunId?: string,
+    campaignBinding?: { campaignId: string; sessionId: string },
   ): StartedObserveRun {
     let baseline: ObserveBaseline;
     let checkpointRow: {
@@ -90,6 +91,27 @@ export class ObserveStore {
         .prepare("SELECT target_id FROM monitor_targets WHERE wallet_address=?")
         .get(walletAddress.toLowerCase()) as { target_id: string } | undefined;
       if (!target) throw new Error(`Monitor target not found: ${walletAddress}`);
+      if (campaignBinding) {
+        const binding = this.database.prepare(
+          `SELECT 1 valid
+           FROM paper_validation_sessions s
+           JOIN paper_validation_campaigns c ON c.campaign_id=s.campaign_id
+           WHERE s.campaign_id=? AND s.session_id=?
+             AND c.target_id=? AND c.baseline_run_id=?
+             AND s.schema_version=? AND s.ruleset_hash=?
+             AND s.source_code_commit=? AND s.source_code_dirty=?`,
+        ).get(
+          campaignBinding.campaignId,
+          campaignBinding.sessionId,
+          target.target_id,
+          baseline.baselineRunId,
+          VERSIONS.schemaVersion,
+          RULESET_HASH,
+          this.sourceVersion.commit,
+          this.sourceVersion.dirty ? 1 : 0,
+        );
+        if (!binding) throw new Error("OBSERVE_CAMPAIGN_SESSION_BINDING_INVALID");
+      }
       const latestRunning = this.database
         .prepare("SELECT observe_run_id,last_heartbeat_at FROM observe_runs WHERE target_id=? AND state='RUNNING' ORDER BY started_at DESC LIMIT 1")
         .get(target.target_id) as { observe_run_id: string; last_heartbeat_at: string } | undefined;
@@ -115,8 +137,9 @@ export class ObserveStore {
           `INSERT INTO observe_runs(
             observe_run_id,target_id,baseline_run_id,state,recovered_from_checkpoint,
             poll_interval_ms,started_at,last_heartbeat_at,schema_version,signal_version,
-            strategy_version,risk_version,ruleset_hash,source_code_commit,source_code_dirty,created_at
-          ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            strategy_version,risk_version,ruleset_hash,source_code_commit,source_code_dirty,created_at,
+            campaign_id,campaign_session_id
+          ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           observeRunId,
@@ -134,6 +157,8 @@ export class ObserveStore {
           this.sourceVersion.commit,
           this.sourceVersion.dirty ? 1 : 0,
           now,
+          campaignBinding?.campaignId ?? null,
+          campaignBinding?.sessionId ?? null,
         );
       this.database.exec("COMMIT");
     } catch (error) {
@@ -446,14 +471,39 @@ export class ObserveStore {
           JSON.stringify(input.reconciliation.details),
           input.completedAt,
         );
-      const projectionJson = JSON.stringify(input.projection.projection);
+      const projectionJson = stableJson(input.projection.projection);
+      this.database
+        .prepare(
+          `INSERT OR IGNORE INTO observe_projection_snapshots(
+            projection_snapshot_hash,projection_json,created_at
+          ) VALUES (?, ?, ?)`,
+        )
+        .run(input.projection.projectionHash, projectionJson, input.completedAt);
+      const storedProjection = this.database
+        .prepare(
+          `SELECT projection_json FROM observe_projection_snapshots
+           WHERE projection_snapshot_hash=?`,
+        )
+        .get(input.projection.projectionHash) as { projection_json: string } | undefined;
+      let storedProjectionCanonical: string | null = null;
+      try {
+        storedProjectionCanonical = storedProjection
+          ? stableJson(JSON.parse(storedProjection.projection_json) as unknown)
+          : null;
+      } catch {
+        storedProjectionCanonical = null;
+      }
+      if (storedProjectionCanonical !== projectionJson) {
+        throw new Error(`OBSERVE_PROJECTION_SNAPSHOT_HASH_COLLISION:${input.projection.projectionHash}`);
+      }
       this.database
         .prepare(
           `INSERT INTO observe_checkpoints(
             checkpoint_id,target_id,baseline_run_id,observe_run_id,poll_id,
             last_processed_timestamp,last_processed_event_id,replay_state,
-            position_projection_json,position_projection_hash,capital_snapshot_id,created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            position_projection_json,position_projection_hash,capital_snapshot_id,created_at,
+            projection_snapshot_hash
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`,
         )
         .run(
           checkpointId,
@@ -464,10 +514,10 @@ export class ObserveStore {
           input.projection.lastProcessedTimestamp,
           input.projection.lastProcessedEventId,
           input.replayState,
-          projectionJson,
           input.projection.projectionHash,
           input.capitalEstimate.capitalEstimateId,
           input.completedAt,
+          input.projection.projectionHash,
         );
       this.database
         .prepare(
@@ -809,20 +859,24 @@ export class ObserveStore {
   }
 
   private insertObserveSignal(input: CommitPollInput, pollId: string, signal: ObserveSignal): void {
+    if (signal.targetId !== input.baseline.targetId) {
+      throw new Error(`OBSERVE_SIGNAL_TARGET_MISMATCH:${signal.signalId}`);
+    }
     const bundle = input.signalContexts.find((item) => item.signal.signalId === signal.signalId);
     this.database
       .prepare(
         `INSERT OR IGNORE INTO signals(
-          signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+          signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
           condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
           sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
           risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
           created_at,execution_eligible,execution_block_reason,event_classification,
           capital_estimate_id,capture_run_id,source_code_dirty,producer_mode,baseline_run_id,observe_run_id
-        ) VALUES (?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'OBSERVE_ONLY', ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'OBSERVE_ONLY', ?, ?)`,
       )
       .run(
         signal.signalId,
+        signal.targetId,
         signal.signalIdempotencyKey,
         signal.sourceEventKey,
         signal.signalType,
@@ -903,18 +957,22 @@ export class ObserveStore {
   }
 
   private insertSignalExecutionContext(bundle: SignalContextBundle): void {
+    if (bundle.context.targetId !== bundle.signal.targetId) {
+      throw new Error(`SIGNAL_CONTEXT_TARGET_MISMATCH:${bundle.signal.signalId}`);
+    }
     this.database
       .prepare(
         `INSERT INTO signal_execution_contexts(
-          context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+          context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
           capital_sizing_ratio_json,capital_sizing_ratio_hash,
           target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
           market_metadata_hash,ruleset_hash,schema_version,signal_version,
           strategy_version,source_code_commit,source_code_dirty,config_version,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         bundle.context.contextId,
+        bundle.context.targetId,
         bundle.context.signalId,
         bundle.context.capitalDecisionId,
         bundle.context.targetTradeCapitalRatioPpm,

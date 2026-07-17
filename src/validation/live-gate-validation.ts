@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../domain/versioning.js";
 import {
@@ -7,6 +10,7 @@ import {
 } from "../live/live-gate-service.js";
 import { FakeClockSafetyProvider, FakeGeoblockProvider } from "../live/live-safety-provider.js";
 import { MockBalanceProvider } from "../live/mock-balance-provider.js";
+import { Phase0Database } from "../infra/sqlite/database.js";
 import { check, errorCheck } from "./checks.js";
 import type { ValidationCheckResult, ValidationValidator, ValidationValidatorContext } from "./types.js";
 
@@ -35,11 +39,18 @@ export class LiveGateValidation implements ValidationValidator {
   readonly type = "LIVE_GATE" as const;
 
   async run(context: ValidationValidatorContext): Promise<ValidationCheckResult[]> {
-    const database = new DatabaseSync(context.databasePath);
+    const fixtureDatabasePath = join(
+      dirname(context.databasePath),
+      `.live-gate-validation-${randomUUID()}.sqlite`,
+    );
+    const phase0 = new Phase0Database(fixtureDatabasePath, context.sourceVersion);
+    phase0.initialize();
+    phase0.close();
+    const database = new DatabaseSync(fixtureDatabasePath);
     database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
     const checkedAt = context.now().toISOString();
     const gate = new LiveGateService(
-      context.databasePath,
+      fixtureDatabasePath,
       new MockBalanceProvider({
         status: "AVAILABLE",
         balanceMicros: "1000000000",
@@ -141,12 +152,22 @@ export class LiveGateValidation implements ValidationValidator {
         metrics: state,
         now: context.now,
       }));
-      return results;
+      return results.map((result) => ({
+        ...result,
+        metrics: {
+          ...(result.metrics ?? {}),
+          evidenceLevel: "CONTROLLED_ISOLATED_FAKE_LIVE",
+          campaignBusinessEvidence: false,
+        },
+      }));
     } catch (error) {
       return [errorCheck({ checkType: this.type, checkName: "live_gate_exception", reason: "LIVE_GATE_VALIDATION_FAILED", error, now: context.now })];
     } finally {
       gate.close();
       database.close();
+      rmSync(fixtureDatabasePath, { force: true });
+      rmSync(`${fixtureDatabasePath}-wal`, { force: true });
+      rmSync(`${fixtureDatabasePath}-shm`, { force: true });
     }
   }
 
@@ -229,17 +250,18 @@ export class LiveGateValidation implements ValidationValidator {
     ).run(sourceKey, targetId, `tx-${signalId}`, ASSET_ID, CONDITION_ID, now);
     database.prepare(
       `INSERT OR IGNORE INTO signals(
-        signal_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+        signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
         condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
         sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
         risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
         created_at,execution_eligible,execution_block_reason,event_classification,
         capital_estimate_id,source_code_dirty,producer_mode
-      ) VALUES (?, ?, ?, 'TARGET_BUY', 'PUBLISHED', ?, ?, '500000000000000000',
+      ) VALUES (?, ?, ?, ?, 'TARGET_BUY', 'PUBLISHED', ?, ?, '500000000000000000',
         '10000000', NULL, NULL, 'VALIDATION', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL,
         'STANDARD_TRADE', NULL, ?, 'OBSERVE_ONLY')`,
     ).run(
       signalId,
+      targetId,
       `idem-${signalId}`,
       sourceKey,
       ASSET_ID,
@@ -258,13 +280,14 @@ export class LiveGateValidation implements ValidationValidator {
     const contextId = `context-${signalId}`;
     database.prepare(
       `INSERT OR IGNORE INTO signal_execution_contexts(
-        context_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
+        context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
         target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
         market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
         source_code_commit,source_code_dirty,config_version,created_at
-      ) VALUES (?, ?, NULL, '100000', ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, NULL, '100000', ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       contextId,
+      targetId,
       signalId,
       now,
       marketEndTime,

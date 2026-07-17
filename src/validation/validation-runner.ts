@@ -10,6 +10,7 @@ import { ObserveOnlyValidation } from "./observe-only-validation.js";
 import { PaperConsistencyValidation } from "./paper-consistency-validation.js";
 import { PaperReplayValidation } from "./paper-replay-validation.js";
 import { ReconciliationValidation } from "./reconciliation-validation.js";
+import { resolveValidationScopeFromDatabase } from "./scoped-invariants.js";
 import { ValidationStore } from "./validation-store.js";
 import type { ValidationCheckResult, ValidationRunOptions, ValidationRunReport, ValidationType, ValidationValidator } from "./types.js";
 
@@ -60,6 +61,16 @@ export class ValidationRunner {
     const store = new ValidationStore(snapshot.workingDatabasePath);
     const checks: ValidationCheckResult[] = [];
     try {
+      const resolvedScope = resolveValidationScopeFromDatabase(
+        snapshot.workingDatabasePath,
+        options.scope.campaignId,
+        options.scope.sessionId,
+      );
+      if (Object.keys(resolvedScope).some((key) => (
+        resolvedScope[key as keyof typeof resolvedScope] !== options.scope[key as keyof typeof options.scope]
+      ))) {
+        throw new Error("VALIDATION_SCOPE_BINDING_MISMATCH");
+      }
       store.startSession({
         sessionId,
         validationType,
@@ -75,6 +86,7 @@ export class ValidationRunner {
           databasePath: snapshot.workingDatabasePath,
           sourceVersion: this.sourceVersion,
           now: this.now,
+          scope: options.scope,
         });
         checks.push(...validatorChecks);
         for (const item of validatorChecks) store.recordCheck(sessionId, item, this.now().toISOString());
@@ -89,6 +101,7 @@ export class ValidationRunner {
         inputSnapshotHash: snapshot.inputSnapshotHash,
         dbSnapshotHash: snapshot.dbSnapshotHash,
         checks,
+        scope: options.scope,
       });
       const written = writeValidationReports({ outputDirectory, sessionId, report });
       for (const artifact of written.artifacts) store.recordArtifact(sessionId, artifact, finishedAt);

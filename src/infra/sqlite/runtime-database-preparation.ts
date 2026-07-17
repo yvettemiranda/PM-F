@@ -5,6 +5,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { VERSIONS } from "../../domain/versioning.js";
 import type { SourceVersion } from "../source-version.js";
 import { Phase0Database } from "./database.js";
+import { assertPaperRuntimeSchemaContract } from "./paper-runtime-schema-contract.js";
 
 export interface RuntimeDatabasePreparationResult {
   databasePath: string;
@@ -40,6 +41,9 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.19.0",
   "2.20.0",
   "2.21.0",
+  "2.22.0",
+  "2.23.0",
+  "2.24.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -93,6 +97,14 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "live_state_transitions_no_update",
   "live_valuation_snapshots_no_delete",
   "live_valuation_snapshots_no_update",
+  "observe_checkpoints_projection_snapshot_required",
+  "observe_checkpoints_no_delete",
+  "observe_checkpoints_no_update",
+  "observe_projection_snapshots_no_delete",
+  "observe_projection_snapshots_no_update",
+  "observe_runs_campaign_binding_consistency",
+  "observe_runs_campaign_binding_immutable",
+  "observe_runs_campaign_binding_pair",
   "paper_accounts_target_id_immutable",
   "paper_cash_ledger_no_delete",
   "paper_cash_ledger_no_update",
@@ -134,6 +146,7 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "replay_event_classifications_no_update",
   "replay_runs_no_delete",
   "replay_runs_no_update",
+  "raw_events_target_id_immutable",
   "risk_decisions_account_insert_guard",
   "risk_decisions_no_delete",
   "risk_decisions_no_update",
@@ -145,11 +158,19 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "signal_execution_contexts_no_delete",
   "signal_execution_contexts_no_update",
   "signal_execution_contexts_sizing_pair_insert",
+  "signal_execution_contexts_target_capital_consistency",
+  "signal_execution_contexts_target_id_immutable",
+  "signal_execution_contexts_target_id_required",
+  "signal_execution_contexts_target_signal_consistency",
   "signal_ingest_sequences_no_delete",
   "signal_ingest_sequences_no_update",
   "signals_assign_ingest_sequence",
   "signals_no_delete",
   "signals_no_update",
+  "signals_target_capital_consistency",
+  "signals_target_id_immutable",
+  "signals_target_id_required",
+  "signals_target_source_consistency",
   "state_transitions_no_delete",
   "state_transitions_no_update",
 ] as const;
@@ -197,7 +218,9 @@ function assertMigrationHistory(database: DatabaseSync, expectation: SchemaExpec
 }
 
 function assertCurrentSchemaObjects(database: DatabaseSync): void {
+  assertPaperRuntimeSchemaContract(database, new Set(migrationVersions(database)));
   const requiredTables = [
+    "observe_projection_snapshots",
     "paper_market_constraint_evidence",
     "paper_validation_campaigns",
     "paper_validation_sessions",
@@ -213,7 +236,10 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
   }
   const requiredColumns: Record<string, string[]> = {
     capital_estimates: ["capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
-    signal_execution_contexts: ["capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
+    observe_checkpoints: ["projection_snapshot_hash"],
+    observe_runs: ["campaign_id", "campaign_session_id"],
+    signals: ["target_id"],
+    signal_execution_contexts: ["target_id", "capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
     risk_decisions: ["capital_sizing_decision_json", "capital_sizing_decision_hash"],
     paper_orderbook_snapshots: [
       "min_order_size",

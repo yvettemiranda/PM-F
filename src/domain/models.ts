@@ -98,6 +98,7 @@ export interface SourceEvent {
 
 export interface Signal {
   signalId: string;
+  targetId: string;
   signalIdempotencyKey: string;
   signalType: SignalType;
   status: SignalStatus;

@@ -8,23 +8,36 @@ import { fileURLToPath } from "node:url";
 import { RULESET } from "../domain/versioning.js";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
+import { buildSafeChildEnvironment } from "../operator/safe-child-environment.js";
 import { PaperExecutor } from "../paper/paper-executor.js";
 import { evaluatePaperShortGate } from "../paper/paper-gate-evaluator.js";
 import { PublicPaperMarketDataProvider } from "../paper/public-market-data.js";
 import {
+  buildCurrentCompatibilityEvidence,
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
 import {
-  collectCheckpointEvidence,
+  assertPaperChildReadyBinding,
+  buildFinalizationOutcome,
+  buildObserveChildSpec,
+  buildPaperChildSpec,
+  campaignCheckpointEvidenceInput,
+  classifyCampaignChildExit,
+  deriveCampaignStopPlan,
+  qualificationMilestoneReached,
+  type CampaignRuntimeBinding,
+} from "../paper-validation/campaign-session-runtime.js";
+import {
   deriveSessionCoverage,
   sessionAcceptanceStatus,
-  validateFinalCampaignIntegrity,
   verifyIsolatedVerificationEvidence,
   type IsolatedVerificationEvidence,
   type ObserveCampaignReport,
   type PaperCampaignReport,
 } from "../paper-validation/operator-evidence.js";
+import { collectCheckpointEvidence } from "../paper-validation/checkpoint-evidence.js";
+import { validateFinalCampaignIntegrity } from "../paper-validation/final-integrity.js";
 import {
   paperCampaignPlannedDurationOverride,
   paperCampaignStartDisposition,
@@ -159,7 +172,7 @@ function sessionOutputPaths(campaignId: string, sessionId: string): SessionOutpu
 function startChild(script: string, args: string[]): ManagedChild {
   const child = spawn(process.execPath, ["--import", "tsx", script, ...args], {
     cwd: projectRoot,
-    env: process.env,
+    env: buildSafeChildEnvironment(),
     stdio: "inherit",
   });
   const managed: ManagedChild = { child, result: null, exited: Promise.resolve({ code: null, signal: null, forced: false }) };
@@ -508,6 +521,7 @@ async function main(): Promise<void> {
   if (sourceVersion.dirty) throw new Error("PAPER_CAMPAIGN_REQUIRES_CLEAN_SOURCE");
   const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
   const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
+  const compatibilityEvidence = buildCurrentCompatibilityEvidence(projectRoot);
   try {
     assertPaperCampaignPreMigrationCompatible({ databasePath, manifest });
   } catch (error) {
@@ -586,6 +600,14 @@ async function main(): Promise<void> {
     await mkdir(sessionDirectory, { recursive: true });
     const readyFile = join(sessionDirectory, "paper-ready.json");
     const accountFile = join(sessionDirectory, "paper-account-id.txt");
+    const runtimeBinding: CampaignRuntimeBinding = {
+      campaignId: snapshot.campaignId,
+      sessionId: session.sessionId,
+      paperAccountId: snapshot.paperAccountId,
+      targetId: snapshot.targetId,
+      targetWallet,
+      baselineRunId: snapshot.baselineRunId,
+    };
     await writeJsonAtomically(latestPointerPath, {
       campaignId: snapshot.campaignId,
       sessionId: session.sessionId,
@@ -604,27 +626,23 @@ async function main(): Promise<void> {
       checkpointKind: "START",
       observedAt: new Date().toISOString(),
       idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:START`,
-      evidence: collectCheckpointEvidence({
+      evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
         databasePath,
-        targetId: snapshot.targetId,
-        paperAccountId: snapshot.paperAccountId,
+        binding: runtimeBinding,
         observeActive: false,
         paperActive: false,
         detail: { stage: "STARTING" },
-      }),
+      })),
     });
 
-    paper = startChild(resolve(projectRoot, "src/cli/paper-run.ts"), [
-      "--duration-seconds=0",
-      "--interval-seconds=1",
-      `--account-id=${snapshot.paperAccountId}`,
-      `--account-id-file=${accountFile}`,
-      `--target-wallet=${targetWallet}`,
-      `--ready-file=${readyFile}`,
-      `--result-file=${paperReportFile}`,
-      `--campaign-id=${snapshot.campaignId}`,
-      `--session-id=${session.sessionId}`,
-    ]);
+    const paperSpec = buildPaperChildSpec({
+      projectRoot,
+      binding: runtimeBinding,
+      accountFile,
+      readyFile,
+      resultFile: paperReportFile,
+    });
+    paper = startChild(paperSpec.script, paperSpec.args);
     await writeJsonAtomically(latestPointerPath, {
       campaignId: snapshot.campaignId,
       sessionId: session.sessionId,
@@ -639,28 +657,16 @@ async function main(): Promise<void> {
       updatedAt: new Date().toISOString(),
     });
     const ready = await waitForReady(readyFile, paper);
-    if (ready.status !== "READY"
-      || ready.mode !== "PAPER"
-      || ready.accountId !== snapshot.paperAccountId
-      || ready.accountSource !== "EXPLICIT"
-      || ready.targetId !== snapshot.targetId
-      || ready.targetWallet !== targetWallet
-      || ready.campaignId !== snapshot.campaignId
-      || ready.sessionId !== session.sessionId) {
-      throw new Error("PAPER_CAMPAIGN_READY_EVIDENCE_INVALID");
-    }
-    observe = startChild(resolve(projectRoot, "src/cli/observe-only.ts"), [
-      targetWallet,
-      "--duration-seconds=0",
-      "--poll-seconds=15",
-      `--minimum-soak-seconds=${session.sessionKind === "QUALIFYING"
-        ? Math.ceil(session.plannedDurationMs / 1_000)
-        : 1}`,
-      `--result-file=${observeReportFile}`,
-      `--campaign-id=${snapshot.campaignId}`,
-      `--session-id=${session.sessionId}`,
-      `--baseline-run-id=${snapshot.baselineRunId}`,
-    ]);
+    assertPaperChildReadyBinding(ready, runtimeBinding);
+    const observeSpec = buildObserveChildSpec({
+      projectRoot,
+      binding: runtimeBinding,
+      resultFile: observeReportFile,
+      minimumSoakSeconds: session.sessionKind === "QUALIFYING"
+        ? Math.ceil(snapshot.qualifyingRuntimeMs / 1_000)
+        : 1,
+    });
+    observe = startChild(observeSpec.script, observeSpec.args);
     await delay(1_000);
     if (!childRunning(observe)) throw new Error("OBSERVE_EXITED_DURING_STARTUP");
 
@@ -671,16 +677,16 @@ async function main(): Promise<void> {
       checkpointKind: "HEARTBEAT",
       observedAt: new Date(activeStartedAt).toISOString(),
       idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:ACTIVE_START`,
-      evidence: collectCheckpointEvidence({
+      evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
         databasePath,
-        targetId: snapshot.targetId,
-        paperAccountId: snapshot.paperAccountId,
+        binding: runtimeBinding,
         observeActive: true,
         paperActive: true,
         detail: { stage: "ACTIVE", checkpointSequence: 0 },
-      }),
+      })),
     });
     let nextCheckpointAt = activeStartedAt + snapshot.checkpointIntervalMs;
+    let qualificationMilestoneRecorded = session.sessionKind !== "QUALIFYING";
     const deadline = activeStartedAt + session.plannedDurationMs;
     await writeJsonAtomically(latestPointerPath, {
       campaignId: snapshot.campaignId,
@@ -714,20 +720,35 @@ async function main(): Promise<void> {
         break;
       }
       if (now >= nextCheckpointAt) {
+        const milestoneReached = qualificationMilestoneReached({
+          alreadyRecorded: qualificationMilestoneRecorded,
+          sessionKind: session.sessionKind,
+          nowMs: now,
+          activeStartedAtMs: activeStartedAt,
+          qualifyingRuntimeMs: snapshot.qualifyingRuntimeMs,
+        });
+        const checkpointEvidence = collectCheckpointEvidence(campaignCheckpointEvidenceInput({
+          databasePath,
+          binding: runtimeBinding,
+          observeActive: true,
+          paperActive: true,
+          detail: {
+            stage: milestoneReached ? "QUALIFICATION_RUNTIME_REACHED" : "ACTIVE",
+            checkpointSequence,
+            qualificationMilestoneReached: milestoneReached,
+          },
+        }));
         service.recordCheckpoint({
           sessionId: session.sessionId,
           checkpointKind: "HEARTBEAT",
           observedAt: new Date(now).toISOString(),
           idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:HEARTBEAT:${checkpointSequence}`,
-          evidence: collectCheckpointEvidence({
-            databasePath,
-            targetId: snapshot.targetId,
-            paperAccountId: snapshot.paperAccountId,
-            observeActive: true,
-            paperActive: true,
-            detail: { stage: "ACTIVE", checkpointSequence },
-          }),
+          evidence: checkpointEvidence,
         });
+        if (milestoneReached) qualificationMilestoneRecorded = true;
+        if (!checkpointEvidence.consistencySafe) {
+          requestStop("RUNTIME_CONSISTENCY_UNSAFE");
+        }
         checkpointSequence += 1;
         nextCheckpointAt += snapshot.checkpointIntervalMs;
       }
@@ -741,24 +762,29 @@ async function main(): Promise<void> {
         checkpointKind: "HEARTBEAT",
         observedAt: preStopAt,
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:PRE_STOP`,
-        evidence: collectCheckpointEvidence({
+        evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,
-          targetId: snapshot.targetId,
-          paperAccountId: snapshot.paperAccountId,
+          binding: runtimeBinding,
           observeActive: true,
           paperActive: true,
           detail: { stage: "PRE_STOP", stopReason },
-        }),
+        })),
       });
     }
 
-    const observeExit = await stopChild(observe, "SIGTERM");
-    const paperExit = await stopChild(paper, "SIGUSR1");
+    let observeExit = observe?.result ?? null;
+    let paperExit = paper?.result ?? null;
+    for (const step of deriveCampaignStopPlan({
+      observeRunning: childRunning(observe),
+      paperRunning: childRunning(paper),
+      finalValuation: true,
+    })) {
+      if (step.role === "OBSERVE") observeExit = await stopChild(observe, step.signal);
+      else paperExit = await stopChild(paper, step.signal);
+    }
     const processBlockers = [
-      ...(observeExit?.forced ? ["OBSERVE_FORCED_STOP"] : []),
-      ...(paperExit?.forced ? ["PAPER_FORCED_STOP"] : []),
-      ...(observeExit && observeExit.code !== 0 ? [`OBSERVE_EXIT_CODE:${observeExit.code ?? observeExit.signal}`] : []),
-      ...(paperExit && paperExit.code !== 0 ? [`PAPER_EXIT_CODE:${paperExit.code ?? paperExit.signal}`] : []),
+      ...classifyCampaignChildExit("OBSERVE", observeExit),
+      ...classifyCampaignChildExit("PAPER", paperExit),
       ...(unexpectedChildExit ? ["UNEXPECTED_CHILD_EXIT"] : []),
     ];
 
@@ -783,7 +809,14 @@ async function main(): Promise<void> {
     if (paperReport && observeReport) {
       integrity = validateFinalCampaignIntegrity({
         databasePath,
-        paperAccountId: snapshot.paperAccountId,
+        scope: {
+          campaignId: snapshot.campaignId,
+          sessionId: session.sessionId,
+          accountId: snapshot.paperAccountId,
+          targetId: snapshot.targetId,
+          baselineRunId: snapshot.baselineRunId,
+          coreHash: snapshot.coreCompatibilityHash,
+        },
         acceptance: paperReport.report.acceptance,
       });
       const blockers = [
@@ -868,10 +901,9 @@ async function main(): Promise<void> {
         checkpointKind: "SAFE_STOP",
         observedAt: stoppedAt,
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:SAFE_STOP`,
-        evidence: collectCheckpointEvidence({
+        evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,
-          targetId: snapshot.targetId,
-          paperAccountId: snapshot.paperAccountId,
+          binding: runtimeBinding,
           observeActive: false,
           paperActive: false,
           detail: {
@@ -880,13 +912,15 @@ async function main(): Promise<void> {
             blockers: finalizationBlockers,
             qualificationDeferred: qualifyingPolicy.qualificationDeferred,
           },
-        }),
+        })),
       });
       finalized = service.finalizeSession({
         sessionId: session.sessionId,
-        outcome: processBlockers.length > 0 || finalizationBlockers.length > 0
-          ? "FAILED"
-          : autoStopped ? "AUTO_STOP" : "SAFE_STOP",
+        outcome: buildFinalizationOutcome({
+          processBlockerCount: processBlockers.length,
+          finalizationBlockerCount: finalizationBlockers.length,
+          autoStopped,
+        }),
         acceptanceStatus,
         consistencyPassed: integrity.passed,
         recoveryConfirmed: true,
@@ -902,14 +936,13 @@ async function main(): Promise<void> {
         checkpointKind: "SAFE_STOP",
         observedAt: stoppedAt,
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:SAFE_STOP`,
-        evidence: collectCheckpointEvidence({
+        evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,
-          targetId: snapshot.targetId,
-          paperAccountId: snapshot.paperAccountId,
+          binding: runtimeBinding,
           observeActive: false,
           paperActive: false,
           detail: { stage: "FAILED", stopReason, blockers: processBlockers },
-        }),
+        })),
       });
       finalized = service.finalizeSession({
         sessionId: session.sessionId,
@@ -930,6 +963,7 @@ async function main(): Promise<void> {
       sessionId: session.sessionId,
       sourceCodeCommit: sourceVersion.commit,
       coreCompatibilityHash,
+      compatibilityEvidence,
       session: finalized.session,
       shortGate: gate,
       paper: paperReport,
@@ -957,6 +991,7 @@ async function main(): Promise<void> {
       campaignId: snapshot.campaignId,
       sourceCodeCommit: sourceVersion.commit,
       coreCompatibilityHash,
+      compatibilityEvidence,
       campaign: finalized.campaign,
       latestSessionReportId: finalized.session.reportId,
       currentFunnel: paperReport?.report.acceptance.funnel ?? null,
@@ -983,6 +1018,7 @@ async function main(): Promise<void> {
       paperReportFile,
       observeReportFile,
       stoppedAt,
+      compatibilityEvidence,
       safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
     });
     await writeJsonAtomically(latestPointerPath, {

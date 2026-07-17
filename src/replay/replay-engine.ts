@@ -15,6 +15,7 @@ export interface ReplayGap {
 }
 
 export interface ReplayInput {
+  targetId: string;
   walletAddress: string;
   identityStatus: IdentityStatus;
   trades: PublicTrade[];
@@ -75,6 +76,7 @@ export interface ReplayEventOutcome {
 
 export interface SerializedSignal {
   signalId: string;
+  targetId: string;
   signalIdempotencyKey: string;
   signalType: "TARGET_BUY" | "TARGET_SELL";
   status: "CREATED" | "VALIDATING" | "READY" | "PUBLISHED" | "REJECTED" | "CANCELLED";
@@ -106,6 +108,7 @@ function isTradeActivity(activity: PublicActivity): activity is PublicActivity &
 
 export class ReplayEngine {
   run(input: ReplayInput): ReplayReport {
+    if (!input.targetId.trim()) throw new Error("REPLAY_TARGET_ID_REQUIRED");
     if (input.identityStatus !== "IDENTITY_CONFIRMED") {
       return this.finish("FAILED", input.trades.length + input.activity.length, [], {}, [], 0, 0, 0, 0, 0, 0, 0, 0, {}, {}, ["WALLET_IDENTITY_NOT_CONFIRMED"]);
     }
@@ -211,7 +214,7 @@ export class ReplayEngine {
       if (event.trade.side === "BUY") {
         if (event.gapEvent) {
           historicalPositions.set(event.trade.asset, beforeHistorical + event.sizeMicros);
-          const signal = this.signal(event, "TARGET_BUY", "GAP_EVENT_RECORDED", "GAP_TRADE", false, "GAP_EVENT");
+          const signal = this.signal(input.targetId, event, "TARGET_BUY", "GAP_EVENT_RECORDED", "GAP_TRADE", false, "GAP_EVENT");
           signals.push(signal);
           eventOutcomes[event.sourceEventKey] = this.outcome(signal);
           positionLedger.push(this.ledger(
@@ -225,7 +228,7 @@ export class ReplayEngine {
           ));
         } else {
           trackedPositions.set(event.trade.asset, beforeTracked + event.sizeMicros);
-          const signal = this.signal(event, "TARGET_BUY", "POST_BASELINE_BUY", "STANDARD_TRADE", true);
+          const signal = this.signal(input.targetId, event, "TARGET_BUY", "POST_BASELINE_BUY", "STANDARD_TRADE", true);
           signals.push(signal);
           eventOutcomes[event.sourceEventKey] = this.outcome(signal);
           positionLedger.push(this.ledger(
@@ -249,6 +252,7 @@ export class ReplayEngine {
       historicalPositions.set(event.trade.asset, beforeHistorical - historicalSell);
       if (event.gapEvent) {
         const signal = this.signal(
+          input.targetId,
           event,
           "TARGET_SELL",
           "GAP_EVENT_RECORDED",
@@ -268,6 +272,7 @@ export class ReplayEngine {
         };
       } else {
         const signal = this.signal(
+          input.targetId,
           event,
           "TARGET_SELL",
           "RECOGNIZED_POSITION_SELL",
@@ -332,6 +337,7 @@ export class ReplayEngine {
   }
 
   private signal(
+    targetId: string,
     event: SourceEvent,
     type: "TARGET_BUY" | "TARGET_SELL",
     reason: string,
@@ -344,6 +350,7 @@ export class ReplayEngine {
     const idempotency = signalIdempotencyKey(event.sourceEventKey, type, VERSIONS.signalVersion);
     return {
       signalId: idempotency,
+      targetId,
       signalIdempotencyKey: idempotency,
       signalType: type,
       status: "PUBLISHED",
@@ -413,6 +420,7 @@ export class ReplayEngine {
   ): ReplayReport {
     const serializedSignals: SerializedSignal[] = signals.map((signal) => ({
       signalId: signal.signalId,
+      targetId: signal.targetId,
       signalIdempotencyKey: signal.signalIdempotencyKey,
       signalType: signal.signalType,
       status: signal.status,

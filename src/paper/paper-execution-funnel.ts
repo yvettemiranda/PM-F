@@ -174,11 +174,10 @@ export function buildPaperExecutionFunnel(
             ce.capital_confidence,
             CASE WHEN pc.signal_id IS NULL THEN 0 ELSE 1 END consumed
      FROM signals s
-     JOIN raw_events r ON r.source_event_key=s.source_event_key
      LEFT JOIN capital_estimates ce ON ce.capital_estimate_id=s.capital_estimate_id
      LEFT JOIN paper_signal_consumptions pc
        ON pc.paper_account_id=? AND pc.signal_id=s.signal_id
-     WHERE r.target_id=? AND s.created_at>=? AND s.created_at<=?
+     WHERE s.target_id=? AND s.created_at>=? AND s.created_at<=?
      ORDER BY s.created_at,s.signal_id`,
   ).all(paperAccountId, targetId, startAt, windowEndAt) as unknown as SignalRow[];
   const buySignals = signals.filter((row) => row.signal_type === "TARGET_BUY");

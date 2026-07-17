@@ -1,26 +1,31 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { RULESET_HASH, VERSIONS } from "../src/domain/versioning.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { PaperAcceptanceSummaryService } from "../src/paper/paper-acceptance-summary.js";
 import { PaperExecutor } from "../src/paper/paper-executor.js";
 import { PublicPaperMarketDataProvider } from "../src/paper/public-market-data.js";
+import { buildCaptureManifest, captureIdentity } from "../src/services/capture-manifest.js";
+import { buildPositionBaseline } from "../src/services/position-baseline.js";
+import type { ValidationScope } from "../src/validation/scoped-invariants.js";
 import {
   evaluateInterruptedSessionRecovery,
   findCampaignRuntimeProcesses,
 } from "../src/paper-validation/crash-recovery.js";
 import {
   buildIsolatedVerificationEvidence,
-  collectCheckpointEvidence,
   deriveSessionCoverage,
   PAPER_CAMPAIGN_ISOLATED_TEST_FILES,
-  validateFinalCampaignIntegrity,
   verifyIsolatedVerificationEvidence,
   type ObserveCampaignReport,
   type PaperCampaignReport,
 } from "../src/paper-validation/operator-evidence.js";
+import { collectCheckpointEvidence } from "../src/paper-validation/checkpoint-evidence.js";
+import { validateFinalCampaignIntegrity } from "../src/paper-validation/final-integrity.js";
 import type { ValidationCheckpoint } from "../src/paper-validation/types.js";
 
 const directories: string[] = [];
@@ -51,12 +56,93 @@ function fixture() {
     "0x0000000000000000000000000000000000000001",
     "IDENTITY_CONFIRMED",
   );
+  const capture = {
+    url: "https://example.test/positions",
+    fetchedAt: "2026-07-16T00:00:00.000Z",
+    latencyMs: 1,
+    status: 200,
+    data: [],
+  };
+  phase0.saveCapture("data-positions", capture);
+  const manifest = buildCaptureManifest({
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    sampleRole: "TARGET",
+    purpose: "OPERATOR_EVIDENCE_TEST",
+    sourceVersion,
+    sources: [{ endpoint: "data-positions", capture, paginationStatus: "END_OF_DATA" }],
+  });
+  phase0.saveCaptureManifest(targetId, manifest);
+  const baseline = buildPositionBaseline({
+    captureRunId: manifest.captureRunId,
+    targetId,
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    positionCaptureId: captureIdentity(capture).captureId,
+    fetchedAt: capture.fetchedAt,
+    latencyMs: capture.latencyMs,
+    positions: [],
+  });
+  phase0.savePositionBaseline(baseline);
   phase0.close();
   const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), { sourceVersion });
   const accountId = executor.createAccount("Operator Evidence", 1_000_000_000n, targetId);
   executor.close();
+  const scope = insertScope(databasePath, targetId, baseline.baselineRunId, accountId);
   const acceptance = new PaperAcceptanceSummaryService(databasePath).summarize(accountId);
-  return { databasePath, targetId, accountId, acceptance };
+  return { databasePath, targetId, accountId, scope, acceptance };
+}
+
+function insertScope(
+  databasePath: string,
+  targetId: string,
+  baselineRunId: string,
+  accountId: string,
+): ValidationScope {
+  const database = new DatabaseSync(databasePath);
+  const campaignId = "PC-operator-evidence";
+  const sessionId = "PS-operator-evidence";
+  const coreHash = "core-operator-evidence";
+  database.prepare(
+    `INSERT INTO paper_validation_campaigns(
+      campaign_id,target_id,baseline_run_id,paper_account_id,initial_balance_micros,
+      required_active_runtime_ms,required_continuous_runtime_ms,qualifying_runtime_ms,
+      checkpoint_interval_ms,max_checkpoint_gap_ms,core_compatibility_hash,core_manifest_json,
+      schema_version,signal_version,strategy_version,risk_version,paper_version,ruleset_hash,
+      config_version,source_code_commit,source_code_dirty,execution_mode,live_gate_state,created_at
+    ) VALUES (?,?,?,?,'1000000000',259200000,43200000,7200000,60000,90000,?,'{}',
+      ?,?,?,?,?,?,?,?,0,'PAPER','LIVE_DISABLED','2026-07-16T00:00:00.000Z')`,
+  ).run(
+    campaignId,
+    targetId,
+    baselineRunId,
+    accountId,
+    coreHash,
+    VERSIONS.schemaVersion,
+    VERSIONS.signalVersion,
+    VERSIONS.strategyVersion,
+    VERSIONS.riskVersion,
+    VERSIONS.paperVersion,
+    RULESET_HASH,
+    VERSIONS.configVersion,
+    sourceVersion.commit,
+  );
+  database.prepare(
+    `INSERT INTO paper_validation_sessions(
+      session_id,campaign_id,sequence,session_kind,planned_duration_ms,core_compatibility_hash,
+      schema_version,ruleset_hash,config_version,source_code_commit,source_code_dirty,
+      live_gate_transition_count_at_start,started_at,created_at
+    ) VALUES (?,?,1,'QUALIFYING',7200000,?,?,?,?,?,0,0,
+      '2026-07-16T00:00:00.000Z','2026-07-16T00:00:00.000Z')`,
+  ).run(
+    sessionId,
+    campaignId,
+    coreHash,
+    VERSIONS.schemaVersion,
+    RULESET_HASH,
+    VERSIONS.configVersion,
+    sourceVersion.commit,
+  );
+  database.close();
+  return { campaignId, sessionId, accountId, targetId, baselineRunId, coreHash };
 }
 
 describe("Paper Campaign operator evidence", () => {
@@ -64,7 +150,7 @@ describe("Paper Campaign operator evidence", () => {
     const env = fixture();
     const integrity = validateFinalCampaignIntegrity({
       databasePath: env.databasePath,
-      paperAccountId: env.accountId,
+      scope: env.scope,
       acceptance: env.acceptance,
     });
     const checkpoint = {
@@ -137,7 +223,7 @@ describe("Paper Campaign operator evidence", () => {
     });
     const integrity = validateFinalCampaignIntegrity({
       databasePath: env.databasePath,
-      paperAccountId: env.accountId,
+      scope: env.scope,
       acceptance: env.acceptance,
     });
     expect(integrity).toMatchObject({

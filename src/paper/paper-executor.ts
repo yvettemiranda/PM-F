@@ -53,6 +53,7 @@ import type {
   PaperExecutionState,
   PaperFeeSnapshot,
   PaperMarketDataProvider,
+  PaperSignalConsumptionScope,
   PaperMarketDataHealthSnapshot,
   PaperMarketDataHealthState,
   PaperOrderbookSnapshot,
@@ -258,35 +259,89 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return executionId;
   }
 
-  async consumeAvailableSignals(accountId: string, signal?: AbortSignal): Promise<string[]> {
+  async consumeAvailableSignals(
+    accountId: string,
+    signal?: AbortSignal,
+    scope?: PaperSignalConsumptionScope,
+  ): Promise<string[]> {
     const account = this.accountRow(accountId);
     if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
+    if (scope) this.assertSignalConsumptionScope(accountId, account.target_id, scope);
     const checkpoint = this.database.prepare(
       "SELECT last_signal_created_at,last_signal_id FROM paper_consumer_checkpoints WHERE paper_account_id=?",
     ).get(accountId) as { last_signal_created_at: string | null; last_signal_id: string | null };
-    const rows = this.database.prepare(
+    const scopeFilter = scope
+      ? `AND EXISTS (
+           SELECT 1 FROM observe_runs o
+           WHERE o.observe_run_id=s.observe_run_id
+             AND o.campaign_id=? AND o.campaign_session_id=?
+         )`
+      : "";
+    const statement = this.database.prepare(
       `SELECT s.signal_id FROM signals s
-       JOIN raw_events r ON r.source_event_key=s.source_event_key
-       WHERE r.target_id=? AND s.created_at>=? AND s.status='PUBLISHED'
+       WHERE s.target_id=? AND s.created_at>=? AND s.status='PUBLISHED'
          AND s.execution_eligible=1
+         ${scopeFilter}
          AND s.created_at<=?
          AND (? IS NULL OR s.created_at>? OR (s.created_at=? AND s.signal_id>?))
        ORDER BY s.created_at,s.signal_id`,
-    ).all(
-      account.target_id,
-      account.signal_cutoff_at,
+    );
+    const trailingParameters = [
       this.now().toISOString(),
       checkpoint.last_signal_created_at,
       checkpoint.last_signal_created_at,
       checkpoint.last_signal_created_at,
       checkpoint.last_signal_id,
-    ) as Array<{ signal_id: string }>;
+    ] as const;
+    const rows = (scope
+      ? statement.all(
+        account.target_id,
+        account.signal_cutoff_at,
+        scope.campaignId,
+        scope.sessionId,
+        ...trailingParameters,
+      )
+      : statement.all(account.target_id, account.signal_cutoff_at, ...trailingParameters)) as Array<{ signal_id: string }>;
     const executions: string[] = [];
     for (const row of rows) {
       if (signal?.aborted) break;
       executions.push(await this.consumeSignal(accountId, row.signal_id, signal));
     }
     return executions;
+  }
+
+  private assertSignalConsumptionScope(
+    accountId: string,
+    targetId: string,
+    scope: PaperSignalConsumptionScope,
+  ): void {
+    if (this.sourceVersion.dirty || !/^[a-f0-9]{64}$/.test(scope.coreCompatibilityHash)) {
+      throw new Error("PAPER_SIGNAL_CONSUMPTION_SCOPE_INVALID");
+    }
+    const binding = this.database.prepare(
+      `SELECT 1 valid
+       FROM paper_validation_sessions s
+       JOIN paper_validation_campaigns c ON c.campaign_id=s.campaign_id
+       WHERE s.campaign_id=? AND s.session_id=?
+         AND c.paper_account_id=? AND c.target_id=?
+         AND c.core_compatibility_hash=? AND s.core_compatibility_hash=?
+         AND length(trim(s.source_code_commit))>0 AND s.source_code_dirty=0
+         AND (SELECT t.to_state FROM paper_validation_transitions t
+              WHERE t.entity_type='SESSION' AND t.session_id=s.session_id
+              ORDER BY t.sequence DESC LIMIT 1)='RUNNING'
+         AND (SELECT t.to_state FROM paper_validation_transitions t
+              WHERE t.entity_type='CAMPAIGN' AND t.campaign_id=c.campaign_id
+                AND t.session_id IS NULL
+              ORDER BY t.sequence DESC LIMIT 1)='RUNNING'`,
+    ).get(
+      scope.campaignId,
+      scope.sessionId,
+      accountId,
+      targetId,
+      scope.coreCompatibilityHash,
+      scope.coreCompatibilityHash,
+    );
+    if (!binding) throw new Error("PAPER_SIGNAL_CONSUMPTION_SCOPE_INVALID");
   }
 
   /**
@@ -320,8 +375,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       const skippedSignalCount = advanced
         ? Number((this.database.prepare(
           `SELECT count(*) count FROM signals s
-           JOIN raw_events r ON r.source_event_key=s.source_event_key
-           WHERE r.target_id=? AND s.status='PUBLISHED' AND s.created_at<=?
+           WHERE s.target_id=? AND s.status='PUBLISHED' AND s.created_at<=?
              AND (? IS NULL OR s.created_at>? OR (s.created_at=? AND s.signal_id>?))`,
         ).get(
           account.target_id,
@@ -861,6 +915,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const account = this.accountRow(accountId);
     if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
     const signalTargetId = this.signalTargetId(signal.signalId);
+    if (signal.targetId !== signalTargetId) throw new Error(`PAPER_SIGNAL_ENVELOPE_TARGET_MISMATCH:${signal.signalId}`);
+    if (signal.context && signal.context.targetId !== signal.targetId) {
+      throw new Error(`PAPER_SIGNAL_CONTEXT_TARGET_MISMATCH:${signal.signalId}`);
+    }
     if (signalTargetId !== account.target_id) throw new Error(`PAPER_SIGNAL_TARGET_MISMATCH:${signal.signalId}`);
     const idempotency = hash(["PAPER", accountId, signal.signalId]);
     const executionId = hash([idempotency, signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId)]);
@@ -2403,9 +2461,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private loadSignal(signalId: string): PaperSignalEnvelope {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
-              c.context_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
@@ -2423,6 +2481,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (!row) throw new Error(`SIGNAL_NOT_FOUND:${signalId}`);
     return {
       signalId: row.signal_id as string,
+      targetId: row.target_id as string,
       signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
       status: row.status as string,
       executionEligible: (row.execution_eligible as number) !== 0,
@@ -2436,6 +2495,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       createdAt: row.created_at as string,
       context: row.context_id ? {
         contextId: row.context_id as string,
+        targetId: row.context_target_id as string,
         signalId: row.signal_id as string,
         capitalDecisionId: row.capital_decision_id as string | null,
         targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
@@ -2518,9 +2578,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
 
   private signalTargetId(signalId: string): string {
     const row = this.database.prepare(
-      `SELECT r.target_id FROM signals s
-       JOIN raw_events r ON r.source_event_key=s.source_event_key
-       WHERE s.signal_id=?`,
+      "SELECT target_id FROM signals WHERE signal_id=?",
     ).get(signalId) as { target_id: string } | undefined;
     if (!row) throw new Error(`PAPER_SIGNAL_TARGET_NOT_FOUND:${signalId}`);
     return row.target_id;
@@ -2940,8 +2998,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const row = this.database.prepare(
       `SELECT 1 blocker
        FROM signals s
-       JOIN raw_events r ON r.source_event_key=s.source_event_key
-       JOIN reconciliation_issues i ON i.target_id=r.target_id
+       JOIN reconciliation_issues i ON i.target_id=s.target_id
        WHERE s.signal_id=?
          AND (i.asset_id IS NULL OR i.asset_id=?)
          AND i.sync_status='MAJOR_DESYNC' AND i.status!='RESOLVED'

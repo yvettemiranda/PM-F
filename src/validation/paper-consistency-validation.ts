@@ -1,5 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { check, errorCheck } from "./checks.js";
+import { checkScopedInvariants } from "./scoped-invariants.js";
 import type { ValidationCheckResult, ValidationValidator, ValidationValidatorContext } from "./types.js";
 
 interface AccountRow {
@@ -24,13 +25,13 @@ function sum(rows: string[]): bigint {
   return rows.reduce((total, value) => total + BigInt(value), 0n);
 }
 
-function count(database: DatabaseSync, sql: string): number {
-  const row = database.prepare(sql).get() as { count: number };
+function count(database: DatabaseSync, sql: string, ...params: SQLInputValue[]): number {
+  const row = database.prepare(sql).get(...params) as { count: number };
   return row.count;
 }
 
-function negativeTextCount(database: DatabaseSync, table: string, columns: string[]): number {
-  const rows = database.prepare(`SELECT ${columns.join(",")} FROM ${table}`).all() as unknown as Array<Record<string, string>>;
+function negativeTextCount(database: DatabaseSync, table: string, columns: string[], where: string, ...params: SQLInputValue[]): number {
+  const rows = database.prepare(`SELECT ${columns.join(",")} FROM ${table} WHERE ${where}`).all(...params) as unknown as Array<Record<string, string>>;
   return rows.filter((row) => columns.some((column) => BigInt(row[column]!) < 0n)).length;
 }
 
@@ -42,21 +43,37 @@ export class PaperConsistencyValidation implements ValidationValidator {
     try {
       return [
         this.sqliteIntegrity(database, context.now),
-        this.paperLedgerConsistency(database, context.now),
-        this.paperReservationConsistency(database, context.now),
-        this.paperExecutionFillConsistency(database, context.now),
-        this.paperFeeFillConsistency(database, context.now),
-        this.paperPositionLedgerConsistency(database, context.now),
-        this.paperPortfolioProjection(database, context.now),
-        this.orphanRecordCheck(database, context.now),
-        this.idempotencyCheck(database, context.now),
-        this.negativeStateCheck(database, context.now),
+        this.scopeAndAuditInvariants(database, context),
+        this.paperLedgerConsistency(database, context.scope.accountId, context.now),
+        this.paperReservationConsistency(database, context.scope.accountId, context.now),
+        this.paperExecutionFillConsistency(database, context.scope.accountId, context.now),
+        this.paperFeeFillConsistency(database, context.scope.accountId, context.now),
+        this.paperPositionLedgerConsistency(database, context.scope.accountId, context.now),
+        this.paperPortfolioProjection(database, context.scope.accountId, context.now),
+        this.orphanRecordCheck(database, context.scope.accountId, context.now),
+        this.idempotencyCheck(database, context.scope.accountId, context.now),
+        this.negativeStateCheck(database, context.scope.accountId, context.now),
       ];
     } catch (error) {
       return [errorCheck({ checkType: this.type, checkName: "paper_consistency_exception", reason: "CONSISTENCY_VALIDATION_FAILED", error, now: context.now })];
     } finally {
       database.close();
     }
+  }
+
+  private scopeAndAuditInvariants(
+    database: DatabaseSync,
+    context: ValidationValidatorContext,
+  ): ValidationCheckResult {
+    const evidence = checkScopedInvariants(database, context.scope);
+    return check({
+      checkType: this.type,
+      checkName: "scoped_evidence_chain_invariants",
+      status: evidence.passed ? "PASS" : "FAIL",
+      reason: evidence.passed ? "OK" : "SCOPED_EVIDENCE_CHAIN_INVARIANT_FAILED",
+      metrics: evidence,
+      now: context.now,
+    });
   }
 
   private sqliteIntegrity(database: DatabaseSync, now: () => Date): ValidationCheckResult {
@@ -73,14 +90,14 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperLedgerConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperLedgerConsistency(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const accounts = database.prepare(
-      "SELECT paper_account_id,cash_balance_micros,reserved_balance_micros,realized_pnl_micros FROM paper_accounts",
-    ).all() as unknown as AccountRow[];
+      "SELECT paper_account_id,cash_balance_micros,reserved_balance_micros,realized_pnl_micros FROM paper_accounts WHERE paper_account_id=?",
+    ).all(accountId) as unknown as AccountRow[];
     const cashRows = database.prepare(
-      "SELECT paper_account_id,cash_delta_micros,reserved_delta_micros FROM paper_cash_ledger",
-    ).all() as unknown as CashLedgerRow[];
-    const pnlRows = database.prepare("SELECT paper_account_id,pnl_micros FROM paper_pnl_ledger").all() as unknown as PnlLedgerRow[];
+      "SELECT paper_account_id,cash_delta_micros,reserved_delta_micros FROM paper_cash_ledger WHERE paper_account_id=?",
+    ).all(accountId) as unknown as CashLedgerRow[];
+    const pnlRows = database.prepare("SELECT paper_account_id,pnl_micros FROM paper_pnl_ledger WHERE paper_account_id=?").all(accountId) as unknown as PnlLedgerRow[];
     const mismatches: string[] = [];
     for (const account of accounts) {
       const ledgerCash = sum(cashRows.filter((row) => row.paper_account_id === account.paper_account_id).map((row) => row.cash_delta_micros));
@@ -100,25 +117,26 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperReservationConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperReservationConsistency(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const accounts = database.prepare(
-      "SELECT paper_account_id,reserved_balance_micros FROM paper_accounts",
-    ).all() as unknown as Array<{ paper_account_id: string; reserved_balance_micros: string }>;
+      "SELECT paper_account_id,reserved_balance_micros FROM paper_accounts WHERE paper_account_id=?",
+    ).all(accountId) as unknown as Array<{ paper_account_id: string; reserved_balance_micros: string }>;
     const reservations = database.prepare(
       `SELECT reservation_id,paper_account_id,remaining_amount_micros,status
-       FROM paper_reservations`,
-    ).all() as unknown as Array<{
+       FROM paper_reservations WHERE paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{
       reservation_id: string;
       paper_account_id: string;
       remaining_amount_micros: string;
       status: "ACTIVE" | "CONSUMED" | "RELEASED";
     }>;
     const reservationLedger = database.prepare(
-      "SELECT reservation_id,delta_micros FROM paper_reservation_ledger",
-    ).all() as unknown as Array<{ reservation_id: string; delta_micros: string }>;
+      `SELECT l.reservation_id,l.delta_micros FROM paper_reservation_ledger l
+       JOIN paper_reservations r ON r.reservation_id=l.reservation_id WHERE r.paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{ reservation_id: string; delta_micros: string }>;
     const cashLedger = database.prepare(
-      "SELECT paper_account_id,reserved_delta_micros FROM paper_cash_ledger",
-    ).all() as unknown as Array<{ paper_account_id: string; reserved_delta_micros: string }>;
+      "SELECT paper_account_id,reserved_delta_micros FROM paper_cash_ledger WHERE paper_account_id=?",
+    ).all(accountId) as unknown as Array<{ paper_account_id: string; reserved_delta_micros: string }>;
     const ledgerByReservation = new Map<string, bigint>();
     for (const row of reservationLedger) {
       ledgerByReservation.set(row.reservation_id, (ledgerByReservation.get(row.reservation_id) ?? 0n) + BigInt(row.delta_micros));
@@ -167,18 +185,19 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperExecutionFillConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperExecutionFillConsistency(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const executions = database.prepare(
       `SELECT paper_execution_id,filled_size_micros,filled_notional_micros
-       FROM paper_executions`,
-    ).all() as unknown as Array<{
+       FROM paper_executions WHERE paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{
       paper_execution_id: string;
       filled_size_micros: string;
       filled_notional_micros: string;
     }>;
     const fills = database.prepare(
-      "SELECT paper_execution_id,size_micros,notional_micros FROM paper_fill_ledger",
-    ).all() as unknown as Array<{ paper_execution_id: string; size_micros: string; notional_micros: string }>;
+      `SELECT f.paper_execution_id,f.size_micros,f.notional_micros FROM paper_fill_ledger f
+       JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id WHERE e.paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{ paper_execution_id: string; size_micros: string; notional_micros: string }>;
     const sizeByExecution = new Map<string, bigint>();
     const notionalByExecution = new Map<string, bigint>();
     for (const fill of fills) {
@@ -201,16 +220,19 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperFeeFillConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperFeeFillConsistency(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const orders = database.prepare(
-      "SELECT paper_order_id,fee_micros FROM paper_orders",
-    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+      `SELECT o.paper_order_id,o.fee_micros FROM paper_orders o
+       JOIN paper_executions e ON e.paper_execution_id=o.paper_execution_id WHERE e.paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
     const fills = database.prepare(
-      "SELECT paper_order_id,fee_micros FROM paper_fill_ledger",
-    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+      `SELECT f.paper_order_id,f.fee_micros FROM paper_fill_ledger f
+       JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id WHERE e.paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
     const fees = database.prepare(
-      "SELECT paper_order_id,fee_micros FROM paper_fee_ledger",
-    ).all() as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
+      `SELECT f.paper_order_id,f.fee_micros FROM paper_fee_ledger f
+       JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id WHERE e.paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{ paper_order_id: string; fee_micros: string }>;
     const fillFeeByOrder = new Map<string, bigint>();
     const ledgerFeeByOrder = new Map<string, bigint>();
     for (const fill of fills) {
@@ -236,13 +258,13 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperPositionLedgerConsistency(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperPositionLedgerConsistency(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const positions = database.prepare(
       `SELECT paper_position_id,opening_execution_id,entry_size_micros,entry_notional_micros,
               entry_fee_micros,current_size_micros,remaining_cost_micros,
               realized_pnl_micros,status
-       FROM paper_positions`,
-    ).all() as unknown as Array<{
+       FROM paper_positions WHERE paper_account_id=?`,
+    ).all(accountId) as unknown as Array<{
       paper_position_id: string;
       opening_execution_id: string;
       entry_size_micros: string;
@@ -306,10 +328,10 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private paperPortfolioProjection(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private paperPortfolioProjection(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const accounts = database.prepare(
-      "SELECT paper_account_id,cash_balance_micros,reserved_balance_micros,realized_pnl_micros FROM paper_accounts",
-    ).all() as unknown as AccountRow[];
+      "SELECT paper_account_id,cash_balance_micros,reserved_balance_micros,realized_pnl_micros FROM paper_accounts WHERE paper_account_id=?",
+    ).all(accountId) as unknown as AccountRow[];
     const issues: string[] = [];
     for (const account of accounts) {
       const openPositions = database.prepare(
@@ -345,13 +367,29 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private orphanRecordCheck(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private orphanRecordCheck(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const metrics = {
-      orphanPaperExecutions: count(database, "SELECT count(*) count FROM paper_executions e LEFT JOIN paper_accounts a ON a.paper_account_id=e.paper_account_id WHERE a.paper_account_id IS NULL"),
-      orphanPaperOrders: count(database, "SELECT count(*) count FROM paper_orders o LEFT JOIN paper_executions e ON e.paper_execution_id=o.paper_execution_id WHERE e.paper_execution_id IS NULL"),
-      orphanPaperFills: count(database, "SELECT count(*) count FROM paper_fill_ledger f LEFT JOIN paper_orders o ON o.paper_order_id=f.paper_order_id WHERE o.paper_order_id IS NULL"),
-      orphanLiveOrders: count(database, "SELECT count(*) count FROM live_orders o LEFT JOIN live_executions e ON e.live_execution_id=o.live_execution_id WHERE e.live_execution_id IS NULL"),
-      orphanLiveFills: count(database, "SELECT count(*) count FROM live_fills f LEFT JOIN live_orders o ON o.live_order_id=f.live_order_id WHERE o.live_order_id IS NULL"),
+      scopedExecutionsWithoutAccount: count(database, `SELECT count(*) count FROM paper_executions e
+        LEFT JOIN paper_accounts a ON a.paper_account_id=e.paper_account_id
+        WHERE e.paper_account_id=? AND a.paper_account_id IS NULL`, accountId),
+      scopedFillsWithoutMatchingOrderExecution: count(database, `SELECT count(*) count FROM paper_fill_ledger f
+        JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id
+        LEFT JOIN paper_orders o ON o.paper_order_id=f.paper_order_id
+        WHERE e.paper_account_id=?
+          AND (o.paper_order_id IS NULL OR o.paper_execution_id<>f.paper_execution_id)`, accountId),
+      scopedPositionsWithoutMatchingOpeningExecution: count(database, `SELECT count(*) count FROM paper_positions p
+        LEFT JOIN paper_executions e ON e.paper_execution_id=p.opening_execution_id
+        WHERE p.paper_account_id=?
+          AND (e.paper_execution_id IS NULL OR e.paper_account_id<>p.paper_account_id)`, accountId),
+      globalPaperOrdersWithoutExecution: count(database, `SELECT count(*) count FROM paper_orders o
+        LEFT JOIN paper_executions e ON e.paper_execution_id=o.paper_execution_id
+        WHERE e.paper_execution_id IS NULL`),
+      globalPaperFillsWithoutExecution: count(database, `SELECT count(*) count FROM paper_fill_ledger f
+        LEFT JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id
+        WHERE e.paper_execution_id IS NULL`),
+      globalPaperFillsWithoutOrder: count(database, `SELECT count(*) count FROM paper_fill_ledger f
+        LEFT JOIN paper_orders o ON o.paper_order_id=f.paper_order_id
+        WHERE o.paper_order_id IS NULL`),
     };
     const failures = Object.values(metrics).reduce((total, value) => total + value, 0);
     return check({
@@ -364,12 +402,16 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private idempotencyCheck(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private idempotencyCheck(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const metrics = {
-      paperExecutionsMissing: count(database, "SELECT count(*) count FROM paper_executions WHERE execution_idempotency_key IS NULL OR execution_idempotency_key=''"),
-      liveExecutionsMissing: count(database, "SELECT count(*) count FROM live_executions WHERE execution_idempotency_key IS NULL OR execution_idempotency_key=''"),
-      paperCashLedgerMissing: count(database, "SELECT count(*) count FROM paper_cash_ledger WHERE idempotency_key IS NULL OR idempotency_key=''"),
-      liveCashLedgerMissing: count(database, "SELECT count(*) count FROM live_cash_ledger WHERE idempotency_key IS NULL OR idempotency_key=''"),
+      paperExecutionsMissing: count(database, `SELECT count(*) count FROM paper_executions
+        WHERE paper_account_id=? AND (execution_idempotency_key IS NULL OR execution_idempotency_key='')`, accountId),
+      paperCashLedgerMissing: count(database, `SELECT count(*) count FROM paper_cash_ledger
+        WHERE paper_account_id=? AND (idempotency_key IS NULL OR idempotency_key='')`, accountId),
+      duplicatePaperExecutions: count(database, `SELECT count(*) count FROM (
+        SELECT execution_idempotency_key FROM paper_executions WHERE paper_account_id=?
+        GROUP BY execution_idempotency_key HAVING count(*)>1
+      )`, accountId),
     };
     const failures = Object.values(metrics).reduce((total, value) => total + value, 0);
     return check({
@@ -382,11 +424,22 @@ export class PaperConsistencyValidation implements ValidationValidator {
     });
   }
 
-  private negativeStateCheck(database: DatabaseSync, now: () => Date): ValidationCheckResult {
+  private negativeStateCheck(database: DatabaseSync, accountId: string, now: () => Date): ValidationCheckResult {
     const metrics = {
-      negativePaperAccounts: negativeTextCount(database, "paper_accounts", ["cash_balance_micros", "reserved_balance_micros"]),
-      negativePaperPositions: negativeTextCount(database, "paper_positions", ["current_size_micros", "remaining_cost_micros"]),
-      negativeLivePositions: negativeTextCount(database, "live_positions", ["current_size_micros", "remaining_cost_micros"]),
+      negativePaperAccounts: negativeTextCount(
+        database,
+        "paper_accounts",
+        ["cash_balance_micros", "reserved_balance_micros"],
+        "paper_account_id=?",
+        accountId,
+      ),
+      negativePaperPositions: negativeTextCount(
+        database,
+        "paper_positions",
+        ["current_size_micros", "remaining_cost_micros"],
+        "paper_account_id=?",
+        accountId,
+      ),
     };
     const failures = Object.values(metrics).reduce((total, value) => total + value, 0);
     return check({

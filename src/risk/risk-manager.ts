@@ -454,10 +454,9 @@ export class RiskManager {
 
   private signalTarget(signalId: string): { target_id: string; sync_status: string } | null {
     const row = this.database.prepare(
-      `SELECT r.target_id,t.sync_status
+      `SELECT s.target_id,t.sync_status
        FROM signals s
-       JOIN raw_events r ON r.source_event_key=s.source_event_key
-       JOIN monitor_targets t ON t.target_id=r.target_id
+       JOIN monitor_targets t ON t.target_id=s.target_id
        WHERE s.signal_id=?`,
     ).get(signalId) as { target_id: string; sync_status: string } | undefined;
     return row ?? null;

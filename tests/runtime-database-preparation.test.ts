@@ -75,10 +75,10 @@ function createPreviousSchema(path: string): void {
 describe("runtime database preparation", () => {
   it("keeps the current safety-trigger registry synchronized with every migration trigger", () => {
     const sqliteDirectory = join(process.cwd(), "src", "infra", "sqlite");
-    const migrationTriggers = readdirSync(sqliteDirectory)
+    const migrationTriggers = [...new Set(readdirSync(sqliteDirectory)
       .filter((name) => /^\d{3}_.+\.sql$/.test(name))
       .flatMap((name) => [...readFileSync(join(sqliteDirectory, name), "utf8").matchAll(/^CREATE TRIGGER\s+(\S+)/gm)]
-        .map((match) => match[1]!))
+        .map((match) => match[1]!)))]
       .sort();
 
     expect([...RUNTIME_CURRENT_REQUIRED_TRIGGERS].sort()).toEqual(migrationTriggers);

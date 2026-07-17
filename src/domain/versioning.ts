@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
+import { stableJson } from "./canonical-json.js";
+export { stableJson } from "./canonical-json.js";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.21.0",
-  signalVersion: "1.4.0",
+  schemaVersion: "2.24.0",
+  signalVersion: "1.5.0",
   strategyVersion: "2.1.0",
   riskVersion: "1.5.0",
-  replayVersion: "1.7.0",
-  paperVersion: "1.4.0",
-  liveVersion: "1.3.0",
-  validationVersion: "1.1.0",
-  operationalVersion: "1.1.0",
+  replayVersion: "1.8.0",
+  paperVersion: "1.5.0",
+  liveVersion: "1.4.0",
+  validationVersion: "1.2.0",
+  operationalVersion: "1.2.0",
   rulesetVersion: "v1.4.0",
   feeModelVersion: "clob-fd-v1",
   configVersion: "v1.2.0",
@@ -61,21 +63,131 @@ export const RULESET = Object.freeze({
   liveKellyEnabled: false,
 });
 
-function stable(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stable);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, child]) => [key, stable(child)]),
-    );
-  }
-  return value;
+/**
+ * Versions which can change the meaning of a Signal, RiskDecision or
+ * Paper/Live execution result. Infrastructure and acceptance-tool versions are
+ * deliberately not part of the ruleset identity: changing a report renderer or
+ * a replay validator must not reinterpret an already-created trade decision.
+ *
+ * `configVersion` is retained because it identifies the executable strategy
+ * configuration stored in `ruleset_registry`; presentation-only configuration
+ * belongs in artifact provenance instead.
+ */
+export const RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
+  "signalVersion",
+  "strategyVersion",
+  "riskVersion",
+  "paperVersion",
+  "rulesetVersion",
+  "feeModelVersion",
+  "configVersion",
+] as const);
+
+/**
+ * Rules that can change Observe, Signal, Risk or Paper execution semantics.
+ * Live-only limits remain in the full ruleset provenance, but must not reset
+ * an otherwise compatible Paper validation Campaign.
+ */
+export const PAPER_RULESET_KEYS = Object.freeze([
+  "buyExecutionMode",
+  "buyPriceMinRatioPpm",
+  "buyPriceMaxRatioPpm",
+  "waitRatioPpm",
+  "maxWaitMs",
+  "followSellMaxSlippagePpm",
+  "stopSellMaxSlippagePpm",
+  "stopTriggerRatioPpm",
+  "capitalTimeToleranceMs",
+  "fallbackAmountMicros",
+  "reconciliationShareAbsToleranceMicros",
+  "reconciliationRelativeTolerancePpm",
+  "majorDesyncConsecutiveCount",
+  "orderbookMaxAgeMs",
+  "paperInitialBalanceMicros",
+  "paperFeeRoundingMicros",
+  "paperMaxSingleTradePpm",
+  "paperMaxMarketExposurePpm",
+  "paperMaxPositionExposurePpm",
+  "paperMarketDataFreezeThreshold",
+  "paperMarketDataRecoverySuccesses",
+  "paperMarketDataInitialBackoffMs",
+  "paperMarketDataMaxBackoffMs",
+  "capitalMode",
+] as const);
+
+export const PAPER_RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
+  "signalVersion",
+  "strategyVersion",
+  "riskVersion",
+  "paperVersion",
+  "feeModelVersion",
+] as const);
+
+export type VersionCatalog = { [Key in keyof typeof VERSIONS]: string };
+type WidenRuleValue<Value> = Value extends string
+  ? string
+  : Value extends number
+    ? number
+    : Value extends boolean
+      ? boolean
+      : Value;
+export type RulesetCatalog = {
+  [Key in keyof typeof RULESET]: WidenRuleValue<(typeof RULESET)[Key]>;
+};
+
+export function rulesetBehaviorVersions(
+  versions: Readonly<VersionCatalog> = VERSIONS,
+): Readonly<Pick<VersionCatalog, typeof RULESET_BEHAVIOR_VERSION_KEYS[number]>> {
+  return Object.freeze(Object.fromEntries(
+    RULESET_BEHAVIOR_VERSION_KEYS.map((key) => [key, versions[key]]),
+  )) as Readonly<Pick<VersionCatalog, typeof RULESET_BEHAVIOR_VERSION_KEYS[number]>>;
 }
 
-export function stableJson(value: unknown): string {
-  return JSON.stringify(stable(value));
+export function buildRulesetSnapshotJson(
+  versions: Readonly<VersionCatalog> = VERSIONS,
+  rules: Readonly<RulesetCatalog> = RULESET,
+): string {
+  return stableJson({ versions: rulesetBehaviorVersions(versions), rules });
 }
 
-export const RULESET_SNAPSHOT_JSON = stableJson({ versions: VERSIONS, rules: RULESET });
+export function paperRuleset(
+  rules: Readonly<RulesetCatalog> = RULESET,
+): Readonly<Pick<RulesetCatalog, typeof PAPER_RULESET_KEYS[number]>> {
+  return Object.freeze(Object.fromEntries(
+    PAPER_RULESET_KEYS.map((key) => [key, rules[key]]),
+  )) as Readonly<Pick<RulesetCatalog, typeof PAPER_RULESET_KEYS[number]>>;
+}
+
+export function buildPaperRulesetSnapshotJson(
+  versions: Readonly<VersionCatalog> = VERSIONS,
+  rules: Readonly<RulesetCatalog> = RULESET,
+): string {
+  return stableJson({
+    versions: Object.fromEntries(
+      PAPER_RULESET_BEHAVIOR_VERSION_KEYS.map((key) => [key, versions[key]]),
+    ),
+    rules: paperRuleset(rules),
+  });
+}
+
+export function buildArtifactProvenanceSnapshotJson(
+  versions: Readonly<VersionCatalog> = VERSIONS,
+  rules: Readonly<RulesetCatalog> = RULESET,
+): string {
+  return stableJson({ versions, rules });
+}
+
+export const RULESET_SNAPSHOT_JSON = buildRulesetSnapshotJson();
 export const RULESET_HASH = createHash("sha256").update(RULESET_SNAPSHOT_JSON).digest("hex");
+
+/** Paper Campaign reset identity; object audit provenance still uses RULESET_HASH. */
+export const PAPER_RULESET_SNAPSHOT_JSON = buildPaperRulesetSnapshotJson();
+export const PAPER_RULESET_HASH = createHash("sha256")
+  .update(PAPER_RULESET_SNAPSHOT_JSON)
+  .digest("hex");
+
+/** Full version inventory for reports/evidence. It never gates Campaign reuse. */
+export const ARTIFACT_PROVENANCE_SNAPSHOT_JSON = buildArtifactProvenanceSnapshotJson();
+export const ARTIFACT_PROVENANCE_HASH = createHash("sha256")
+  .update(ARTIFACT_PROVENANCE_SNAPSHOT_JSON)
+  .digest("hex");
