@@ -39,6 +39,12 @@
 - Crash 清理后会重建并核对 Portfolio Projection；清理前的多个 Observe/绑定冲突等结构异常始终保留为 blocker，不能被清理动作抹掉。
 - 首次资格短测安全暂停的健康时间会累计，但不会让 Campaign 提前获得 `qualified`。
 - 桌面按钮不依赖 Finder 当前目录；诊断 ZIP 失败时不会误打开上一次旧包。
+- Campaign 启动在新隔离 proof 写入前失败时，不再把旧 source commit/coreCompatibilityHash 的 `paper-isolated-verification.json` 放进标准 proof 清单；失败包改为保留本次 Vitest、Phase 0、Replay 和日志证据。
+- 新增导出的 Vitest、Phase 0、Replay 证据中的系统临时目录和 `file://` 本地路径现会被稳定别名替换；manifest 会拒绝任何仍含已识别本机绝对路径的包，避免诊断 ZIP 泄露运行机器路径。
+- Manifest 不再只写 commit 而遗漏 dirty/core；无报告时记录当前真实 dirty/core，有报告时冲突或缺失字段保守写 `null`，不会把未知来源伪装成 clean。
+- 诊断包中的隔离 proof 现在必须同时匹配报告 source commit、报告 coreCompatibilityHash 与当前核心；同 commit 但报告 core 冲突/缺失时也会被排除。
+- Manifest 扫描失败不再继续生成无 manifest 的 ZIP 或未压缩目录；HTTPS query/fragment 不再因整条 URL 被保护而绕过本机路径泄漏检查。
+- Phase 0 分页边界偶发 ambiguous event 时不再尝试去重、归并或解释性放行；启动器最多执行 3 次全新公开抓取，只有 `ambiguousEvents=0`、Replay 稳定且 proof 校验成功才继续，否则保持 `PAPER + LIVE_DISABLED` 并在创建 Campaign 前停止。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

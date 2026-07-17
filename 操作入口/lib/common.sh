@@ -523,6 +523,23 @@ operator_copy_sanitized_log() {
     log "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
+operator_is_bundle_compatible_isolated_evidence() {
+  local evidence_file="$1"
+  local expected_source_commit="$2"
+  local expected_core_compatibility_hash="$3"
+  [[ -f "$evidence_file" ]] || return 1
+  [[ "$expected_source_commit" =~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' ]] || return 1
+  [[ "$expected_core_compatibility_hash" =~ '^[0-9a-fA-F]{64}$' ]] || return 1
+  (
+    cd "$PROJECT_ROOT"
+    node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-evidence.ts" \
+      verify-for-bundle \
+      "--file=$evidence_file" \
+      "--source-commit=$expected_source_commit" \
+      "--core-compatibility-hash=$expected_core_compatibility_hash"
+  ) >/dev/null 2>&1
+}
+
 operator_create_codex_bundle() {
   local marker="$1"
   local log_file="$2"
@@ -620,32 +637,47 @@ operator_create_codex_bundle() {
     print "安全状态：本次仅为 Paper + Observe，不包含 private key、真实订单或链上写操作。"
   } > "$bundle_dir/请把整个ZIP发给Codex.txt"
 
-  local manifest_metadata
+  local manifest_metadata source_provenance
+  source_provenance="$(
+    cd "$PROJECT_ROOT"
+    node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" provenance "$PROJECT_ROOT"
+  )"
   manifest_metadata="$(
     OPERATOR_CAMPAIGN_ID="$OPERATOR_CAMPAIGN_ID" \
     OPERATOR_SESSION_ID="$OPERATOR_SESSION_ID" \
     OPERATOR_REPORT_ID="$OPERATOR_REPORT_ID" \
+    OPERATOR_SOURCE_PROVENANCE="$source_provenance" \
     node --import tsx -e '
       import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
       const value = (name) => process.env[name] || null;
+      const provenance = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
       process.stdout.write(JSON.stringify({
         campaignId: value("OPERATOR_CAMPAIGN_ID"),
         sessionId: value("OPERATOR_SESSION_ID"),
         reportId: value("OPERATOR_REPORT_ID"),
-        sourceCommit: process.argv[1],
+        sourceCommit: provenance.sourceCommit ?? null,
+        sourceCodeDirty: provenance.sourceCodeDirty ?? null,
+        coreCompatibilityHash: provenance.coreCompatibilityHash ?? null,
         schemaVersion: VERSIONS.schemaVersion,
         rulesetHash: RULESET_HASH,
         configVersion: VERSIONS.configVersion,
         generatedAt: new Date().toISOString(),
       }));
-    ' "$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || print UNKNOWN)"
+    '
   )"
   if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
     included+=("bundle-manifest.json")
   else
     rm -f "$bundle_dir/bundle-manifest.json"
-    missing+=("诊断包 Manifest")
+    rm -f "$bundle_zip_temporary"
+    if [[ "$bundle_dir" == "$bundle_root"/.bundle-*.tmp ]]; then
+      rm -rf -- "$bundle_dir"
+    fi
+    rm -f "$marker"
+    OPERATOR_RESULT_ZIP=""
+    print "诊断包安全检查失败；本次不会发布 ZIP，也不会保留可能含敏感路径的副本。"
+    return 1
   fi
 
   local archive_created=0 archive_entry_count=0 expected_archive_entry_count=$((${#included[@]} + 1))
@@ -722,8 +754,11 @@ operator_create_campaign_bundle() {
   local pointer_file="$1"
   local log_file="$2"
   local isolated_evidence_file="$3"
+  local isolated_test_results_file="${4:-}"
+  local phase0_evidence_file="${5:-}"
+  local replay_evidence_file="${6:-}"
   local metadata campaign_id session_id report_id session_report campaign_report run_result
-  local paper_report observe_report report_source_commit stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary
+  local paper_report observe_report report_source_commit report_core_compatibility_hash source_provenance stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary
   local archive_entry_count expected_archive_entry_count
   local -a included=()
   local -a missing=()
@@ -745,6 +780,9 @@ operator_create_campaign_bundle() {
     ' "$pointer_file")"
     IFS=$'\t' read -r campaign_id session_id report_id session_report campaign_report run_result <<< "$metadata"
   fi
+  [[ "$campaign_id" == PC-* ]] || campaign_id="UNKNOWN"
+  [[ "$session_id" == PS-* ]] || session_id="UNKNOWN"
+  [[ "$report_id" == PR-* ]] || report_id="UNKNOWN"
 
   if [[ -n "$run_result" && -f "$run_result" ]]; then
     metadata="$(node -e '
@@ -757,28 +795,21 @@ operator_create_campaign_bundle() {
     paper_report=""
     observe_report=""
   fi
-  report_source_commit="$(node -e '
-    const fs = require("node:fs");
-    for (const file of process.argv.slice(1)) {
-      if (!file || !fs.existsSync(file)) continue;
-      try {
-        const value = JSON.parse(fs.readFileSync(file, "utf8"));
-        const candidates = [
-          value.sourceCodeCommit,
-          value.session?.sourceVersion?.commit,
-          value.campaign?.sourceVersion?.commit,
-        ];
-        const commit = candidates.find((candidate) =>
-          typeof candidate === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(candidate.trim())
-        );
-        if (commit) {
-          process.stdout.write(commit.trim());
-          process.exit(0);
-        }
-      } catch {}
-    }
-  ' "$session_report" "$campaign_report" "$run_result" 2>/dev/null || true)"
-  [[ -n "$report_source_commit" ]] || report_source_commit="UNKNOWN"
+  source_provenance="$(
+    cd "$PROJECT_ROOT"
+    node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+      provenance "$PROJECT_ROOT" "$session_report" "$campaign_report" "$run_result"
+  )"
+  report_source_commit="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" node -e '
+    const value = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
+    if (typeof value.sourceCommit === "string") process.stdout.write(value.sourceCommit);
+  ')"
+  [[ "$report_source_commit" =~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' ]] || report_source_commit="UNKNOWN"
+  report_core_compatibility_hash="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" node -e '
+    const value = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
+    if (typeof value.coreCompatibilityHash === "string") process.stdout.write(value.coreCompatibilityHash);
+  ')"
+  [[ "$report_core_compatibility_hash" =~ '^[0-9a-fA-F]{64}$' ]] || report_core_compatibility_hash="UNKNOWN"
 
   stamp="$(date +%Y%m%d-%H%M%S)-$$"
   bundle_root="$PROJECT_ROOT/交给Codex"
@@ -795,7 +826,6 @@ operator_create_campaign_bundle() {
     "$paper_report"
     "$observe_report"
     "$run_result"
-    "$isolated_evidence_file"
   )
   local -a destinations=(
     "paper-session-report-redacted.json"
@@ -803,7 +833,6 @@ operator_create_campaign_bundle() {
     "paper-report-redacted.json"
     "observe-report-redacted.json"
     "run-result-redacted.json"
-    "paper-isolated-verification.json"
   )
   local -a labels=(
     "本次 Session 报告"
@@ -811,10 +840,9 @@ operator_create_campaign_bundle() {
     "Paper 内部报告"
     "Observe 内部报告"
     "运行结果"
-    "隔离测试证明"
   )
   local index
-  for index in {1..6}; do
+  for index in {1..5}; do
     source="${sources[$index]}"
     destination="${destinations[$index]}"
     label="${labels[$index]}"
@@ -827,6 +855,54 @@ operator_create_campaign_bundle() {
       fi
     else
       missing+=("$label")
+    fi
+  done
+  if [[ -n "$isolated_evidence_file" && -f "$isolated_evidence_file" ]]; then
+    if operator_is_bundle_compatible_isolated_evidence \
+      "$isolated_evidence_file" \
+      "$report_source_commit" \
+      "$report_core_compatibility_hash"; then
+      if operator_copy_sanitized_observe_report \
+        "$isolated_evidence_file" "$bundle_dir/paper-isolated-verification.json"; then
+        included+=("paper-isolated-verification.json")
+      else
+        rm -f "$bundle_dir/paper-isolated-verification.json"
+        missing+=("隔离测试证明（脱敏失败）")
+      fi
+    else
+      missing+=("隔离测试证明（与本次代码/核心版本不匹配，已排除）")
+    fi
+  else
+    missing+=("隔离测试证明")
+  fi
+
+  # 这些路径均带本次 launcher 的 STAMP；存在时才导出，避免从旧运行捞取证据。
+  local -a launch_evidence_sources=(
+    "$isolated_test_results_file"
+    "$phase0_evidence_file"
+    "$replay_evidence_file"
+  )
+  local -a launch_evidence_destinations=(
+    "paper-isolated-test-results-redacted.json"
+    "paper-phase0-validation-redacted.json"
+    "paper-replay-validation-redacted.json"
+  )
+  local -a launch_evidence_labels=(
+    "本次隔离测试结果"
+    "本次 Phase 0 验证证据"
+    "本次 Replay 验证证据"
+  )
+  for index in {1..3}; do
+    source="${launch_evidence_sources[$index]}"
+    destination="${launch_evidence_destinations[$index]}"
+    label="${launch_evidence_labels[$index]}"
+    if [[ -n "$source" && -f "$source" ]]; then
+      if operator_copy_sanitized_observe_report "$source" "$bundle_dir/$destination"; then
+        included+=("$destination")
+      else
+        rm -f "$bundle_dir/$destination"
+        missing+=("$label（脱敏失败）")
+      fi
     fi
   done
   if [[ -f "$log_file" ]]; then
@@ -872,26 +948,36 @@ operator_create_campaign_bundle() {
     OPERATOR_CAMPAIGN_ID="$campaign_id" \
     OPERATOR_SESSION_ID="$session_id" \
     OPERATOR_REPORT_ID="$report_id" \
+    OPERATOR_SOURCE_PROVENANCE="$source_provenance" \
     node --import tsx -e '
       import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
+      const provenance = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
       process.stdout.write(JSON.stringify({
         campaignId: process.env.OPERATOR_CAMPAIGN_ID || null,
         sessionId: process.env.OPERATOR_SESSION_ID || null,
         reportId: process.env.OPERATOR_REPORT_ID || null,
-        sourceCommit: process.argv[1],
+        sourceCommit: provenance.sourceCommit ?? null,
+        sourceCodeDirty: provenance.sourceCodeDirty ?? null,
+        coreCompatibilityHash: provenance.coreCompatibilityHash ?? null,
         schemaVersion: VERSIONS.schemaVersion,
         rulesetHash: RULESET_HASH,
         configVersion: VERSIONS.configVersion,
         generatedAt: new Date().toISOString(),
       }));
-    ' "$report_source_commit"
+    '
   )"
   if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
     included+=("bundle-manifest.json")
   else
     rm -f "$bundle_dir/bundle-manifest.json"
-    missing+=("诊断包 Manifest")
+    rm -f "$bundle_zip_temporary"
+    if [[ "$bundle_dir" == "$bundle_root"/.paper-campaign-*.tmp ]]; then
+      rm -rf -- "$bundle_dir"
+    fi
+    OPERATOR_RESULT_ZIP=""
+    print "诊断包安全检查失败；本次不会发布 ZIP，也不会保留可能含敏感路径的副本。"
+    return 1
   fi
 
   expected_archive_entry_count=$((${#included[@]} + 1))

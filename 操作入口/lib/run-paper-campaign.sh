@@ -10,9 +10,10 @@ POINTER_FILE="$DATA_DIR/operator/paper-campaign-latest.json"
 POINTER_MARKER="$RUN_DIR/paper-campaign-pointer-$STAMP.marker"
 ISOLATED_EVIDENCE_FILE="$DATA_DIR/operator/paper-campaign-isolated-verification.json"
 EVIDENCE_DIR="$DATA_DIR/operator/evidence"
-PHASE0_RESULT_FILE="$EVIDENCE_DIR/paper-campaign-phase0-$STAMP.json"
+PHASE0_RESULT_FILE=""
 TEST_RESULTS_FILE="$EVIDENCE_DIR/paper-campaign-vitest-$STAMP.json"
-REPLAY_RESULT_FILE="$EVIDENCE_DIR/paper-campaign-replay-$STAMP.json"
+REPLAY_RESULT_FILE=""
+PHASE0_MAX_ATTEMPTS=3
 RESULT_PACKAGED=0
 mkdir -p "$EVIDENCE_DIR"
 
@@ -21,6 +22,70 @@ abort_if_stop_requested() {
     print "已收到停止请求；不会启动 Paper Campaign，正在整理本次日志。"
     exit 130
   fi
+}
+
+run_fresh_phase0_attempt() {
+  local attempt="$1"
+  local phase0_metadata capture_run_id ambiguous_events replay_stable
+  PHASE0_RESULT_FILE="$EVIDENCE_DIR/paper-campaign-phase0-$STAMP-attempt-$attempt.json"
+  REPLAY_RESULT_FILE="$EVIDENCE_DIR/paper-campaign-replay-$STAMP-attempt-$attempt.json"
+
+  title "刷新真实公开数据并验证 Replay（第 $attempt/$PHASE0_MAX_ATTEMPTS 次）"
+  if ! pnpm phase0:validate -- "$TARGET_WALLET" | tee "$PHASE0_RESULT_FILE"; then
+    print "第 $attempt 次公开数据采集失败；本次证据已保留。"
+    return 1
+  fi
+  abort_if_stop_requested
+  phase0_metadata="$(node -e '
+    const fs = require("node:fs");
+    const text = fs.readFileSync(process.argv[1], "utf8");
+    const start = text.indexOf("{");
+    if (start < 0) process.exit(2);
+    const value = JSON.parse(text.slice(start));
+    if (!/^[a-f0-9]{64}$/.test(value.captureRunId ?? "")) process.exit(3);
+    if (!Number.isSafeInteger(value.ambiguousEvents) || value.ambiguousEvents < 0) process.exit(4);
+    process.stdout.write(`${value.captureRunId}\t${value.ambiguousEvents}`);
+  ' "$PHASE0_RESULT_FILE" 2>/dev/null || true)"
+  IFS=$'\t' read -r capture_run_id ambiguous_events <<< "$phase0_metadata"
+  if [[ -z "$capture_run_id" || -z "$ambiguous_events" ]]; then
+    print "第 $attempt 次 Phase 0 输出无法验证；不会生成通过证明。"
+    return 2
+  fi
+
+  if ! pnpm phase05:replay-capture -- "$capture_run_id" | tee "$REPLAY_RESULT_FILE"; then
+    print "第 $attempt 次 Capture Replay 失败；不会生成通过证明。"
+    return 3
+  fi
+  abort_if_stop_requested
+  replay_stable="$(node -e '
+    const fs = require("node:fs");
+    const text = fs.readFileSync(process.argv[1], "utf8");
+    const start = text.indexOf("{");
+    if (start < 0) process.exit(2);
+    const value = JSON.parse(text.slice(start));
+    if (value.captureRunId !== process.argv[2] || value.stable !== true) process.exit(3);
+    process.stdout.write("yes");
+  ' "$REPLAY_RESULT_FILE" "$capture_run_id" 2>/dev/null || true)"
+  if [[ "$replay_stable" != "yes" ]]; then
+    print "第 $attempt 次 Replay 不稳定；不会生成通过证明。"
+    return 4
+  fi
+  if (( ambiguous_events != 0 )); then
+    print "第 $attempt 次原始 Replay 发现 $ambiguous_events 个 ambiguous event。"
+    print "系统不会合并、接受或放宽该结果，将重新抓取一份全新公开数据。"
+    return 5
+  fi
+
+  if ! node --import tsx src/cli/paper-campaign-evidence.ts write-passed \
+    --file="$ISOLATED_EVIDENCE_FILE" \
+    --test-results="$TEST_RESULTS_FILE" \
+    --phase0-results="$PHASE0_RESULT_FILE" \
+    --replay-results="$REPLAY_RESULT_FILE"; then
+    print "第 $attempt 次后续 proof 校验未通过；不会接受本次结果。"
+    return 6
+  fi
+  print "第 $attempt 次 Phase 0 与 Replay proof 已通过。"
+  return 0
 }
 
 title "开始或继续 Paper 累计验证"
@@ -54,7 +119,10 @@ finish_campaign_launcher() {
     operator_create_campaign_bundle \
       "$pointer_for_bundle" \
       "$LOG_FILE" \
-      "$ISOLATED_EVIDENCE_FILE" || true
+      "$ISOLATED_EVIDENCE_FILE" \
+      "$TEST_RESULTS_FILE" \
+      "$PHASE0_RESULT_FILE" \
+      "$REPLAY_RESULT_FILE" || true
     RESULT_PACKAGED=1
   fi
   rm -f "$POINTER_MARKER" "$pointer_snapshot"
@@ -133,26 +201,28 @@ if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
     --reporter=default --reporter=json --outputFile.json="$TEST_RESULTS_FILE"
   abort_if_stop_requested
 
-  title "刷新真实公开数据并验证 Replay 稳定性"
-  pnpm phase0:validate -- "$TARGET_WALLET" | tee "$PHASE0_RESULT_FILE"
-  abort_if_stop_requested
-  CAPTURE_RUN_ID="$(node -e '
-    const fs = require("node:fs");
-    const text = fs.readFileSync(process.argv[1], "utf8");
-    const start = text.indexOf("{");
-    if (start < 0) process.exit(2);
-    const value = JSON.parse(text.slice(start));
-    if (!/^[a-f0-9]{64}$/.test(value.captureRunId ?? "")) process.exit(3);
-    process.stdout.write(value.captureRunId);
-  ' "$PHASE0_RESULT_FILE")"
-  pnpm phase05:replay-capture -- "$CAPTURE_RUN_ID" | tee "$REPLAY_RESULT_FILE"
-  abort_if_stop_requested
-  node --import tsx src/cli/paper-campaign-evidence.ts write-passed \
-    --file="$ISOLATED_EVIDENCE_FILE" \
-    --test-results="$TEST_RESULTS_FILE" \
-    --phase0-results="$PHASE0_RESULT_FILE" \
-    --replay-results="$REPLAY_RESULT_FILE"
-  abort_if_stop_requested
+  integer phase0_attempt=1
+  integer phase0_attempt_exit=0
+  integer phase0_verified=0
+  while (( phase0_attempt <= PHASE0_MAX_ATTEMPTS )); do
+    phase0_attempt_exit=0
+    run_fresh_phase0_attempt "$phase0_attempt" || phase0_attempt_exit=$?
+    abort_if_stop_requested
+    if (( phase0_attempt_exit == 0 )); then
+      phase0_verified=1
+      break
+    fi
+    if (( phase0_attempt < PHASE0_MAX_ATTEMPTS )); then
+      print "将在短暂退避后进行下一次独立抓取。"
+      sleep "$(( phase0_attempt * 2 ))"
+    fi
+    (( phase0_attempt += 1 ))
+  done
+  if (( phase0_verified != 1 )); then
+    print "连续 $PHASE0_MAX_ATTEMPTS 次 Phase 0 均未形成可接受证明。"
+    print "系统保持 PAPER + LIVE_DISABLED；不会创建 Campaign 或启动 Paper。"
+    exit 1
+  fi
 fi
 
 abort_if_stop_requested

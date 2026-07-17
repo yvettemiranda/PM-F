@@ -110,6 +110,30 @@ if (command === "write-passed") {
     phase0ReplayStatus: evidence.proofs.phase0ReplayStatus,
     acceptedIncompleteReasons: evidence.proofs.acceptedIncompleteReasons,
   }));
+} else if (command === "verify-for-bundle") {
+  const expectedSourceCommit = valueArg("source-commit");
+  const expectedCoreCompatibilityHash = valueArg("core-compatibility-hash");
+  if (!expectedSourceCommit || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(expectedSourceCommit)) {
+    throw new Error("BUNDLE_SOURCE_COMMIT_REQUIRED");
+  }
+  if (!expectedCoreCompatibilityHash || !/^[0-9a-f]{64}$/i.test(expectedCoreCompatibilityHash)) {
+    throw new Error("BUNDLE_CORE_COMPATIBILITY_HASH_REQUIRED");
+  }
+  const evidence = JSON.parse(await readFile(output, "utf8")) as IsolatedVerificationEvidence;
+  if (
+    evidence.sourceCodeCommit !== expectedSourceCommit
+    || evidence.coreCompatibilityHash !== expectedCoreCompatibilityHash
+    || !verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash)
+  ) {
+    throw new Error("ISOLATED_EVIDENCE_NOT_COMPATIBLE_WITH_BUNDLE");
+  }
+  console.log(JSON.stringify({
+    status: "PASSED",
+    output,
+    sourceCodeCommit: evidence.sourceCodeCommit,
+    coreCompatibilityHash: evidence.coreCompatibilityHash,
+    artifactHash: evidence.artifactHash,
+  }));
 } else {
   throw new Error(`UNKNOWN_PAPER_CAMPAIGN_EVIDENCE_COMMAND:${command}`);
 }

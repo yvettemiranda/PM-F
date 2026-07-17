@@ -1,9 +1,18 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  buildCurrentCoreCompatibilityManifest,
+  computeCoreCompatibilityHash,
+} from "../src/paper-validation/core-compatibility.js";
+import {
+  buildIsolatedVerificationEvidence,
+  PAPER_CAMPAIGN_ISOLATED_TEST_FILES,
+} from "../src/paper-validation/operator-evidence.js";
+import { resolveSourceVersion } from "../src/infra/source-version.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryDirectories: string[] = [];
@@ -23,6 +32,99 @@ function sleepingProcess(roleScript: string, campaignId: string, sessionId: stri
     `--session-id=${sessionId}`,
     ...(ownerToken ? [`--operator-owner-token=${ownerToken}`] : []),
   ], { cwd: projectRoot, stdio: "ignore" });
+}
+
+function isolatedEvidence(sourceCodeCommit: string, coreCompatibilityHash: string) {
+  return buildIsolatedVerificationEvidence({
+    status: "PASSED",
+    coreCompatibilityHash,
+    sourceCodeCommit,
+    generatedAt: "2026-07-17T00:00:00.000Z",
+    coverage: [],
+    testFiles: [...PAPER_CAMPAIGN_ISOLATED_TEST_FILES],
+    replayStatus: "PASSED",
+    proofs: {
+      vitestResultSha256: "1".repeat(64),
+      phase0ResultSha256: "2".repeat(64),
+      replayResultSha256: "3".repeat(64),
+      captureRunId: "4".repeat(64),
+      replayHash: "5".repeat(64),
+      phase0ReplayStatus: "PASSED",
+      acceptedIncompleteReasons: [],
+      passedTestFileCount: PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length,
+      passedTestCount: PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length,
+    },
+    safety: {
+      executionMode: "PAPER",
+      liveGateState: "LIVE_DISABLED",
+      privateKeyLoaded: false,
+      authenticatedTradingClientPresent: false,
+      realOrdersCreated: 0,
+      chainWrites: 0,
+    },
+  });
+}
+
+function campaignBundleFixture(input: {
+  evidenceSourceCommit: string;
+  evidenceCoreCompatibilityHash: string;
+}) {
+  const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-proof-bundle-"));
+  temporaryDirectories.push(directory);
+  symlinkSync(resolve(projectRoot, "src"), join(directory, "src"), "dir");
+  symlinkSync(resolve(projectRoot, "node_modules"), join(directory, "node_modules"), "dir");
+  symlinkSync(resolve(projectRoot, ".git"), join(directory, ".git"), "dir");
+  symlinkSync(resolve(projectRoot, "package.json"), join(directory, "package.json"), "file");
+  symlinkSync(resolve(projectRoot, "pnpm-lock.yaml"), join(directory, "pnpm-lock.yaml"), "file");
+  const evidenceDirectory = join(directory, "evidence");
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const isolated = join(evidenceDirectory, "isolated.json");
+  const testResults = join(evidenceDirectory, "tests.json");
+  const phase0 = join(evidenceDirectory, "phase0.json");
+  const replay = join(evidenceDirectory, "replay.json");
+  const log = join(evidenceDirectory, "run.log");
+  writeFileSync(isolated, JSON.stringify(isolatedEvidence(
+    input.evidenceSourceCommit,
+    input.evidenceCoreCompatibilityHash,
+  )));
+  writeFileSync(testResults, JSON.stringify({ success: true, run: "current" }));
+  writeFileSync(phase0, JSON.stringify({ status: "INCOMPLETE", run: "current" }));
+  writeFileSync(replay, JSON.stringify({ stable: true, run: "current" }));
+  writeFileSync(log, "current launch failed safely\n");
+  const expectedCurrentSourceVersion = resolveSourceVersion(directory);
+  const expectedCurrentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(directory));
+
+  const bundled = spawnSync("zsh", [
+    "-c",
+    `PROJECT_ROOT="$1"
+     source "$2/操作入口/lib/common.sh"
+     operator_create_campaign_bundle "$3" "$4" "$5" "$6" "$7" "$8"`,
+    "zsh",
+    directory,
+    projectRoot,
+    join(evidenceDirectory, "missing-pointer.json"),
+    log,
+    isolated,
+    testResults,
+    phase0,
+    replay,
+  ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+  expect(bundled.status, bundled.stderr).toBe(0);
+  const zipName = readdirSync(join(directory, "交给Codex")).find((name) => name.endsWith(".zip"));
+  expect(zipName).toMatch(/^Paper累计验证_UNKNOWN_UNKNOWN_/);
+  const zipPath = join(directory, "交给Codex", zipName!);
+  const entries = spawnSync("unzip", ["-Z1", zipPath], { encoding: "utf8" }).stdout.trim().split("\n");
+  const manifest = JSON.parse(spawnSync("unzip", ["-p", zipPath, "bundle-manifest.json"], {
+    encoding: "utf8",
+  }).stdout) as {
+    campaignId: string;
+    sessionId: string;
+    reportId: string;
+    sourceCommit: string | null;
+    sourceCodeDirty: boolean | null;
+    coreCompatibilityHash: string | null;
+  };
+  return { entries, manifest, zipPath, expectedCurrentSourceVersion, expectedCurrentCoreHash };
 }
 
 async function exited(child: ReturnType<typeof sleepingProcess>): Promise<void> {
@@ -177,7 +279,9 @@ describe("Paper Campaign operator shell", () => {
     expect(launcher).toContain("--phase0-results=\"$PHASE0_RESULT_FILE\"");
     expect(launcher).toContain("--replay-results=\"$REPLAY_RESULT_FILE\"");
     expect(common).toContain('print "代码版本：$report_source_commit"');
-    expect(common).toContain('\' "$report_source_commit"');
+    expect(common).toContain("OPERATOR_SOURCE_PROVENANCE");
+    expect(common).toContain("sourceCodeDirty: provenance.sourceCodeDirty ?? null");
+    expect(common).toContain("coreCompatibilityHash: provenance.coreCompatibilityHash ?? null");
     expect(common).toContain('"$actual_pnpm" != "$expected_pnpm"');
     expect(phase0).toContain("preparePhase0ValidationDatabase");
     expect(phase0).not.toContain("database.initialize()");
@@ -205,6 +309,34 @@ describe("Paper Campaign operator shell", () => {
     }
   });
 
+  it("bounds fresh Phase0 retries and never accepts ambiguous Replay", () => {
+    const launcher = readFileSync(resolve(projectRoot, "操作入口/lib/run-paper-campaign.sh"), "utf8");
+    const attemptFunction = launcher.indexOf("run_fresh_phase0_attempt() {");
+    const phase0Capture = launcher.indexOf("pnpm phase0:validate", attemptFunction);
+    const replayCapture = launcher.indexOf("pnpm phase05:replay-capture", phase0Capture);
+    const ambiguityGuard = launcher.indexOf("if (( ambiguous_events != 0 )); then", replayCapture);
+    const proofWrite = launcher.indexOf("paper-campaign-evidence.ts write-passed", ambiguityGuard);
+    const retryLoop = launcher.indexOf("while (( phase0_attempt <= PHASE0_MAX_ATTEMPTS )); do");
+    const naturalRun = launcher.indexOf('title "自然数据运行"');
+
+    expect(launcher).toContain("PHASE0_MAX_ATTEMPTS=3");
+    expect(launcher).toContain('paper-campaign-phase0-$STAMP-attempt-$attempt.json');
+    expect(launcher).toContain('paper-campaign-replay-$STAMP-attempt-$attempt.json');
+    expect(launcher).toContain("value.ambiguousEvents");
+    expect(launcher).toContain("系统不会合并、接受或放宽该结果");
+    expect(launcher).toContain("连续 $PHASE0_MAX_ATTEMPTS 次 Phase 0 均未形成可接受证明");
+    expect(launcher).toContain('"$PHASE0_RESULT_FILE"');
+    expect(launcher).toContain('"$REPLAY_RESULT_FILE"');
+    expect(attemptFunction).toBeGreaterThanOrEqual(0);
+    expect(phase0Capture).toBeGreaterThan(attemptFunction);
+    expect(replayCapture).toBeGreaterThan(phase0Capture);
+    expect(ambiguityGuard).toBeGreaterThan(replayCapture);
+    expect(proofWrite).toBeGreaterThan(ambiguityGuard);
+    expect(retryLoop).toBeGreaterThan(proofWrite);
+    expect(naturalRun).toBeGreaterThan(retryLoop);
+    expect(launcher).not.toContain("reconcileEventCapturePages");
+  });
+
   it("packages a redacted fixed report and records its immutable source commit", () => {
     const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-bundle-"));
     temporaryDirectories.push(directory);
@@ -222,11 +354,14 @@ describe("Paper Campaign operator shell", () => {
     const isolated = join(evidenceDirectory, "isolated.json");
     const log = join(evidenceDirectory, "run.log");
     const immutableCommit = "a".repeat(40);
+    const immutableCore = "e".repeat(64);
     writeFileSync(sessionReport, JSON.stringify({
       reportId: "PR-SESSION",
       campaignId: "PC-BUNDLE",
       sessionId: "PS-BUNDLE",
       sourceCodeCommit: immutableCommit,
+      sourceVersion: { commit: immutableCommit, dirty: false },
+      coreCompatibilityHash: immutableCore,
       paperAccountId: "secret-account",
       observeRunId: internalUuid,
       path: join(directory, "private", "report.json"),
@@ -235,6 +370,8 @@ describe("Paper Campaign operator shell", () => {
       reportId: "PR-CAMPAIGN",
       campaignId: "PC-BUNDLE",
       sourceCodeCommit: immutableCommit,
+      sourceVersion: { commit: immutableCommit, dirty: false },
+      coreCompatibilityHash: immutableCore,
     }));
     writeFileSync(paperReport, JSON.stringify({ paperAccountId: "secret-account" }));
     writeFileSync(observeReport, JSON.stringify({ observeRunId: internalUuid }));
@@ -268,8 +405,18 @@ describe("Paper Campaign operator shell", () => {
     const zipPath = join(directory, "交给Codex", zipName!);
     const manifest = JSON.parse(spawnSync("unzip", ["-p", zipPath, "bundle-manifest.json"], {
       encoding: "utf8",
-    }).stdout) as { sourceCommit: string };
-    expect(manifest.sourceCommit).toBe(immutableCommit);
+    }).stdout) as {
+      manifestVersion: string;
+      sourceCommit: string | null;
+      sourceCodeDirty: boolean | null;
+      coreCompatibilityHash: string | null;
+    };
+    expect(manifest).toMatchObject({
+      manifestVersion: "1.1.0",
+      sourceCommit: immutableCommit,
+      sourceCodeDirty: false,
+      coreCompatibilityHash: immutableCore,
+    });
     const allText = spawnSync("unzip", ["-p", zipPath], { encoding: "utf8" }).stdout;
     expect(allText).not.toContain(internalUuid);
     expect(allText).not.toContain("secret-account");
@@ -291,5 +438,144 @@ describe("Paper Campaign operator shell", () => {
     ], { cwd: tmpdir(), encoding: "utf8" });
     expect(selected.status, selected.stderr).toBe(0);
     expect(selected.stdout.trim()).toBe(zipPath);
+  });
+
+  it("excludes stale isolated proof while retaining only current launch failure evidence", () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).stdout.trim();
+    const currentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(projectRoot));
+
+    for (const stale of [
+      { evidenceSourceCommit: "b".repeat(40), evidenceCoreCompatibilityHash: currentCoreHash },
+      { evidenceSourceCommit: currentCommit, evidenceCoreCompatibilityHash: "c".repeat(64) },
+    ]) {
+      const bundled = campaignBundleFixture(stale);
+      expect(bundled.entries).not.toContain("paper-isolated-verification.json");
+      expect(bundled.entries).toEqual(expect.arrayContaining([
+        "paper-isolated-test-results-redacted.json",
+        "paper-phase0-validation-redacted.json",
+        "paper-replay-validation-redacted.json",
+        "run-log-redacted.log",
+      ]));
+      expect(bundled.manifest).toMatchObject({
+        campaignId: "UNKNOWN",
+        sessionId: "UNKNOWN",
+        reportId: "UNKNOWN",
+        sourceCommit: currentCommit,
+        sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
+        coreCompatibilityHash: bundled.expectedCurrentCoreHash,
+      });
+    }
+  });
+
+  it("includes isolated proof only when source commit and core compatibility both match", () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).stdout.trim();
+    const currentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(projectRoot));
+    const bundled = campaignBundleFixture({
+      evidenceSourceCommit: currentCommit,
+      evidenceCoreCompatibilityHash: currentCoreHash,
+    });
+    expect(bundled.entries).toContain("paper-isolated-verification.json");
+    expect(bundled.manifest).toMatchObject({
+      campaignId: "UNKNOWN",
+      sessionId: "UNKNOWN",
+      reportId: "UNKNOWN",
+      sourceCommit: currentCommit,
+      sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
+      coreCompatibilityHash: bundled.expectedCurrentCoreHash,
+    });
+  });
+
+  it("requires bundled isolated proof to match the report core hash", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ni-k-bundle-proof-core-"));
+    temporaryDirectories.push(directory);
+    const evidenceFile = join(directory, "isolated.json");
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).stdout.trim();
+    const currentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(projectRoot));
+    writeFileSync(evidenceFile, JSON.stringify(isolatedEvidence(currentCommit, currentCoreHash)));
+
+    const verify = (expectedCoreHash: string) => spawnSync("zsh", [
+      "-c",
+      `PROJECT_ROOT="$1"
+       source "$1/操作入口/lib/common.sh"
+       operator_is_bundle_compatible_isolated_evidence "$2" "$3" "$4"`,
+      "zsh",
+      projectRoot,
+      evidenceFile,
+      currentCommit,
+      expectedCoreHash,
+    ], { cwd: projectRoot, encoding: "utf8", timeout: 30_000 });
+
+    expect(verify(currentCoreHash).status).toBe(0);
+    expect(verify("f".repeat(64)).status).not.toBe(0);
+    const common = readFileSync(resolve(projectRoot, "操作入口/lib/common.sh"), "utf8");
+    expect(common).toContain('"$report_core_compatibility_hash"; then');
+  });
+
+  it("publishes neither ZIP nor fallback directory when either manifest safety scan fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-manifest-fail-"));
+    temporaryDirectories.push(directory);
+    for (const [name, type] of [
+      ["src", "dir"],
+      ["node_modules", "dir"],
+      [".git", "dir"],
+      ["package.json", "file"],
+      ["pnpm-lock.yaml", "file"],
+    ] as const) {
+      symlinkSync(resolve(projectRoot, name), join(directory, name), type);
+    }
+    const evidenceDirectory = join(directory, "evidence");
+    mkdirSync(evidenceDirectory, { recursive: true });
+    const log = join(evidenceDirectory, "unsafe.log");
+    const marker = join(evidenceDirectory, "marker");
+    writeFileSync(log, "leak=/private/var/folders/xy/unredacted.log\n");
+    writeFileSync(marker, "start\n");
+
+    const legacy = spawnSync("zsh", [
+      "-c",
+      `PROJECT_ROOT="$1"
+       source "$2/操作入口/lib/common.sh"
+       operator_copy_sanitized_log() { /bin/cp "$1" "$2"; }
+       operator_create_codex_bundle "$3" "$4"`,
+      "zsh",
+      directory,
+      projectRoot,
+      marker,
+      log,
+    ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+    expect(legacy.status).toBe(1);
+    expect(existsSync(marker)).toBe(false);
+
+    const campaign = spawnSync("zsh", [
+      "-c",
+      `PROJECT_ROOT="$1"
+       source "$2/操作入口/lib/common.sh"
+       operator_copy_sanitized_log() { /bin/cp "$1" "$2"; }
+       operator_create_campaign_bundle "$3" "$4" "$5"`,
+      "zsh",
+      directory,
+      projectRoot,
+      join(evidenceDirectory, "missing-pointer.json"),
+      log,
+      join(evidenceDirectory, "missing-proof.json"),
+    ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+    expect(campaign.status).toBe(1);
+
+    const published = readdirSync(join(directory, "交给Codex"));
+    expect(published.filter((name) => (
+      name.endsWith(".zip")
+      || name.includes("未压缩")
+      || name.startsWith("发给Codex_")
+      || name.startsWith(".bundle-")
+      || name.startsWith(".paper-campaign-")
+    ))).toEqual([]);
   });
 });

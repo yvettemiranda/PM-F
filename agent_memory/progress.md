@@ -1,7 +1,7 @@
 # Progress
 
 ## Current task
-- 修复 12 小时 Paper Session 暴露的公开市场数据兼容与验收分级问题；完成 clean commit 后重新运行真实 2 小时资格 Session。
+- 修复 `UNKNOWN_UNKNOWN` 启动包暴露的 Phase 0 临时分页边界歧义、旧 proof 误打包与失败证据 provenance/脱敏问题；完成 clean commit 后重新运行真实 2 小时资格 Session。
 - 全程固定 `PAPER + LIVE_DISABLED`；旧失败报告只读保留。
 
 ## Completed implementation
@@ -22,11 +22,17 @@
 - Market data 异常按暴露分级：无 Position/待退出/等待执行/有效 Reservation 的市场隔离为 quarantine，不再杀死整个 Session；有暴露仍是 blocker。
 - 最终验收新增 `ACTIVE_RESERVATION_REMAINS`；任何未释放 Reservation 都不能通过停止/Crash 验收。
 - 旧终态 Campaign 仅在核心不同且 blocker 精确属于本次市场数据缺陷时允许替换；新 Campaign 创建 transition 永久记录 supersedes、旧状态、旧 core hash 与修复原因，禁止历史混算。
+- Paper Campaign 在创建 Campaign 前失败时，诊断 ZIP 会按本次 source commit 与 coreCompatibilityHash 验证隔离 proof；旧版本 proof 被排除，本次带 STAMP 的 Vitest、Phase 0、Replay 证据与日志会单独脱敏导出，UNKNOWN Campaign/Session/Report ID 不会被旧指针替代。
+- 诊断脱敏覆盖 Vitest/Node 常见的 `/private/var/folders`、`/tmp`、`file:///Users` 及其他 macOS/POSIX 本地绝对路径（含 JSON 对象 key），同时保留 HTTPS URL；bundle manifest 在哈希前扫描全部文件，发现残留本机路径会 fail closed。
+- 诊断 manifest 升级到 `1.1.0`，明确记录 nullable `sourceCommit`、`sourceCodeDirty` 和 `coreCompatibilityHash`；Campaign 有报告时只采用 session/campaign/run-result 的一致证据，无报告与 legacy 包才读取当前 Git/sourceVersion 和当前 core，不再用 `UNKNOWN` 或默认 false 冒充有效 provenance。
+- 隔离 proof 打包校验同时绑定报告的 source commit、报告的 coreCompatibilityHash 与当前核心；任一缺失、冲突或不匹配均排除 proof，不生成互相矛盾的 manifest/证据组合。
+- 两条诊断打包路径在 manifest 安全扫描失败时都会删除临时副本并返回失败，不发布 ZIP、也不保留可能含泄漏的 fallback；HTTPS URL 仅保护 origin/path，query/fragment 内明文或百分号编码的本机路径仍会被扫描和脱敏。
+- 首次隔离 proof 的公开 Phase 0 改为最多 3 次独立新抓取；任一原始结果存在 ambiguous event、Replay 不稳定或 proof 校验失败都不会合并、接受或放宽，只保留逐次证据并重试，三次失败即在 Campaign 创建前阻断。
 
 ## Verification completed
 - Node `24.14.0`、pnpm `11.9.0`。
 - `pnpm typecheck` 通过。
-- 本轮最终全量验证：43 个测试文件、489 项全部通过；包含真实子进程停止、遗留进程收割与 SIGKILL Crash Recovery 测试，无跳过项。
+- 本轮最终全量验证：43 个测试文件、499 项全部通过；包含真实子进程停止、遗留进程收割、SIGKILL Crash Recovery、诊断包 proof/provenance 双版本绑定、路径脱敏/manifest fail-closed 与 Phase 0 有界重试策略测试，无跳过项。
 - 旧业务库副本依次迁移至 2.20.0/2.21.0：`integrity_check=ok`、0 外键问题、两类市场快照均有 capture FK、5 张 Campaign 表存在。
 - 全部 `.command/.sh` zsh 语法与 `git diff --check` 通过。
 - 当前库版本准备改为 backup-first、连续 migration 前缀验证，并核对全部 109 个安全触发器；未知未来版本、缺失历史 marker/触发器/关键表列均 fail closed。
@@ -37,9 +43,13 @@
 - 当前真实运行库只读检查：`integrity_check=ok`、0 外键问题、0 active Reservation、0 RUNNING Session，安全状态为 `PAPER + LIVE_DISABLED`。
 - 真实公开接口只读冒烟通过：显式零费率市场返回 `clob-fee-rate/base_fee=0`；非零费率市场由完整 market-info 得到 `base_fee=1000`、`feeRatePpm=40000`；盘口含 `min_order_size/tick_size`。旧冻结市场 raw 内容时间约落后 21 秒，但本次公开捕获保守 age 约 659ms，证明 freshness 修复符合真实响应语义。
 - 12 小时 Session `PS-7489C9EA1F667923B775` 实际运行 `43,200,002ms`，因旧核心的 `UNRECOVERED_MARKET_DATA_BLOCKER` 失败且 `countsTowardCampaign=false`；失败证据未修改。
+- 诊断 ZIP 回归验证：不同 source commit、不同 coreCompatibilityHash 的旧 proof 均不打包；同版本有效 proof 正常打包；本次失败证据和 UNKNOWN 公共 ID 保持诚实。相关 4 个测试文件 20 项通过。
+- 诊断路径脱敏与 manifest fail-closed 回归通过；HTTPS URL 不会被误改或误拒绝，相关诊断/打包测试 16 项通过，TypeScript 检查通过。
+- Manifest provenance、UNKNOWN 启动失败包、报告版本证据及冲突/null 口径回归通过；诊断/打包测试共 17 项通过，TypeScript、zsh 语法与 diff check 通过。
+- HTTPS query/fragment 路径脱敏与 scanner 回归 10 项通过；legacy/Campaign manifest 失败端到端不发布结果的 shell 回归通过；TypeScript、zsh 语法与 diff check 通过。
 
 ## Next steps
-1. 提交本轮市场数据与 Campaign 安全修复，形成 clean commit。
-2. 用户双击“1_开始或继续Paper累计验证”；入口只读保留旧 BLOCKED Campaign，自动刷新真实公开数据/Replay/隔离 proof，创建带 lineage 的新 1000 pUSD Campaign。
+1. 本轮修复已形成 clean commit；下一步不再改核心代码。
+2. 用户双击“1_开始或继续Paper累计验证”；入口只读保留旧 BLOCKED Campaign，自动执行最多 3 次公开数据/Replay/proof 保守验证，通过后创建带 lineage 的新 1000 pUSD Campaign。
 3. 自动运行完整 2 小时资格 Session；不要手工中断，结束后由入口自动生成报告与诊断 ZIP。
 4. Codex 复核 ZIP；通过后才开始每次最多 12 小时的累计 Session，最终目标仍为 72 小时且至少一次连续 12 小时。
