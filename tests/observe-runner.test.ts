@@ -232,6 +232,54 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("keeps position-leading delayed trades inside the grace period without historical major desync", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const delayedSell = trade({
+      transactionHash: "0xdelayed-sell",
+      side: "SELL",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const source = new QueueSource([
+      snapshot([], [position("100")], now.toISOString()),
+      snapshot([], [position("90")], "2026-07-08T00:01:10.000Z"),
+      snapshot([], [position("90")], "2026-07-08T00:01:26.000Z"),
+      snapshot([], [position("90")], "2026-07-08T00:01:41.000Z"),
+      snapshot([delayedSell], [position("90")], "2026-07-08T00:01:57.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 15_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:26.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:41.000Z");
+    await runner.pollOnce();
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      finalSyncStatus: "MINOR_DIFF",
+      minorDiffCount: 3,
+      majorDesyncCount: 0,
+    });
+
+    now = new Date("2026-07-08T00:01:57.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      finalSyncStatus: "SYNCED",
+      minorDiffCount: 3,
+      majorDesyncCount: 0,
+    });
+    store.close();
+  });
+
   it("stores an unchanged position projection once and references it from later checkpoints", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");

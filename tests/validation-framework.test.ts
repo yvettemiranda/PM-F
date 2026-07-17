@@ -1116,20 +1116,25 @@ describe("Final validation framework", () => {
       store,
       new QueueObserveSource([
         observeSnapshot([position("200")], "2026-07-08T00:01:00.000Z"),
-        observeSnapshot([position("200")], "2026-07-08T00:01:10.000Z"),
-        observeSnapshot([position("200")], "2026-07-08T00:01:20.000Z"),
-        observeSnapshot([position("100")], "2026-07-08T00:01:30.000Z"),
+        observeSnapshot([position("200")], "2026-07-08T00:02:00.000Z"),
+        observeSnapshot([position("200")], "2026-07-08T00:03:00.000Z"),
+        observeSnapshot([position("100")], "2026-07-08T00:03:10.000Z"),
       ]),
       {
         walletAddress: wallet,
-        pollIntervalMs: 1_000,
+        pollIntervalMs: 60_000,
         now: () => clock,
         campaignId: env.scope.campaignId,
         campaignSessionId: env.scope.sessionId,
       },
     );
-    for (let poll = 0; poll < 4; poll += 1) {
-      clock = new Date(`2026-07-08T00:01:${String(poll * 10).padStart(2, "0")}.000Z`);
+    for (const pollAt of [
+      "2026-07-08T00:01:00.000Z",
+      "2026-07-08T00:02:00.000Z",
+      "2026-07-08T00:03:00.000Z",
+      "2026-07-08T00:03:10.000Z",
+    ]) {
+      clock = new Date(pollAt);
       expect(await runner.pollOnce()).toBe(true);
     }
     store.stopRun(runner.start().observeRunId, clock.toISOString(), "TEST_COMPLETE");

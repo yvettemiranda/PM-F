@@ -4,7 +4,9 @@ import type { PublicPosition, SyncStatus } from "../domain/models.js";
 import { RULESET, stableJson } from "../domain/versioning.js";
 import type {
   ObserveProjectionEntry,
+  ReconciliationHistoryReport,
   ReconciliationResult,
+  ReconciliationDetail,
   SourceEventMultiplicityAmbiguity,
 } from "./types.js";
 
@@ -12,16 +14,35 @@ function absolute(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
 
+function issueIdentity(detail: ReconciliationDetail): string {
+  if (detail.issueType === "POSITION_QUANTITY_DIFF") {
+    return stableJson({
+      issueType: detail.issueType,
+      asset: detail.asset,
+      differenceMicros: detail.differenceMicros,
+    });
+  }
+  return stableJson({
+    issueType: detail.issueType,
+    sourceEventKey: detail.sourceEventKey,
+    tradesCount: detail.tradesCount,
+    activityCount: detail.activityCount,
+  });
+}
+
 export function reconcileProjection(
   projection: ObserveProjectionEntry[],
   positions: PublicPosition[],
-  previousConsecutiveDiffs = 0,
+  observedAt: string,
+  previousReport: ReconciliationHistoryReport | null,
   sourceEventAmbiguities: readonly SourceEventMultiplicityAmbiguity[] = [],
 ): ReconciliationResult {
+  const observedAtMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedAtMs)) throw new Error("RECONCILIATION_OBSERVED_AT_INVALID");
   const expected = new Map(projection.map((entry) => [entry.asset, BigInt(entry.expectedTotalMicros)]));
   const observed = new Map(positions.map((position) => [position.asset, decimalToScaled(position.size, SHARE_SCALE_DIGITS)]));
   const assets = new Set([...expected.keys(), ...observed.keys()]);
-  const details: ReconciliationResult["details"] = [];
+  const currentDetails: ReconciliationDetail[] = [];
   for (const asset of assets) {
     const expectedValue = expected.get(asset) ?? 0n;
     const observedValue = observed.get(asset) ?? 0n;
@@ -30,7 +51,7 @@ export function reconcileProjection(
     const absoluteTolerance = BigInt(RULESET.reconciliationShareAbsToleranceMicros);
     const tolerance = relativeTolerance > absoluteTolerance ? relativeTolerance : absoluteTolerance;
     if (absolute(difference) > tolerance) {
-      details.push({
+      currentDetails.push({
         issueType: "POSITION_QUANTITY_DIFF",
         asset,
         expectedMicros: expectedValue.toString(),
@@ -41,16 +62,53 @@ export function reconcileProjection(
     }
   }
   for (const ambiguity of sourceEventAmbiguities) {
-    details.push({
+    currentDetails.push({
       issueType: "SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS",
       sourceEventKey: ambiguity.sourceEventKey,
       tradesCount: ambiguity.tradesCount,
       activityCount: ambiguity.activityCount,
     });
   }
+  const previousDetails = new Map(
+    (previousReport?.details ?? []).map((detail) => [issueIdentity(detail), detail]),
+  );
+  const previousCreatedAtMs = previousReport ? Date.parse(previousReport.createdAt) : null;
+  if (
+    previousReport
+    && (!Number.isFinite(previousCreatedAtMs) || previousCreatedAtMs! > observedAtMs)
+  ) {
+    throw new Error("RECONCILIATION_HISTORY_TIMESTAMP_INVALID");
+  }
+  const details = currentDetails.map((detail): ReconciliationDetail => {
+    const previous = previousDetails.get(issueIdentity(detail));
+    if (!previous || !previousReport) {
+      return { ...detail, firstObservedAt: observedAt, consecutiveCount: 1 };
+    }
+    const previousFirstObservedAt = previous.firstObservedAt ?? previousReport.createdAt;
+    const previousFirstObservedAtMs = Date.parse(previousFirstObservedAt);
+    if (
+      !Number.isFinite(previousFirstObservedAtMs)
+      || previousFirstObservedAtMs > previousCreatedAtMs!
+    ) {
+      throw new Error("RECONCILIATION_HISTORY_FIRST_OBSERVED_AT_INVALID");
+    }
+    const previousConsecutiveCount = previous.consecutiveCount ?? 1;
+    if (!Number.isInteger(previousConsecutiveCount) || previousConsecutiveCount < 1) {
+      throw new Error("RECONCILIATION_HISTORY_CONSECUTIVE_COUNT_INVALID");
+    }
+    return {
+      ...detail,
+      firstObservedAt: previousFirstObservedAt,
+      consecutiveCount: previousConsecutiveCount + 1,
+    };
+  });
   let syncStatus: SyncStatus = "SYNCED";
   if (details.length > 0) {
-    syncStatus = previousConsecutiveDiffs + 1 >= RULESET.majorDesyncConsecutiveCount ? "MAJOR_DESYNC" : "MINOR_DIFF";
+    const major = details.some((detail) => (
+      detail.consecutiveCount! >= RULESET.majorDesyncConsecutiveCount
+      && observedAtMs - Date.parse(detail.firstObservedAt!) >= RULESET.reconciliationGraceMs
+    ));
+    syncStatus = major ? "MAJOR_DESYNC" : "MINOR_DIFF";
   }
   const observedRows = [...observed.entries()]
     .filter(([, size]) => size !== 0n)

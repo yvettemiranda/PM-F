@@ -1,8 +1,8 @@
 # Bugs And Risks
 
 ## Active blockers
-- 稳定化核心的新 Campaign 尚未执行，因此资格里程碑、连续 12 小时和累计 72 小时自然运行都尚未通过。
-- 旧 Campaign `PC-6D45BA731F325AA7370D` 已 BLOCKED；其 12 小时失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
+- 修复后核心的新 Campaign 尚未执行，因此资格里程碑、连续 12 小时和累计 72 小时自然运行都尚未通过。
+- Campaign `PC-AB62B3FFCEDFC944FEAF` 已因旧核心对账宽限期缺陷 BLOCKED；其约 3 小时 10 分钟失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
 - 即使资格通过，仍需累计有效运行 72 小时、至少一个连续 12 小时 Session，并满足最终一致性与覆盖门槛。
 - 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景可能需要继续运行或使用明确标注的同版本隔离证据；不能伪装成自然行情。
 - 当前环境历史 geoblock 曾返回受限，CLOB clock offset 曾不安全；Live 前必须在合法环境重新验证，禁止绕过。
@@ -11,11 +11,12 @@
 ## Active risks
 - Data API 历史 offset 限制仍可能使完整历史 Replay 不可得；不得把不完整历史冒充完整回放。
 - `node:sqlite` 在 Node 24 仍有 experimental warning，长期稳定性需要 72 小时 Campaign 证明。
-- 公开钱包依赖增量轮询，数据源可能短暂不同步；Gap、MINOR_DIFF/MAJOR_DESYNC 与 reconciliation 必须继续 fail closed。
+- 公开钱包依赖增量轮询，Positions 与 Trades/Activity 可能短暂不同步；120 秒内保持 `MINOR_DIFF`，同一差异达到连续次数且持续满 120 秒后仍必须 `MAJOR_DESYNC` 并 fail closed。
 - 2 秒 orderbook 新鲜度提高安全性但可能降低成交率；不得为提高通过率放宽。
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
 
 ## Resolved in current implementation
+- 2026-07-17 的 3 小时资格运行发现：`reconciliationGraceMs=120000` 虽已配置但 Observe 未使用，连续三次约 31 秒就升级 `MAJOR_DESYNC`，且不同差异会共享连续计数。现已按具体差异持久化首次时间与连续次数，只有“同一差异连续至少 3 次且持续至少 120 秒”才升级；真实迟到事件回归、持续失步回归及替代 Campaign 审计路径均已覆盖。
 - 2026-07-17 首次稳定化核心启动的三次 Phase 0 均为稳定 Replay、`ambiguousEvents=0`，但交易历史由客户端在已知官方 offset 边界主动停止时记录 `CLIENT_OFFSET_LIMIT`，proof 校验器只接受 `SOURCE_OFFSET_LIMIT`，造成 `PHASE0_VALIDATION_PROOF_INVALID`。校验器现接受这两种精确已知上限类别，未知 stop category、Schema 错误、分页错配和 Replay 不一致仍全部拒绝。
 - `coreCompatibilityHash` 已只覆盖实际 Paper 行为、运行编排、恢复、安全和 Schema 合同；Live-only/纯报告/说明/打包变化不再误伤 Campaign，canonical serializer、runtime policy 与 checkpoint 等真实语义变化不会漏掉。
 - Validation/Operational/Paper 最终检查已统一到当前 Campaign/Session/Account/Target/Core；Signal/Execution Context 固化 target，Paper/Risk 不再靠 raw event 推导执行身份。

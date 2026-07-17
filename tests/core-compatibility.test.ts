@@ -96,6 +96,7 @@ describe("Paper Campaign core compatibility", () => {
 
   it("uses only Paper-relevant rules for the Campaign reset identity", () => {
     expect(PAPER_RULESET_KEYS.some((key) => key.startsWith("live"))).toBe(false);
+    expect(PAPER_RULESET_KEYS).toContain("reconciliationGraceMs");
     expect(PAPER_RULESET_KEYS).not.toContain("clockUnsafeThresholdMs");
     expect(PAPER_RULESET_KEYS).not.toContain("reconciliationCashAbsToleranceMicros");
     expect(PAPER_RULESET_KEYS).not.toContain("requestTimeoutMs");

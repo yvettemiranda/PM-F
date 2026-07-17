@@ -83,7 +83,7 @@ export interface ReconciliationResult {
   details: ReconciliationDetail[];
 }
 
-export type ReconciliationDetail = {
+export type ReconciliationDetail = ({
   issueType: "POSITION_QUANTITY_DIFF";
   asset: string;
   expectedMicros: string;
@@ -95,7 +95,15 @@ export type ReconciliationDetail = {
   sourceEventKey: string;
   tradesCount: number;
   activityCount: number;
+}) & {
+  firstObservedAt?: string;
+  consecutiveCount?: number;
 };
+
+export interface ReconciliationHistoryReport {
+  createdAt: string;
+  details: ReconciliationDetail[];
+}
 
 export interface SourceEventMultiplicityAmbiguity {
   sourceEventKey: string;

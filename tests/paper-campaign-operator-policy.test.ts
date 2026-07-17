@@ -73,6 +73,14 @@ describe("paper Campaign operator policy", () => {
       "b".repeat(64),
     )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: ["MAJOR_DESYNC:1", "OBSERVE_STATUS:SHORT_SOAK_FAILED"],
+      }),
+      "b".repeat(64),
+    )).toBe("CREATE_REPLACEMENT");
+    expect(paperCampaignStartDisposition(
       snapshot({ state: "BLOCKED", coreCompatibilityHash: "a".repeat(64) }),
       "a".repeat(64),
     )).toBe("REFUSE_TERMINAL");
@@ -101,6 +109,14 @@ describe("paper Campaign operator policy", () => {
         state: "BLOCKED",
         coreCompatibilityHash: "a".repeat(64),
         blockers: ["PAPER_ACCEPTANCE_INCONSISTENT"],
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: ["MAJOR_DESYNC:1", "OBSERVE_STATUS:SHORT_SOAK_FAILED", "PAPER_CONSISTENCY_FAILED"],
       }),
       "b".repeat(64),
     )).toBe("REFUSE_TERMINAL");

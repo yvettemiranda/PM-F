@@ -895,6 +895,80 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
+  it("replaces only the blocked grace-period Campaign with a new reconciliation core", () => {
+    const input = fixture();
+    const original = createCampaign(input);
+    const session = startSession(input, original.campaignId, 0, "PS-GRACE-BLOCKED");
+    recordHealthySession(input, session, 0, 2);
+    const blocked = input.service.finalizeSession({
+      sessionId: session.sessionId,
+      outcome: "FAILED",
+      acceptanceStatus: "FAILED",
+      consistencyPassed: true,
+      recoveryConfirmed: true,
+      stopReason: "TEST_RECONCILIATION_GRACE_DEFECT",
+      blockers: ["MAJOR_DESYNC:1", "OBSERVE_STATUS:SHORT_SOAK_FAILED"],
+      coverage: {},
+      observeMetrics: {
+        ...observeMetrics(120, 0),
+        minorDiffCount: 2,
+        majorDesyncCount: 1,
+      },
+      stoppedAt: at(2),
+    });
+    expect(blocked.campaign).toMatchObject({
+      campaignState: "BLOCKED",
+      blockers: ["MAJOR_DESYNC:1", "OBSERVE_STATUS:SHORT_SOAK_FAILED"],
+    });
+
+    const repairedManifest: CoreCompatibilityManifest = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        observeRecovery: componentHash("reconciliation-grace-repaired"),
+      },
+    };
+    const executor = new PaperExecutor(
+      input.databasePath,
+      new PublicPaperMarketDataProvider(),
+      { sourceVersion },
+    );
+    const replacementAccountId = executor.createAccount(
+      "Reconciliation Grace Replacement",
+      BigInt(RULESET.paperInitialBalanceMicros),
+      input.targetId,
+    );
+    executor.close();
+
+    const replacement = input.service.createCampaign({
+      targetId: input.targetId,
+      baselineRunId: input.baselineRunId,
+      paperAccountId: replacementAccountId,
+      coreManifest: repairedManifest,
+      sourceVersion,
+      now: at(3),
+      campaignId: "PC-GRACE-REPLACEMENT",
+      supersedesCampaignId: original.campaignId,
+      replacementReason: "CORE_REPAIR_RECONCILIATION_GRACE",
+    });
+    expect(replacement).toMatchObject({
+      state: "QUALIFYING",
+      accumulatedActiveRuntimeMs: 0,
+      paperAccountId: replacementAccountId,
+    });
+    const transition = input.service.store.database.prepare(
+      `SELECT evidence_json FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence DESC LIMIT 1`,
+    ).get(replacement.campaignId) as { evidence_json: string };
+    expect(JSON.parse(transition.evidence_json)).toMatchObject({
+      supersedesCampaignId: original.campaignId,
+      supersededCampaignState: "BLOCKED",
+      supersededCoreCompatibilityHash: original.coreCompatibilityHash,
+      replacementReason: "CORE_REPAIR_RECONCILIATION_GRACE",
+    });
+    input.service.close();
+  });
+
   it("rejects an unclean fixed account and an unsafe runtime state", () => {
     const accountInput = fixture();
     accountInput.service.store.database.prepare(

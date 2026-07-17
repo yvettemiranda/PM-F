@@ -3,6 +3,41 @@ import type { CampaignSnapshot } from "./types.js";
 export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
 
 export type PaperCampaignStartDisposition = "CONTINUE" | "CREATE_REPLACEMENT" | "REFUSE_TERMINAL";
+export type PaperCampaignReplacementReason =
+  | "CORE_REPAIR_MARKET_DATA"
+  | "CORE_REPAIR_RECONCILIATION_GRACE"
+  | "CORE_VERSION_REPLACEMENT";
+
+function replacementReason(input: {
+  campaignState: string;
+  blockers: readonly string[];
+  previousCoreCompatibilityHash: string;
+  currentCoreCompatibilityHash: string;
+}): PaperCampaignReplacementReason | null {
+  if (input.previousCoreCompatibilityHash === input.currentCoreCompatibilityHash) return null;
+  if (input.campaignState === "FROZEN" && input.blockers.length === 0) {
+    return "CORE_VERSION_REPLACEMENT";
+  }
+  if (input.campaignState !== "BLOCKED") return null;
+  if (
+    input.blockers.includes("UNRECOVERED_MARKET_DATA_BLOCKER")
+    && input.blockers.every((blocker) => (
+      blocker === "UNRECOVERED_MARKET_DATA_BLOCKER"
+      || blocker === "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS"
+      || blocker === "PAPER_EXIT_CODE:1"
+    ))
+  ) {
+    return "CORE_REPAIR_MARKET_DATA";
+  }
+  if (
+    input.blockers.length === 2
+    && input.blockers.includes("MAJOR_DESYNC:1")
+    && input.blockers.includes("OBSERVE_STATUS:SHORT_SOAK_FAILED")
+  ) {
+    return "CORE_REPAIR_RECONCILIATION_GRACE";
+  }
+  return null;
+}
 
 export function paperCampaignReplacementAuthorized(input: {
   campaignState: string;
@@ -10,15 +45,19 @@ export function paperCampaignReplacementAuthorized(input: {
   previousCoreCompatibilityHash: string;
   currentCoreCompatibilityHash: string;
 }): boolean {
-  if (input.previousCoreCompatibilityHash === input.currentCoreCompatibilityHash) return false;
-  if (input.campaignState === "FROZEN" && input.blockers.length === 0) return true;
-  if (input.campaignState !== "BLOCKED") return false;
-  if (!input.blockers.includes("UNRECOVERED_MARKET_DATA_BLOCKER")) return false;
-  return input.blockers.every((blocker) => (
-    blocker === "UNRECOVERED_MARKET_DATA_BLOCKER"
-    || blocker === "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS"
-    || blocker === "PAPER_EXIT_CODE:1"
-  ));
+  return replacementReason(input) !== null;
+}
+
+export function paperCampaignReplacementReason(
+  snapshot: CampaignSnapshot,
+  currentCoreCompatibilityHash: string,
+): PaperCampaignReplacementReason | null {
+  return replacementReason({
+    campaignState: snapshot.state,
+    blockers: snapshot.blockers,
+    previousCoreCompatibilityHash: snapshot.coreCompatibilityHash,
+    currentCoreCompatibilityHash,
+  });
 }
 
 /**
@@ -31,12 +70,9 @@ export function paperCampaignStartDisposition(
   currentCoreCompatibilityHash: string,
 ): PaperCampaignStartDisposition {
   if (!["PASSED", "BLOCKED", "FROZEN"].includes(snapshot.state)) return "CONTINUE";
-  return paperCampaignReplacementAuthorized({
-    campaignState: snapshot.state,
-    blockers: snapshot.blockers,
-    previousCoreCompatibilityHash: snapshot.coreCompatibilityHash,
-    currentCoreCompatibilityHash,
-  }) ? "CREATE_REPLACEMENT" : "REFUSE_TERMINAL";
+  return paperCampaignReplacementReason(snapshot, currentCoreCompatibilityHash)
+    ? "CREATE_REPLACEMENT"
+    : "REFUSE_TERMINAL";
 }
 
 /**

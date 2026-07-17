@@ -329,11 +329,12 @@ export class ObserveOnlyRunner {
         tradesCount: currentTradeKeys.has(key) || storedTradeKeys.has(key) ? 1 : 0,
         activityCount: currentActivityKeys.has(key) ? 1 : 0,
       }));
-    const previousDiffs = this.store.consecutiveDiffCount(started.baseline.baselineRunId);
+    const previousReport = this.store.latestReconciliationReport(started.observeRunId);
     const reconciliation = reconcileProjection(
       projection.projection,
       snapshot.positions.data,
-      previousDiffs,
+      completedAt,
+      previousReport,
       sourceEventAmbiguities,
     );
     const balanceResult = snapshot.pUsdBalance.data.result;

@@ -11,7 +11,11 @@ import {
   validationReportHash,
 } from "./report.js";
 import { PaperValidationStore } from "./store.js";
-import { paperCampaignStartDisposition } from "./operator-policy.js";
+import {
+  paperCampaignReplacementReason,
+  paperCampaignStartDisposition,
+  type PaperCampaignReplacementReason,
+} from "./operator-policy.js";
 import {
   PAPER_VALIDATION_CHECKPOINT_INTERVAL_MS,
   PAPER_VALIDATION_MAX_CHECKPOINT_GAP_MS,
@@ -46,7 +50,7 @@ export interface CreateCampaignInput {
   now: string;
   campaignId?: string;
   supersedesCampaignId?: string;
-  replacementReason?: "CORE_REPAIR_MARKET_DATA" | "CORE_VERSION_REPLACEMENT";
+  replacementReason?: PaperCampaignReplacementReason;
   requiredActiveRuntimeMs?: number;
   requiredContinuousRuntimeMs?: number;
   qualifyingRuntimeMs?: number;
@@ -255,11 +259,13 @@ export class PaperValidationCampaignService {
           throw new Error(`PAPER_VALIDATION_REPLACEMENT_NOT_LATEST:${input.supersedesCampaignId}:${latestCampaignId}`);
         }
         const previous = this.campaignSnapshot(input.supersedesCampaignId);
-        const expectedReplacementReason = previous.state === "BLOCKED"
-          ? "CORE_REPAIR_MARKET_DATA"
-          : "CORE_VERSION_REPLACEMENT";
+        const expectedReplacementReason = paperCampaignReplacementReason(
+          previous,
+          coreCompatibilityHash,
+        );
         if (
           previous.targetId !== input.targetId
+          || expectedReplacementReason === null
           || input.replacementReason !== expectedReplacementReason
           || paperCampaignStartDisposition(previous, coreCompatibilityHash) !== "CREATE_REPLACEMENT"
         ) {

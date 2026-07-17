@@ -39,6 +39,7 @@ import {
 import { collectCheckpointEvidence } from "../paper-validation/checkpoint-evidence.js";
 import { validateFinalCampaignIntegrity } from "../paper-validation/final-integrity.js";
 import {
+  paperCampaignReplacementReason,
   paperCampaignPlannedDurationOverride,
   paperCampaignStartDisposition,
   paperQualifyingFinalizationPolicy,
@@ -261,6 +262,15 @@ function createCampaign(
   superseded?: CampaignSnapshot,
 ): CampaignSnapshot {
   const { targetId, baselineRunId } = findTargetAndBaseline();
+  const replacementReason = superseded === undefined
+    ? undefined
+    : paperCampaignReplacementReason(
+      superseded,
+      computeCoreCompatibilityHash(manifest),
+    );
+  if (superseded !== undefined && replacementReason === null) {
+    throw new Error(`PAPER_CAMPAIGN_REPLACEMENT_REASON_UNAVAILABLE:${superseded.campaignId}`);
+  }
   const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), { sourceVersion });
   try {
     const accountId = executor.createAccount(
@@ -277,9 +287,7 @@ function createCampaign(
       now: new Date().toISOString(),
       ...(superseded === undefined ? {} : {
         supersedesCampaignId: superseded.campaignId,
-        replacementReason: superseded.state === "BLOCKED"
-          ? "CORE_REPAIR_MARKET_DATA" as const
-          : "CORE_VERSION_REPLACEMENT" as const,
+        replacementReason: replacementReason!,
       }),
     });
   } finally {

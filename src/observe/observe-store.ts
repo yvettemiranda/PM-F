@@ -18,6 +18,7 @@ import type {
   ObserveProjectionResult,
   ObserveRunMetrics,
   ObserveSignal,
+  ReconciliationHistoryReport,
   ReconciliationResult,
 } from "./types.js";
 
@@ -251,16 +252,22 @@ export class ObserveStore {
     return existing;
   }
 
-  consecutiveDiffCount(baselineRunId: string): number {
-    const rows = this.database
-      .prepare("SELECT sync_status FROM reconciliation_reports WHERE baseline_run_id=? ORDER BY created_at DESC LIMIT 10")
-      .all(baselineRunId) as Array<{ sync_status: string }>;
-    let count = 0;
-    for (const row of rows) {
-      if (row.sync_status === "SYNCED") break;
-      count += 1;
-    }
-    return count;
+  latestReconciliationReport(observeRunId: string): ReconciliationHistoryReport | null {
+    const row = this.database
+      .prepare(
+        `SELECT detail_json,created_at
+         FROM reconciliation_reports
+         WHERE observe_run_id=?
+         ORDER BY created_at DESC,reconciliation_report_id DESC LIMIT 1`,
+      )
+      .get(observeRunId) as { detail_json: string; created_at: string } | undefined;
+    if (!row) return null;
+    const details = JSON.parse(row.detail_json) as unknown;
+    if (!Array.isArray(details)) throw new Error("RECONCILIATION_HISTORY_DETAILS_INVALID");
+    return {
+      createdAt: row.created_at,
+      details: details as ReconciliationHistoryReport["details"],
+    };
   }
 
   targetSyncStatus(targetId: string): "SYNCED" | "MINOR_DIFF" | "MAJOR_DESYNC" {

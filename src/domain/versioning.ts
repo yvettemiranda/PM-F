@@ -101,6 +101,7 @@ export const PAPER_RULESET_KEYS = Object.freeze([
   "fallbackAmountMicros",
   "reconciliationShareAbsToleranceMicros",
   "reconciliationRelativeTolerancePpm",
+  "reconciliationGraceMs",
   "majorDesyncConsecutiveCount",
   "orderbookMaxAgeMs",
   "paperInitialBalanceMicros",
