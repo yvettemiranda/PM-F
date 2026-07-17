@@ -169,6 +169,33 @@ function insertPublishedSignalForTarget(
   );
 }
 
+function insertUnhealthyMarket(
+  database: DatabaseSync,
+  assetId = "asset-acceptance",
+  conditionId = "condition-acceptance",
+): void {
+  database.prepare(
+    `INSERT INTO paper_market_data_health(
+      paper_account_id,asset_id,condition_id,state,consecutive_failures,
+      consecutive_successes,next_retry_at,last_error_code,last_error_message,
+      last_failure_at,last_success_at,frozen_at,ruleset_hash,source_code_commit,
+      source_code_dirty,config_version,created_at,updated_at
+    ) VALUES ('paper-acceptance',?,?,'FROZEN',3,0,?,'ORDERBOOK_STALE',
+      'Orderbook capture is stale',?,NULL,?,?,?,0,?,?,?)`,
+  ).run(
+    assetId,
+    conditionId,
+    "2026-07-15T00:01:00.000Z",
+    timestamp,
+    timestamp,
+    RULESET_HASH,
+    sourceVersion.commit,
+    VERSIONS.configVersion,
+    timestamp,
+    timestamp,
+  );
+}
+
 afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -217,7 +244,13 @@ describe("PaperAcceptanceSummaryService", () => {
       execution: { orders: 0, fills: 0 },
       stage: { BUY: "NO_SIGNAL", SELL: "NO_SIGNAL" },
     });
-    expect(summary.marketData).toEqual({ blockerCount: 0, blockers: [], records: [] });
+    expect(summary.marketData).toEqual({
+      blockerCount: 0,
+      blockers: [],
+      quarantineCount: 0,
+      quarantined: [],
+      records: [],
+    });
 
     const after = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((after.prepare("SELECT count(*) count FROM paper_cash_ledger").get() as { count: number }).count)
@@ -295,6 +328,64 @@ describe("PaperAcceptanceSummaryService", () => {
     });
   });
 
+  it("reports an unhealthy market without exposure as quarantine instead of a campaign blocker", () => {
+    const env = setup();
+    const database = new DatabaseSync(env.databasePath);
+    database.prepare(
+      `INSERT INTO paper_market_data_health(
+        paper_account_id,asset_id,condition_id,state,consecutive_failures,
+        consecutive_successes,next_retry_at,last_error_code,last_error_message,
+        last_failure_at,last_success_at,frozen_at,ruleset_hash,source_code_commit,
+        source_code_dirty,config_version,created_at,updated_at
+      ) VALUES (?, 'asset-quarantined','condition-quarantined','FROZEN',3,0,?,
+        'ORDERBOOK_STALE','Orderbook source time is stale',?,NULL,?,?,?,0,?,?,?)`,
+    ).run(
+      env.accountId,
+      "2026-07-15T00:01:00.000Z",
+      timestamp,
+      timestamp,
+      RULESET_HASH,
+      sourceVersion.commit,
+      VERSIONS.configVersion,
+      timestamp,
+      timestamp,
+    );
+    database.close();
+
+    const summary = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId);
+
+    expect(summary.consistency.passed).toBe(true);
+    expect(summary.marketData.blockerCount).toBe(0);
+    expect(summary.marketData.blockers).toEqual([]);
+    expect(summary.marketData.quarantineCount).toBe(1);
+    expect(summary.marketData.quarantined[0]).toMatchObject({
+      assetId: "asset-quarantined",
+      conditionId: "condition-quarantined",
+      state: "FROZEN",
+      lastErrorCode: "ORDERBOOK_STALE",
+    });
+  });
+
+  it.each([
+    ["WAITING_EXECUTION", "TARGET_BUY"],
+    ["EXIT_PENDING", "TARGET_SELL"],
+    ["STOP_EXIT_PENDING", "STOP_LOSS"],
+  ] as const)("keeps an unhealthy market with %s execution as a blocker", (state, type) => {
+    const env = setup();
+    const database = new DatabaseSync(env.databasePath);
+    insertExecution(database, `pending-${state}`, type);
+    database.prepare(
+      "UPDATE paper_executions SET state=? WHERE paper_execution_id=?",
+    ).run(state, `pending-${state}`);
+    insertUnhealthyMarket(database);
+    database.close();
+
+    const summary = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId);
+    expect(summary.consistency.passed).toBe(true);
+    expect(summary.marketData.blockerCount).toBe(1);
+    expect(summary.marketData.quarantineCount).toBe(0);
+  });
+
   it("rejects a cash ledger whose totals match but its recorded running balance does not", () => {
     const env = setup();
     const database = new DatabaseSync(env.databasePath);
@@ -345,6 +436,7 @@ describe("PaperAcceptanceSummaryService", () => {
       ) VALUES ('cash-reserve',?,'waiting-buy','RESERVE','0','100','1000000000','100',
         'cash-reserve',?)`,
     ).run(env.accountId, timestamp);
+    insertUnhealthyMarket(database);
     database.close();
 
     const summary = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId);
@@ -357,6 +449,39 @@ describe("PaperAcceptanceSummaryService", () => {
       cashLedgerReservedMicros: "100",
       matches: true,
     });
+    expect(summary.marketData.blockerCount).toBe(1);
+    expect(summary.marketData.quarantineCount).toBe(0);
+
+    const recoveredDatabase = new DatabaseSync(env.databasePath);
+    recoveredDatabase.prepare(
+      "UPDATE paper_executions SET state='CANCELLED' WHERE paper_execution_id='waiting-buy'",
+    ).run();
+    recoveredDatabase.prepare(
+      "UPDATE paper_reservations SET remaining_amount_micros='0',status='RELEASED',updated_at=? WHERE reservation_id='reservation-active'",
+    ).run("2026-07-15T00:00:01.000Z");
+    recoveredDatabase.prepare(
+      "UPDATE paper_accounts SET reserved_balance_micros='0' WHERE paper_account_id=?",
+    ).run(env.accountId);
+    recoveredDatabase.prepare(
+      `INSERT INTO paper_reservation_ledger(
+        reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+        remaining_after_micros,idempotency_key,created_at
+      ) VALUES ('reservation-ledger-release','reservation-active','waiting-buy','RELEASE',
+        '-100','0','reservation-ledger-release','2026-07-15T00:00:01.000Z')`,
+    ).run();
+    recoveredDatabase.prepare(
+      `INSERT INTO paper_cash_ledger(
+        cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES ('cash-release',?,'waiting-buy','RELEASE','0','-100','1000000000','0',
+        'cash-release','2026-07-15T00:00:01.000Z')`,
+    ).run(env.accountId);
+    recoveredDatabase.close();
+
+    const recovered = new PaperAcceptanceSummaryService(env.databasePath).summarize(env.accountId);
+    expect(recovered.consistency.passed).toBe(true);
+    expect(recovered.marketData.blockerCount).toBe(0);
+    expect(recovered.marketData.quarantineCount).toBe(1);
   });
 
   it("rejects a reservation ledger whose totals match but row-by-row balances do not", () => {

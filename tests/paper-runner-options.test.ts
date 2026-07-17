@@ -70,7 +70,7 @@ const acceptanceSummary: PaperAcceptanceSummary = {
     lifecycle: { stopLossExecutions: 0, settlementExecutions: 0, redeemedPositions: 0 },
     stage: { BUY: "NO_SIGNAL", SELL: "NO_SIGNAL" },
   },
-  marketData: { blockerCount: 0, blockers: [], records: [] },
+  marketData: { blockerCount: 0, blockers: [], quarantineCount: 0, quarantined: [], records: [] },
 };
 
 function idleExecutor(): PaperExecutor {
@@ -297,7 +297,10 @@ describe("PaperRunner options", () => {
     expect(paperRunCompletionStatus({
       ...report,
       account: accountSnapshot,
-      acceptance: { ...acceptanceSummary, marketData: { blockerCount: 1, blockers: [], records: [] } },
+      acceptance: {
+        ...acceptanceSummary,
+        marketData: { blockerCount: 1, blockers: [], quarantineCount: 0, quarantined: [], records: [] },
+      },
     })).toBe("COMPLETED_WITH_SAFETY_BLOCKERS");
     expect(paperRunCompletionStatus({
       ...report,
@@ -305,6 +308,33 @@ describe("PaperRunner options", () => {
       acceptance: {
         ...acceptanceSummary,
         coverage: { ...acceptanceSummary.coverage, BUY: "NOT_OBSERVED" },
+      },
+    })).toBe("COMPLETED");
+    expect(paperRunCompletionStatus({
+      ...report,
+      account: accountSnapshot,
+      acceptance: {
+        ...acceptanceSummary,
+        marketData: {
+          blockerCount: 0,
+          blockers: [],
+          quarantineCount: 1,
+          quarantined: [{
+            assetId: "asset-quarantined",
+            conditionId: "condition-quarantined",
+            state: "FROZEN",
+            consecutiveFailures: 1,
+            consecutiveSuccesses: 0,
+            nextRetryAt: null,
+            lastErrorCode: "ORDERBOOK_STALE",
+            lastErrorMessage: "stale",
+            lastFailureAt: "2026-07-15T00:00:00.000Z",
+            lastSuccessAt: null,
+            frozenAt: "2026-07-15T00:00:00.000Z",
+            updatedAt: "2026-07-15T00:00:00.000Z",
+          }],
+          records: [],
+        },
       },
     })).toBe("COMPLETED");
   });

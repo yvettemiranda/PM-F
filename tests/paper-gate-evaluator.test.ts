@@ -32,7 +32,7 @@ function acceptance(stage: PaperAcceptanceSummary["funnel"]["stage"]["BUY"]): Pa
       lifecycle: { stopLossExecutions: 0, settlementExecutions: 0, redeemedPositions: 0 },
       stage: { BUY: stage, SELL: "NO_SIGNAL" },
     },
-    marketData: { blockerCount: 0, blockers: [], records: [] },
+    marketData: { blockerCount: 0, blockers: [], quarantineCount: 0, quarantined: [], records: [] },
   };
 }
 
@@ -56,6 +56,22 @@ describe("evaluatePaperShortGate", () => {
       safety: safe,
       acceptance: acceptance("FULL_FILL"),
     })).toMatchObject({ status: "SHORT_RUNTIME_PASSED_NATURAL", longRunAllowed: true, liveAllowed: false });
+  });
+
+  it("fails a stopped Session while any reservation remains active", () => {
+    const report = acceptance("FULL_FILL");
+    report.consistency.reservations.activeReservationsMicros = "1";
+    const decision = evaluatePaperShortGate({
+      durationMs: 7_200_000,
+      minimumDurationMs: 7_170_000,
+      finalValuationComplete: true,
+      runnerErrorCount: 0,
+      versionsMatch: true,
+      safety: safe,
+      acceptance: report,
+    });
+    expect(decision.status).toBe("SHORT_RUNTIME_FAILED");
+    expect(decision.blockingReasons).toContain("ACTIVE_RESERVATION_REMAINS");
   });
 
   it("allows compatible controlled evidence but labels it supplemental", () => {

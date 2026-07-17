@@ -60,8 +60,8 @@ export interface ClobMarket {
 }
 
 export interface ClobMarketInfo {
-  tbf: number;
-  mbf: number;
+  tbf?: number;
+  mbf?: number;
   fd?: { r: number | string; e: number | string; to: boolean };
   t: Array<{ t: string; o: string }>;
   mts: number;
@@ -304,8 +304,13 @@ export class PolymarketPublicApi {
     return this.request(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`, undefined, parseClobOrderbook, signal);
   }
 
-  async feeRate(assetId: string): Promise<ApiCapture<{ base_fee: number }>> {
-    return this.request(`https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`, undefined, parseFeeRate);
+  async feeRate(assetId: string, signal?: AbortSignal): Promise<ApiCapture<{ base_fee: number }>> {
+    return this.request(
+      `https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`,
+      undefined,
+      parseFeeRate,
+      signal,
+    );
   }
 
   async clobMarket(conditionId: string, signal?: AbortSignal): Promise<ApiCapture<ClobMarket>> {

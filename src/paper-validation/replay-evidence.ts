@@ -144,7 +144,11 @@ interface PublicCaptureBinding {
   captureId: string;
   payloadSha256: string;
   recordHash: string;
+  latencyMs: number;
 }
+
+type PublicMarketEndpoint = "clob-orderbook" | "clob-market-info" | "clob-fee-rate";
+type PublicFeeEndpoint = Extract<PublicMarketEndpoint, "clob-market-info" | "clob-fee-rate">;
 
 function sha256(value: unknown): string {
   return createHash("sha256").update(typeof value === "string" ? value : stableJson(value)).digest("hex");
@@ -175,34 +179,32 @@ function objectPayload(value: unknown, label: string): Record<string, unknown> {
 
 function officialClobUrl(
   value: string,
-  endpoint: "clob-orderbook" | "clob-market-info",
+  endpoint: PublicMarketEndpoint,
   assetId: string,
   conditionId: string,
 ): boolean {
-  try {
-    const url = new URL(value);
-    if (
-      url.protocol !== "https:"
-      || url.hostname !== "clob.polymarket.com"
-      || url.port !== ""
-      || url.username !== ""
-      || url.password !== ""
-    ) return false;
-    if (endpoint === "clob-orderbook") {
-      return url.pathname === "/book"
-        && url.searchParams.get("token_id") === assetId
-        && [...url.searchParams.keys()].every((key) => key === "token_id");
-    }
-    return url.pathname === `/clob-markets/${encodeURIComponent(conditionId)}` && url.search === "";
-  } catch {
-    return false;
-  }
+  const expected = endpoint === "clob-orderbook"
+    ? `https://clob.polymarket.com/book?token_id=${encodeURIComponent(assetId)}`
+    : endpoint === "clob-fee-rate"
+      ? `https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(assetId)}`
+      : `https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`;
+  return value === expected;
+}
+
+function feeEndpointFromSourceUrl(
+  value: string,
+  assetId: string,
+  conditionId: string,
+): PublicFeeEndpoint {
+  if (officialClobUrl(value, "clob-fee-rate", assetId, conditionId)) return "clob-fee-rate";
+  if (officialClobUrl(value, "clob-market-info", assetId, conditionId)) return "clob-market-info";
+  throw new Error("REPLAY_EVIDENCE_PUBLIC_MARKET_CAPTURE_SOURCE_INVALID");
 }
 
 function publicMarketCaptureBinding(input: {
   database: DatabaseSync;
   captureId: string | null;
-  endpoint: "clob-orderbook" | "clob-market-info";
+  endpoint: PublicMarketEndpoint;
   requestUrl: string;
   fetchedAt: string;
   assetId: string;
@@ -257,7 +259,7 @@ function publicMarketCaptureBinding(input: {
     ) {
       throw new Error("REPLAY_EVIDENCE_PUBLIC_ORDERBOOK_CAPTURE_MISMATCH");
     }
-  } else {
+  } else if (input.endpoint === "clob-market-info") {
     const fee = input.fee!;
     const tokens = Array.isArray(raw.t) ? raw.t : [];
     if (!tokens.some((token) => token && typeof token === "object" && (token as { t?: unknown }).t === input.assetId)) {
@@ -289,10 +291,26 @@ function publicMarketCaptureBinding(input: {
     ) {
       throw new Error("REPLAY_EVIDENCE_PUBLIC_FEE_CAPTURE_MISMATCH");
     }
+  } else {
+    const fee = input.fee!;
+    const keys = Object.keys(raw).sort();
+    if (
+      keys.length !== 1
+      || keys[0] !== "base_fee"
+      || typeof raw.base_fee !== "number"
+      || raw.base_fee !== 0
+      || fee.base_fee !== 0
+      || fee.fee_rate_ppm !== "0"
+      || fee.fee_exponent !== 1
+      || fee.status !== "AVAILABLE"
+    ) {
+      throw new Error("REPLAY_EVIDENCE_PUBLIC_FEE_CAPTURE_MISMATCH");
+    }
   }
   return {
     captureId: capture.capture_id,
     payloadSha256: capture.payload_sha256,
+    latencyMs: capture.latency_ms,
     recordHash: sha256({
       captureId: capture.capture_id,
       endpoint: capture.endpoint,
@@ -564,7 +582,11 @@ function buildExecutionBinding(input: {
   const feePublicCapture = publicMarketCaptureBinding({
     database: input.database,
     captureId: typeof fee.source_capture_id === "string" ? fee.source_capture_id : null,
-    endpoint: "clob-market-info",
+    endpoint: feeEndpointFromSourceUrl(
+      String(fee.source_url),
+      String(execution.asset_id),
+      String(execution.condition_id),
+    ),
     requestUrl: String(fee.source_url),
     fetchedAt: String(fee.snapshot_time),
     assetId: String(execution.asset_id),
@@ -582,7 +604,11 @@ function buildExecutionBinding(input: {
     throw new Error("REPLAY_EVIDENCE_ORDERBOOK_PAYLOAD_HASH_MISMATCH");
   }
   const age = Number(book.data_age_ms);
-  if (!Number.isSafeInteger(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+  if (
+    !Number.isSafeInteger(age)
+    || age < Math.ceil(orderbookPublicCapture.latencyMs)
+    || age > RULESET.orderbookMaxAgeMs
+  ) {
     throw new Error("REPLAY_EVIDENCE_ORDERBOOK_STALE");
   }
   const targetTime = parseIso(input.targetTradeTimestamp, "TARGET_TRADE_TIME");
@@ -594,8 +620,11 @@ function buildExecutionBinding(input: {
   const bookTime = parseIso(String(book.market_snapshot_time), "ORDERBOOK_TIME");
   const bookReceivedAt = parseIso(String(book.received_at), "ORDERBOOK_RECEIVED_AT");
   const feeTime = parseIso(String(fee.snapshot_time), "FEE_SNAPSHOT_TIME");
-  if (bookTime < targetTime - RULESET.orderbookMaxAgeMs || bookTime > deadline) {
+  if (bookTime > deadline) {
     throw new Error("REPLAY_EVIDENCE_ORDERBOOK_OUTSIDE_EXECUTION_WINDOW");
+  }
+  if (bookReceivedAt < targetTime || bookReceivedAt > deadline) {
+    throw new Error("REPLAY_EVIDENCE_ORDERBOOK_CAPTURE_OUTSIDE_EXECUTION_WINDOW");
   }
   if (feeTime < targetTime - RULESET.orderbookMaxAgeMs || feeTime > deadline) {
     throw new Error("REPLAY_EVIDENCE_FEE_SNAPSHOT_OUTSIDE_EXECUTION_WINDOW");
@@ -607,9 +636,8 @@ function buildExecutionBinding(input: {
     }
     if (
       orderTime < bookTime
-      || orderTime - bookTime > RULESET.orderbookMaxAgeMs
       || orderTime < bookReceivedAt
-      || orderTime - bookReceivedAt > RULESET.orderbookMaxAgeMs
+      || orderTime - bookReceivedAt + orderbookPublicCapture.latencyMs > RULESET.orderbookMaxAgeMs
     ) {
       throw new Error("REPLAY_EVIDENCE_ORDERBOOK_STALE_AT_ORDER_TIME");
     }

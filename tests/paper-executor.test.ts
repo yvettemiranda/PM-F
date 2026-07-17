@@ -157,6 +157,8 @@ class FakeMarketData implements PaperMarketDataProvider {
   orderbookCalls = 0;
   feeCalls = 0;
   resolutionCalls = 0;
+  beforeOrderbook: (() => void) | null = null;
+  beforeFee: (() => void) | null = null;
 
   constructor(private readonly clock: () => Date) {
     this.book = this.makeBook([{ price: "0.5", size: "10000" }], [{ price: "0.5", size: "10000" }]);
@@ -197,12 +199,14 @@ class FakeMarketData implements PaperMarketDataProvider {
 
   async orderbook(_assetId?: string, _conditionId?: string, _signal?: AbortSignal): Promise<PaperOrderbookSnapshot> {
     this.orderbookCalls += 1;
+    this.beforeOrderbook?.();
     if (this.orderbookError) throw this.orderbookError;
     return this.book;
   }
 
   async fee(): Promise<PaperFeeSnapshot> {
     this.feeCalls += 1;
+    this.beforeFee?.();
     return { ...this.feeSnapshot, snapshotTime: this.clock().toISOString() };
   }
 
@@ -780,14 +784,14 @@ describe("PaperExecutor", () => {
         tick_size: env.market.book.tickSize,
       },
     };
-    env.market.feeSnapshot.sourceUrl = `https://clob.polymarket.com/clob-markets/${conditionId}`;
+    env.market.feeSnapshot.sourceUrl = `https://clob.polymarket.com/fee-rate?token_id=${assetId}`;
     env.market.feeSnapshot.publicCapture = {
-      endpoint: "clob-market-info",
+      endpoint: "clob-fee-rate",
       requestUrl: env.market.feeSnapshot.sourceUrl,
       fetchedAt: env.market.feeSnapshot.snapshotTime,
       latencyMs: 10,
       httpStatus: 200,
-      payload: { tbf: 0, mbf: 0, t: [{ t: assetId, o: "Yes" }], mts: 1, mos: 1 },
+      payload: { base_fee: 0 },
     };
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "buy-high", createdAt: "2026-07-08T00:00:01.000Z" });
     const executionId = await env.executor.consumeSignal(env.accountId, "buy-high");
@@ -798,8 +802,13 @@ describe("PaperExecutor", () => {
     expect(snapshot.reservedBalanceMicros).toBe("0");
     const captureDatabase = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((captureDatabase.prepare(
-      "SELECT count(*) count FROM api_captures WHERE endpoint IN ('clob-orderbook','clob-market-info')",
+      "SELECT count(*) count FROM api_captures WHERE endpoint IN ('clob-orderbook','clob-fee-rate')",
     ).get() as { count: number }).count).toBe(2);
+    expect(captureDatabase.prepare(
+      `SELECT c.endpoint FROM paper_fee_snapshots f
+       JOIN api_captures c ON c.capture_id=f.source_capture_id
+       WHERE f.asset_id=? ORDER BY f.created_at DESC LIMIT 1`,
+    ).get(assetId)).toEqual({ endpoint: "clob-fee-rate" });
     captureDatabase.close();
     env.executor.close();
   });
@@ -910,7 +919,10 @@ describe("PaperExecutor", () => {
     env.market.book = env.market.makeBook([{ price: "0.6", size: "1000" }], []);
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "range", createdAt: "2026-07-08T00:00:01.000Z" });
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "range"))).toBe("WAITING_EXECUTION");
-    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], [], "2026-07-07T23:59:00.000Z");
+    env.market.book = {
+      ...env.market.makeBook([{ price: "0.5", size: "1000" }], [], "2026-07-07T23:59:00.000Z"),
+      receivedAt: "2026-07-07T23:59:00.000Z",
+    };
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "stale", createdAt: "2026-07-08T00:00:02.000Z" });
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "stale"))).toBe("WAITING_EXECUTION");
     expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
@@ -918,6 +930,36 @@ describe("PaperExecutor", () => {
       lastErrorCode: "ORDERBOOK_STALE",
     });
     expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1000000000");
+    env.executor.close();
+  });
+
+  it("fetches fee before the book so a slow fee lookup cannot age a newly fetched snapshot", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    const calls: string[] = [];
+    env.market.beforeFee = () => {
+      calls.push("fee");
+      env.setClock(new Date("2026-07-08T00:00:02.500Z"));
+    };
+    env.market.beforeOrderbook = () => {
+      calls.push("book");
+      env.market.book = env.market.makeBook(
+        [{ price: "0.5", size: "1000" }],
+        [{ price: "0.5", size: "1000" }],
+        "2026-07-07T23:00:00.000Z",
+      );
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "fee-before-fresh-book",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "fee-before-fresh-book");
+
+    expect(calls.slice(0, 2)).toEqual(["fee", "book"]);
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId).state).toBe("HEALTHY");
     env.executor.close();
   });
 
@@ -1487,6 +1529,7 @@ describe("PaperExecutor", () => {
       [{ price: "0.2", size: "1000" }],
       "2026-07-07T23:59:55.000Z",
     );
+    env.market.book = { ...env.market.book, receivedAt: "2026-07-07T23:59:55.000Z" };
 
     await expect(env.executor.checkStopLosses(env.accountId)).resolves.toEqual([]);
 
@@ -1498,6 +1541,10 @@ describe("PaperExecutor", () => {
     expect((database.prepare("SELECT status FROM paper_positions").get() as { status: string }).status)
       .toBe("FROZEN");
     database.close();
+    expect(env.executor.acceptanceSummary(env.accountId).marketData).toMatchObject({
+      blockerCount: 1,
+      quarantineCount: 0,
+    });
     env.executor.close();
   });
 
@@ -2096,6 +2143,7 @@ describe("PaperExecutor", () => {
       [{ price: "0.4", size: "1000" }],
       "2026-07-07T23:59:55.000Z",
     );
+    env.market.book = { ...env.market.book, receivedAt: "2026-07-07T23:59:55.000Z" };
 
     const snapshot = await env.executor.accountSnapshot(env.accountId);
 

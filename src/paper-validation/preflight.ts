@@ -15,6 +15,7 @@ interface PreMigrationCampaignRow {
   config_version: string;
   created_at: string;
   state: string | null;
+  latest_report_json: string | null;
 }
 
 function sha256(value: unknown): string {
@@ -43,7 +44,10 @@ function campaignRows(database: DatabaseSync): PreMigrationCampaignRow[] {
     `SELECT c.campaign_id,c.core_compatibility_hash,c.config_version,c.created_at,
             (SELECT t.to_state FROM paper_validation_transitions t
              WHERE t.entity_type='CAMPAIGN' AND t.campaign_id=c.campaign_id
-             ORDER BY t.sequence DESC LIMIT 1) state
+             ORDER BY t.sequence DESC LIMIT 1) state,
+            (SELECT r.report_json FROM paper_validation_reports r
+             WHERE r.campaign_id=c.campaign_id AND r.report_scope='CAMPAIGN'
+             ORDER BY r.created_at DESC,r.report_id DESC LIMIT 1) latest_report_json
      FROM paper_validation_campaigns c
      ORDER BY c.created_at DESC,c.campaign_id DESC`,
   ).all() as unknown as PreMigrationCampaignRow[];
@@ -167,23 +171,45 @@ function insertFreezeTransition(database: DatabaseSync, input: {
 export function assertPaperCampaignPreMigrationCompatible(input: {
   databasePath: string;
   manifest: CoreCompatibilityManifest;
-}): { campaignId: string | null; campaignState: string | null } {
-  if (!existsSync(input.databasePath)) return { campaignId: null, campaignState: null };
+}): {
+  campaignId: string | null;
+  campaignState: string | null;
+  campaignCoreCompatibilityHash: string | null;
+  campaignBlockers: string[];
+} {
+  if (!existsSync(input.databasePath)) {
+    return { campaignId: null, campaignState: null, campaignCoreCompatibilityHash: null, campaignBlockers: [] };
+  }
   const database = new DatabaseSync(input.databasePath, { readOnly: true });
   database.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=5000;");
   try {
     const safetyTableExists = tableExists(database, "live_gate_state");
     if (safetyTableExists) assertSafeDatabase(database);
-    if (!tableExists(database, "paper_validation_campaigns")) return { campaignId: null, campaignState: null };
+    if (!tableExists(database, "paper_validation_campaigns")) {
+      return { campaignId: null, campaignState: null, campaignCoreCompatibilityHash: null, campaignBlockers: [] };
+    }
     if (!safetyTableExists) throw new Error("PAPER_CAMPAIGN_UNSAFE_DATABASE:MISSING:MISSING");
     const row = selectedCampaign(database);
-    if (!row) return { campaignId: null, campaignState: null };
+    if (!row) return { campaignId: null, campaignState: null, campaignCoreCompatibilityHash: null, campaignBlockers: [] };
     assertKnownCampaignState(row);
     const currentHash = computeCoreCompatibilityHash(input.manifest);
     if (ACTIVE_CAMPAIGN_STATES.has(row.state) && row.core_compatibility_hash !== currentHash) {
       throw new Error(`ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:${row.campaign_id}`);
     }
-    return { campaignId: row.campaign_id, campaignState: row.state };
+    let campaignBlockers: string[] = [];
+    if (row.latest_report_json !== null) {
+      const parsed = JSON.parse(row.latest_report_json) as { blockers?: unknown };
+      if (!Array.isArray(parsed.blockers) || parsed.blockers.some((blocker) => typeof blocker !== "string")) {
+        throw new Error(`PAPER_CAMPAIGN_BLOCKERS_INVALID_BEFORE_MIGRATION:${row.campaign_id}`);
+      }
+      campaignBlockers = [...new Set(parsed.blockers)].sort();
+    }
+    return {
+      campaignId: row.campaign_id,
+      campaignState: row.state,
+      campaignCoreCompatibilityHash: row.core_compatibility_hash,
+      campaignBlockers,
+    };
   } finally {
     database.close();
   }

@@ -2,6 +2,43 @@ import type { CampaignSnapshot } from "./types.js";
 
 export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
 
+export type PaperCampaignStartDisposition = "CONTINUE" | "CREATE_REPLACEMENT" | "REFUSE_TERMINAL";
+
+export function paperCampaignReplacementAuthorized(input: {
+  campaignState: string;
+  blockers: readonly string[];
+  previousCoreCompatibilityHash: string;
+  currentCoreCompatibilityHash: string;
+}): boolean {
+  if (input.previousCoreCompatibilityHash === input.currentCoreCompatibilityHash) return false;
+  if (input.campaignState === "FROZEN" && input.blockers.length === 0) return true;
+  if (input.campaignState !== "BLOCKED") return false;
+  if (!input.blockers.includes("UNRECOVERED_MARKET_DATA_BLOCKER")) return false;
+  return input.blockers.every((blocker) => (
+    blocker === "UNRECOVERED_MARKET_DATA_BLOCKER"
+    || blocker === "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS"
+    || blocker === "PAPER_EXIT_CODE:1"
+  ));
+}
+
+/**
+ * A user click may create a replacement only when the last Campaign is already
+ * terminal and belongs to a different core. Same-core terminal evidence stays
+ * closed and requires diagnosis instead of being silently retried.
+ */
+export function paperCampaignStartDisposition(
+  snapshot: CampaignSnapshot,
+  currentCoreCompatibilityHash: string,
+): PaperCampaignStartDisposition {
+  if (!["PASSED", "BLOCKED", "FROZEN"].includes(snapshot.state)) return "CONTINUE";
+  return paperCampaignReplacementAuthorized({
+    campaignState: snapshot.state,
+    blockers: snapshot.blockers,
+    previousCoreCompatibilityHash: snapshot.coreCompatibilityHash,
+    currentCoreCompatibilityHash,
+  }) ? "CREATE_REPLACEMENT" : "REFUSE_TERMINAL";
+}
+
 /**
  * A campaign that has already met both runtime gates but is still missing
  * scenario coverage must keep running useful 12-hour sessions. The service's

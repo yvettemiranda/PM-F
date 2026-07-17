@@ -1,7 +1,8 @@
 # Bugs And Risks
 
 ## Active blockers
-- 新版本 2 小时 Paper 资格 Session 尚未执行，因此 Campaign 尚未 qualified，累计长测尚未开放。
+- 市场数据修复后的新核心 2 小时 Paper 资格 Session 尚未执行，因此新 Campaign 尚未 qualified，累计长测尚未开放。
+- 旧 Campaign `PC-6D45BA731F325AA7370D` 已 BLOCKED；其 12 小时失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
 - 即使资格通过，仍需累计有效运行 72 小时、至少一个连续 12 小时 Session，并满足最终一致性与覆盖门槛。
 - 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景可能需要继续运行或使用明确标注的同版本隔离证据；不能伪装成自然行情。
 - 当前环境历史 geoblock 曾返回受限，CLOB clock offset 曾不安全；Live 前必须在合法环境重新验证，禁止绕过。
@@ -15,6 +16,11 @@
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
 
 ## Resolved in current implementation
+- 2026-07-17 的 12 小时运行发现：官方显式零费率未被接受、慢 fee 请求会让先取回的盘口变旧、源端内容 timestamp 在盘口不变化时可能长期不更新、无暴露市场冻结会误伤整场。上述四项已修复并补真实公开接口只读验证。
+- Orderbook freshness 现使用收到时间、收到后的等待时间及公开请求 latency 的保守总和；raw 源时间仅作不可变审计和未来时间异常检查。
+- 无暴露市场异常降为 quarantine；存在 Position、WAITING/EXIT/STOP pending 或 active Reservation 时仍保守 blocker。
+- 最终停止和 Crash Recovery 明确阻断任何 active Reservation；不能用账本“彼此一致”掩盖资金尚未释放。
+- 终态 Campaign 替换白名单已收紧：必须是不同核心、包含 `UNRECOVERED_MARKET_DATA_BLOCKER`、退出码只能是 1，且新旧关系写入 append-only transition；crash/kill/未知 blocker 不能借机重开。
 - 首次资格启动发现仓库冻结 pnpm `11.7.0`、当前 Codex 运行时为 `11.9.0`；入口在 Campaign 创建前安全拒绝，现已将冻结版本对齐为 `11.9.0`，未混入任何运行时长或模拟数据。
 - 旧 Phase 0 校验把三个必然缺失的历史输入和 Data API offset 限制一律视为不可启动；现仅允许精确、可核验的已知不完整原因，并在全部报告中明确保留 `phase0ReplayStatus`，未知原因仍 fail closed。
 - Phase 0/Replay 数据库准备改为先备份、再迁移、后校验；current schema 会核对连续 marker、关键表列、唯一索引和全部 109 个安全触发器。

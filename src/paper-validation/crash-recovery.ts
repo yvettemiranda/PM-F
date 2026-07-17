@@ -489,6 +489,8 @@ export function evaluateInterruptedSessionRecovery(input: {
     ...input.lingeringProcesses.map((process) => `RECOVERY_PROCESS_STILL_RUNNING:${process.role}:${process.pid}`),
     ...input.integrity.blockers,
     ...(input.acceptance.consistency.passed ? [] : ["PAPER_CONSISTENCY_FAILED"]),
+    ...(input.acceptance.consistency.reservations.activeReservationsMicros === "0"
+      ? [] : ["ACTIVE_RESERVATION_REMAINS"]),
     ...(input.acceptance.marketData.blockerCount === 0 ? [] : ["UNRECOVERED_MARKET_DATA_BLOCKER"]),
     ...(latest ? [] : ["RECOVERY_VALIDATION_CHECKPOINT_MISSING"]),
     ...(latest && ["SAFE_STOP", "CRASH_RECOVERY"].includes(latest.checkpointKind)

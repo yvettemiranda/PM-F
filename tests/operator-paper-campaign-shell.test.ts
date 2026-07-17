@@ -172,6 +172,7 @@ describe("Paper Campaign operator shell", () => {
     expect(bundleAt).toBeGreaterThan(finishStart);
     expect(releaseAt).toBeGreaterThan(bundleAt);
     expect(launcher).toContain("abort_if_stop_requested");
+    expect(launcher).toContain("PREFLIGHT_REPLACEMENT_REQUIRED");
     expect(launcher).toContain("--test-results=\"$TEST_RESULTS_FILE\"");
     expect(launcher).toContain("--phase0-results=\"$PHASE0_RESULT_FILE\"");
     expect(launcher).toContain("--replay-results=\"$REPLAY_RESULT_FILE\"");
@@ -189,7 +190,9 @@ describe("Paper Campaign operator shell", () => {
     expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("ensure_phase0_database"));
     expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("paper-campaign-preflight.ts"));
     expect(launcher.indexOf("operator_start_keep_awake")).toBeLessThan(launcher.indexOf("ensure_phase0_database"));
-    const existingCampaignGuard = launcher.indexOf('if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" ]]');
+    const existingCampaignGuard = launcher.indexOf(
+      'if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" && "$PREFLIGHT_REPLACEMENT_REQUIRED" != "yes" ]]',
+    );
     expect(existingCampaignGuard).toBeGreaterThan(launcher.indexOf("paper-campaign-preflight.ts"));
     expect(existingCampaignGuard).toBeLessThan(launcher.indexOf('title "首次运行：自动完成隔离验证"'));
     expect(launcher).toContain("为保护崩溃恢复游标，本次不会先刷新 Phase 0 数据");

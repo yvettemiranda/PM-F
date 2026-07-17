@@ -5,6 +5,7 @@ import {
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
+import { paperCampaignReplacementAuthorized } from "../paper-validation/operator-policy.js";
 import {
   assertPaperCampaignPreMigrationCompatible,
   freezePaperCampaignPreMigrationMismatch,
@@ -14,6 +15,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sourceVersion = resolveSourceVersion(projectRoot);
 if (sourceVersion.dirty) throw new Error("PAPER_CAMPAIGN_REQUIRES_CLEAN_SOURCE");
 const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
+const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
 const databasePath = resolve(projectRoot, "data/phase0/phase0.sqlite");
 let result: ReturnType<typeof assertPaperCampaignPreMigrationCompatible>;
 try {
@@ -32,7 +34,7 @@ try {
     reason: "CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION",
     ...frozen,
     sourceCodeCommit: sourceVersion.commit,
-    coreCompatibilityHash: computeCoreCompatibilityHash(manifest),
+    coreCompatibilityHash,
     safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
   }));
   throw new Error(`PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION:${frozen.campaignId ?? "UNKNOWN"}`);
@@ -40,7 +42,15 @@ try {
 console.log(JSON.stringify({
   status: "PASSED",
   ...result,
+  replacementRequired: result.campaignId !== null
+    && result.campaignCoreCompatibilityHash !== null
+    && paperCampaignReplacementAuthorized({
+      campaignState: result.campaignState ?? "UNKNOWN",
+      blockers: result.campaignBlockers,
+      previousCoreCompatibilityHash: result.campaignCoreCompatibilityHash,
+      currentCoreCompatibilityHash: coreCompatibilityHash,
+    }),
   sourceCodeCommit: sourceVersion.commit,
-  coreCompatibilityHash: computeCoreCompatibilityHash(manifest),
+  coreCompatibilityHash,
   safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
 }));

@@ -65,6 +65,8 @@ export interface PaperAcceptanceSummary {
   marketData: {
     blockerCount: number;
     blockers: PaperMarketDataAcceptanceRecord[];
+    quarantineCount: number;
+    quarantined: PaperMarketDataAcceptanceRecord[];
     records: PaperMarketDataAcceptanceRecord[];
   };
 }
@@ -279,7 +281,9 @@ export class PaperAcceptanceSummaryService {
          ORDER BY asset_id,condition_id`,
       ).all(paperAccountId) as unknown as MarketDataHealthRow[];
       const marketRecords = marketRows.map(toMarketDataRecord);
-      const blockers = marketRecords.filter((row) => row.state === "DEGRADED" || row.state === "FROZEN");
+      const unhealthyMarketRecords = marketRecords.filter(
+        (row) => row.state === "DEGRADED" || row.state === "FROZEN",
+      );
 
       const settlementObserved = (database.prepare(
         `SELECT count(*) count
@@ -306,6 +310,13 @@ export class PaperAcceptanceSummaryService {
         && negativeValues.length === 0
         && orphanDetails.length === 0
         && aggregateIssues.length === 0;
+      const blockers = unhealthyMarketRecords.filter(
+        (row) => !consistencyPassed || this.marketHasExposure(database, paperAccountId, row),
+      );
+      const blockedMarkets = new Set(blockers.map((row) => `${row.assetId}\u0000${row.conditionId}`));
+      const quarantined = unhealthyMarketRecords.filter(
+        (row) => !blockedMarkets.has(`${row.assetId}\u0000${row.conditionId}`),
+      );
       return {
         paperAccountId,
         targetId: account.target_id ?? "UNBOUND",
@@ -343,12 +354,53 @@ export class PaperAcceptanceSummaryService {
         marketData: {
           blockerCount: blockers.length,
           blockers,
+          quarantineCount: quarantined.length,
+          quarantined,
           records: marketRecords,
         },
       };
     } finally {
       database.close();
     }
+  }
+
+  private marketHasExposure(
+    database: DatabaseSync,
+    paperAccountId: string,
+    market: PaperMarketDataAcceptanceRecord,
+  ): boolean {
+    const exposure = database.prepare(
+      `SELECT
+         EXISTS(
+           SELECT 1 FROM paper_positions p
+           WHERE p.paper_account_id=? AND p.asset_id=? AND p.condition_id=?
+             AND p.current_size_micros!='0' AND p.status NOT IN ('CLOSED','REDEEMED')
+         ) position_exposure,
+         EXISTS(
+           SELECT 1 FROM paper_executions e
+           WHERE e.paper_account_id=? AND e.asset_id=? AND e.condition_id=?
+             AND e.state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
+         ) pending_execution,
+         EXISTS(
+           SELECT 1 FROM paper_reservations r
+           JOIN paper_executions e ON e.paper_execution_id=r.paper_execution_id
+           WHERE r.paper_account_id=? AND e.asset_id=? AND e.condition_id=?
+             AND r.status='ACTIVE' AND r.remaining_amount_micros!='0'
+         ) active_reservation`,
+    ).get(
+      paperAccountId,
+      market.assetId,
+      market.conditionId,
+      paperAccountId,
+      market.assetId,
+      market.conditionId,
+      paperAccountId,
+      market.assetId,
+      market.conditionId,
+    ) as { position_exposure: number; pending_execution: number; active_reservation: number };
+    return exposure.position_exposure === 1
+      || exposure.pending_execution === 1
+      || exposure.active_reservation === 1;
   }
 
   private reservationConsistency(

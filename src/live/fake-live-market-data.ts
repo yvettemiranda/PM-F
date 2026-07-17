@@ -9,6 +9,7 @@ import type { LiveMarketDataProvider } from "./live-market-data.js";
 export interface FakeLiveMarketDataOptions {
   now?: () => Date;
   marketSnapshotTime?: string;
+  receivedAt?: string;
   bids?: ExecutionOrderbookLevel[];
   asks?: ExecutionOrderbookLevel[];
   minOrderSize?: string;
@@ -33,7 +34,7 @@ export class FakeLiveMarketDataProvider implements LiveMarketDataProvider {
   }
 
   async orderbook(assetId: string, conditionId: string): Promise<ExecutionOrderbookSnapshot> {
-    const receivedAt = this.now().toISOString();
+    const receivedAt = this.options.receivedAt ?? this.now().toISOString();
     return {
       assetId,
       conditionId,

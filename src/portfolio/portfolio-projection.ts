@@ -5,9 +5,14 @@ import type { SourceVersion } from "../infra/source-version.js";
 import {
   assertPaperMarketSnapshotCaptureBinding,
   persistPublicMarketCapture,
+  publicFeeCaptureEndpoint,
 } from "../infra/sqlite/public-market-capture.js";
 import { calculateUnrealizedPnl } from "../pnl/pnl-model.js";
-import { isOrderbookUnavailableError } from "../execution/market-data.js";
+import {
+  executableOrderbookAgeMs,
+  isOrderbookUnavailableError,
+  loadFeeThenOrderbook,
+} from "../execution/market-data.js";
 import { orderbookConstraintAvailability, parseMarketOrderConstraints } from "../execution/market-order-constraints.js";
 import { matchPaperSell } from "../paper/matching.js";
 import type {
@@ -96,10 +101,12 @@ export class PortfolioProjectionService {
         continue;
       }
       try {
-        const [book, fee] = await Promise.all([
-          this.marketData.orderbook(first.asset_id, first.condition_id, signal),
-          this.marketData.fee(first.asset_id, first.condition_id, signal),
-        ]);
+        const { book, fee } = await loadFeeThenOrderbook(
+          this.marketData,
+          first.asset_id,
+          first.condition_id,
+          signal,
+        );
         if (signal?.aborted) {
           unpricedPositionCount += group.length;
           continue;
@@ -137,7 +144,7 @@ export class PortfolioProjectionService {
           unpricedPositionCount += group.length;
           continue;
         }
-        const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+        const age = executableOrderbookAgeMs(book, this.now().valueOf());
         if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
           this.marketHealth?.onFailure(
             accountId,
@@ -385,7 +392,7 @@ export class PortfolioProjectionService {
       fetchedAt: book.receivedAt,
     });
     const feeCaptureId = persistPublicMarketCapture(this.database, fee.publicCapture, {
-      endpoint: "clob-market-info",
+      endpoint: publicFeeCaptureEndpoint(fee.publicCapture),
       requestUrl: fee.sourceUrl,
       fetchedAt: fee.snapshotTime,
     });

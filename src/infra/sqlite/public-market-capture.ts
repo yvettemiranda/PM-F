@@ -4,6 +4,16 @@ import { VERSIONS } from "../../domain/versioning.js";
 import { captureIdentityFromResponseJson } from "../../services/capture-manifest.js";
 import { storeCompressedCapturePayload } from "./capture-payload.js";
 
+export function publicFeeCaptureEndpoint(
+  capture: PublicMarketDataCapture | undefined,
+): "clob-market-info" | "clob-fee-rate" {
+  if (!capture) return "clob-market-info";
+  if (capture.endpoint === "clob-market-info" || capture.endpoint === "clob-fee-rate") {
+    return capture.endpoint;
+  }
+  throw new Error("PUBLIC_FEE_CAPTURE_ENDPOINT_INVALID");
+}
+
 export function persistPublicMarketCapture(
   database: DatabaseSync,
   capture: PublicMarketDataCapture | undefined,

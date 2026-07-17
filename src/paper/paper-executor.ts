@@ -8,7 +8,11 @@ import {
 } from "../domain/state-machine.js";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
-import { isOrderbookUnavailableError } from "../execution/market-data.js";
+import {
+  executableOrderbookAgeMs,
+  isOrderbookUnavailableError,
+  loadFeeThenOrderbook,
+} from "../execution/market-data.js";
 import {
   evaluateBuyMarketConstraint,
   evaluateSellMarketConstraint,
@@ -36,6 +40,7 @@ import { resolveSourceVersion } from "../infra/source-version.js";
 import {
   assertPaperMarketSnapshotCaptureBinding,
   persistPublicMarketCapture,
+  publicFeeCaptureEndpoint,
 } from "../infra/sqlite/public-market-capture.js";
 import { calculateRealizedPnl } from "../pnl/pnl-model.js";
 import { PortfolioProjectionService } from "../portfolio/portfolio-projection.js";
@@ -469,17 +474,19 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     for (const row of rows) {
       if (signal?.aborted) break;
       try {
-        const [book, fee] = await Promise.all([
-          this.marketData.orderbook(row.asset_id, row.condition_id, signal),
-          this.marketData.fee(row.asset_id, row.condition_id, signal),
-        ]);
+        const { book, fee } = await loadFeeThenOrderbook(
+          this.marketData,
+          row.asset_id,
+          row.condition_id,
+          signal,
+        );
         if (signal?.aborted) break;
         const identityError = this.marketDataIdentityError(row.asset_id, row.condition_id, book, fee);
         if (identityError) {
           this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, identityError, identityError);
           continue;
         }
-        const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+        const age = executableOrderbookAgeMs(book, this.now().valueOf());
         if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
           this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, "ORDERBOOK_STALE", `Orderbook age ${String(age)}ms`);
           continue;
@@ -528,10 +535,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     let book: PaperOrderbookSnapshot;
     let fee: PaperFeeSnapshot;
     try {
-      [book, fee] = await Promise.all([
-        this.marketData.orderbook(execution.asset_id, execution.condition_id, signal),
-        this.marketData.fee(execution.asset_id, execution.condition_id, signal),
-      ]);
+      ({ book, fee } = await loadFeeThenOrderbook(
+        this.marketData,
+        execution.asset_id,
+        execution.condition_id,
+        signal,
+      ));
     } catch (error) {
       if (isOrderbookUnavailableError(error)) {
         await this.handleOrderbookUnavailable(execution, error, signal);
@@ -565,7 +574,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.recordMarketDataFailure(execution.paper_account_id, execution.asset_id, execution.condition_id, identityError, identityError);
       return execution.state;
     }
-    const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+    const age = executableOrderbookAgeMs(book, this.now().valueOf());
     if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
       this.recordMarketDataFailure(
         execution.paper_account_id,
@@ -654,7 +663,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         this.recordMarketDataFailure(accountId, first.asset_id, first.condition_id, identityError, identityError);
         continue;
       }
-      const age = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+      const age = executableOrderbookAgeMs(book, this.now().valueOf());
       if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
         this.recordMarketDataFailure(
           accountId,
@@ -1796,7 +1805,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       fetchedAt: book.receivedAt,
     });
     const feeCaptureId = persistPublicMarketCapture(this.database, fee.publicCapture, {
-      endpoint: "clob-market-info",
+      endpoint: publicFeeCaptureEndpoint(fee.publicCapture),
       requestUrl: fee.sourceUrl,
       fetchedAt: fee.snapshotTime,
     });

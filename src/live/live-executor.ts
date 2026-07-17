@@ -16,7 +16,11 @@ import { RULESET, RULESET_HASH } from "../domain/versioning.js";
 import { registeredExecutionRules, registeredStopLossRules } from "../domain/ruleset-registry.js";
 import { executableSellVwap, matchExecutionBuy, matchExecutionSell, type ExecutionMatchResult } from "../execution/orderbook-matching.js";
 import { evaluateBuyMarketConstraint, evaluateSellMarketConstraint } from "../execution/market-order-constraints.js";
-import type { ExecutionFeeSnapshot, ExecutionOrderbookSnapshot } from "../execution/market-data.js";
+import {
+  executableOrderbookAgeMs,
+  type ExecutionFeeSnapshot,
+  type ExecutionOrderbookSnapshot,
+} from "../execution/market-data.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
 import { DisabledOrderAdapter } from "./disabled-order-adapter.js";
 import { DisabledRedeemAdapter } from "./disabled-redeem-adapter.js";
@@ -445,20 +449,20 @@ export class LiveExecutor implements ExecutorInterface {
     for (const position of positions) {
       try {
         if (this.marketDataProvider.providerType === "DISABLED") throw new Error("LIVE_MARKET_DATA_DISABLED");
-        const [book, fee] = await Promise.all([
-          withExternalTimeout(
-            "VALUATION_ORDERBOOK",
-            this.externalCallTimeoutMs,
-            () => this.marketDataProvider.orderbook(position.asset_id, position.condition_id),
-          ),
-          withExternalTimeout(
-            "VALUATION_FEE",
-            this.externalCallTimeoutMs,
-            () => this.marketDataProvider.fee(position.asset_id, position.condition_id),
-          ),
-        ]);
-        const ageMs = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
-        if (ageMs < 0 || ageMs > RULESET.orderbookMaxAgeMs) throw new Error("ORDERBOOK_STALE");
+        const fee = await withExternalTimeout(
+          "VALUATION_FEE",
+          this.externalCallTimeoutMs,
+          () => this.marketDataProvider.fee(position.asset_id, position.condition_id),
+        );
+        const book = await withExternalTimeout(
+          "VALUATION_ORDERBOOK",
+          this.externalCallTimeoutMs,
+          () => this.marketDataProvider.orderbook(position.asset_id, position.condition_id),
+        );
+        const ageMs = executableOrderbookAgeMs(book, this.now().valueOf());
+        if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > RULESET.orderbookMaxAgeMs) {
+          throw new Error("ORDERBOOK_STALE");
+        }
         if (fee.status !== "AVAILABLE" || fee.feeRatePpm === null || fee.exponent === null) {
           throw new Error("FEE_MODEL_UNAVAILABLE");
         }
@@ -657,7 +661,7 @@ export class LiveExecutor implements ExecutorInterface {
           );
           continue;
         }
-        const ageMs = this.now().valueOf() - Date.parse(book.marketSnapshotTime);
+        const ageMs = executableOrderbookAgeMs(book, this.now().valueOf());
         if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > RULESET.orderbookMaxAgeMs) {
           blockers.push({ positionId: position.live_position_id, reason: "ORDERBOOK_STALE" });
           this.store.audit("LIVE_POSITION", position.live_position_id, "stop_loss_orderbook_stale", "ORDERBOOK_STALE", {
@@ -1348,8 +1352,12 @@ export class LiveExecutor implements ExecutorInterface {
       this.store.transaction(() => this.store.failPendingExecution(execution!, `LIVE_ORDER_SIGNING_FAILED:${reason}`));
       return { mode: "LIVE", executionId: execution.live_execution_id, state: "FAILED" };
     }
-    const signedSnapshotAge = this.now().valueOf() - Date.parse(plan.book.marketSnapshotTime);
-    if (signedSnapshotAge < 0 || signedSnapshotAge > RULESET.orderbookMaxAgeMs) {
+    const signedSnapshotAge = executableOrderbookAgeMs(plan.book, this.now().valueOf());
+    if (
+      !Number.isFinite(signedSnapshotAge)
+      || signedSnapshotAge < 0
+      || signedSnapshotAge > RULESET.orderbookMaxAgeMs
+    ) {
       this.store.audit("LIVE_EXECUTION", execution.live_execution_id, "signing_snapshot_stale", "ORDERBOOK_STALE_AFTER_SIGNING", {
         marketSnapshotTime: plan.book.marketSnapshotTime,
         dataAgeMs: signedSnapshotAge,
@@ -1701,25 +1709,22 @@ export class LiveExecutor implements ExecutorInterface {
     side: LiveOrderSide,
     approval: ApprovedRiskDecisionRow,
   ): Promise<LiveMarketPlan> {
-    const [book, fee] = await Promise.all([
-      withExternalTimeout(
-        "EXECUTION_ORDERBOOK",
-        this.externalCallTimeoutMs,
-        () => this.marketDataProvider.orderbook(execution.asset_id, execution.condition_id),
-      ),
-      withExternalTimeout(
-        "EXECUTION_FEE",
-        this.externalCallTimeoutMs,
-        () => this.marketDataProvider.fee(execution.asset_id, execution.condition_id),
-      ),
-    ]);
+    const fee = await withExternalTimeout(
+      "EXECUTION_FEE",
+      this.externalCallTimeoutMs,
+      () => this.marketDataProvider.fee(execution.asset_id, execution.condition_id),
+    );
+    const book = await withExternalTimeout(
+      "EXECUTION_ORDERBOOK",
+      this.externalCallTimeoutMs,
+      () => this.marketDataProvider.orderbook(execution.asset_id, execution.condition_id),
+    );
     if (book.assetId !== execution.asset_id || book.conditionId.toLowerCase() !== execution.condition_id.toLowerCase()) {
       throw new Error("LIVE_ORDERBOOK_IDENTITY_MISMATCH");
     }
     if (fee.assetId !== execution.asset_id) throw new Error("LIVE_FEE_IDENTITY_MISMATCH");
-    const snapshotTimestamp = Date.parse(book.marketSnapshotTime);
-    const ageMs = this.now().valueOf() - snapshotTimestamp;
-    if (!Number.isFinite(snapshotTimestamp)) throw new Error("LIVE_ORDERBOOK_TIMESTAMP_INVALID");
+    const ageMs = executableOrderbookAgeMs(book, this.now().valueOf());
+    if (!Number.isFinite(ageMs)) throw new Error("LIVE_ORDERBOOK_TIMESTAMP_INVALID");
     const target = BigInt(execution.target_price_units ?? "0");
     if (target <= 0n || target >= PRICE_SCALE) throw new Error("LIVE_TARGET_PRICE_INVALID");
     const executionRules = registeredExecutionRules(this.database, execution.ruleset_hash);

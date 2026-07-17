@@ -83,6 +83,9 @@ export function evaluatePaperShortGate(input: PaperShortGateInput): PaperShortGa
   if (input.runnerErrorCount > 0) blockers.add("PAPER_RUNNER_ERRORS");
   if (!input.versionsMatch) blockers.add("VERSION_MISMATCH");
   if (!input.acceptance.consistency.passed) blockers.add("PAPER_CONSISTENCY_FAILED");
+  if (input.acceptance.consistency.reservations.activeReservationsMicros !== "0") {
+    blockers.add("ACTIVE_RESERVATION_REMAINS");
+  }
   if (input.acceptance.marketData.blockerCount > 0) blockers.add("UNRECOVERED_MARKET_DATA_BLOCKER");
   if (input.acceptance.funnel.signals.unconsumedEligible > 0) blockers.add("ELIGIBLE_SIGNAL_UNCONSUMED");
   for (const reason of Object.keys(input.acceptance.funnel.risk.rejectReasons)) {

@@ -89,7 +89,7 @@ function seedExecutionEvidence(input: {
   databasePath: string;
   targetId: string;
   sourceEventKey: string;
-}, sourceMode: "OFFICIAL" | "OFFICIAL_MISSING" | "FAKE" = "OFFICIAL"): {
+}, sourceMode: "OFFICIAL" | "OFFICIAL_FEE_RATE" | "OFFICIAL_FEE_RATE_NONZERO" | "OFFICIAL_FEE_RATE_EXTRA_QUERY" | "OFFICIAL_MISSING" | "FAKE" = "OFFICIAL"): {
   executionId: string;
   orderId: string;
   feeSnapshotId: string;
@@ -129,13 +129,15 @@ function seedExecutionEvidence(input: {
   const bookUrl = sourceMode !== "FAKE"
     ? `https://clob.polymarket.com/book?token_id=${encodeURIComponent(signal.asset_id)}`
     : "https://clob.test/book";
-  const feeUrl = sourceMode !== "FAKE"
-    ? `https://clob.polymarket.com/clob-markets/${encodeURIComponent(signal.condition_id)}`
+  const feeUrl = ["OFFICIAL_FEE_RATE", "OFFICIAL_FEE_RATE_NONZERO", "OFFICIAL_FEE_RATE_EXTRA_QUERY"].includes(sourceMode)
+    ? `https://clob.polymarket.com/fee-rate?token_id=${encodeURIComponent(signal.asset_id)}${sourceMode === "OFFICIAL_FEE_RATE_EXTRA_QUERY" ? "&unexpected=1" : ""}`
+    : sourceMode !== "FAKE"
+      ? `https://clob.polymarket.com/clob-markets/${encodeURIComponent(signal.condition_id)}`
     : "https://clob.test/fee";
   let bookCaptureId: string | null = null;
   let feeCaptureId: string | null = null;
 
-  if (sourceMode === "OFFICIAL") {
+  if (["OFFICIAL", "OFFICIAL_FEE_RATE", "OFFICIAL_FEE_RATE_NONZERO", "OFFICIAL_FEE_RATE_EXTRA_QUERY"].includes(sourceMode)) {
     for (const capture of [
       {
         endpoint: "clob-orderbook",
@@ -152,21 +154,27 @@ function seedExecutionEvidence(input: {
         },
       },
       {
-        endpoint: "clob-market-info",
+        endpoint: ["OFFICIAL_FEE_RATE", "OFFICIAL_FEE_RATE_NONZERO", "OFFICIAL_FEE_RATE_EXTRA_QUERY"].includes(sourceMode)
+          ? "clob-fee-rate"
+          : "clob-market-info",
         url: feeUrl,
-        data: {
-          tbf: 0,
-          mbf: 0,
-          t: [{ t: signal.asset_id, o: "Yes" }],
-          mts: 1,
-          mos: 1,
-        },
+        data: ["OFFICIAL_FEE_RATE", "OFFICIAL_FEE_RATE_NONZERO", "OFFICIAL_FEE_RATE_EXTRA_QUERY"].includes(sourceMode)
+          ? { base_fee: sourceMode === "OFFICIAL_FEE_RATE_NONZERO" ? 1 : 0 }
+          : {
+            tbf: 0,
+            mbf: 0,
+            t: [{ t: signal.asset_id, o: "Yes" }],
+            mts: 1,
+            mos: 1,
+          },
       },
     ]) {
       const responseJson = JSON.stringify(capture.data);
       const identity = captureIdentityFromResponseJson(capture.url, orderTime, responseJson);
       if (capture.endpoint === "clob-orderbook") bookCaptureId = identity.captureId;
-      if (capture.endpoint === "clob-market-info") feeCaptureId = identity.captureId;
+      if (capture.endpoint === "clob-market-info" || capture.endpoint === "clob-fee-rate") {
+        feeCaptureId = identity.captureId;
+      }
       storeCompressedCapturePayload(database, identity.payloadSha256, responseJson, orderTime);
       database.prepare(
         `INSERT INTO api_captures(
@@ -247,7 +255,7 @@ function seedExecutionEvidence(input: {
       orderbook_snapshot_id,asset_id,condition_id,market_snapshot_time,received_at,
       data_age_ms,payload_hash,bids_json,asks_json,source_url,min_order_size,
       min_order_size_micros,tick_size,tick_size_units,source_capture_id,created_at
-    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, '1', '1000000',
+    ) VALUES (?, ?, ?, ?, ?, 10, ?, ?, ?, ?, '1', '1000000',
       '0.01', '10000000000000000', ?, ?)`,
   ).run(
     orderbookId, signal.asset_id, signal.condition_id, orderTime, orderTime, payloadHash,
@@ -407,6 +415,67 @@ describe("real replay validation evidence", () => {
       coreHash,
       sourceVersion.commit,
     )).not.toThrow();
+  });
+
+  it("accepts an immutable official explicit-zero fee-rate capture", () => {
+    const env = fixture();
+    const seeded = seedExecutionEvidence(env, "OFFICIAL_FEE_RATE");
+    const coreHash = "9".repeat(64);
+
+    const artifact = buildReplayValidationEvidenceArtifact({
+      databasePath: env.databasePath,
+      source: "REAL_EXECUTION_REPLAY",
+      coverage: ["FEE", "FILL", "ORDER"],
+      coreCompatibilityHash: coreHash,
+      sourceCodeCommit: sourceVersion.commit,
+      sourceEventKey: env.sourceEventKey,
+      replayRunId: env.replayRunId,
+      paperExecutionId: seeded.executionId,
+      paperOrderId: seeded.orderId,
+    });
+
+    expect(artifact.execution).toMatchObject({
+      feeSnapshotId: seeded.feeSnapshotId,
+      feePublicCaptureId: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(() => assertReplayValidationEvidenceArtifactAgainstDatabase(
+      artifact,
+      env.databasePath,
+      coreHash,
+      sourceVersion.commit,
+    )).not.toThrow();
+  });
+
+  it("rejects a non-zero fee-rate capture that lacks the complete fee curve", () => {
+    const env = fixture();
+    const seeded = seedExecutionEvidence(env, "OFFICIAL_FEE_RATE_NONZERO");
+    expect(() => buildReplayValidationEvidenceArtifact({
+      databasePath: env.databasePath,
+      source: "REAL_EXECUTION_REPLAY",
+      coverage: ["FEE"],
+      coreCompatibilityHash: "8".repeat(64),
+      sourceCodeCommit: sourceVersion.commit,
+      sourceEventKey: env.sourceEventKey,
+      replayRunId: env.replayRunId,
+      paperExecutionId: seeded.executionId,
+      paperOrderId: seeded.orderId,
+    })).toThrow("REPLAY_EVIDENCE_PUBLIC_FEE_CAPTURE_MISMATCH");
+  });
+
+  it("rejects an official-looking fee-rate URL with unexpected query parameters", () => {
+    const env = fixture();
+    const seeded = seedExecutionEvidence(env, "OFFICIAL_FEE_RATE_EXTRA_QUERY");
+    expect(() => buildReplayValidationEvidenceArtifact({
+      databasePath: env.databasePath,
+      source: "REAL_EXECUTION_REPLAY",
+      coverage: ["FEE"],
+      coreCompatibilityHash: "7".repeat(64),
+      sourceCodeCommit: sourceVersion.commit,
+      sourceEventKey: env.sourceEventKey,
+      replayRunId: env.replayRunId,
+      paperExecutionId: seeded.executionId,
+      paperOrderId: seeded.orderId,
+    })).toThrow("REPLAY_EVIDENCE_PUBLIC_MARKET_CAPTURE_SOURCE_INVALID");
   });
 
   it("rejects fake market sources before they can qualify as real execution replay", () => {

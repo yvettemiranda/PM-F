@@ -12,7 +12,7 @@ export interface ExecutionOrderbookLevel {
  * omit this field, so their snapshots can never qualify as real replay proof.
  */
 export interface PublicMarketDataCapture {
-  endpoint: "clob-orderbook" | "clob-market-info";
+  endpoint: "clob-orderbook" | "clob-market-info" | "clob-fee-rate";
   requestUrl: string;
   fetchedAt: string;
   latencyMs: number;
@@ -80,6 +80,51 @@ export interface ExecutionMarketDataProvider {
   resolution(conditionId: string, assetId: string, signal?: AbortSignal): Promise<ExecutionResolutionSnapshot>;
 }
 
+/**
+ * Load fee evidence before the orderbook so a slower fee lookup cannot make an
+ * already-returned book cross the execution freshness boundary while waiting.
+ * The caller must still validate the source snapshot timestamp immediately.
+ */
+export async function loadFeeThenOrderbook(
+  provider: Pick<ExecutionMarketDataProvider, "fee" | "orderbook">,
+  assetId: string,
+  conditionId: string,
+  signal?: AbortSignal,
+): Promise<{ fee: ExecutionFeeSnapshot; book: ExecutionOrderbookSnapshot }> {
+  const fee = await provider.fee(assetId, conditionId, signal);
+  const book = await provider.orderbook(assetId, conditionId, signal);
+  return { fee, book };
+}
+
+/**
+ * Freshness is the age of this authoritative HTTP capture, not the age of the
+ * last orderbook content change. The raw source timestamp remains immutable
+ * audit evidence and is still rejected when invalid or in the future.
+ */
+export function executableOrderbookAgeMs(
+  book: Pick<ExecutionOrderbookSnapshot, "marketSnapshotTime" | "receivedAt" | "publicCapture">,
+  nowMs: number,
+): number {
+  const sourceTimeMs = Date.parse(book.marketSnapshotTime);
+  const receivedAtMs = Date.parse(book.receivedAt);
+  const requestLatencyMs = book.publicCapture?.endpoint === "clob-orderbook"
+    ? book.publicCapture.latencyMs
+    : 0;
+  if (
+    !Number.isFinite(nowMs)
+    || !Number.isFinite(sourceTimeMs)
+    || !Number.isFinite(receivedAtMs)
+    || !Number.isFinite(requestLatencyMs)
+    || requestLatencyMs < 0
+    || sourceTimeMs > nowMs
+  ) return Number.NaN;
+  // A fresh receipt can still be unsafe when the HTTP request itself took
+  // longer than the execution freshness budget. Conservatively age public
+  // captures from request start; fake/isolated snapshots have no capture and
+  // retain receipt-time semantics.
+  return Math.ceil(nowMs - receivedAtMs + requestLatencyMs);
+}
+
 function sourceTime(value: string): string {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) throw new Error(`Invalid orderbook timestamp: ${value}`);
@@ -132,17 +177,51 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
   }
 
   async fee(assetId: string, conditionId: string, signal?: AbortSignal): Promise<ExecutionFeeSnapshot> {
+    let publicBaseFee: Awaited<ReturnType<PolymarketPublicApi["feeRate"]>> | null = null;
+    try {
+      publicBaseFee = await this.api.feeRate(assetId, signal);
+      if (publicBaseFee.data.base_fee === 0) {
+        return {
+          assetId,
+          status: "AVAILABLE",
+          baseFee: 0,
+          feeRatePpm: "0",
+          // The exponent is mathematically inert when the explicit fee
+          // coefficient is zero. Keep a canonical value for the shared
+          // Paper/Live fee interface; never infer zero from a missing field.
+          exponent: 1,
+          sourceUrl: publicBaseFee.url,
+          snapshotTime: publicBaseFee.fetchedAt,
+          publicCapture: {
+            endpoint: "clob-fee-rate",
+            requestUrl: publicBaseFee.url,
+            fetchedAt: publicBaseFee.fetchedAt,
+            latencyMs: publicBaseFee.latencyMs,
+            httpStatus: publicBaseFee.status,
+            payload: publicBaseFee.data,
+          },
+        };
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
     try {
       const capture = await this.api.clobMarketInfo(conditionId, signal);
       const token = capture.data.t.find((item) => item.t === assetId);
       if (!token) throw new Error("FEE_ASSET_NOT_FOUND");
       const exponent = capture.data.fd ? Number(capture.data.fd.e) : 1;
+      // A single immutable market-info capture must fully explain a non-zero
+      // fee model. Do not combine an unpersisted /fee-rate value with partial
+      // curve details, because that result could not be replayed later.
+      const baseFee = capture.data.tbf ?? null;
       const feeRatePpm = capture.data.fd
         ? decimalToScaled(capture.data.fd.r, 6).toString()
-        : capture.data.tbf === 0 ? "0" : null;
+        : baseFee === 0 ? "0" : null;
       if (
-        !Number.isSafeInteger(capture.data.tbf)
-        || capture.data.tbf < 0
+        baseFee === null
+        || !Number.isSafeInteger(baseFee)
+        || baseFee < 0
+        || (publicBaseFee !== null && baseFee !== publicBaseFee.data.base_fee)
         || !Number.isSafeInteger(exponent)
         || exponent < 1
         || exponent > 4
@@ -153,7 +232,7 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
       return {
         assetId,
         status: "AVAILABLE",
-        baseFee: capture.data.tbf,
+        baseFee,
         feeRatePpm,
         exponent,
         sourceUrl: capture.url,
@@ -175,7 +254,8 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
         baseFee: null,
         feeRatePpm: null,
         exponent: null,
-        sourceUrl: `https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`,
+        sourceUrl: publicBaseFee?.url
+          ?? `https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`,
         snapshotTime: new Date().toISOString(),
       };
     }

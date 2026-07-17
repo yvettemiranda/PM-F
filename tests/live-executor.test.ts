@@ -1188,6 +1188,7 @@ describe("LiveExecutor", () => {
       marketDataProvider: new FakeLiveMarketDataProvider({
         now: () => new Date(now),
         marketSnapshotTime: "2026-07-08T23:59:55.000Z",
+        receivedAt: "2026-07-08T23:59:55.000Z",
       }),
     });
     const first = await stale.executeBuy({
@@ -1707,6 +1708,7 @@ describe("LiveExecutor", () => {
       marketDataProvider: new FakeLiveMarketDataProvider({
         now: clock,
         marketSnapshotTime: "2026-07-08T23:59:00.000Z",
+        receivedAt: "2026-07-08T23:59:00.000Z",
       }),
     });
     const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, clock);

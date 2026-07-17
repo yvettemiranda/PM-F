@@ -720,7 +720,12 @@ describe("PaperValidationCampaignService", () => {
     expect(assertPaperCampaignPreMigrationCompatible({
       databasePath: input.databasePath,
       manifest: incompatible,
-    })).toEqual({ campaignId: campaign.campaignId, campaignState: "FROZEN" });
+    })).toEqual({
+      campaignId: campaign.campaignId,
+      campaignState: "FROZEN",
+      campaignCoreCompatibilityHash: computeCoreCompatibilityHash(input.manifest),
+      campaignBlockers: [],
+    });
     const database = new DatabaseSync(input.databasePath);
     const transitions = database.prepare(
       "SELECT count(*) count FROM paper_validation_transitions WHERE campaign_id=? AND to_state='FROZEN'",
@@ -809,6 +814,78 @@ describe("PaperValidationCampaignService", () => {
     });
     expect(session.sourceVersion.commit).toBe("ui-and-docs-only-commit");
     expect(input.service.campaignSnapshot(campaign.campaignId).state).toBe("RUNNING");
+    input.service.close();
+  });
+
+  it("requires and immutably audits an authorized replacement Campaign", () => {
+    const input = fixture();
+    const original = createCampaign(input);
+    const repairedManifest: CoreCompatibilityManifest = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        paperExecution: componentHash("market-data-repaired-paper-execution"),
+      },
+    };
+    expect(() => input.service.startSession({
+      campaignId: original.campaignId,
+      coreManifest: repairedManifest,
+      sourceVersion,
+      now: at(1),
+      sessionId: "PS-FREEZE-OLD-CORE",
+    })).toThrow(`PAPER_VALIDATION_CAMPAIGN_FROZEN:CORE_COMPATIBILITY_MISMATCH:${original.campaignId}`);
+
+    const executor = new PaperExecutor(
+      input.databasePath,
+      new PublicPaperMarketDataProvider(),
+      { sourceVersion },
+    );
+    const replacementAccountId = executor.createAccount(
+      "Replacement Campaign Account",
+      BigInt(RULESET.paperInitialBalanceMicros),
+      input.targetId,
+    );
+    executor.close();
+
+    const replacementInput = {
+      targetId: input.targetId,
+      baselineRunId: input.baselineRunId,
+      paperAccountId: replacementAccountId,
+      coreManifest: repairedManifest,
+      sourceVersion,
+      now: at(2),
+      campaignId: "PC-REPLACEMENT",
+    } as const;
+    expect(() => input.service.createCampaign(replacementInput))
+      .toThrow(`PAPER_VALIDATION_REPLACEMENT_LINK_REQUIRED:${original.campaignId}`);
+    expect(() => input.service.createCampaign({
+      ...replacementInput,
+      supersedesCampaignId: original.campaignId,
+      replacementReason: "CORE_REPAIR_MARKET_DATA",
+    })).toThrow(`PAPER_VALIDATION_REPLACEMENT_NOT_AUTHORIZED:${original.campaignId}`);
+
+    const replacement = input.service.createCampaign({
+      ...replacementInput,
+      supersedesCampaignId: original.campaignId,
+      replacementReason: "CORE_VERSION_REPLACEMENT",
+    });
+    expect(replacement.state).toBe("QUALIFYING");
+    expect(replacement.accumulatedActiveRuntimeMs).toBe(0);
+    expect(replacement.paperAccountId).toBe(replacementAccountId);
+
+    const transition = input.service.store.database.prepare(
+      `SELECT reason,evidence_json FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence DESC LIMIT 1`,
+    ).get(replacement.campaignId) as { reason: string; evidence_json: string };
+    expect(transition.reason).toBe("CAMPAIGN_CREATED_AFTER_CORE_REPAIR");
+    expect(JSON.parse(transition.evidence_json)).toMatchObject({
+      supersedesCampaignId: original.campaignId,
+      supersededCampaignState: "FROZEN",
+      supersededCoreCompatibilityHash: original.coreCompatibilityHash,
+      replacementReason: "CORE_VERSION_REPLACEMENT",
+      executionMode: "PAPER",
+      liveGateState: "LIVE_DISABLED",
+    });
     input.service.close();
   });
 

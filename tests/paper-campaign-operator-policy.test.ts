@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS,
+  paperCampaignStartDisposition,
   paperCampaignPlannedDurationOverride,
   paperQualifyingFinalizationPolicy,
 } from "../src/paper-validation/operator-policy.js";
@@ -57,6 +58,53 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
 }
 
 describe("paper Campaign operator policy", () => {
+  it("starts a replacement only when an explicitly started terminal Campaign belongs to an older core", () => {
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: [
+          "PAPER_EXIT_CODE:1",
+          "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS",
+          "UNRECOVERED_MARKET_DATA_BLOCKER",
+        ],
+      }),
+      "b".repeat(64),
+    )).toBe("CREATE_REPLACEMENT");
+    expect(paperCampaignStartDisposition(
+      snapshot({ state: "BLOCKED", coreCompatibilityHash: "a".repeat(64) }),
+      "a".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: ["PAPER_EXIT_CODE:1"],
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: ["UNRECOVERED_MARKET_DATA_BLOCKER", "PAPER_EXIT_CODE:137"],
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({ state: "PAUSED", coreCompatibilityHash: "a".repeat(64) }),
+      "a".repeat(64),
+    )).toBe("CONTINUE");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        state: "BLOCKED",
+        coreCompatibilityHash: "a".repeat(64),
+        blockers: ["PAPER_ACCEPTANCE_INCONSISTENT"],
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+  });
+
   it("keeps a coverage-incomplete Campaign on a useful 12-hour session", () => {
     expect(paperCampaignPlannedDurationOverride(snapshot({ state: "INCOMPLETE_COVERAGE" })))
       .toBe(PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS);

@@ -27,6 +27,7 @@ import {
 } from "../paper-validation/operator-evidence.js";
 import {
   paperCampaignPlannedDurationOverride,
+  paperCampaignStartDisposition,
   paperQualifyingFinalizationPolicy,
 } from "../paper-validation/operator-policy.js";
 import { prepareInterruptedRuntimeRecovery } from "../paper-validation/runtime-recovery.js";
@@ -244,6 +245,7 @@ function createCampaign(
   service: PaperValidationCampaignService,
   manifest: CoreCompatibilityManifest,
   sourceVersion: SourceVersion,
+  superseded?: CampaignSnapshot,
 ): CampaignSnapshot {
   const { targetId, baselineRunId } = findTargetAndBaseline();
   const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), { sourceVersion });
@@ -260,6 +262,12 @@ function createCampaign(
       coreManifest: manifest,
       sourceVersion,
       now: new Date().toISOString(),
+      ...(superseded === undefined ? {} : {
+        supersedesCampaignId: superseded.campaignId,
+        replacementReason: superseded.state === "BLOCKED"
+          ? "CORE_REPAIR_MARKET_DATA" as const
+          : "CORE_VERSION_REPLACEMENT" as const,
+      }),
     });
   } finally {
     executor.close();
@@ -470,6 +478,8 @@ function hardBlockers(input: {
     ...(paper.report.account.valuationStatus === "COMPLETE" && paper.report.account.unpricedPositionCount === 0
       ? [] : ["PAPER_FINAL_VALUATION_INCOMPLETE"]),
     ...(paper.report.acceptance.consistency.passed ? [] : ["PAPER_ACCEPTANCE_INCONSISTENT"]),
+    ...(paper.report.acceptance.consistency.reservations.activeReservationsMicros === "0"
+      ? [] : ["ACTIVE_RESERVATION_REMAINS"]),
     ...(paper.report.acceptance.marketData.blockerCount === 0 ? [] : ["UNRECOVERED_MARKET_DATA_BLOCKER"]),
     ...(paper.report.acceptance.funnel.signals.unconsumedEligible === 0 ? [] : ["ELIGIBLE_SIGNAL_UNCONSUMED"]),
     ...(paper.safety.privateKeyLoaded ? ["PRIVATE_KEY_LOADED"] : []),
@@ -540,7 +550,17 @@ async function main(): Promise<void> {
     let snapshot = ids.length === 0
       ? createCampaign(service, manifest, sourceVersion)
       : service.campaignSnapshot(ids.at(-1)!);
-    if (["PASSED", "BLOCKED", "FROZEN"].includes(snapshot.state)) {
+    const startDisposition = paperCampaignStartDisposition(snapshot, coreCompatibilityHash);
+    if (startDisposition === "CREATE_REPLACEMENT") {
+      const previous = snapshot;
+      snapshot = createCampaign(service, manifest, sourceVersion, previous);
+      console.log(JSON.stringify({
+        event: "PAPER_CAMPAIGN_REPLACED_AFTER_CORE_CHANGE",
+        previousCampaignId: previous.campaignId,
+        previousCampaignState: previous.state,
+        replacementCampaignId: snapshot.campaignId,
+      }));
+    } else if (startDisposition === "REFUSE_TERMINAL") {
       throw new Error(`PAPER_CAMPAIGN_NOT_STARTABLE:${snapshot.state}:${snapshot.campaignId}`);
     }
     await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);

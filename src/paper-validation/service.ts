@@ -11,6 +11,7 @@ import {
   validationReportHash,
 } from "./report.js";
 import { PaperValidationStore } from "./store.js";
+import { paperCampaignStartDisposition } from "./operator-policy.js";
 import {
   PAPER_VALIDATION_CHECKPOINT_INTERVAL_MS,
   PAPER_VALIDATION_MAX_CHECKPOINT_GAP_MS,
@@ -44,6 +45,8 @@ export interface CreateCampaignInput {
   sourceVersion: SourceVersion;
   now: string;
   campaignId?: string;
+  supersedesCampaignId?: string;
+  replacementReason?: "CORE_REPAIR_MARKET_DATA" | "CORE_VERSION_REPLACEMENT";
   requiredActiveRuntimeMs?: number;
   requiredContinuousRuntimeMs?: number;
   qualifyingRuntimeMs?: number;
@@ -212,6 +215,11 @@ export class PaperValidationCampaignService {
     parseTime(input.now, "CAMPAIGN_CREATED_AT");
     const campaignId = input.campaignId ?? publicId("PC");
     const coreCompatibilityHash = computeCoreCompatibilityHash(input.coreManifest);
+    const hasSupersededCampaign = input.supersedesCampaignId !== undefined;
+    const hasReplacementReason = input.replacementReason !== undefined;
+    if (hasSupersededCampaign !== hasReplacementReason) {
+      throw new Error("PAPER_VALIDATION_REPLACEMENT_LINK_INCOMPLETE");
+    }
     const definition: CampaignDefinition = {
       campaignId,
       targetId: input.targetId,
@@ -235,6 +243,36 @@ export class PaperValidationCampaignService {
       );
       if (activeCampaign) {
         throw new Error(`PAPER_VALIDATION_ACTIVE_CAMPAIGN_EXISTS:${activeCampaign}`);
+      }
+      const existingCampaignIds = this.store.campaignIdsForTarget(input.targetId);
+      const latestCampaignId = existingCampaignIds.at(-1) ?? null;
+      let replacementEvidence: Record<string, unknown> = {};
+      if (latestCampaignId !== null) {
+        if (!input.supersedesCampaignId || !input.replacementReason) {
+          throw new Error(`PAPER_VALIDATION_REPLACEMENT_LINK_REQUIRED:${latestCampaignId}`);
+        }
+        if (input.supersedesCampaignId !== latestCampaignId) {
+          throw new Error(`PAPER_VALIDATION_REPLACEMENT_NOT_LATEST:${input.supersedesCampaignId}:${latestCampaignId}`);
+        }
+        const previous = this.campaignSnapshot(input.supersedesCampaignId);
+        const expectedReplacementReason = previous.state === "BLOCKED"
+          ? "CORE_REPAIR_MARKET_DATA"
+          : "CORE_VERSION_REPLACEMENT";
+        if (
+          previous.targetId !== input.targetId
+          || input.replacementReason !== expectedReplacementReason
+          || paperCampaignStartDisposition(previous, coreCompatibilityHash) !== "CREATE_REPLACEMENT"
+        ) {
+          throw new Error(`PAPER_VALIDATION_REPLACEMENT_NOT_AUTHORIZED:${input.supersedesCampaignId}`);
+        }
+        replacementEvidence = {
+          supersedesCampaignId: previous.campaignId,
+          supersededCampaignState: previous.state,
+          supersededCoreCompatibilityHash: previous.coreCompatibilityHash,
+          replacementReason: input.replacementReason,
+        };
+      } else if (input.supersedesCampaignId || input.replacementReason) {
+        throw new Error("PAPER_VALIDATION_REPLACEMENT_SOURCE_NOT_FOUND");
       }
       this.store.assertCampaignBindings({
         targetId: input.targetId,
@@ -263,13 +301,16 @@ export class PaperValidationCampaignService {
         campaignId,
         fromState: null,
         toState: "QUALIFYING",
-        reason: "CAMPAIGN_CREATED",
+        reason: latestCampaignId === null
+          ? "CAMPAIGN_CREATED"
+          : "CAMPAIGN_CREATED_AFTER_CORE_REPAIR",
         evidence: {
           targetId: input.targetId,
           baselineRunId: input.baselineRunId,
           paperAccountId: input.paperAccountId,
           executionMode: "PAPER",
           liveGateState: "LIVE_DISABLED",
+          ...replacementEvidence,
         },
         coreCompatibilityHash,
         sourceVersion: input.sourceVersion,

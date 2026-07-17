@@ -174,8 +174,12 @@ export function parseClobMarket(value: unknown): ClobMarket {
 
 export function parseClobMarketInfo(value: unknown): ClobMarketInfo {
   const row = record(value, "marketInfo");
-  if (!Number.isSafeInteger(row.tbf) || Number(row.tbf) < 0) throw new Error("API_SCHEMA_INVALID:marketInfo.tbf");
-  if (!Number.isSafeInteger(row.mbf) || Number(row.mbf) < 0) throw new Error("API_SCHEMA_INVALID:marketInfo.mbf");
+  if (row.tbf !== undefined && (!Number.isSafeInteger(row.tbf) || Number(row.tbf) < 0)) {
+    throw new Error("API_SCHEMA_INVALID:marketInfo.tbf");
+  }
+  if (row.mbf !== undefined && (!Number.isSafeInteger(row.mbf) || Number(row.mbf) < 0)) {
+    throw new Error("API_SCHEMA_INVALID:marketInfo.mbf");
+  }
   array(row.t, "marketInfo.t").forEach((item, index) => {
     const token = record(item, `marketInfo.t[${index}]`);
     tokenId(token.t, `marketInfo.t[${index}].t`);
