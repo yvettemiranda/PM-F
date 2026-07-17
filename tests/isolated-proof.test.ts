@@ -99,7 +99,6 @@ describe("isolated verification proof artifacts", () => {
   });
 
   it("accepts only the exact stable Phase 0 limitations produced by source offset caps", () => {
-    const limited = artifacts();
     const reasons = [
       "HISTORICAL_CAPITAL_SNAPSHOTS_MISSING",
       "GOLDEN_EXPECTATIONS_MISSING",
@@ -107,7 +106,7 @@ describe("isolated verification proof artifacts", () => {
       "TRADE_HISTORY_TRUNCATED",
       "ACTIVITY_HISTORY_TRUNCATED",
     ];
-    limited.phase0ResultContent = `phase0 output\n${JSON.stringify({
+    const phase0 = {
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
@@ -129,8 +128,8 @@ describe("isolated verification proof artifacts", () => {
       replayIncompleteReasons: reasons,
       ambiguousEvents: 0,
       replayHash,
-    })}`;
-    limited.replayResultContent = `replay output\n${JSON.stringify({
+    };
+    const replay = {
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
@@ -143,12 +142,26 @@ describe("isolated verification proof artifacts", () => {
       replayHash,
       storedReplayHashes: [replayHash],
       stable: true,
-    })}`;
+    };
 
-    expect(verifyIsolatedProofArtifacts(limited)).toMatchObject({
-      phase0ReplayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
-      acceptedIncompleteReasons: reasons,
-    });
+    for (const [tradeHistoryStopCategory, activityHistoryStopCategory] of [
+      ["SOURCE_OFFSET_LIMIT", "SOURCE_OFFSET_LIMIT"],
+      ["CLIENT_OFFSET_LIMIT", "SOURCE_OFFSET_LIMIT"],
+      ["SOURCE_OFFSET_LIMIT", "CLIENT_OFFSET_LIMIT"],
+    ] as const) {
+      const limited = artifacts();
+      limited.phase0ResultContent = `phase0 output\n${JSON.stringify({
+        ...phase0,
+        tradeHistoryStopCategory,
+        activityHistoryStopCategory,
+      })}`;
+      limited.replayResultContent = `replay output\n${JSON.stringify(replay)}`;
+
+      expect(verifyIsolatedProofArtifacts(limited)).toMatchObject({
+        phase0ReplayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
+        acceptedIncompleteReasons: reasons,
+      });
+    }
   });
 
   it("rejects unknown limitations, schema failures, pagination mismatches, or replay disagreement", () => {

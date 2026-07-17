@@ -16,6 +16,7 @@
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
 
 ## Resolved in current implementation
+- 2026-07-17 首次稳定化核心启动的三次 Phase 0 均为稳定 Replay、`ambiguousEvents=0`，但交易历史由客户端在已知官方 offset 边界主动停止时记录 `CLIENT_OFFSET_LIMIT`，proof 校验器只接受 `SOURCE_OFFSET_LIMIT`，造成 `PHASE0_VALIDATION_PROOF_INVALID`。校验器现接受这两种精确已知上限类别，未知 stop category、Schema 错误、分页错配和 Replay 不一致仍全部拒绝。
 - `coreCompatibilityHash` 已只覆盖实际 Paper 行为、运行编排、恢复、安全和 Schema 合同；Live-only/纯报告/说明/打包变化不再误伤 Campaign，canonical serializer、runtime policy 与 checkpoint 等真实语义变化不会漏掉。
 - Validation/Operational/Paper 最终检查已统一到当前 Campaign/Session/Account/Target/Core；Signal/Execution Context 固化 target，Paper/Risk 不再靠 raw event 推导执行身份。
 - Execution→Risk、当前状态→Transition、关键动作→Audit、资金/仓位/幂等/orphan 已有确定性 scoped invariant；旧数据不能替当前 Session 制造通过。

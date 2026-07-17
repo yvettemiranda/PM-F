@@ -1,7 +1,8 @@
 # Progress
 
 ## Current task
-- 最终候选版稳定化已完成，期间没有启动新的 2/12 小时自然运行；下一步只需由用户双击入口启动新核心 Campaign。
+- 2026-07-17 13:55 用户首次启动稳定化核心：环境、隔离测试、backup-first 与业务库 `2.21.0→2.24.0` 迁移均通过；三次公开 Phase 0/Replay 均稳定且 `ambiguousEvents=0`，但 proof 校验器误拒绝采集端按已知上限产生的 `CLIENT_OFFSET_LIMIT`，因此在创建 Campaign 前安全停止。
+- proof 校验器已按采集端真实语义接受 `SOURCE_OFFSET_LIMIT` 或 `CLIENT_OFFSET_LIMIT` 两种精确已知上限类别；未知类别仍 fail closed。新 Campaign 仍未创建，下一步由用户在 clean commit 上重新双击入口。
 - 全程固定 `PAPER + LIVE_DISABLED`；旧失败报告只读保留。
 
 ## Completed implementation
@@ -38,6 +39,8 @@
 - Node `24.14.0`、pnpm `11.9.0`。
 - `pnpm typecheck` 通过。
 - 本轮最新全量验证：47 个测试文件、539 项全部通过；`pnpm typecheck`、`git diff --check` 和全部 `.command/.sh` zsh 语法检查通过。
+- `CLIENT_OFFSET_LIMIT` 回归先稳定复现 `PHASE0_VALIDATION_PROOF_INVALID`，修复后目标测试通过；直接重放用户本次第 1 次原始 Vitest/Phase 0/Replay 证据得到 `INCOMPLETE_KNOWN_LIMITATIONS`，24 个隔离测试文件、374 项测试绑定保持完整。
+- 修复后 `pnpm typecheck`、47 个测试文件/539 项测试与 `git diff --check` 全部通过；`coreCompatibilityHash` 保持 `235fc5f6e57d90db6676c1f30756c8b498d41fe560d10c4844541f55b7b325c6`，未改变 Paper 行为合同。
 - 当前运行库准备固定为 backup-first、连续 migration 前缀验证，并核对完整安全触发器注册表；未知未来版本、缺失历史 marker/触发器/关键表列均 fail closed。
 - Phase 0 资格证据只接受完整 `PASSED`，或精确列举且相互匹配的 `INCOMPLETE_KNOWN_LIMITATIONS`；不会把 Data API 历史限制冒充完整 Replay。
 - 独立启动流、运行时 Schema、报告/Replay 三路复审已关闭启动顺序、遗留进程、历史回放诚实性和 current schema 防护问题；最终无剩余 P0/P1。
@@ -54,7 +57,7 @@
 - 独立 RC 复审确认无 P0/P1 阻断；尚未验证的只有新核心实际 12 小时/72 小时自然运行。
 
 ## Next steps
-1. 形成 clean Release Candidate commit，保持交易核心冻结。
-2. 用户双击桌面“1_开始或继续Paper累计验证.command”，建议第一次直接运行满 12 小时。
+1. 形成包含 proof 分类修复的 clean commit，保持交易核心冻结。
+2. 用户重新双击桌面“1_开始或继续Paper累计验证.command”，建议第一次直接运行满 12 小时。
 3. 自动或手工安全停止后，用第三个按钮定位 ZIP 并交给 Codex；先分析本次结果，再继续累计到 72 小时。
 4. 72 小时与场景覆盖全部通过前，不进入 Live 准备。

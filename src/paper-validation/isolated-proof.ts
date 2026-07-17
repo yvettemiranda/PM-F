@@ -69,6 +69,10 @@ const TRADE_TRUNCATION_REASON = "TRADE_HISTORY_TRUNCATED";
 const ACTIVITY_TRUNCATION_REASON = "ACTIVITY_HISTORY_TRUNCATED";
 const TRADE_TRUNCATION_WARNING = "TRADE_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT";
 const ACTIVITY_TRUNCATION_WARNING = "ACTIVITY_HISTORY_TRUNCATED_BY_SOURCE_OFFSET_LIMIT";
+const KNOWN_OFFSET_LIMIT_STOP_CATEGORIES = new Set([
+  "SOURCE_OFFSET_LIMIT",
+  "CLIENT_OFFSET_LIMIT",
+]);
 
 function exactStringSet(actual: unknown, expected: readonly string[]): boolean {
   return Array.isArray(actual)
@@ -126,10 +130,10 @@ function acceptedPhase0ReplayStatus(phase0: Phase0ValidationResult):
   ];
   const paginationMatches = phase0.tradeHistoryComplete === true
     ? phase0.tradeHistoryStopCategory === "END_OF_DATA"
-    : phase0.tradeHistoryStopCategory === "SOURCE_OFFSET_LIMIT";
+    : KNOWN_OFFSET_LIMIT_STOP_CATEGORIES.has(phase0.tradeHistoryStopCategory ?? "");
   const activityPaginationMatches = phase0.activityHistoryComplete === true
     ? phase0.activityHistoryStopCategory === "END_OF_DATA"
-    : phase0.activityHistoryStopCategory === "SOURCE_OFFSET_LIMIT";
+    : KNOWN_OFFSET_LIMIT_STOP_CATEGORIES.has(phase0.activityHistoryStopCategory ?? "");
   const expectedApiStatus = expectedWarnings.length === 0 ? "PASSED" : "INCOMPLETE";
   return phase0.apiContractStatus === expectedApiStatus
     && paginationMatches
