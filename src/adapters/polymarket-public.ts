@@ -26,6 +26,7 @@ export interface ApiCapture<T> {
 export interface PagedResult<T> {
   rows: T[];
   captures: ApiCapture<T[]>[];
+  boundaryOverlapRows: T[];
   historyComplete: boolean;
   stopReason: string;
 }
@@ -92,6 +93,24 @@ function assertPageLimit(name: string, value: number, maximum: number): number {
 
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("REQUEST_ABORTED");
+}
+
+export function exactPaginationBoundaryOverlaps<T>(
+  pages: readonly (readonly T[])[],
+): T[] {
+  const overlaps: T[] = [];
+  for (let index = 1; index < pages.length; index += 1) {
+    const previous = pages[index - 1]?.at(-1);
+    const current = pages[index]?.[0];
+    if (
+      previous !== undefined
+      && current !== undefined
+      && stableJson(previous) === stableJson(current)
+    ) {
+      overlaps.push(current);
+    }
+  }
+  return overlaps;
 }
 
 export class PolymarketPublicHttpError extends Error {
@@ -276,7 +295,13 @@ export class PolymarketPublicApi {
           throw new Error("PAGINATION_SNAPSHOT_DRIFT");
         }
       }
-      return { rows, captures, historyComplete, stopReason };
+      return {
+        rows,
+        captures,
+        boundaryOverlapRows: exactPaginationBoundaryOverlaps(captures.map((capture) => capture.data)),
+        historyComplete,
+        stopReason,
+      };
     };
     for (let offset = 0; offset <= 10_000; offset += pageSize) {
       try {

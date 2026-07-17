@@ -1,5 +1,7 @@
 import { resolve } from "node:path";
+import { exactPaginationBoundaryOverlaps } from "../adapters/polymarket-public.js";
 import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from "../domain/models.js";
+import { activityAsTrade } from "../domain/activity-trade.js";
 import { preparePhase0ValidationDatabase } from "../infra/sqlite/phase0-validation-database.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { ReplayEngine } from "../replay/replay-engine.js";
@@ -21,15 +23,23 @@ try {
     throw new Error(`Source commit mismatch: capture=${captureRun.sourceCodeCommit} current=${sourceVersion.commit}`);
   }
 
-  const flatten = <T>(endpoint: string): T[] => database.loadCapturePayloads(captureRunId, endpoint)
-    .flatMap((payload) => Array.isArray(payload) ? payload as T[] : []);
+  const pages = <T>(endpoint: string): T[][] => database.loadCapturePayloads(captureRunId, endpoint)
+    .flatMap((payload) => Array.isArray(payload) ? [payload as T[]] : []);
+  const flatten = <T>(endpoint: string): T[] => pages<T>(endpoint).flat();
   const single = <T>(endpoint: string): T => {
     const payload = database.loadCapturePayloads(captureRunId, endpoint)[0];
     if (payload === undefined) throw new Error(`Capture endpoint missing: ${endpoint}`);
     return payload as T;
   };
-  const trades = flatten<PublicTrade>("data-trades");
-  const activity = flatten<PublicActivity>("data-activity");
+  const tradePages = pages<PublicTrade>("data-trades");
+  const activityPages = pages<PublicActivity>("data-activity");
+  const trades = tradePages.flat();
+  const activity = activityPages.flat();
+  const tradePaginationBoundaryOverlaps = exactPaginationBoundaryOverlaps(tradePages);
+  const activityPaginationBoundaryOverlaps = exactPaginationBoundaryOverlaps(activityPages).flatMap((item) => {
+    const trade = activityAsTrade(item);
+    return trade ? [trade] : [];
+  });
   const positions = flatten<PublicPosition>("data-positions");
   const profile = single<PublicProfile>("gamma-public-profile");
   const code = single<{ result?: string }>("polygon-eth-get-code");
@@ -59,6 +69,8 @@ try {
     hasPositionBaseline: false,
     tradeHistoryComplete,
     activityHistoryComplete,
+    tradePaginationBoundaryOverlaps,
+    activityPaginationBoundaryOverlaps,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
@@ -75,6 +87,7 @@ try {
     positionHistoryComplete,
     replayStatus: replay.status,
     replayIncompleteReasons: replay.incompleteReasons,
+    reconciledPaginationOverlapRows: replay.metrics.reconciledPaginationOverlapRows,
     replayHash: replay.reportHash,
     storedReplayHashes: storedHashes,
     stable,

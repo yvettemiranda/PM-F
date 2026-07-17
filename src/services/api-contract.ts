@@ -8,6 +8,8 @@ export interface ApiContractInput {
   positions: PublicPosition[];
   tradeHistoryComplete: boolean;
   activityHistoryComplete: boolean;
+  tradePaginationBoundaryOverlaps?: PublicTrade[];
+  activityPaginationBoundaryOverlaps?: PublicTrade[];
   clobTime: ApiCapture<number>;
   captures: ApiCapture<unknown>[];
 }
@@ -31,6 +33,7 @@ export interface ApiContractReport {
     maxSizeFractionDigits: number;
     exactDuplicateRows: number;
     confirmedDuplicateRows: number;
+    reconciledPaginationOverlapRows: number;
     ambiguousDuplicateRows: number;
     sameSecondGroups: number;
     maxRowsInSameSecond: number;
@@ -111,7 +114,14 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
     maxSizeFractionDigits = Math.max(maxSizeFractionDigits, fractionDigits(trade.size));
   }
   const tradeActivities = input.activity.filter(isTradeActivity);
-  const multiplicity = resolveSourceEventMultiplicity(input.trades, tradeActivities);
+  const multiplicity = resolveSourceEventMultiplicity(input.trades, tradeActivities, {
+    ...(input.tradePaginationBoundaryOverlaps === undefined
+      ? {}
+      : { tradePaginationBoundaryOverlaps: input.tradePaginationBoundaryOverlaps }),
+    ...(input.activityPaginationBoundaryOverlaps === undefined
+      ? {}
+      : { activityPaginationBoundaryOverlaps: input.activityPaginationBoundaryOverlaps }),
+  });
 
   const requestLatencies = input.captures.map((capture) => capture.latencyMs);
   const tradeTimestamps = input.trades.map((trade) => trade.timestamp).filter(Number.isFinite);
@@ -149,6 +159,7 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
       maxSizeFractionDigits,
       exactDuplicateRows,
       confirmedDuplicateRows,
+      reconciledPaginationOverlapRows: multiplicity.reconciledPaginationOverlapRows,
       ambiguousDuplicateRows,
       sameSecondGroups: sameSecond.length,
       maxRowsInSameSecond: sameSecond.length === 0 ? 1 : Math.max(...sameSecond),

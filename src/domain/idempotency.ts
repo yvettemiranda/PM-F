@@ -75,6 +75,12 @@ export interface SourceEventMultiplicityResolution<
   activityTrades: SourceEventOccurrence<TActivityTrade>[];
   confirmedRepeatedKeys: string[];
   ambiguousRepeatedKeys: string[];
+  reconciledPaginationOverlapRows: number;
+}
+
+export interface SourceEventMultiplicityEvidence {
+  tradePaginationBoundaryOverlaps?: readonly PublicTrade[];
+  activityPaginationBoundaryOverlaps?: readonly PublicTrade[];
 }
 
 /** Resolve repeated identical fills by matching source-local occurrence rank. */
@@ -84,21 +90,108 @@ export function resolveSourceEventMultiplicity<
 >(
   trades: readonly TTrade[],
   activityTrades: readonly TActivityTrade[],
+  evidence: SourceEventMultiplicityEvidence = {},
 ): SourceEventMultiplicityResolution<TTrade, TActivityTrade> {
-  const tradeOccurrences = sourceEventOccurrences(trades);
-  const activityOccurrences = sourceEventOccurrences(activityTrades);
-  const repeatedTradeKeys = new Set(
-    tradeOccurrences.filter((item) => item.occurrenceIndex > 0).map((item) => item.sourceEventKey),
+  const rawTradeOccurrences = sourceEventOccurrences(trades);
+  const rawActivityOccurrences = sourceEventOccurrences(activityTrades);
+  const countsByBaseKey = (occurrences: readonly SourceEventOccurrence[]): Map<string, number> => {
+    const result = new Map<string, number>();
+    for (const occurrence of occurrences) {
+      const key = sourceEventKey(occurrence.trade);
+      result.set(key, (result.get(key) ?? 0) + 1);
+    }
+    return result;
+  };
+  const evidenceCounts = (rows: readonly PublicTrade[] | undefined): Map<string, number> => {
+    const result = new Map<string, number>();
+    for (const row of rows ?? []) {
+      const key = sourceEventKey(row);
+      result.set(key, (result.get(key) ?? 0) + 1);
+    }
+    return result;
+  };
+  const rawTradeCounts = countsByBaseKey(rawTradeOccurrences);
+  const rawActivityCounts = countsByBaseKey(rawActivityOccurrences);
+  const tradeOverlapCounts = evidenceCounts(evidence.tradePaginationBoundaryOverlaps);
+  const activityOverlapCounts = evidenceCounts(evidence.activityPaginationBoundaryOverlaps);
+  const assertValidEvidence = (overlaps: Map<string, number>, raw: Map<string, number>): void => {
+    for (const [key, count] of overlaps) {
+      if (count <= 0 || count >= (raw.get(key) ?? 0)) {
+        throw new Error(`INVALID_PAGINATION_BOUNDARY_OVERLAP_EVIDENCE:${key}`);
+      }
+    }
+  };
+  assertValidEvidence(tradeOverlapCounts, rawTradeCounts);
+  assertValidEvidence(activityOverlapCounts, rawActivityCounts);
+
+  const effectiveTradeCounts = new Map(rawTradeCounts);
+  const effectiveActivityCounts = new Map(rawActivityCounts);
+  const forcedAmbiguousBaseKeys = new Set<string>();
+  let reconciledPaginationOverlapRows = 0;
+  const baseKeys = new Set([
+    ...rawTradeCounts.keys(),
+    ...rawActivityCounts.keys(),
+    ...tradeOverlapCounts.keys(),
+    ...activityOverlapCounts.keys(),
+  ]);
+  for (const key of baseKeys) {
+    const tradeCount = rawTradeCounts.get(key) ?? 0;
+    const activityCount = rawActivityCounts.get(key) ?? 0;
+    const tradeOverlapCount = tradeOverlapCounts.get(key) ?? 0;
+    const activityOverlapCount = activityOverlapCounts.get(key) ?? 0;
+    if (tradeOverlapCount > 0 && activityOverlapCount > 0) {
+      forcedAmbiguousBaseKeys.add(key);
+      continue;
+    }
+    if (
+      tradeOverlapCount > 0
+      && activityCount > 0
+      && tradeCount - tradeOverlapCount === activityCount
+    ) {
+      effectiveTradeCounts.set(key, tradeCount - tradeOverlapCount);
+      reconciledPaginationOverlapRows += tradeOverlapCount;
+      continue;
+    }
+    if (
+      activityOverlapCount > 0
+      && tradeCount > 0
+      && activityCount - activityOverlapCount === tradeCount
+    ) {
+      effectiveActivityCounts.set(key, activityCount - activityOverlapCount);
+      reconciledPaginationOverlapRows += activityOverlapCount;
+    }
+  }
+
+  const tradeOccurrences = rawTradeOccurrences.filter(
+    (item) => item.occurrenceIndex < (effectiveTradeCounts.get(sourceEventKey(item.trade)) ?? 0),
   );
-  const repeatedActivityKeys = new Set(
-    activityOccurrences.filter((item) => item.occurrenceIndex > 0).map((item) => item.sourceEventKey),
+  const activityOccurrences = rawActivityOccurrences.filter(
+    (item) => item.occurrenceIndex < (effectiveActivityCounts.get(sourceEventKey(item.trade)) ?? 0),
   );
-  const repeatedKeys = new Set([...repeatedTradeKeys, ...repeatedActivityKeys]);
   const confirmedRepeatedKeys: string[] = [];
   const ambiguousRepeatedKeys: string[] = [];
-  for (const key of repeatedKeys) {
-    if (repeatedTradeKeys.has(key) && repeatedActivityKeys.has(key)) confirmedRepeatedKeys.push(key);
-    else ambiguousRepeatedKeys.push(key);
+  const sampleByBaseKey = new Map<string, PublicTrade>();
+  for (const row of [...trades, ...activityTrades]) {
+    const key = sourceEventKey(row);
+    if (!sampleByBaseKey.has(key)) sampleByBaseKey.set(key, row);
+  }
+  for (const key of baseKeys) {
+    const sample = sampleByBaseKey.get(key);
+    if (!sample) continue;
+    const tradeCount = effectiveTradeCounts.get(key) ?? 0;
+    const activityCount = effectiveActivityCounts.get(key) ?? 0;
+    for (let occurrenceIndex = 1; occurrenceIndex < Math.max(tradeCount, activityCount); occurrenceIndex += 1) {
+      const repeatedKey = sourceEventKey(sample, occurrenceIndex);
+      if (
+        !forcedAmbiguousBaseKeys.has(key)
+        && occurrenceIndex < tradeCount
+        && occurrenceIndex < activityCount
+      ) {
+        confirmedRepeatedKeys.push(repeatedKey);
+      } else {
+        ambiguousRepeatedKeys.push(repeatedKey);
+      }
+    }
   }
   confirmedRepeatedKeys.sort();
   ambiguousRepeatedKeys.sort();
@@ -107,6 +200,7 @@ export function resolveSourceEventMultiplicity<
     activityTrades: activityOccurrences,
     confirmedRepeatedKeys,
     ambiguousRepeatedKeys,
+    reconciledPaginationOverlapRows,
   };
 }
 

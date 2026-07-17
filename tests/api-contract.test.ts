@@ -115,5 +115,20 @@ describe("API contract validation", () => {
     expect(ambiguous.status).toBe("INCOMPLETE");
     expect(ambiguous.observations.ambiguousDuplicateRows).toBe(1);
     expect(ambiguous.warnings).toContain("EXACT_DUPLICATE_TRADE_ROWS_REQUIRE_RECONCILIATION");
+
+    const reconciledBoundaryOverlap = validateApiContract({
+      ...common,
+      trades: [fill, { ...fill }],
+      activity: [{ ...fill, type: "TRADE" }],
+      tradePaginationBoundaryOverlaps: [{ ...fill }],
+    });
+    expect(reconciledBoundaryOverlap.status).toBe("PASSED");
+    expect(reconciledBoundaryOverlap.warnings).toEqual([]);
+    expect(reconciledBoundaryOverlap.observations).toMatchObject({
+      exactDuplicateRows: 1,
+      confirmedDuplicateRows: 0,
+      reconciledPaginationOverlapRows: 1,
+      ambiguousDuplicateRows: 0,
+    });
   });
 });

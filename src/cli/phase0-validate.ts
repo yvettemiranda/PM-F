@@ -40,6 +40,10 @@ const [profile, trades, activity, positionHistory, code, pUsdBalance, safe, wall
   api.clobTime(),
 ]);
 const positions = positionHistory.merged;
+const activityPaginationBoundaryOverlaps = activity.boundaryOverlapRows.flatMap((item) => {
+  const trade = activityAsTrade(item);
+  return trade ? [trade] : [];
+});
 
 const identity = buildWalletIdentityReport({
   address,
@@ -69,6 +73,8 @@ const apiContractReport = validateApiContract({
   positions: positions.data,
   tradeHistoryComplete: trades.historyComplete,
   activityHistoryComplete: activity.historyComplete,
+  tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
+  activityPaginationBoundaryOverlaps,
   clobTime,
   captures: contractCaptures,
 });
@@ -183,6 +189,8 @@ try {
     hasPositionBaseline: false,
     tradeHistoryComplete: trades.historyComplete,
     activityHistoryComplete: activity.historyComplete,
+    tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
+    activityPaginationBoundaryOverlaps,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
@@ -303,6 +311,7 @@ console.log(
       ambiguousEvents: replay.metrics.ambiguousEvents,
       replayHash: replay.reportHash,
       duplicateRows: replay.metrics.duplicateRows,
+      reconciledPaginationOverlapRows: replay.metrics.reconciledPaginationOverlapRows,
       buySignals: replay.metrics.buySignals,
       sellSignals: replay.metrics.sellSignals,
       historicalSells: replay.metrics.historicalSells,

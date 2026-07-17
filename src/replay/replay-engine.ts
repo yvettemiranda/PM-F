@@ -29,6 +29,8 @@ export interface ReplayInput {
   sourceCodeCommit?: string;
   sourceCodeDirty?: boolean;
   positionBaseline?: Array<{ asset: string; size: number | string }>;
+  tradePaginationBoundaryOverlaps?: PublicTrade[];
+  activityPaginationBoundaryOverlaps?: PublicTrade[];
 }
 
 export interface ReplayReport {
@@ -39,6 +41,7 @@ export interface ReplayReport {
     uniqueEvents: number;
     duplicateRows: number;
     confirmedDuplicateRows: number;
+    reconciledPaginationOverlapRows: number;
     ambiguousEvents: number;
     buySignals: number;
     sellSignals: number;
@@ -110,7 +113,7 @@ export class ReplayEngine {
   run(input: ReplayInput): ReplayReport {
     if (!input.targetId.trim()) throw new Error("REPLAY_TARGET_ID_REQUIRED");
     if (input.identityStatus !== "IDENTITY_CONFIRMED") {
-      return this.finish("FAILED", input.trades.length + input.activity.length, [], {}, [], 0, 0, 0, 0, 0, 0, 0, 0, {}, {}, ["WALLET_IDENTITY_NOT_CONFIRMED"]);
+      return this.finish("FAILED", input.trades.length + input.activity.length, [], {}, [], 0, 0, 0, 0, 0, 0, 0, 0, 0, {}, {}, ["WALLET_IDENTITY_NOT_CONFIRMED"]);
     }
 
     const comboKeys = new Set(
@@ -123,12 +126,21 @@ export class ReplayEngine {
     const multiplicity = resolveSourceEventMultiplicity(
       input.trades,
       activityTradeRows.map((item) => item.trade),
+      {
+        ...(input.tradePaginationBoundaryOverlaps === undefined
+          ? {}
+          : { tradePaginationBoundaryOverlaps: input.tradePaginationBoundaryOverlaps }),
+        ...(input.activityPaginationBoundaryOverlaps === undefined
+          ? {}
+          : { activityPaginationBoundaryOverlaps: input.activityPaginationBoundaryOverlaps }),
+      },
     );
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
     const ambiguousRepeatedKeys = new Set(multiplicity.ambiguousRepeatedKeys);
     const events: SourceEvent[] = [];
     const duplicateRows = multiplicity.trades.filter((item) => item.occurrenceIndex > 0).length
-      + multiplicity.activityTrades.filter((item) => item.occurrenceIndex > 0).length;
+      + multiplicity.activityTrades.filter((item) => item.occurrenceIndex > 0).length
+      + multiplicity.reconciledPaginationOverlapRows;
 
     for (const { trade, sourceEventKey: key, occurrenceIndex } of multiplicity.trades) {
       if (occurrenceIndex > 0 && !confirmedRepeatedKeys.has(key)) continue;
@@ -325,6 +337,7 @@ export class ReplayEngine {
       events.length,
       duplicateRows,
       confirmedDuplicateRows,
+      multiplicity.reconciledPaginationOverlapRows,
       ambiguousEvents,
       historicalSells,
       gapEvents,
@@ -409,6 +422,7 @@ export class ReplayEngine {
     uniqueEvents: number,
     duplicateRows: number,
     confirmedDuplicateRows: number,
+    reconciledPaginationOverlapRows: number,
     ambiguousEvents: number,
     historicalSells: number,
     gapEvents: number,
@@ -444,6 +458,7 @@ export class ReplayEngine {
         uniqueEvents,
         duplicateRows,
         confirmedDuplicateRows,
+        reconciledPaginationOverlapRows,
         ambiguousEvents,
         buySignals: signals.filter((signal) => signal.signalType === "TARGET_BUY").length,
         sellSignals: signals.filter((signal) => signal.signalType === "TARGET_SELL").length,

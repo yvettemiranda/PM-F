@@ -67,6 +67,32 @@ describe("Polymarket public API pagination", () => {
     )).rejects.toThrow("PAGINATION_SNAPSHOT_DRIFT");
   });
 
+  it("records an exact adjacent-page overlap without deleting the raw trade rows", async () => {
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const trade = (index: number) => ({
+      proxyWallet: wallet,
+      transactionHash: `0x${index.toString(16).padStart(64, "0")}`,
+      conditionId,
+      asset: String(100_000 + index),
+      side: "BUY" as const,
+      price: "0.5",
+      size: "1",
+      timestamp: 1_700_000_000 + index,
+    });
+    const firstPage = Array.from({ length: 1_000 }, (_, index) => trade(index));
+    const boundary = firstPage.at(-1)!;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const offset = Number(new URL(String(input)).searchParams.get("offset"));
+      return new Response(JSON.stringify(offset === 0 ? firstPage : [boundary, trade(1_000)]), { status: 200 });
+    }));
+
+    const result = await new PolymarketPublicApi({ maxRetries: 0 }).trades(wallet);
+
+    expect(result.rows).toHaveLength(1_002);
+    expect(result.captures).toHaveLength(2);
+    expect(result.boundaryOverlapRows).toEqual([boundary]);
+  });
+
   it("fails closed when a successful HTTP response violates the runtime schema", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([{ asset: "missing-fields" }]), { status: 200 })));
     await expect(new PolymarketPublicApi({ maxRetries: 0 }).allPositions(

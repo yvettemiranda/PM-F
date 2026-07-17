@@ -10,12 +10,14 @@
 
 ## Active risks
 - Data API 历史 offset 限制仍可能使完整历史 Replay 不可得；不得把不完整历史冒充完整回放。
+- Data API offset 分页可能把同一行同时放在相邻页首尾；只允许用相邻页原始位置加另一独立公开接口的精确 multiplicity 共同核销。若另一接口缺失、同样位于边界或数量不匹配，仍必须 `AMBIGUOUS_DUPLICATE_EVENTS`。
 - `node:sqlite` 在 Node 24 仍有 experimental warning，长期稳定性需要 72 小时 Campaign 证明。
 - 公开钱包依赖增量轮询，Positions 与 Trades/Activity 可能短暂不同步；120 秒内保持 `MINOR_DIFF`，同一差异达到连续次数且持续满 120 秒后仍必须 `MAJOR_DESYNC` 并 fail closed。
 - 2 秒 orderbook 新鲜度提高安全性但可能降低成交率；不得为提高通过率放宽。
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
 
 ## Resolved in current implementation
+- 2026-07-17 20:42 的三次 Phase 0 均稳定出现同一 `ambiguousEvents=1`：一笔此前 7 份捕获中始终单次出现的历史 BUY，移动到 Trades offset 0/1000 边界后被相邻两页各返回一次，Activity 仍只有一行。现保留两份原始行和重复计数，仅在相邻页首尾完全相同且另一独立接口精确确认较低 multiplicity 时记录 `reconciledPaginationOverlapRows`；真实双重成交、单源证据、双源边界或非法证据继续阻断。
 - 2026-07-17 的 3 小时资格运行发现：`reconciliationGraceMs=120000` 虽已配置但 Observe 未使用，连续三次约 31 秒就升级 `MAJOR_DESYNC`，且不同差异会共享连续计数。现已按具体差异持久化首次时间与连续次数，只有“同一差异连续至少 3 次且持续至少 120 秒”才升级；真实迟到事件回归、持续失步回归及替代 Campaign 审计路径均已覆盖。
 - 2026-07-17 首次稳定化核心启动的三次 Phase 0 均为稳定 Replay、`ambiguousEvents=0`，但交易历史由客户端在已知官方 offset 边界主动停止时记录 `CLIENT_OFFSET_LIMIT`，proof 校验器只接受 `SOURCE_OFFSET_LIMIT`，造成 `PHASE0_VALIDATION_PROOF_INVALID`。校验器现接受这两种精确已知上限类别，未知 stop category、Schema 错误、分页错配和 Replay 不一致仍全部拒绝。
 - `coreCompatibilityHash` 已只覆盖实际 Paper 行为、运行编排、恢复、安全和 Schema 合同；Live-only/纯报告/说明/打包变化不再误伤 Campaign，canonical serializer、runtime policy 与 checkpoint 等真实语义变化不会漏掉。

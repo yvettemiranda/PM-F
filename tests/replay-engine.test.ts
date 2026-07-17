@@ -24,6 +24,7 @@ describe("ReplayEngine", () => {
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first, { ...first }, trade({ size: "20" })],
       activity: [],
+      tradePaginationBoundaryOverlaps: [{ ...first }],
       hasCapitalSnapshots: true,
       hasGoldenExpectations: true,
     });
@@ -55,6 +56,37 @@ describe("ReplayEngine", () => {
     expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
   });
 
+  it("reconciles an exact Trades page-boundary overlap only when Activity confirms one occurrence", () => {
+    const first = trade({
+      transactionHash: "0xpagination-boundary-overlap",
+      timestamp: 1784032153,
+    });
+    const input = {
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED" as const,
+      trades: [first, { ...first }],
+      activity: [{ ...first, type: "TRADE" }],
+      tradePaginationBoundaryOverlaps: [{ ...first }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    };
+
+    const report = new ReplayEngine().run(input);
+
+    expect(report.status).toBe("PASSED");
+    expect(report.metrics).toMatchObject({
+      inputRows: 3,
+      uniqueEvents: 1,
+      duplicateRows: 1,
+      confirmedDuplicateRows: 0,
+      reconciledPaginationOverlapRows: 1,
+      ambiguousEvents: 0,
+      buySignals: 1,
+    });
+    expect(report.incompleteReasons).not.toContain("AMBIGUOUS_DUPLICATE_EVENTS");
+  });
+
   it("preserves a repeated fill when Trades and Activity confirm the same multiplicity", () => {
     const first = trade({});
     const activityTrade = { ...first, type: "TRADE" };
@@ -64,6 +96,7 @@ describe("ReplayEngine", () => {
       identityStatus: "IDENTITY_CONFIRMED",
       trades: [first, { ...first }],
       activity: [activityTrade, { ...activityTrade }],
+      tradePaginationBoundaryOverlaps: [{ ...first }],
       hasCapitalSnapshots: true,
       hasGoldenExpectations: true,
     });
@@ -71,10 +104,49 @@ describe("ReplayEngine", () => {
     expect(report.status).toBe("PASSED");
     expect(report.metrics.duplicateRows).toBe(2);
     expect(report.metrics.confirmedDuplicateRows).toBe(1);
+    expect(report.metrics.reconciledPaginationOverlapRows).toBe(0);
     expect(report.metrics.ambiguousEvents).toBe(0);
     expect(report.metrics.uniqueEvents).toBe(2);
     expect(report.metrics.buySignals).toBe(2);
     expect(new Set(report.signals.map((signal) => signal.sourceEventKey)).size).toBe(2);
+  });
+
+  it("fails closed when both public sources place the repeated row on a page boundary", () => {
+    const first = trade({ transactionHash: "0xboth-sources-boundary" });
+    const activityTrade = { ...first, type: "TRADE" };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [first, { ...first }],
+      activity: [activityTrade, { ...activityTrade }],
+      tradePaginationBoundaryOverlaps: [{ ...first }],
+      activityPaginationBoundaryOverlaps: [{ ...first }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.metrics).toMatchObject({
+      uniqueEvents: 1,
+      reconciledPaginationOverlapRows: 0,
+      ambiguousEvents: 1,
+    });
+    expect(report.incompleteReasons).toContain("AMBIGUOUS_DUPLICATE_EVENTS");
+  });
+
+  it("rejects page-boundary evidence that does not correspond to a duplicate raw row", () => {
+    const first = trade({ transactionHash: "0xinvalid-boundary-evidence" });
+    expect(() => new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [first],
+      activity: [{ ...first, type: "TRADE" }],
+      tradePaginationBoundaryOverlaps: [{ ...first }],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    })).toThrow("INVALID_PAGINATION_BOUNDARY_OVERLAP_EVIDENCE");
   });
 
   it("replays an Activity-only TRADE instead of silently dropping it", () => {
