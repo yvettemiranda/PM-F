@@ -773,6 +773,7 @@ describe("PaperValidationCampaignService", () => {
       campaignState: "FROZEN",
       campaignCoreCompatibilityHash: computeCoreCompatibilityHash(input.manifest),
       campaignBlockers: [],
+      latestCompatibilityIdentity: null,
     });
     const database = new DatabaseSync(input.databasePath);
     const transitions = database.prepare(
@@ -1415,6 +1416,45 @@ describe("PaperValidationCampaignService", () => {
       coverageStatus: "COMPLETE",
       canContinue: false,
     });
+    expect(assertPaperCampaignPreMigrationCompatible({
+      databasePath: input.databasePath,
+      manifest: input.manifest,
+    })).toMatchObject({
+      campaignId: campaign.campaignId,
+      campaignState: "PASSED",
+      latestCompatibilityIdentity: {
+        validationPolicyHash: compatibilityEvidence.validationPolicyHash,
+        verificationSuiteHash: compatibilityEvidence.verificationSuiteHash,
+      },
+    });
+    const changedPolicy = {
+      ...compatibilityEvidence,
+      validationPolicyHash: "e".repeat(64),
+    };
+    const revalidation = input.service.startSession({
+      campaignId: campaign.campaignId,
+      coreManifest: input.manifest,
+      compatibilityEvidence: changedPolicy,
+      sourceVersion,
+      now: at(startHour + 11),
+      sessionId: "PS-PASSED-REVALIDATION",
+    });
+    expect(revalidation.sessionKind).toBe("QUALIFYING");
+    expect(input.service.campaignSnapshot(campaign.campaignId)).toMatchObject({
+      state: "RUNNING",
+      accumulatedActiveRuntimeMs: 72 * 60 * 60 * 1_000,
+      latestCompatibilityIdentity: {
+        validationPolicyHash: changedPolicy.validationPolicyHash,
+        verificationSuiteHash: changedPolicy.verificationSuiteHash,
+        operatorBuildHash: changedPolicy.operatorBuildHash,
+        artifactProvenanceHash: changedPolicy.artifactProvenanceHash,
+      },
+    });
+    expect(input.service.store.database.prepare(
+      `SELECT reason FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=?
+       ORDER BY sequence DESC LIMIT 1`,
+    ).get(campaign.campaignId)).toEqual({ reason: "CAMPAIGN_REVALIDATION_STARTED" });
     input.service.close();
   });
 

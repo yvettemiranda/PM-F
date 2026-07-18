@@ -55,6 +55,12 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
     canContinue: true,
     latestSessionId: "PS-LAST",
     latestReportId: "PR-LAST",
+    latestCompatibilityIdentity: {
+      validationPolicyHash: "1".repeat(64),
+      verificationSuiteHash: "2".repeat(64),
+      operatorBuildHash: "3".repeat(64),
+      artifactProvenanceHash: "4".repeat(64),
+    },
     ...overrides,
   };
 }
@@ -158,6 +164,24 @@ describe("paper Campaign operator policy", () => {
       snapshot({ state: "FROZEN", coreCompatibilityHash: "a".repeat(64) }),
       "b".repeat(64),
     )).toBe("CREATE_REPLACEMENT");
+  });
+
+  it("revalidates only a same-core PASSED Campaign whose policy or suite changed", () => {
+    const passed = snapshot({ state: "PASSED", coreCompatibilityHash: "a".repeat(64) });
+    expect(paperCampaignStartDisposition(passed, "a".repeat(64), {
+      ...passed.latestCompatibilityIdentity!,
+      validationPolicyHash: "5".repeat(64),
+    })).toBe("REVALIDATE_TERMINAL");
+    expect(paperCampaignStartDisposition(passed, "a".repeat(64), passed.latestCompatibilityIdentity!))
+      .toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({ ...passed, state: "BLOCKED" }),
+      "a".repeat(64),
+      {
+        ...passed.latestCompatibilityIdentity!,
+        verificationSuiteHash: "6".repeat(64),
+      },
+    )).toBe("REFUSE_TERMINAL");
   });
 
   it("keeps a coverage-incomplete Campaign on a useful 12-hour session", () => {

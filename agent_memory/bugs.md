@@ -27,6 +27,9 @@
 - scoped invariant 曾重复扫描实体并对每条 transition 单独查 audit；现复用扫描并分批比对。
 - Session 兼容身份数据库触发器曾允许 SQL NULL 绕过；现显式拒绝 NULL、错误长度和非小写十六进制。
 - 诊断包旧 proof 校验在全量并发下接近测试超时；现先拒绝明显 source/core 不匹配，再做昂贵完整校验。
+- 新增 `.test.ts` 曾可能进入 suite hash 但漏出静态隔离执行清单；现两者不完全一致时 proof 身份计算直接 fail closed。
+- Observe 等待的 `Promise.race` 曾在 abort 后留下 15 秒定时器；现默认 cadence wait 会移除监听并清除 timer，安全停止不会被残留事件循环拖延。
+- 同核心 `PASSED` Campaign 在 policy/suite 变化后曾既不能 replacement、也不能追加重验 Session；现只允许该精确条件以 append-only `PASSED→RUNNING` 重验，原始时长保留，旧覆盖/资格按新身份重判；同核心 `BLOCKED/FROZEN` 仍拒绝。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

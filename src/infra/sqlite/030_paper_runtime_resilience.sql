@@ -79,6 +79,44 @@ CREATE TABLE paper_validation_evidence_adjudications (
 CREATE INDEX paper_validation_evidence_adjudications_campaign_idx
 ON paper_validation_evidence_adjudications(campaign_id,session_id,created_at);
 
+-- A PASSED Campaign may be reopened only by the service's policy/suite
+-- revalidation guard. The database state machine allows that audited edge;
+-- BLOCKED and FROZEN remain terminal for the same core.
+DROP TRIGGER paper_validation_campaign_transition_insert_guard;
+
+CREATE TRIGGER paper_validation_campaign_transition_insert_guard
+BEFORE INSERT ON paper_validation_transitions
+WHEN NEW.entity_type = 'CAMPAIGN'
+BEGIN
+  SELECT RAISE(ABORT, 'paper validation campaign transition sequence mismatch')
+  WHERE NEW.sequence <> (
+    SELECT coalesce(max(sequence), 0) + 1
+    FROM paper_validation_transitions
+    WHERE entity_type = 'CAMPAIGN' AND campaign_id = NEW.campaign_id
+  );
+
+  SELECT RAISE(ABORT, 'paper validation campaign transition from_state mismatch')
+  WHERE NEW.from_state IS NOT (
+    SELECT to_state
+    FROM paper_validation_transitions
+    WHERE entity_type = 'CAMPAIGN' AND campaign_id = NEW.campaign_id
+    ORDER BY sequence DESC
+    LIMIT 1
+  );
+
+  SELECT RAISE(ABORT, 'paper validation campaign transition is illegal')
+  WHERE NOT (
+    (NEW.from_state IS NULL AND NEW.to_state = 'QUALIFYING')
+    OR (NEW.from_state = 'QUALIFYING' AND NEW.to_state IN ('RUNNING', 'BLOCKED', 'FROZEN'))
+    OR (NEW.from_state = 'RUNNING' AND NEW.to_state IN (
+      'PAUSED', 'INCOMPLETE_COVERAGE', 'PASSED', 'BLOCKED', 'FROZEN'
+    ))
+    OR (NEW.from_state = 'PAUSED' AND NEW.to_state IN ('RUNNING', 'BLOCKED', 'FROZEN'))
+    OR (NEW.from_state = 'INCOMPLETE_COVERAGE' AND NEW.to_state IN ('RUNNING', 'BLOCKED', 'FROZEN'))
+    OR (NEW.from_state = 'PASSED' AND NEW.to_state = 'RUNNING')
+  );
+END;
+
 CREATE TRIGGER paper_validation_evidence_adjudications_no_update
 BEFORE UPDATE ON paper_validation_evidence_adjudications
 BEGIN

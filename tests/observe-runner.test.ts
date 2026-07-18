@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PolymarketPublicApi, type ApiCapture } from "../src/adapters/polymarket-public.js";
 import type { PublicActivity, PublicPosition, PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
@@ -948,6 +948,35 @@ describe("ObserveOnlyRunner", () => {
     expect(pollStarts).toEqual([0, 15_000]);
     expect(waits).toEqual([13_800, 13_800]);
     store.close();
+  });
+
+  it("clears the pending cadence timer when a safe stop aborts the wait", async () => {
+    vi.useFakeTimers();
+    const { databasePath } = setup();
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const controller = new AbortController();
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([snapshot([], [position("100")], now.toISOString())]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 15_000,
+        durationMs: 60_000,
+        now: () => now,
+      },
+    );
+    try {
+      const running = runner.run(controller.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      controller.abort(new Error("TEST_SAFE_STOP"));
+      await expect(running).resolves.toMatchObject({ successfulPolls: 1, failedPolls: 0 });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      store.close();
+      vi.useRealTimers();
+    }
   });
 
   it("cancels an in-flight poll without recording an API failure or partial checkpoint", async () => {

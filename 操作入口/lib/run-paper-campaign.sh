@@ -176,10 +176,18 @@ PREFLIGHT_REPLACEMENT_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
   else if (value.replacementRequired === false) process.stdout.write("no");
   else process.exit(2);
 ')"
+PREFLIGHT_REVALIDATION_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
+  const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
+  if (value.terminalRevalidationRequired === true) process.stdout.write("yes");
+  else if (value.terminalRevalidationRequired === false) process.stdout.write("no");
+  else process.exit(2);
+')"
 abort_if_stop_requested
 if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
   --file="$ISOLATED_EVIDENCE_FILE" >/dev/null 2>&1; then
-  if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" && "$PREFLIGHT_REPLACEMENT_REQUIRED" != "yes" ]]; then
+  if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__"
+    && "$PREFLIGHT_REPLACEMENT_REQUIRED" != "yes"
+    && "$PREFLIGHT_REVALIDATION_REQUIRED" != "yes" ]]; then
     print "已有 Campaign $PREFLIGHT_CAMPAIGN_ID，但隔离证据缺失、损坏或版本不匹配。"
     print "为保护崩溃恢复游标，本次不会先刷新 Phase 0 数据，也不会改写数据库。"
     print "请把本次诊断包交给 Codex 处理。"
@@ -187,6 +195,8 @@ if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
   fi
   if [[ "$PREFLIGHT_REPLACEMENT_REQUIRED" == "yes" ]]; then
     print "旧 Campaign 属于已结束的旧核心版本；将只读保留，并为修复后的核心重建隔离证据。"
+  elif [[ "$PREFLIGHT_REVALIDATION_REQUIRED" == "yes" ]]; then
+    print "已通过 Campaign 的验收策略或测试套件发生变化；将保留原始运行时长并重建隔离证据。"
   fi
   title "首次运行：自动完成隔离验证"
   print "只使用 Paper、Replay、Fake/Disabled Adapter；不会连接真实资金。"

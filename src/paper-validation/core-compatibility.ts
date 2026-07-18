@@ -440,6 +440,15 @@ export function computeOperatorBuildHash(projectRoot: string): string {
 
 export function computeVerificationSuiteHash(projectRoot: string): string {
   const packageDefinition = readPackageDefinition(projectRoot);
+  const discoveredTestFiles = filesUnder(
+    projectRoot,
+    "tests",
+    (name) => name.endsWith(".test.ts"),
+  ).sort();
+  const listedTestFiles = [...PAPER_CAMPAIGN_ISOLATED_TEST_FILES].sort();
+  if (stableJson(discoveredTestFiles) !== stableJson(listedTestFiles)) {
+    throw new Error("PAPER_VERIFICATION_TEST_FILE_SET_MISMATCH");
+  }
   const toolchain = Object.fromEntries([
     "@types/node",
     "tsx",
@@ -448,7 +457,7 @@ export function computeVerificationSuiteHash(projectRoot: string): string {
   ].map((name) => [name, packageDefinition.devDependencies?.[name] ?? null]));
   return hashValue({
     version: "paper-verification-suite-v1",
-    testFiles: PAPER_CAMPAIGN_ISOLATED_TEST_FILES,
+    testFiles: listedTestFiles,
     toolchain,
     fileHash: hashFiles(projectRoot, [
       ...filesUnder(projectRoot, "tests", (name) => name.endsWith(".ts")),

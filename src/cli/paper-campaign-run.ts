@@ -602,7 +602,11 @@ async function main(): Promise<void> {
     let snapshot = ids.length === 0
       ? createCampaign(service, manifest, sourceVersion, compatibilityEvidence)
       : service.campaignSnapshot(ids.at(-1)!);
-    const startDisposition = paperCampaignStartDisposition(snapshot, coreCompatibilityHash);
+    const startDisposition = paperCampaignStartDisposition(
+      snapshot,
+      coreCompatibilityHash,
+      compatibilityEvidence,
+    );
     if (startDisposition === "CREATE_REPLACEMENT") {
       const previous = snapshot;
       snapshot = createCampaign(service, manifest, sourceVersion, compatibilityEvidence, previous);
@@ -614,10 +618,18 @@ async function main(): Promise<void> {
       }));
     } else if (startDisposition === "REFUSE_TERMINAL") {
       throw new Error(`PAPER_CAMPAIGN_NOT_STARTABLE:${snapshot.state}:${snapshot.campaignId}`);
+    } else if (startDisposition === "REVALIDATE_TERMINAL") {
+      console.log(JSON.stringify({
+        event: "PAPER_CAMPAIGN_REVALIDATION_REQUIRED",
+        campaignId: snapshot.campaignId,
+        campaignState: snapshot.state,
+      }));
     }
     await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);
     snapshot = service.campaignSnapshot(snapshot.campaignId);
-    if (!snapshot.canContinue) throw new Error(`PAPER_CAMPAIGN_CANNOT_CONTINUE:${snapshot.state}`);
+    if (!snapshot.canContinue && startDisposition !== "REVALIDATE_TERMINAL") {
+      throw new Error(`PAPER_CAMPAIGN_CANNOT_CONTINUE:${snapshot.state}`);
+    }
     const plannedDurationMs = paperCampaignPlannedDurationOverride(snapshot);
     session = service.startSession({
       campaignId: snapshot.campaignId,

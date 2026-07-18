@@ -312,6 +312,20 @@ describe("Paper Campaign core compatibility", () => {
     }
   });
 
+  it("fails closed when a test file is not in the isolated execution list", () => {
+    const fixture = createProjectFixture();
+    try {
+      writeFileSync(
+        join(fixture, "tests/unlisted-safety-regression.test.ts"),
+        "void \"unlisted-safety-regression\";\n",
+      );
+      expect(() => computeVerificationSuiteHash(fixture))
+        .toThrow("PAPER_VERIFICATION_TEST_FILE_SET_MISMATCH");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("keeps presentation reports outside while retaining runtime accounting and orchestration", () => {
     expect(CORE_COMPATIBILITY_PAPER_FILES).toContain("src/paper/paper-executor.ts");
     expect(CORE_COMPATIBILITY_PAPER_FILES).not.toContain("src/paper/paper-acceptance-summary.ts");

@@ -26,6 +26,7 @@
 - `coreCompatibilityHash` 覆盖实际 Paper/Observe/恢复/计时/安全/Schema 语义，TypeScript 按去注释 AST 规范化；Live-only 和注释变化不重置 Campaign。
 - 非核心变化分别绑定 `validationPolicyHash`、`verificationSuiteHash`、`operatorBuildHash`、`artifactProvenanceHash`，并以 append-only adjudication 说明旧证据如何继承。
 - 任何终态 Campaign 只有在核心不同才可创建 replacement；同核心终态继续 fail closed。不同核心绝不混算累计时长。
+- 唯一例外是已 `PASSED` Campaign 的 validation policy 或 verification suite 身份发生变化：保留原始运行时长，以 append-only transition/adjudication 重新打开资格或证据验证；同核心 `BLOCKED/FROZEN` 仍不可重开。
 - scoped invariants 复用实体扫描并批量核对 transition audit；历史数据库不做破坏性压缩或覆盖。
 
 ## Current runtime and Campaign

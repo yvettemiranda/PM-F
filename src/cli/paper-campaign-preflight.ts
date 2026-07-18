@@ -2,11 +2,15 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import {
+  buildCurrentCompatibilityEvidence,
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
 import { checkPaperCampaignClockSafety } from "../paper-validation/clock-safety.js";
-import { paperCampaignReplacementAuthorized } from "../paper-validation/operator-policy.js";
+import {
+  paperCampaignReplacementAuthorized,
+  paperCompatibilityRevalidationRequired,
+} from "../paper-validation/operator-policy.js";
 import {
   assertPaperCampaignPreMigrationCompatible,
   freezePaperCampaignPreMigrationMismatch,
@@ -17,6 +21,7 @@ const sourceVersion = resolveSourceVersion(projectRoot);
 if (sourceVersion.dirty) throw new Error("PAPER_CAMPAIGN_REQUIRES_CLEAN_SOURCE");
 const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
 const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
+const compatibilityEvidence = buildCurrentCompatibilityEvidence(projectRoot);
 const clockSafety = await checkPaperCampaignClockSafety();
 if (clockSafety.status !== "PASSED") {
   console.error(JSON.stringify({
@@ -59,10 +64,15 @@ console.log(JSON.stringify({
     && result.campaignCoreCompatibilityHash !== null
     && paperCampaignReplacementAuthorized({
       campaignState: result.campaignState ?? "UNKNOWN",
-      blockers: result.campaignBlockers,
       previousCoreCompatibilityHash: result.campaignCoreCompatibilityHash,
       currentCoreCompatibilityHash: coreCompatibilityHash,
     }),
+  terminalRevalidationRequired: result.campaignState === "PASSED"
+    && result.campaignCoreCompatibilityHash === coreCompatibilityHash
+    && paperCompatibilityRevalidationRequired(
+      result.latestCompatibilityIdentity,
+      compatibilityEvidence,
+    ),
   sourceCodeCommit: sourceVersion.commit,
   coreCompatibilityHash,
   clockSafety,

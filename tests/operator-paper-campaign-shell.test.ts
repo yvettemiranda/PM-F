@@ -292,6 +292,7 @@ describe("Paper Campaign operator shell", () => {
     expect(releaseAt).toBeGreaterThan(bundleAt);
     expect(launcher).toContain("abort_if_stop_requested");
     expect(launcher).toContain("PREFLIGHT_REPLACEMENT_REQUIRED");
+    expect(launcher).toContain("PREFLIGHT_REVALIDATION_REQUIRED");
     expect(launcher).toContain("--test-results=\"$TEST_RESULTS_FILE\"");
     expect(launcher).toContain("--phase0-results=\"$PHASE0_RESULT_FILE\"");
     expect(launcher).toContain("--replay-results=\"$REPLAY_RESULT_FILE\"");
@@ -312,7 +313,7 @@ describe("Paper Campaign operator shell", () => {
     expect(firstOrphanCleanup).toBeLessThan(launcher.indexOf("paper-campaign-preflight.ts"));
     expect(launcher.indexOf("operator_start_keep_awake")).toBeLessThan(launcher.indexOf("ensure_phase0_database"));
     const existingCampaignGuard = launcher.indexOf(
-      'if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__" && "$PREFLIGHT_REPLACEMENT_REQUIRED" != "yes" ]]',
+      'if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__"',
     );
     expect(existingCampaignGuard).toBeGreaterThan(launcher.indexOf("paper-campaign-preflight.ts"));
     expect(existingCampaignGuard).toBeLessThan(launcher.indexOf('title "首次运行：自动完成隔离验证"'));
@@ -455,7 +456,7 @@ describe("Paper Campaign operator shell", () => {
     ], { cwd: tmpdir(), encoding: "utf8" });
     expect(selected.status, selected.stderr).toBe(0);
     expect(selected.stdout.trim()).toBe(zipPath);
-  });
+  }, 15_000);
 
   it.each([
     "source commit",

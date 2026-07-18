@@ -132,6 +132,7 @@ export interface CampaignSnapshot extends CampaignDefinition {
   canContinue: boolean;
   latestSessionId: string | null;
   latestReportId: string | null;
+  latestCompatibilityIdentity: CompatibilityIdentity | null;
 }
 
 export interface ValidationSessionDefinition {

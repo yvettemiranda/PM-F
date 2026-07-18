@@ -417,14 +417,22 @@ export class PaperValidationCampaignService {
     this.assertCompatibilityEvidence(input.compatibilityEvidence);
     parseTime(input.now, "SESSION_STARTED_AT");
     const actualCoreHash = computeCoreCompatibilityHash(input.coreManifest);
+    const currentIdentity = identityFromEvidence(input.compatibilityEvidence);
     const initialSnapshot = this.campaignSnapshot(input.campaignId);
-    if (!["QUALIFYING", "PAUSED", "INCOMPLETE_COVERAGE"].includes(initialSnapshot.state)) {
+    const initialDisposition = paperCampaignStartDisposition(
+      initialSnapshot,
+      actualCoreHash,
+      currentIdentity,
+    );
+    if (
+      !["QUALIFYING", "PAUSED", "INCOMPLETE_COVERAGE"].includes(initialSnapshot.state)
+      && initialDisposition !== "REVALIDATE_TERMINAL"
+    ) {
       throw new Error(`PAPER_VALIDATION_CAMPAIGN_NOT_STARTABLE:${initialSnapshot.state}`);
     }
     this.freezeAndThrowIfIncompatible(input.campaignId, actualCoreHash, input.sourceVersion, input.now);
 
     const snapshot = this.campaignSnapshot(input.campaignId);
-    const currentIdentity = identityFromEvidence(input.compatibilityEvidence);
     const priorReports = this.store.sessionReports(input.campaignId);
     const qualifiedForCurrentCompatibility = priorReports.some((report) => (
       reportQualifiesCurrentCompatibility(report, snapshot, currentIdentity)
@@ -445,7 +453,12 @@ export class PaperValidationCampaignService {
         throw new Error(`PAPER_VALIDATION_SESSION_ALREADY_RUNNING:${input.campaignId}`);
       }
       const currentState = this.store.campaignState(input.campaignId);
-      if (!["QUALIFYING", "PAUSED", "INCOMPLETE_COVERAGE"].includes(currentState)) {
+      const terminalRevalidation = currentState === "PASSED"
+        && paperCampaignStartDisposition(snapshot, actualCoreHash, currentIdentity) === "REVALIDATE_TERMINAL";
+      if (
+        !["QUALIFYING", "PAUSED", "INCOMPLETE_COVERAGE"].includes(currentState)
+        && !terminalRevalidation
+      ) {
         throw new Error(`PAPER_VALIDATION_CAMPAIGN_NOT_STARTABLE:${currentState}`);
       }
       const sequence = this.store.nextSessionSequence(input.campaignId);
@@ -522,12 +535,13 @@ export class PaperValidationCampaignService {
         campaignId: input.campaignId,
         fromState: currentState,
         toState: "RUNNING",
-        reason: "SESSION_STARTED",
+        reason: terminalRevalidation ? "CAMPAIGN_REVALIDATION_STARTED" : "SESSION_STARTED",
         evidence: {
           sessionId,
           sessionKind,
           plannedDurationMs,
           sequence,
+          terminalRevalidation,
           compatibilityIdentity: currentIdentity,
           liveGateTransitionCountAtStart: safety.transitionCount,
         },
@@ -923,6 +937,8 @@ export class PaperValidationCampaignService {
     const latestReport = this.store.latestCampaignReport(campaignId);
     const coverage = mergeCampaignCoverage(countedReports);
     const missingScenarios = missingCoverageScenarios(coverage);
+    const latestSession = allReports.at(-1) ?? null;
+    const runningSession = this.store.runningSession(campaignId);
     return {
       ...definition,
       state,
@@ -941,8 +957,11 @@ export class PaperValidationCampaignService {
       missingScenarios,
       blockers: latestReport?.blockers ?? [],
       canContinue: state === "QUALIFYING" || state === "PAUSED" || state === "INCOMPLETE_COVERAGE",
-      latestSessionId: allReports.at(-1)?.sessionId ?? this.store.runningSession(campaignId)?.sessionId ?? null,
+      latestSessionId: runningSession?.sessionId ?? latestSession?.sessionId ?? null,
       latestReportId: latestReport?.reportId ?? null,
+      latestCompatibilityIdentity: runningSession?.compatibilityIdentity
+        ?? latestSession?.compatibilityIdentity
+        ?? null,
     };
   }
 

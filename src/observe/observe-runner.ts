@@ -21,6 +21,22 @@ import { marketClockOffsetIsValid } from "../execution/market-data.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    if (signal?.aborted) finish();
+    else signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
 export interface ObserveRunnerOptions {
   walletAddress: string;
   baselineRunId?: string;
@@ -31,7 +47,7 @@ export interface ObserveRunnerOptions {
   staleRunAfterMs?: number;
   now?: () => Date;
   monotonicNow?: () => number;
-  wait?: (milliseconds: number) => Promise<void>;
+  wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   marketClockOffsetMs?: number;
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
   sourceVersion?: SourceVersion;
@@ -55,7 +71,7 @@ function assertRecoveryCoverage(snapshot: Awaited<ReturnType<ObserveDataSource["
 export class ObserveOnlyRunner {
   private readonly now: () => Date;
   private readonly monotonicNow: () => number;
-  private readonly wait: (milliseconds: number) => Promise<void>;
+  private readonly wait: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   private started: StartedObserveRun | null = null;
   private gapActive = true;
   private gapCutoffAt: string | null = null;
@@ -72,7 +88,7 @@ export class ObserveOnlyRunner {
     this.now = options.now ?? (() => new Date());
     this.monotonicNow = options.monotonicNow
       ?? (options.now ? () => this.now().valueOf() : () => performance.now());
-    this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.wait = options.wait ?? abortableDelay;
     this.marketClockOffsetMs = options.marketClockOffsetMs ?? 0;
     if (!marketClockOffsetIsValid(this.marketClockOffsetMs)) {
       throw new Error("OBSERVE_MARKET_CLOCK_OFFSET_INVALID");
@@ -490,13 +506,6 @@ export class ObserveOnlyRunner {
 
   private async waitForNextPoll(milliseconds: number, signal?: AbortSignal): Promise<void> {
     if (milliseconds <= 0 || signal?.aborted) return;
-    if (!signal) {
-      await this.wait(milliseconds);
-      return;
-    }
-    await Promise.race([
-      this.wait(milliseconds),
-      new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
-    ]);
+    await this.wait(milliseconds, signal);
   }
 }

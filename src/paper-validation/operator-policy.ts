@@ -1,13 +1,16 @@
-import type { CampaignSnapshot } from "./types.js";
+import type { CampaignSnapshot, CompatibilityIdentity } from "./types.js";
 
 export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
 
-export type PaperCampaignStartDisposition = "CONTINUE" | "CREATE_REPLACEMENT" | "REFUSE_TERMINAL";
+export type PaperCampaignStartDisposition =
+  | "CONTINUE"
+  | "CREATE_REPLACEMENT"
+  | "REVALIDATE_TERMINAL"
+  | "REFUSE_TERMINAL";
 export type PaperCampaignReplacementReason = "CORE_VERSION_REPLACEMENT";
 
 function replacementReason(input: {
   campaignState: string;
-  blockers: readonly string[];
   previousCoreCompatibilityHash: string;
   currentCoreCompatibilityHash: string;
 }): PaperCampaignReplacementReason | null {
@@ -19,7 +22,6 @@ function replacementReason(input: {
 
 export function paperCampaignReplacementAuthorized(input: {
   campaignState: string;
-  blockers: readonly string[];
   previousCoreCompatibilityHash: string;
   currentCoreCompatibilityHash: string;
 }): boolean {
@@ -32,10 +34,17 @@ export function paperCampaignReplacementReason(
 ): PaperCampaignReplacementReason | null {
   return replacementReason({
     campaignState: snapshot.state,
-    blockers: snapshot.blockers,
     previousCoreCompatibilityHash: snapshot.coreCompatibilityHash,
     currentCoreCompatibilityHash,
   });
+}
+
+export function paperCompatibilityRevalidationRequired(
+  previous: CompatibilityIdentity | null,
+  current: CompatibilityIdentity,
+): boolean {
+  return previous?.validationPolicyHash !== current.validationPolicyHash
+    || previous?.verificationSuiteHash !== current.verificationSuiteHash;
 }
 
 /**
@@ -46,11 +55,17 @@ export function paperCampaignReplacementReason(
 export function paperCampaignStartDisposition(
   snapshot: CampaignSnapshot,
   currentCoreCompatibilityHash: string,
+  currentCompatibilityIdentity?: CompatibilityIdentity,
 ): PaperCampaignStartDisposition {
   if (!["PASSED", "BLOCKED", "FROZEN"].includes(snapshot.state)) return "CONTINUE";
-  return paperCampaignReplacementReason(snapshot, currentCoreCompatibilityHash)
-    ? "CREATE_REPLACEMENT"
-    : "REFUSE_TERMINAL";
+  if (paperCampaignReplacementReason(snapshot, currentCoreCompatibilityHash)) return "CREATE_REPLACEMENT";
+  const revalidationRequired = snapshot.state === "PASSED"
+    && currentCompatibilityIdentity !== undefined
+    && paperCompatibilityRevalidationRequired(
+      snapshot.latestCompatibilityIdentity,
+      currentCompatibilityIdentity,
+    );
+  return revalidationRequired ? "REVALIDATE_TERMINAL" : "REFUSE_TERMINAL";
 }
 
 /**
