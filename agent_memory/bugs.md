@@ -1,6 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
+- macOS `timed` 当前会拒绝正确 NTP 的约 2 秒校正并回退到错误合成时钟；Apple/Cloudflare/Google 均测得本机慢约 `2.05s`，CLOB preflight 已以 `CLOCK_OFFSET_EXCEEDED` 安全阻断。系统层偏差稳定回到 1000ms 内前不得创建新 Campaign。
 - 修复后核心的新 Campaign 尚未执行，因此资格里程碑、连续 12 小时和累计 72 小时自然运行都尚未通过。
 - Campaign `PC-A90AEC5B17EA925E5AF1` 已因旧核心时钟/订单簿未来时间误判 BLOCKED；其 12 小时失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
 - 即使资格通过，仍需累计有效运行 72 小时、至少一个连续 12 小时 Session，并满足最终一致性与覆盖门槛。

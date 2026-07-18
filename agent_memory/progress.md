@@ -3,7 +3,7 @@
 ## Current task
 - 2026-07-18 Campaign `PC-A90AEC5B17EA925E5AF1` 的 Session `PS-F76E83CEABE73C181068` 实际运行 `43,200,002ms`，Observe 与 Paper 主流程健康，但最终 1 个持仓因 `ORDERBOOK_STALE / Orderbook age NaNms` 无法估值，Session FAILED 且累计为 0。
 - 根因已由 ZIP、系统时间和 CLOB 公开时间共同确认：本机时钟约慢 2 秒，旧逻辑对任何大于 0ms 的源端未来时间立即返回 `NaN`，与既有 `clockUnsafeThresholdMs=1000` 安全规则不一致。
-- 系统时间已通过 macOS 管理员确认的 Apple NTP 校正；校正后 Apple/Cloudflare/Google 偏差约在 ±40ms，CLOB `/time` 与订单簿样本均回到阈值内。
+- 系统时间曾通过 macOS 管理员确认的 Apple NTP 临时校正至约 ±40ms，但 `timed` 后续把时间重新拨慢；修复提交后的 Apple/Cloudflare/Google NTP 均再次测得约 `+2.05s`，CLOB preflight 测得 `+1407ms` 并正确阻断。
 - 修复已按 TDD 完成：订单簿允许阈值内微小偏差，超限明确记录 `ORDERBOOK_CLOCK_UNSAFE`；每次 Campaign 启动前必须用无认证 CLOB `/time` 做只读、fail-closed 检查。
 - 替代策略仅接受本次精确五项 blocker 且新旧核心不同；新 Campaign 固定从累计 0 开始并记录 `CORE_REPAIR_CLOCK_SAFETY` supersedes 证据。
 - 全程固定 `PAPER + LIVE_DISABLED`；未启动新 Campaign，未修改任何历史失败证据。
@@ -79,9 +79,10 @@
 - 时钟回归先稳定复现阈值内源端偏差被旧实现返回 `NaN`；修复后 5 个定向测试文件、95 项通过，替代 Campaign 服务层验证确认新累计与最长连续时长均为 0。
 - 最新全量验证：48 个测试文件、550 项全部通过；TypeScript、全部 `.command/.sh` zsh 语法和 `git diff --check` 通过。
 - Schema 保持 `2.24.0`；时钟修复后的 `coreCompatibilityHash=637191cd09eff0ddcdb8309b71226be62fdb6c08dbd13087208e6ca04cc17d08`，Paper ruleset hash 为 `96e307f8ec0b3ff6a672403dfe17d15e5095f290b6d7c85a117761ec6ddb0429`。
+- 干净提交 `ec16d94c631df0ab05de92b5c97fb3b8c04ab7fb` 上的真实 preflight 未访问交易能力、未创建 Campaign；因 CLOB clock offset `+1407ms > 1000ms` 返回 `CLOCK_SAFETY_FAILED`。三方 NTP 与 `timed` 日志证明该阻断是真实系统时钟问题，不是新安全门误报。
 
 ## Next steps
-1. 在干净修复提交上执行一次只读 preflight，确认当前 CLOB clock、旧 Campaign 精确 blocker 和 replacementRequired。
-2. 用户双击桌面“1_开始或继续Paper累计验证.command”；入口将为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始。
-3. 建议第一次直接健康运行满 12 小时；安全停止后用第三个按钮定位 ZIP 并交给 Codex。
-4. 累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。
+1. 在 macOS“系统设置 → 通用 → 日期与时间”中关闭再开启“自动设定时间与日期”，服务器设为 `time.apple.com`；如系统要求密码或 Touch ID，必须由用户本人完成。
+2. 重新用 Apple/Cloudflare/Google NTP 与 CLOB `/time` 交叉核对，并在干净提交上重跑只读 preflight；只有 offset 不超过 1000ms 才可继续。
+3. preflight 通过后，用户双击桌面“1_开始或继续Paper累计验证.command”；入口将为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始。
+4. 建议第一次直接健康运行满 12 小时；累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。
