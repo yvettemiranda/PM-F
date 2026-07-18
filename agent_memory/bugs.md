@@ -2,7 +2,7 @@
 
 ## Active blockers
 - 优化后核心尚未执行新的自然 Paper Campaign，因此资格、连续 12 小时、累计 72 小时和最终 24 小时 Observe 均未通过。
-- 最新旧核心 Campaign `PC-088B9A92605F05B2677A` 的约 0.54 小时只保留为历史证据；优化后 replacement 必须从 0 开始。
+- 最新旧核心 Campaign `PC-088B9A92605F05B2677A` 已因核心变化安全 `FROZEN`；约 0.54 小时只保留为历史证据，优化后 replacement 必须从 0 开始。
 - 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景仍需长期运行或明确标注的同版本隔离证据；不能伪装成自然行情。
 - Live 所需长期稳定、geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
@@ -16,6 +16,7 @@
 - 公开 HTTP 响应没有服务器数字签名；当前只能证明官方 URL、内容寻址、本地 append-only capture 与解析一致。
 
 ## Resolved in current implementation
+- 预检曾在成功冻结旧核心 Campaign 后仍无条件抛出 `PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION`，导致第一次点击生成 `UNKNOWN_UNKNOWN` 并退出、必须第二次点击才能继续；现冻结后立即只读重查并在同一次启动中返回 replacement-ready，同时保持旧证据不可变。
 - Observe 未使用应用内时钟偏移，曾在本机慢约 1.7 秒时制造错误事件边界；现 Observe/Paper/Settlement 共用 MarketClock 并校验报告绑定。
 - wall-clock 计算可能因系统拨时延长、缩短 12/72 小时或突发补 checkpoint；现运行时长和调度使用单调时钟。
 - 停止时在途公开请求不能取消；现 AbortSignal 贯穿请求、分页和退避，取消轮询不会记失败证据。

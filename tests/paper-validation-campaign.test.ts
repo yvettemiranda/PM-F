@@ -31,6 +31,7 @@ import { collectCheckpointEvidence } from "../src/paper-validation/checkpoint-ev
 import {
   assertPaperCampaignPreMigrationCompatible,
   freezePaperCampaignPreMigrationMismatch,
+  preparePaperCampaignPreMigration,
 } from "../src/paper-validation/preflight.js";
 import { prepareInterruptedRuntimeRecovery } from "../src/paper-validation/runtime-recovery.js";
 import { PaperValidationCampaignService } from "../src/paper-validation/service.js";
@@ -780,6 +781,44 @@ describe("PaperValidationCampaignService", () => {
       "SELECT count(*) count FROM paper_validation_transitions WHERE campaign_id=? AND to_state='FROZEN'",
     ).get(campaign.campaignId) as { count: number };
     expect(transitions.count).toBe(1);
+    database.close();
+  });
+
+  it("freezes an active core mismatch and makes it replacement-ready in the same preflight", () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const incompatible: CoreCompatibilityManifest = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        paperExecution: componentHash("same-launch-replacement"),
+      },
+    };
+    input.service.close();
+
+    const prepared = preparePaperCampaignPreMigration({
+      databasePath: input.databasePath,
+      manifest: incompatible,
+      sourceVersion: { commit: "same-launch-new-core", dirty: false },
+      now: at(1),
+    });
+
+    expect(prepared).toMatchObject({
+      campaignId: campaign.campaignId,
+      campaignState: "FROZEN",
+      campaignCoreCompatibilityHash: computeCoreCompatibilityHash(input.manifest),
+      mismatchFrozen: true,
+    });
+    const database = new DatabaseSync(input.databasePath);
+    const transitions = database.prepare(
+      `SELECT from_state,to_state,reason FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence`,
+    ).all(campaign.campaignId);
+    expect(transitions).toContainEqual({
+      from_state: "QUALIFYING",
+      to_state: "FROZEN",
+      reason: "CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION",
+    });
     database.close();
   });
 

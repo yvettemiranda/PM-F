@@ -31,12 +31,13 @@
 
 ## Current runtime and Campaign
 - 2026-07-18 最新 Campaign：`PC-088B9A92605F05B2677A`，Session：`PS-9359096BA625BA2AC206`。
-- 用户安全暂停后：Campaign `PAUSED`、Session `COMPLETED`，stop reason 为 `USER_SAFE_PAUSE_SIGTERM`。
+- 用户安全暂停后 Session `COMPLETED`，stop reason 为 `USER_SAFE_PAUSE_SIGTERM`；2026-07-19 首次启动优化版本时，预检按设计将旧核心 Campaign 从 `PAUSED` 标记为 `FROZEN`。
 - 本次有效历史运行 `1,955,053ms`（约 0.54 小时），无 blocker，但不足资格和 12 小时；只作为旧核心历史证据保留。
 - 优化后的核心必须新建 replacement Campaign，从 0 累计，不得继承这 0.54 小时。
 - 当前无 Paper、Observe 或 Campaign supervisor 进程。
 
 ## Operator workflow
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
+- 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
 - 下一次正式启动会先做环境/隔离 proof/Phase 0/时钟检查，再 backup-first 升级数据库并创建新核心 Campaign；任一异常在 Session 前停止。
 - 建议新 Campaign 第一次连续运行满 12 小时；累计 72 小时、场景覆盖和最终 24 小时 Observe 完成前绝不进入 Live。

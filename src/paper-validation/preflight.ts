@@ -361,3 +361,30 @@ export function freezePaperCampaignPreMigrationMismatch(input: {
     database.close();
   }
 }
+
+export function preparePaperCampaignPreMigration(input: {
+  databasePath: string;
+  manifest: CoreCompatibilityManifest;
+  sourceVersion: SourceVersion;
+  now: string;
+}): ReturnType<typeof assertPaperCampaignPreMigrationCompatible> & {
+  mismatchFrozen: boolean;
+} {
+  try {
+    return {
+      ...assertPaperCampaignPreMigrationCompatible(input),
+      mismatchFrozen: false,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith("ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:")) throw error;
+    const frozen = freezePaperCampaignPreMigrationMismatch(input);
+    if (!frozen.frozen || frozen.campaignState !== "FROZEN") {
+      throw new Error(`PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_NOT_CONFIRMED:${frozen.campaignId ?? "UNKNOWN"}`);
+    }
+    return {
+      ...assertPaperCampaignPreMigrationCompatible(input),
+      mismatchFrozen: true,
+    };
+  }
+}

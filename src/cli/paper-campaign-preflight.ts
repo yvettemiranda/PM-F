@@ -12,8 +12,7 @@ import {
   paperCompatibilityRevalidationRequired,
 } from "../paper-validation/operator-policy.js";
 import {
-  assertPaperCampaignPreMigrationCompatible,
-  freezePaperCampaignPreMigrationMismatch,
+  preparePaperCampaignPreMigration,
 } from "../paper-validation/preflight.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -35,27 +34,22 @@ if (clockSafety.status !== "PASSED") {
   throw new Error(`PAPER_CAMPAIGN_CLOCK_SAFETY_BLOCKED:${clockSafety.reason ?? "UNKNOWN"}`);
 }
 const databasePath = resolve(projectRoot, "data/phase0/phase0.sqlite");
-let result: ReturnType<typeof assertPaperCampaignPreMigrationCompatible>;
-try {
-  result = assertPaperCampaignPreMigrationCompatible({ databasePath, manifest });
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!message.startsWith("ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:")) throw error;
-  const frozen = freezePaperCampaignPreMigrationMismatch({
-    databasePath,
-    manifest,
-    sourceVersion,
-    now: new Date().toISOString(),
-  });
+const result = preparePaperCampaignPreMigration({
+  databasePath,
+  manifest,
+  sourceVersion,
+  now: new Date().toISOString(),
+});
+if (result.mismatchFrozen) {
   console.error(JSON.stringify({
-    status: "FROZEN",
-    reason: "CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION",
-    ...frozen,
+    status: "CONTINUING",
+    event: "OLD_CORE_CAMPAIGN_FROZEN_FOR_REPLACEMENT",
+    campaignId: result.campaignId,
+    campaignState: result.campaignState,
     sourceCodeCommit: sourceVersion.commit,
     coreCompatibilityHash,
     safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
   }));
-  throw new Error(`PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION:${frozen.campaignId ?? "UNKNOWN"}`);
 }
 console.log(JSON.stringify({
   status: "PASSED",
