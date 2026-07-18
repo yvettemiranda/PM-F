@@ -13,6 +13,7 @@ import {
   executableOrderbookTimingFailure,
   isOrderbookUnavailableError,
   loadFeeThenOrderbook,
+  marketClockOffsetIsValid,
 } from "../execution/market-data.js";
 import { orderbookConstraintAvailability, parseMarketOrderConstraints } from "../execution/market-order-constraints.js";
 import { matchPaperSell } from "../paper/matching.js";
@@ -72,7 +73,12 @@ export class PortfolioProjectionService {
     private readonly sourceVersion: SourceVersion,
     private readonly now: () => Date,
     private readonly marketHealth?: PaperProjectionMarketHealth,
-  ) {}
+    private readonly marketClockOffsetMs = 0,
+  ) {
+    if (!marketClockOffsetIsValid(this.marketClockOffsetMs)) {
+      throw new Error("PAPER_MARKET_CLOCK_OFFSET_INVALID");
+    }
+  }
 
   async projectPaperAccount(accountId: string, signal?: AbortSignal): Promise<PaperAccountSnapshot> {
     const account = this.account(accountId);
@@ -145,7 +151,11 @@ export class PortfolioProjectionService {
           unpricedPositionCount += group.length;
           continue;
         }
-        const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+        const timing = assessExecutableOrderbookTiming(
+          book,
+          this.now().valueOf(),
+          this.marketClockOffsetMs,
+        );
         const timingFailure = executableOrderbookTimingFailure(timing);
         const age = timing.ageMs;
         if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {

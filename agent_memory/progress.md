@@ -1,10 +1,10 @@
 # Progress
 
 ## Current task
-- 2026-07-18 Campaign `PC-A90AEC5B17EA925E5AF1` 的 Session `PS-F76E83CEABE73C181068` 实际运行 `43,200,002ms`，Observe 与 Paper 主流程健康，但最终 1 个持仓因 `ORDERBOOK_STALE / Orderbook age NaNms` 无法估值，Session FAILED 且累计为 0。
-- 根因已由 ZIP、系统时间和 CLOB 公开时间共同确认：本机时钟约慢 2 秒，旧逻辑对任何大于 0ms 的源端未来时间立即返回 `NaN`，与既有 `clockUnsafeThresholdMs=1000` 安全规则不一致。
-- 系统时间曾通过 macOS 管理员确认的 Apple NTP 临时校正至约 ±40ms，但 `timed` 后续把时间重新拨慢；修复提交后的 Apple/Cloudflare/Google NTP 均再次测得约 `+2.05s`，CLOB preflight 测得 `+1407ms` 并正确阻断。
-- 修复已按 TDD 完成：订单簿允许阈值内微小偏差，超限明确记录 `ORDERBOOK_CLOCK_UNSAFE`；每次 Campaign 启动前必须用无认证 CLOB `/time` 做只读、fail-closed 检查。
+- 2026-07-18 已把反复手工校时替换为 Paper 启动自动校准：preflight 和 Campaign supervisor 各自连续采样 5 次无认证 CLOB `/time`，以中位数生成本次 Session 固定的应用内 `marketClockOffsetMs`。
+- 校准不修改 macOS 时间，也不改变运行时长、Signal deadline、数据库时间或 receipt freshness；只修正 orderbook 源端时间相对本机时间的比较，避免把偏移本身算成盘口年龄。
+- 最大可校准偏移固定 5 秒；样本数不符、来源错误、证据非法/不可用、任一样本相对中位数超过原 1000ms 阈值或中位数超过 5 秒均在创建 Session 前 fail closed。
+- supervisor 把完整样本写入 append-only START checkpoint 和最终 Session/Campaign/run-result；Paper 子进程必须按 CLI 参数接收并在 READY/内部报告原样回报，不一致新增 `PAPER_CLOCK_CALIBRATION_MISMATCH` blocker。
 - 替代策略仅接受本次精确五项 blocker 且新旧核心不同；新 Campaign 固定从累计 0 开始并记录 `CORE_REPAIR_CLOCK_SAFETY` supersedes 证据。
 - 全程固定 `PAPER + LIVE_DISABLED`；未启动新 Campaign，未修改任何历史失败证据。
 
@@ -45,6 +45,8 @@
 - Paper Campaign preflight 新增 CLOB `/time` 公共只读安全门；非 `LIVE_READONLY`、请求不可用、来源错误、证据非法或绝对偏差超过 1000ms 均在 Campaign 创建前停止。
 - `clockUnsafeThresholdMs`、时钟 preflight 及其公开 provider 已纳入 Paper ruleset/core identity；修复后时间不得与旧核心混算。
 - 本次精确五 blocker 的终态 Campaign 可由不同核心创建审计化替代；少/多任一 blocker 均继续拒绝。
+- Paper 启动时钟门升级为 5 样本稳健校准：允许应用内修正稳定且不超过 5 秒的实际偏移，同时继续以 1000ms 限制校准后的样本残差；Paper execution、market recovery、stop loss 与 portfolio valuation 共用同一 Session 偏移。
+- `tests/paper-campaign-clock-safety.test.ts` 已加入正式隔离 proof 测试清单，启动时的同核心 proof 会覆盖自动校准算法和 fail-closed 边界。
 
 ## Verification completed
 - Node `24.14.0`、pnpm `11.9.0`。
@@ -81,9 +83,12 @@
 - Schema 保持 `2.24.0`；时钟修复后的 `coreCompatibilityHash=637191cd09eff0ddcdb8309b71226be62fdb6c08dbd13087208e6ca04cc17d08`，Paper ruleset hash 为 `96e307f8ec0b3ff6a672403dfe17d15e5095f290b6d7c85a117761ec6ddb0429`。
 - 干净提交 `ec16d94c631df0ab05de92b5c97fb3b8c04ab7fb` 上的真实 preflight 未访问交易能力、未创建 Campaign；因 CLOB clock offset `+1407ms > 1000ms` 返回 `CLOCK_SAFETY_FAILED`。三方 NTP 与 `timed` 日志证明该阻断是真实系统时钟问题，不是新安全门误报。
 - 用户在“日期与时间”界面关闭再开启自动设定并确认 `time.apple.com` 后，Apple/Cloudflare/Google 仍分别约 `+2.050/+2.051/+2.052s`；CLOB 10 次样本范围 `+1064..+1979ms`，说明 GUI 开关没有重置 `timed` 的错误状态。因管理员/终端自动化窗口未能可靠显示，所有悬挂命令均已取消，未修改系统或创建 Campaign。
+- 自动校准回归按红绿流程完成：5 个定向测试文件、94 项通过；新增 PaperExecutor 端到端校准后，全量为 48 个测试文件、553 项全部通过，`pnpm typecheck` 与 `git diff --check` 通过。
+- Schema/Paper ruleset hash 保持 `2.24.0` / `96e307f8ec0b3ff6a672403dfe17d15e5095f290b6d7c85a117761ec6ddb0429`；自动启动校准核心的 `coreCompatibilityHash=38d4a991dfa91ce1daa933badb34fd9846f60cc2d6206268bac57d84d161dad4`。
+- 真实只读 CLOB 校准得到 5/5 成功样本：`+1827/+1270/+1876/+1579/+1266ms`，中位数 `+1579ms`、spread `610ms`，判定 `CALIBRATED/PASSED`；未启动 Paper、未写数据库、未修改系统时间。
+- 收尾只读核验：旧 Campaign/Session 仍为 `PC-A90AEC5B17EA925E5AF1 / PS-F76E83CEABE73C181068`、`BLOCKED`、累计 0、五项 blocker 不变；数据库 `integrity_check=ok`、0 外键异常、无 Paper/Observe 运行进程。
 
 ## Next steps
-1. 由用户在可见终端中执行一次管理员校时服务重置；Codex 不接触或代输电脑密码。
-2. 重新用 Apple/Cloudflare/Google NTP 与 CLOB `/time` 交叉核对，并在干净提交上重跑只读 preflight；只有 offset 不超过 1000ms 才可继续。
-3. preflight 通过后，用户双击桌面“1_开始或继续Paper累计验证.command”；入口将为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始。
-4. 建议第一次直接健康运行满 12 小时；累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。
+1. 用户下一次只需双击桌面“1_开始或继续Paper累计验证.command”；入口会先自动校准，无需再手工调整 macOS 时间。
+2. 校准和同核心隔离 proof 通过后，入口才会为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始；任一安全证据异常会在创建 Session 前停止。
+3. 建议第一次直接健康运行满 12 小时；累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。

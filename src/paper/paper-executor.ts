@@ -13,6 +13,7 @@ import {
   executableOrderbookTimingFailure,
   isOrderbookUnavailableError,
   loadFeeThenOrderbook,
+  marketClockOffsetIsValid,
 } from "../execution/market-data.js";
 import {
   evaluateBuyMarketConstraint,
@@ -168,6 +169,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private readonly database: DatabaseSync;
   private readonly sourceVersion: SourceVersion;
   private readonly now: () => Date;
+  private readonly marketClockOffsetMs: number;
   private readonly riskManager: RiskManager;
   private readonly transactionBarrier: ((barrier: PaperTransactionBarrier) => void) | undefined;
 
@@ -178,12 +180,17 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       sourceVersion?: SourceVersion;
       now?: () => Date;
       transactionBarrier?: (barrier: PaperTransactionBarrier) => void;
+      marketClockOffsetMs?: number;
     } = {},
   ) {
     this.database = new DatabaseSync(databasePath);
     this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
     this.sourceVersion = options.sourceVersion ?? resolveSourceVersion();
     this.now = options.now ?? (() => new Date());
+    this.marketClockOffsetMs = options.marketClockOffsetMs ?? 0;
+    if (!marketClockOffsetIsValid(this.marketClockOffsetMs)) {
+      throw new Error("PAPER_MARKET_CLOCK_OFFSET_INVALID");
+    }
     this.transactionBarrier = options.transactionBarrier;
     this.riskManager = new RiskManager(this.database, this.sourceVersion);
   }
@@ -541,7 +548,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, identityError, identityError);
           continue;
         }
-        const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+        const timing = assessExecutableOrderbookTiming(
+          book,
+          this.now().valueOf(),
+          this.marketClockOffsetMs,
+        );
         const timingFailure = executableOrderbookTimingFailure(timing);
         const age = timing.ageMs;
         if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
@@ -637,7 +648,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.recordMarketDataFailure(execution.paper_account_id, execution.asset_id, execution.condition_id, identityError, identityError);
       return execution.state;
     }
-    const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+    const timing = assessExecutableOrderbookTiming(
+      book,
+      this.now().valueOf(),
+      this.marketClockOffsetMs,
+    );
     const timingFailure = executableOrderbookTimingFailure(timing);
     const age = timing.ageMs;
     if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
@@ -728,7 +743,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         this.recordMarketDataFailure(accountId, first.asset_id, first.condition_id, identityError, identityError);
         continue;
       }
-      const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+      const timing = assessExecutableOrderbookTiming(
+        book,
+        this.now().valueOf(),
+        this.marketClockOffsetMs,
+      );
       const timingFailure = executableOrderbookTimingFailure(timing);
       const age = timing.ageMs;
       if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
@@ -849,6 +868,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.recordMarketDataSuccess(candidateAccountId, assetId, conditionId)
         ),
       },
+      this.marketClockOffsetMs,
     ).projectPaperAccount(accountId, signal);
   }
 

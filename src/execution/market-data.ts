@@ -107,6 +107,7 @@ export interface ExecutableOrderbookTimingAssessment {
   status: "VALID" | "INVALID" | "CLOCK_UNSAFE";
   ageMs: number;
   sourceClockOffsetMs: number;
+  appliedMarketClockOffsetMs: number;
 }
 
 export interface ExecutableOrderbookTimingFailure {
@@ -114,9 +115,17 @@ export interface ExecutableOrderbookTimingFailure {
   message: string;
 }
 
+export const MAX_MARKET_CLOCK_CALIBRATION_OFFSET_MS = 5_000;
+
+export function marketClockOffsetIsValid(offsetMs: number): boolean {
+  return Number.isSafeInteger(offsetMs)
+    && Math.abs(offsetMs) <= MAX_MARKET_CLOCK_CALIBRATION_OFFSET_MS;
+}
+
 export function assessExecutableOrderbookTiming(
   book: Pick<ExecutionOrderbookSnapshot, "marketSnapshotTime" | "receivedAt" | "publicCapture">,
   nowMs: number,
+  marketClockOffsetMs = 0,
 ): ExecutableOrderbookTimingAssessment {
   const sourceTimeMs = Date.parse(book.marketSnapshotTime);
   const receivedAtMs = Date.parse(book.receivedAt);
@@ -129,19 +138,22 @@ export function assessExecutableOrderbookTiming(
     || !Number.isFinite(receivedAtMs)
     || !Number.isFinite(requestLatencyMs)
     || requestLatencyMs < 0
+    || !marketClockOffsetIsValid(marketClockOffsetMs)
   ) {
     return {
       status: "INVALID",
       ageMs: Number.NaN,
       sourceClockOffsetMs: Number.NaN,
+      appliedMarketClockOffsetMs: Number.NaN,
     };
   }
-  const sourceClockOffsetMs = sourceTimeMs - nowMs;
+  const sourceClockOffsetMs = sourceTimeMs - (nowMs + marketClockOffsetMs);
   if (sourceClockOffsetMs > RULESET.clockUnsafeThresholdMs) {
     return {
       status: "CLOCK_UNSAFE",
       ageMs: Number.NaN,
       sourceClockOffsetMs,
+      appliedMarketClockOffsetMs: marketClockOffsetMs,
     };
   }
   // A fresh receipt can still be unsafe when the HTTP request itself took
@@ -152,14 +164,16 @@ export function assessExecutableOrderbookTiming(
     status: "VALID",
     ageMs: Math.ceil(nowMs - receivedAtMs + requestLatencyMs),
     sourceClockOffsetMs,
+    appliedMarketClockOffsetMs: marketClockOffsetMs,
   };
 }
 
 export function executableOrderbookAgeMs(
   book: Pick<ExecutionOrderbookSnapshot, "marketSnapshotTime" | "receivedAt" | "publicCapture">,
   nowMs: number,
+  marketClockOffsetMs = 0,
 ): number {
-  return assessExecutableOrderbookTiming(book, nowMs).ageMs;
+  return assessExecutableOrderbookTiming(book, nowMs, marketClockOffsetMs).ageMs;
 }
 
 export function executableOrderbookTimingFailure(

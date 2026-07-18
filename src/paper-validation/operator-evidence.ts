@@ -54,6 +54,7 @@ export interface PaperCampaignReport {
   sourceCodeDirty: boolean;
   campaignId: string | null;
   sessionId: string | null;
+  marketClockOffsetMs: number;
   finalDrainConsumedSignals: number;
   cancelledWaitingBuyCount?: number;
   report: {
@@ -94,6 +95,7 @@ export interface IsolatedVerificationEvidence {
 
 export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/core-compatibility.test.ts",
+  "tests/paper-campaign-clock-safety.test.ts",
   "tests/campaign-session-runtime.test.ts",
   "tests/paper-session-runtime.test.ts",
   "tests/safe-child-environment.test.ts",

@@ -45,6 +45,7 @@ describe("PublicExecutionMarketDataProvider", () => {
       status: "VALID",
       ageMs: 11,
       sourceClockOffsetMs: RULESET.clockUnsafeThresholdMs,
+      appliedMarketClockOffsetMs: 0,
     });
     const unsafeBook = {
       ...book,
@@ -55,12 +56,41 @@ describe("PublicExecutionMarketDataProvider", () => {
       status: "CLOCK_UNSAFE",
       ageMs: Number.NaN,
       sourceClockOffsetMs: RULESET.clockUnsafeThresholdMs + 1,
+      appliedMarketClockOffsetMs: 0,
     });
     expect(executableOrderbookTimingFailure(unsafeTiming)).toEqual({
       code: "ORDERBOOK_CLOCK_UNSAFE",
       message: `Orderbook source clock offset ${RULESET.clockUnsafeThresholdMs + 1}ms exceeds ${RULESET.clockUnsafeThresholdMs}ms`,
     });
     expect(executableOrderbookAgeMs(unsafeBook, now)).toBeNaN();
+  });
+
+  it("applies startup market-clock calibration only to source-clock safety, not receipt age", () => {
+    const now = Date.parse("2026-07-08T00:00:00.000Z");
+    const book = {
+      marketSnapshotTime: new Date(now + 2_050).toISOString(),
+      receivedAt: new Date(now).toISOString(),
+      publicCapture: {
+        endpoint: "clob-orderbook" as const,
+        requestUrl: "https://clob.polymarket.com/book?token_id=asset",
+        fetchedAt: new Date(now).toISOString(),
+        latencyMs: 10.25,
+        httpStatus: 200,
+        payload: {},
+      },
+    };
+
+    expect(assessExecutableOrderbookTiming(book, now, 1_700)).toEqual({
+      status: "VALID",
+      ageMs: 11,
+      sourceClockOffsetMs: 350,
+      appliedMarketClockOffsetMs: 1_700,
+    });
+    expect(assessExecutableOrderbookTiming(book, now)).toMatchObject({
+      status: "CLOCK_UNSAFE",
+      sourceClockOffsetMs: 2_050,
+      appliedMarketClockOffsetMs: 0,
+    });
   });
 
   it("accepts the current public market-info shape when legacy fee fields are absent", () => {

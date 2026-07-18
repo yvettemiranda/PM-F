@@ -18,6 +18,10 @@ import {
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
 import {
+  checkPaperCampaignClockSafety,
+  type PaperCampaignClockSafetyEvidence,
+} from "../paper-validation/clock-safety.js";
+import {
   assertPaperChildReadyBinding,
   buildFinalizationOutcome,
   buildObserveChildSpec,
@@ -100,6 +104,7 @@ interface PaperReady {
   targetWallet: string | null;
   campaignId: string | null;
   sessionId: string | null;
+  marketClockOffsetMs: number;
 }
 
 interface SessionOutputPaths {
@@ -486,6 +491,7 @@ function hardBlockers(input: {
   sessionId: string;
   baselineRunId: string;
   sourceVersion: SourceVersion;
+  marketClockOffsetMs: number;
 }): string[] {
   const { paper, observe, integrity } = input;
   return [...new Set([
@@ -495,6 +501,7 @@ function hardBlockers(input: {
     ...(paper.shutdownMode === "FINAL_VALUATION" ? [] : [`PAPER_SHUTDOWN:${paper.shutdownMode}`]),
     ...(paper.sourceCodeCommit === input.sourceVersion.commit && !paper.sourceCodeDirty ? [] : ["PAPER_SOURCE_VERSION_MISMATCH"]),
     ...(paper.campaignId === input.campaignId && paper.sessionId === input.sessionId ? [] : ["PAPER_SESSION_BINDING_MISMATCH"]),
+    ...(paper.marketClockOffsetMs === input.marketClockOffsetMs ? [] : ["PAPER_CLOCK_CALIBRATION_MISMATCH"]),
     ...(paper.report.errorCount === 0 ? [] : [`PAPER_RUNNER_ERRORS:${paper.report.errorCount}`]),
     ...(paper.report.account.valuationStatus === "COMPLETE" && paper.report.account.unpricedPositionCount === 0
       ? [] : ["PAPER_FINAL_VALUATION_INCOMPLETE"]),
@@ -530,6 +537,18 @@ async function main(): Promise<void> {
   const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
   const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
   const compatibilityEvidence = buildCurrentCompatibilityEvidence(projectRoot);
+  const clockCalibration: PaperCampaignClockSafetyEvidence = await checkPaperCampaignClockSafety();
+  if (clockCalibration.status !== "PASSED" || clockCalibration.offsetMs === null) {
+    throw new Error(
+      `PAPER_CAMPAIGN_CLOCK_SAFETY_BLOCKED:${clockCalibration.reason ?? "UNKNOWN"}`,
+    );
+  }
+  const marketClockOffsetMs = clockCalibration.offsetMs;
+  console.log(JSON.stringify({
+    event: "PAPER_CAMPAIGN_CLOCK_CALIBRATED",
+    clockCalibration,
+    safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
+  }));
   try {
     assertPaperCampaignPreMigrationCompatible({ databasePath, manifest });
   } catch (error) {
@@ -615,6 +634,7 @@ async function main(): Promise<void> {
       targetId: snapshot.targetId,
       targetWallet,
       baselineRunId: snapshot.baselineRunId,
+      marketClockOffsetMs,
     };
     await writeJsonAtomically(latestPointerPath, {
       campaignId: snapshot.campaignId,
@@ -626,6 +646,7 @@ async function main(): Promise<void> {
       runResultFile,
       supervisorPid: process.pid,
       operatorOwnerToken,
+      marketClockOffsetMs,
       updatedAt: new Date().toISOString(),
     });
 
@@ -639,7 +660,7 @@ async function main(): Promise<void> {
         binding: runtimeBinding,
         observeActive: false,
         paperActive: false,
-        detail: { stage: "STARTING" },
+        detail: { stage: "STARTING", clockCalibration },
       })),
     });
 
@@ -657,6 +678,7 @@ async function main(): Promise<void> {
       state: "STARTING",
       supervisorPid: process.pid,
       operatorOwnerToken,
+      marketClockOffsetMs,
       paperPid: paper.child.pid,
       sessionDirectory,
       sessionReportFile,
@@ -708,6 +730,7 @@ async function main(): Promise<void> {
       observePid: observe.child.pid,
       supervisorPid: process.pid,
       operatorOwnerToken,
+      marketClockOffsetMs,
       sessionDirectory,
       sessionReportFile,
       campaignReportFile,
@@ -837,6 +860,7 @@ async function main(): Promise<void> {
           sessionId: session.sessionId,
           baselineRunId: snapshot.baselineRunId,
           sourceVersion,
+          marketClockOffsetMs,
         }),
       ];
       coverage = deriveSessionCoverage({
@@ -972,6 +996,7 @@ async function main(): Promise<void> {
       sourceCodeCommit: sourceVersion.commit,
       coreCompatibilityHash,
       compatibilityEvidence,
+      clockCalibration,
       session: finalized.session,
       shortGate: gate,
       paper: paperReport,
@@ -1000,6 +1025,7 @@ async function main(): Promise<void> {
       sourceCodeCommit: sourceVersion.commit,
       coreCompatibilityHash,
       compatibilityEvidence,
+      latestClockCalibration: clockCalibration,
       campaign: finalized.campaign,
       latestSessionReportId: finalized.session.reportId,
       currentFunnel: paperReport?.report.acceptance.funnel ?? null,
@@ -1027,6 +1053,7 @@ async function main(): Promise<void> {
       observeReportFile,
       stoppedAt,
       compatibilityEvidence,
+      clockCalibration,
       safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
     });
     await writeJsonAtomically(latestPointerPath, {
@@ -1040,6 +1067,7 @@ async function main(): Promise<void> {
       runResultFile,
       supervisorPid: process.pid,
       operatorOwnerToken,
+      marketClockOffsetMs,
       updatedAt: stoppedAt,
     });
     console.log(JSON.stringify({

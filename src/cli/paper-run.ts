@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
+import { marketClockOffsetIsValid } from "../execution/market-data.js";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { selectPaperAccount } from "../paper/paper-account-selection.js";
@@ -31,6 +32,12 @@ const numberArg = (name: string, fallback: number, allowZero: boolean): number =
   }
   return value;
 };
+const signedIntegerArg = (name: string, fallback: number): number => {
+  const raw = valueArg(name);
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isSafeInteger(value)) throw new Error(`Invalid --${name}: ${raw ?? String(value)}`);
+  return value;
+};
 
 const readOptionalText = async (path: string): Promise<string | undefined> => {
   try {
@@ -58,6 +65,10 @@ const main = async (): Promise<void> => {
   const databasePath = resolve(valueArg("database") ?? defaultDatabasePath);
   const durationSeconds = numberArg("duration-seconds", 0, true);
   const intervalSeconds = numberArg("interval-seconds", 1, false);
+  const marketClockOffsetMs = signedIntegerArg("market-clock-offset-ms", 0);
+  if (!marketClockOffsetIsValid(marketClockOffsetMs)) {
+    throw new Error(`Invalid --market-clock-offset-ms: ${marketClockOffsetMs}`);
+  }
   const accountIdFile = resolve(
     valueArg("account-id-file")
       ?? (databasePath === defaultDatabasePath
@@ -73,10 +84,16 @@ const main = async (): Promise<void> => {
     buildCurrentCoreCompatibilityManifest(resolve(".")),
   );
   const campaignScope = paperCampaignScope(campaignId, sessionId, coreCompatibilityHash);
+  if (campaignScope && valueArg("market-clock-offset-ms") === undefined) {
+    throw new Error("PAPER_CAMPAIGN_CLOCK_CALIBRATION_REQUIRED");
+  }
   const databasePreparation = await prepareRuntimeDatabase({ databasePath, sourceVersion });
   console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePreparation }));
 
-  const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), { sourceVersion });
+  const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), {
+    sourceVersion,
+    marketClockOffsetMs,
+  });
   const accountLookup = new DatabaseSync(databasePath, { readOnly: true });
   accountLookup.exec("PRAGMA busy_timeout=5000;");
   const controller = new AbortController();
@@ -159,6 +176,7 @@ const main = async (): Promise<void> => {
       databasePreparation,
       campaignId,
       sessionId,
+      marketClockOffsetMs,
       readyAt: new Date().toISOString(),
     };
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
@@ -202,6 +220,7 @@ const main = async (): Promise<void> => {
       shutdownMode: currentShutdownMode(),
       campaignId,
       sessionId,
+      marketClockOffsetMs,
       accountSelection: selection,
       consumerCutoff,
       finalDrainConsumedSignals,

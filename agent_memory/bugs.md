@@ -1,8 +1,6 @@
 # Bugs And Risks
 
 ## Active blockers
-- macOS `timed` 当前会拒绝正确 NTP 的约 2 秒校正并回退到错误合成时钟；Apple/Cloudflare/Google 均测得本机慢约 `2.05s`，CLOB preflight 已以 `CLOCK_OFFSET_EXCEEDED` 安全阻断。系统层偏差稳定回到 1000ms 内前不得创建新 Campaign。
-- 仅在系统设置中关闭/开启自动时间并重新确认 `time.apple.com` 无效；复测三方 NTP 仍约 `+2.05s`，CLOB 10 次样本全部超过 1000ms。下一步必须通过用户可见终端、由用户本人输入管理员密码来重置 `timed` 服务。
 - 修复后核心的新 Campaign 尚未执行，因此资格里程碑、连续 12 小时和累计 72 小时自然运行都尚未通过。
 - Campaign `PC-A90AEC5B17EA925E5AF1` 已因旧核心时钟/订单簿未来时间误判 BLOCKED；其 12 小时失败 Session 不计时。新核心必须创建独立且带 supersedes 审计链接的 Campaign，不能沿用旧累计。
 - 即使资格通过，仍需累计有效运行 72 小时、至少一个连续 12 小时 Session，并满足最终一致性与覆盖门槛。
@@ -17,10 +15,10 @@
 - 公开钱包依赖增量轮询，Positions 与 Trades/Activity 可能短暂不同步；120 秒内保持 `MINOR_DIFF`，同一差异达到连续次数且持续满 120 秒后仍必须 `MAJOR_DESYNC` 并 fail closed。
 - 2 秒 orderbook 新鲜度提高安全性但可能降低成交率；不得为提高通过率放宽。
 - 公开 HTTP 响应没有服务器数字签名；当前证据能证明内容寻址、官方 URL、不可变本地 capture 与解析一致，但不是密码学级服务器签名。
-- CLOB clock 启动前检查只能证明开始时安全；运行中若系统时钟再次越过阈值，执行层仍会 fail closed 并记录 `ORDERBOOK_CLOCK_UNSAFE`，但新核心仍需自然 12/72 小时验证稳定性。
+- CLOB 自动校准固定绑定本次 Session 的启动样本；运行中若系统时钟继续向危险方向漂移，校准后的执行层仍会 fail closed 并记录 `ORDERBOOK_CLOCK_UNSAFE`。新核心仍需用自然 12/72 小时验证长时间稳定性。
 
 ## Resolved in current implementation
-- 2026-07-18 的 12 小时运行发现：本机时钟约慢 2 秒，而旧订单簿逻辑对任何大于 0ms 的未来源时间直接返回 `NaN`，造成已有持仓最终估值失败。现统一使用 `clockUnsafeThresholdMs=1000`：阈值内允许正常微差，超限明确记录 `ORDERBOOK_CLOCK_UNSAFE`；Campaign 创建前使用 CLOB 公共 `/time` 只读检查并 fail closed，本次五项 blocker 仅可由不同核心按精确白名单创建累计为 0 的替代 Campaign。
+- 2026-07-18 的 12 小时运行发现：本机时钟约慢 2 秒，而旧订单簿逻辑对任何大于 0ms 的源端未来时间直接返回 `NaN`，造成已有持仓最终估值失败。现每次启动以 5 个 CLOB `/time` 样本中位数做应用内校准，不修改系统时间；最大修正 5 秒、校准后残差仍受 `clockUnsafeThresholdMs=1000` 限制。超限/不稳定/缺证据会在 Session 前阻断，运行中超限明确记录 `ORDERBOOK_CLOCK_UNSAFE`；本次五项 blocker 仅可由不同核心按精确白名单创建累计为 0 的替代 Campaign。
 - 2026-07-17 20:42 的三次 Phase 0 均稳定出现同一 `ambiguousEvents=1`：一笔此前 7 份捕获中始终单次出现的历史 BUY，移动到 Trades offset 0/1000 边界后被相邻两页各返回一次，Activity 仍只有一行。现保留两份原始行和重复计数，仅在相邻页首尾完全相同且另一独立接口精确确认较低 multiplicity 时记录 `reconciledPaginationOverlapRows`；真实双重成交、单源证据、双源边界或非法证据继续阻断。
 - 2026-07-17 的 3 小时资格运行发现：`reconciliationGraceMs=120000` 虽已配置但 Observe 未使用，连续三次约 31 秒就升级 `MAJOR_DESYNC`，且不同差异会共享连续计数。现已按具体差异持久化首次时间与连续次数，只有“同一差异连续至少 3 次且持续至少 120 秒”才升级；真实迟到事件回归、持续失步回归及替代 Campaign 审计路径均已覆盖。
 - 2026-07-17 首次稳定化核心启动的三次 Phase 0 均为稳定 Replay、`ambiguousEvents=0`，但交易历史由客户端在已知官方 offset 边界主动停止时记录 `CLIENT_OFFSET_LIMIT`，proof 校验器只接受 `SOURCE_OFFSET_LIMIT`，造成 `PHASE0_VALIDATION_PROOF_INVALID`。校验器现接受这两种精确已知上限类别，未知 stop category、Schema 错误、分页错配和 Replay 不一致仍全部拒绝。

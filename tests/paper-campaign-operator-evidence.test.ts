@@ -309,6 +309,7 @@ describe("Paper Campaign operator evidence", () => {
       sourceCodeDirty: false,
       campaignId: "PC-1",
       sessionId: "PS-1",
+      marketClockOffsetMs: 1_700,
       finalDrainConsumedSignals: 0,
       report: {
         startedAt: "2026-07-16T00:00:00.000Z",

@@ -222,7 +222,11 @@ class FakeMarketData implements PaperMarketDataProvider {
   }
 }
 
-function setup(now: Date, initialBalanceMicros = 1_000_000_000n) {
+function setup(
+  now: Date,
+  initialBalanceMicros = 1_000_000_000n,
+  marketClockOffsetMs = 0,
+) {
   const directory = mkdtempSync(join(tmpdir(), "ni-k-paper-"));
   directories.push(directory);
   const databasePath = join(directory, "phase0.sqlite");
@@ -232,7 +236,11 @@ function setup(now: Date, initialBalanceMicros = 1_000_000_000n) {
   phase0.close();
   let clock = now;
   const market = new FakeMarketData(() => clock);
-  const executor = new PaperExecutor(databasePath, market, { sourceVersion, now: () => clock });
+  const executor = new PaperExecutor(databasePath, market, {
+    sourceVersion,
+    now: () => clock,
+    marketClockOffsetMs,
+  });
   const accountId = executor.createAccount("Test Paper", initialBalanceMicros);
   return {
     databasePath,
@@ -964,6 +972,34 @@ describe("PaperExecutor", () => {
       lastErrorMessage: `Orderbook source clock offset ${RULESET.clockUnsafeThresholdMs + 1}ms exceeds ${RULESET.clockUnsafeThresholdMs}ms`,
     });
     expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1000000000");
+    env.executor.close();
+  });
+
+  it("uses the startup market-clock calibration across Paper execution", async () => {
+    const now = new Date("2026-07-08T00:00:00.000Z");
+    const env = setup(now, undefined, 1_700);
+    env.market.book = {
+      ...env.market.makeBook(
+        [{ price: "0.5", size: "1000" }],
+        [],
+        new Date(now.valueOf() + 2_050).toISOString(),
+      ),
+      receivedAt: now.toISOString(),
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "clock-calibrated",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "clock-calibrated");
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "HEALTHY",
+      lastErrorCode: null,
+    });
     env.executor.close();
   });
 

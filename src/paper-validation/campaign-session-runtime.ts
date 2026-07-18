@@ -7,6 +7,7 @@ export interface CampaignRuntimeBinding {
   targetId: string;
   targetWallet: string;
   baselineRunId: string;
+  marketClockOffsetMs: number;
 }
 
 export interface CampaignChildSpec {
@@ -33,6 +34,7 @@ export function buildPaperChildSpec(input: {
       `--result-file=${input.resultFile}`,
       `--campaign-id=${input.binding.campaignId}`,
       `--session-id=${input.binding.sessionId}`,
+      `--market-clock-offset-ms=${input.binding.marketClockOffsetMs}`,
     ],
   };
 }
@@ -70,6 +72,7 @@ export interface PaperChildReadyBinding {
   targetWallet: string | null;
   campaignId: string | null;
   sessionId: string | null;
+  marketClockOffsetMs: number;
 }
 
 export function assertPaperChildReadyBinding(
@@ -83,7 +86,8 @@ export function assertPaperChildReadyBinding(
     || ready.targetId !== binding.targetId
     || ready.targetWallet !== binding.targetWallet
     || ready.campaignId !== binding.campaignId
-    || ready.sessionId !== binding.sessionId) {
+    || ready.sessionId !== binding.sessionId
+    || ready.marketClockOffsetMs !== binding.marketClockOffsetMs) {
     throw new Error("PAPER_CAMPAIGN_READY_EVIDENCE_INVALID");
   }
 }

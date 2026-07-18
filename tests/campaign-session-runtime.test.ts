@@ -18,6 +18,7 @@ const binding: CampaignRuntimeBinding = {
   targetId: "target-test",
   targetWallet: "0x0000000000000000000000000000000000000001",
   baselineRunId: "baseline-test",
+  marketClockOffsetMs: 1_700,
 };
 
 describe("Paper Campaign runtime contract", () => {
@@ -33,6 +34,7 @@ describe("Paper Campaign runtime contract", () => {
     expect(paper.args).toContain("--account-id=PA-TEST");
     expect(paper.args).toContain("--campaign-id=PC-TEST");
     expect(paper.args).toContain("--session-id=PS-TEST");
+    expect(paper.args).toContain("--market-clock-offset-ms=1700");
 
     const observe = buildObserveChildSpec({
       projectRoot: "/project",
@@ -55,9 +57,12 @@ describe("Paper Campaign runtime contract", () => {
       targetWallet: binding.targetWallet,
       campaignId: binding.campaignId,
       sessionId: binding.sessionId,
+      marketClockOffsetMs: binding.marketClockOffsetMs,
     };
     expect(() => assertPaperChildReadyBinding(ready, binding)).not.toThrow();
     expect(() => assertPaperChildReadyBinding({ ...ready, accountId: "wrong" }, binding))
+      .toThrow("PAPER_CAMPAIGN_READY_EVIDENCE_INVALID");
+    expect(() => assertPaperChildReadyBinding({ ...ready, marketClockOffsetMs: 0 }, binding))
       .toThrow("PAPER_CAMPAIGN_READY_EVIDENCE_INVALID");
   });
 
