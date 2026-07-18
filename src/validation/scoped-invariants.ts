@@ -92,6 +92,21 @@ interface TransitionRow {
   created_at: string;
 }
 
+interface TransitionAuditRow {
+  entity_type: string;
+  entity_id: string;
+  timestamp: string;
+  action: string;
+  reason: string | null;
+  ruleset_hash: string;
+  source_code_commit: string;
+  source_code_dirty: number;
+  config_version: string;
+  sequence: number | null;
+  from_state: string | null;
+  to_state: string | null;
+}
+
 export interface ScopedInvariantEvidence {
   [key: string]: unknown;
   passed: boolean;
@@ -339,10 +354,13 @@ function executionRiskLinkViolations(database: DatabaseSync, accountId: string):
   });
 }
 
-function scopedTransitions(database: DatabaseSync, accountId: string): TransitionRow[] {
-  const entityIds = scopedEntityStates(database, accountId);
+function scopedTransitions(
+  database: DatabaseSync,
+  accountId: string,
+  entityStates: readonly EntityStateRow[],
+): TransitionRow[] {
   const marketDataIds = new Set(
-    entityIds.filter((row) => row.entity_type === "PAPER_MARKET_DATA").map((row) => row.entity_id),
+    entityStates.filter((row) => row.entity_type === "PAPER_MARKET_DATA").map((row) => row.entity_id),
   );
   const rows = database.prepare(
     `SELECT transition_id,entity_type,entity_id,from_state,to_state,sequence,reason,
@@ -390,32 +408,98 @@ function expectedTransitionAuditAction(transition: TransitionRow): string {
   return "STATE_CHANGED";
 }
 
-function hasTransitionAudit(database: DatabaseSync, transition: TransitionRow): boolean {
-  const row = database.prepare(
-    `SELECT 1 present
-     FROM audit_log
-     WHERE entity_type=? AND entity_id=? AND timestamp=?
-       AND action=? AND reason IS ?
-       AND ruleset_hash=? AND source_code_commit=? AND source_code_dirty=? AND config_version=?
-       AND json_extract(metadata_json,'$.sequence')=?
-       AND json_extract(metadata_json,'$.from') IS ?
-       AND json_extract(metadata_json,'$.to')=?
-     LIMIT 1`,
-  ).get(
-    transition.entity_type,
-    transition.entity_id,
-    transition.created_at,
-    expectedTransitionAuditAction(transition),
-    transition.reason,
-    transition.ruleset_hash,
-    transition.source_code_commit,
-    transition.source_code_dirty,
-    transition.config_version,
-    transition.sequence,
-    transition.from_state,
-    transition.to_state,
-  ) as { present: number } | undefined;
-  return row !== undefined;
+function transitionAuditKey(input: {
+  entityType: string;
+  entityId: string;
+  timestamp: string;
+  action: string;
+  reason: string | null;
+  rulesetHash: string;
+  sourceCodeCommit: string;
+  sourceCodeDirty: number;
+  configVersion: string;
+  sequence: number | null;
+  fromState: string | null;
+  toState: string | null;
+}): string {
+  return JSON.stringify([
+    input.entityType,
+    input.entityId,
+    input.timestamp,
+    input.action,
+    input.reason,
+    input.rulesetHash,
+    input.sourceCodeCommit,
+    input.sourceCodeDirty,
+    input.configVersion,
+    input.sequence,
+    input.fromState,
+    input.toState,
+  ]);
+}
+
+function expectedTransitionAuditKey(transition: TransitionRow): string {
+  return transitionAuditKey({
+    entityType: transition.entity_type,
+    entityId: transition.entity_id,
+    timestamp: transition.created_at,
+    action: expectedTransitionAuditAction(transition),
+    reason: transition.reason,
+    rulesetHash: transition.ruleset_hash,
+    sourceCodeCommit: transition.source_code_commit,
+    sourceCodeDirty: transition.source_code_dirty,
+    configVersion: transition.config_version,
+    sequence: transition.sequence,
+    fromState: transition.from_state,
+    toState: transition.to_state,
+  });
+}
+
+function scopedTransitionAuditKeys(
+  database: DatabaseSync,
+  transitions: readonly TransitionRow[],
+): Set<string> {
+  const entityKeys = Array.from(
+    new Map(
+      transitions.map((transition) => [
+        `${transition.entity_type}\u0000${transition.entity_id}`,
+        [transition.entity_type, transition.entity_id] as const,
+      ]),
+    ).values(),
+  );
+  const rows: TransitionAuditRow[] = [];
+  const entityChunkSize = 250;
+  for (let offset = 0; offset < entityKeys.length; offset += entityChunkSize) {
+    const chunk = entityKeys.slice(offset, offset + entityChunkSize);
+    const scopedPredicates = chunk.map(() => "(entity_type=? AND entity_id=?)").join(" OR ");
+    rows.push(...database.prepare(
+      `SELECT entity_type,entity_id,timestamp,action,reason,ruleset_hash,
+              source_code_commit,source_code_dirty,config_version,
+              json_extract(metadata_json,'$.sequence') sequence,
+              json_extract(metadata_json,'$.from') from_state,
+              json_extract(metadata_json,'$.to') to_state
+       FROM audit_log
+       WHERE ${scopedPredicates}`,
+    ).all(...chunk.flat()) as unknown as TransitionAuditRow[]);
+  }
+  return new Set(rows.map((row) => transitionAuditKey({
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    timestamp: row.timestamp,
+    action: row.action,
+    reason: row.reason,
+    rulesetHash: row.ruleset_hash,
+    sourceCodeCommit: row.source_code_commit,
+    sourceCodeDirty: row.source_code_dirty,
+    configVersion: row.config_version,
+    sequence: row.sequence,
+    fromState: row.from_state,
+    toState: row.to_state,
+  })));
+}
+
+function hasTransitionAudit(auditKeys: ReadonlySet<string>, transition: TransitionRow): boolean {
+  return auditKeys.has(expectedTransitionAuditKey(transition));
 }
 
 export function checkScopedInvariants(database: DatabaseSync, scope: ValidationScope): ScopedInvariantEvidence {
@@ -442,7 +526,7 @@ export function checkScopedInvariants(database: DatabaseSync, scope: ValidationS
   reusedRisk.forEach((row) => sample(`RISK_DECISION_REUSED:${row.risk_decision_id}`));
 
   const entityStates = scopedEntityStates(database, scope.accountId);
-  const transitions = scopedTransitions(database, scope.accountId);
+  const transitions = scopedTransitions(database, scope.accountId, entityStates);
   const transitionsByEntity = new Map<string, TransitionRow[]>();
   for (const transition of transitions) {
     const key = `${transition.entity_type}:${transition.entity_id}`;
@@ -479,8 +563,9 @@ export function checkScopedInvariants(database: DatabaseSync, scope: ValidationS
   }
 
   let transitionAuditViolationCount = 0;
+  const transitionAuditKeys = scopedTransitionAuditKeys(database, transitions);
   for (const transition of transitions) {
-    if (!hasTransitionAudit(database, transition)) {
+    if (!hasTransitionAudit(transitionAuditKeys, transition)) {
       transitionAuditViolationCount += 1;
       sample(`TRANSITION_AUDIT_MISSING:${transition.transition_id}`);
     }

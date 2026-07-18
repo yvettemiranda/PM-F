@@ -16,6 +16,7 @@ import {
   buildCurrentCompatibilityEvidence,
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
+  type CompatibilityEvidenceHashes,
 } from "../paper-validation/core-compatibility.js";
 import {
   checkPaperCampaignClockSafety,
@@ -28,7 +29,9 @@ import {
   buildPaperChildSpec,
   campaignCheckpointEvidenceInput,
   classifyCampaignChildExit,
+  deriveCampaignRuntimeTick,
   deriveCampaignStopPlan,
+  nextCampaignCheckpointAt,
   qualificationMilestoneReached,
   type CampaignRuntimeBinding,
 } from "../paper-validation/campaign-session-runtime.js";
@@ -264,6 +267,7 @@ function createCampaign(
   service: PaperValidationCampaignService,
   manifest: CoreCompatibilityManifest,
   sourceVersion: SourceVersion,
+  compatibilityEvidence: CompatibilityEvidenceHashes,
   superseded?: CampaignSnapshot,
 ): CampaignSnapshot {
   const { targetId, baselineRunId } = findTargetAndBaseline();
@@ -288,6 +292,7 @@ function createCampaign(
       baselineRunId,
       paperAccountId: accountId,
       coreManifest: manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: new Date().toISOString(),
       ...(superseded === undefined ? {} : {
@@ -337,6 +342,7 @@ function observeOperationalMetrics(report: ObserveCampaignReport): ObserveOperat
 function summarizeIsolatedEvidence(isolated: IsolatedVerificationEvidence) {
   return {
     verificationStatus: isolated.status,
+    verificationSuiteHash: isolated.verificationSuiteHash,
     phase0ReplayStatus: isolated.proofs.phase0ReplayStatus,
     acceptedIncompleteReasons: isolated.proofs.acceptedIncompleteReasons,
     artifactHash: isolated.artifactHash,
@@ -518,6 +524,7 @@ function hardBlockers(input: {
     ...(observe.mode === "OBSERVE_ONLY" ? [] : ["OBSERVE_REPORT_MODE_INVALID"]),
     ...(observe.sourceCodeCommit === input.sourceVersion.commit && !observe.sourceCodeDirty ? [] : ["OBSERVE_SOURCE_VERSION_MISMATCH"]),
     ...(observe.campaignId === input.campaignId && observe.sessionId === input.sessionId ? [] : ["OBSERVE_SESSION_BINDING_MISMATCH"]),
+    ...(observe.marketClockOffsetMs === input.marketClockOffsetMs ? [] : ["OBSERVE_CLOCK_CALIBRATION_MISMATCH"]),
     ...(observe.baselineRunId === input.baselineRunId && observe.metrics.baselineRunId === input.baselineRunId
       ? [] : ["OBSERVE_BASELINE_BINDING_MISMATCH"]),
     ...(observe.acceptance.observeStatus === "SHORT_SOAK_PASSED" ? [] : [`OBSERVE_STATUS:${observe.acceptance.observeStatus}`]),
@@ -564,7 +571,11 @@ async function main(): Promise<void> {
   }
   await prepareRuntimeDatabase({ databasePath, sourceVersion });
   const isolated = await readJson<IsolatedVerificationEvidence>(isolatedEvidencePath);
-  if (!verifyIsolatedVerificationEvidence(isolated, coreCompatibilityHash)) {
+  if (!verifyIsolatedVerificationEvidence(
+    isolated,
+    coreCompatibilityHash,
+    compatibilityEvidence.verificationSuiteHash,
+  )) {
     throw new Error("PAPER_CAMPAIGN_ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
   }
   const replayEvidence = await loadReplayEvidence(coreCompatibilityHash);
@@ -589,12 +600,12 @@ async function main(): Promise<void> {
   try {
     const ids = campaignIds();
     let snapshot = ids.length === 0
-      ? createCampaign(service, manifest, sourceVersion)
+      ? createCampaign(service, manifest, sourceVersion, compatibilityEvidence)
       : service.campaignSnapshot(ids.at(-1)!);
     const startDisposition = paperCampaignStartDisposition(snapshot, coreCompatibilityHash);
     if (startDisposition === "CREATE_REPLACEMENT") {
       const previous = snapshot;
-      snapshot = createCampaign(service, manifest, sourceVersion, previous);
+      snapshot = createCampaign(service, manifest, sourceVersion, compatibilityEvidence, previous);
       console.log(JSON.stringify({
         event: "PAPER_CAMPAIGN_REPLACED_AFTER_CORE_CHANGE",
         previousCampaignId: previous.campaignId,
@@ -611,6 +622,7 @@ async function main(): Promise<void> {
     session = service.startSession({
       campaignId: snapshot.campaignId,
       coreManifest: manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: new Date().toISOString(),
       ...(plannedDurationMs === undefined ? {} : { plannedDurationMs }),
@@ -650,10 +662,15 @@ async function main(): Promise<void> {
       updatedAt: new Date().toISOString(),
     });
 
+    const sessionStartedMonotonicMs = performance.now();
+    const sessionElapsedRuntimeMs = (): number => (
+      Math.max(0, Math.floor(performance.now() - sessionStartedMonotonicMs))
+    );
     service.recordCheckpoint({
       sessionId: session.sessionId,
       checkpointKind: "START",
       observedAt: new Date().toISOString(),
+      elapsedRuntimeMs: 0,
       idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:START`,
       evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
         databasePath,
@@ -700,12 +717,14 @@ async function main(): Promise<void> {
     await delay(1_000);
     if (!childRunning(observe)) throw new Error("OBSERVE_EXITED_DURING_STARTUP");
 
-    const activeStartedAt = Date.now();
+    const activeStartedWallMs = Date.now();
+    const activeStartedMonotonicMs = performance.now();
     let checkpointSequence = 1;
     service.recordCheckpoint({
       sessionId: session.sessionId,
       checkpointKind: "HEARTBEAT",
-      observedAt: new Date(activeStartedAt).toISOString(),
+      observedAt: new Date(activeStartedWallMs).toISOString(),
+      elapsedRuntimeMs: sessionElapsedRuntimeMs(),
       idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:ACTIVE_START`,
       evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
         databasePath,
@@ -715,17 +734,20 @@ async function main(): Promise<void> {
         detail: { stage: "ACTIVE", checkpointSequence: 0 },
       })),
     });
-    let nextCheckpointAt = activeStartedAt + snapshot.checkpointIntervalMs;
+    let nextCheckpointAt = nextCampaignCheckpointAt(
+      activeStartedMonotonicMs,
+      snapshot.checkpointIntervalMs,
+    );
     let qualificationMilestoneRecorded = session.sessionKind !== "QUALIFYING";
-    const deadline = activeStartedAt + session.plannedDurationMs;
+    const deadline = activeStartedMonotonicMs + session.plannedDurationMs;
     await writeJsonAtomically(latestPointerPath, {
       campaignId: snapshot.campaignId,
       sessionId: session.sessionId,
       state: "RUNNING",
       sessionKind: session.sessionKind,
       plannedDurationMs: session.plannedDurationMs,
-      activeStartedAt: new Date(activeStartedAt).toISOString(),
-      plannedStopAt: new Date(deadline).toISOString(),
+      activeStartedAt: new Date(activeStartedWallMs).toISOString(),
+      plannedStopAt: new Date(activeStartedWallMs + session.plannedDurationMs).toISOString(),
       paperPid: paper.child.pid,
       observePid: observe.child.pid,
       supervisorPid: process.pid,
@@ -744,18 +766,25 @@ async function main(): Promise<void> {
         requestStop("UNEXPECTED_CHILD_EXIT");
         break;
       }
-      const now = Date.now();
-      if (now >= deadline) {
+      const now = performance.now();
+      const tick = deriveCampaignRuntimeTick({
+        sessionStartedMonotonicMs,
+        activeStartedMonotonicMs,
+        nowMonotonicMs: now,
+        nextCheckpointMonotonicMs: nextCheckpointAt,
+        plannedDurationMs: session.plannedDurationMs,
+      });
+      if (tick.durationReached) {
         autoStopped = true;
         requestStop("PLANNED_SESSION_DURATION_REACHED");
         break;
       }
-      if (now >= nextCheckpointAt) {
+      if (tick.checkpointDue) {
         const milestoneReached = qualificationMilestoneReached({
           alreadyRecorded: qualificationMilestoneRecorded,
           sessionKind: session.sessionKind,
           nowMs: now,
-          activeStartedAtMs: activeStartedAt,
+          activeStartedAtMs: activeStartedMonotonicMs,
           qualifyingRuntimeMs: snapshot.qualifyingRuntimeMs,
         });
         const checkpointEvidence = collectCheckpointEvidence(campaignCheckpointEvidenceInput({
@@ -772,7 +801,8 @@ async function main(): Promise<void> {
         service.recordCheckpoint({
           sessionId: session.sessionId,
           checkpointKind: "HEARTBEAT",
-          observedAt: new Date(now).toISOString(),
+          observedAt: new Date().toISOString(),
+          elapsedRuntimeMs: tick.elapsedRuntimeMs,
           idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:HEARTBEAT:${checkpointSequence}`,
           evidence: checkpointEvidence,
         });
@@ -781,17 +811,25 @@ async function main(): Promise<void> {
           requestStop("RUNTIME_CONSISTENCY_UNSAFE");
         }
         checkpointSequence += 1;
-        nextCheckpointAt += snapshot.checkpointIntervalMs;
+        nextCheckpointAt = nextCampaignCheckpointAt(now, snapshot.checkpointIntervalMs);
       }
       await delay(Math.min(1_000, Math.max(25, Math.min(nextCheckpointAt, deadline) - now)));
     }
 
     const preStopAt = new Date().toISOString();
+    const preStopTick = deriveCampaignRuntimeTick({
+      sessionStartedMonotonicMs,
+      activeStartedMonotonicMs,
+      nowMonotonicMs: performance.now(),
+      nextCheckpointMonotonicMs: nextCheckpointAt,
+      plannedDurationMs: session.plannedDurationMs,
+    });
     if (childRunning(paper) && childRunning(observe)) {
       service.recordCheckpoint({
         sessionId: session.sessionId,
         checkpointKind: "HEARTBEAT",
         observedAt: preStopAt,
+        elapsedRuntimeMs: preStopTick.elapsedRuntimeMs,
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:PRE_STOP`,
         evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,
@@ -873,7 +911,7 @@ async function main(): Promise<void> {
       });
       if (session.sessionKind === "QUALIFYING") {
         gate = evaluatePaperShortGate({
-          durationMs: Math.max(0, Date.parse(preStopAt) - activeStartedAt),
+          durationMs: preStopTick.activeRuntimeMs,
           minimumDurationMs: snapshot.qualifyingRuntimeMs,
           finalValuationComplete: paperReport.status === "COMPLETED"
             && paperReport.shutdownMode === "FINAL_VALUATION"
@@ -925,13 +963,18 @@ async function main(): Promise<void> {
         qualifying: session.sessionKind === "QUALIFYING",
         hardBlockers: finalizationBlockers,
         naturalFullFill: paperReport.report.acceptance.funnel.stage.BUY === "FULL_FILL",
-        supplementalEvidenceValid: verifyIsolatedVerificationEvidence(isolated, coreCompatibilityHash)
+        supplementalEvidenceValid: verifyIsolatedVerificationEvidence(
+          isolated,
+          coreCompatibilityHash,
+          compatibilityEvidence.verificationSuiteHash,
+        )
           || replayEvidence.some((artifact) => artifact.source === "REAL_EXECUTION_REPLAY" && artifact.coverage.includes("FILL")),
       });
       service.recordCheckpoint({
         sessionId: session.sessionId,
         checkpointKind: "SAFE_STOP",
         observedAt: stoppedAt,
+        elapsedRuntimeMs: sessionElapsedRuntimeMs(),
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:SAFE_STOP`,
         evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,
@@ -967,6 +1010,7 @@ async function main(): Promise<void> {
         sessionId: session.sessionId,
         checkpointKind: "SAFE_STOP",
         observedAt: stoppedAt,
+        elapsedRuntimeMs: sessionElapsedRuntimeMs(),
         idempotencyKey: `SESSION:${session.sessionId}:CHECKPOINT:SAFE_STOP`,
         evidence: collectCheckpointEvidence(campaignCheckpointEvidenceInput({
           databasePath,

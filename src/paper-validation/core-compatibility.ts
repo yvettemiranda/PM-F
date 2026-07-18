@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import {
   ARTIFACT_PROVENANCE_HASH,
   ARTIFACT_PROVENANCE_SNAPSHOT_JSON,
@@ -9,7 +10,7 @@ import {
   VERSIONS,
   stableJson,
 } from "../domain/versioning.js";
-import type { CoreCompatibilityManifest } from "./types.js";
+import type { CompatibilityIdentity, CoreCompatibilityManifest } from "./types.js";
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const CORE_COMPONENT_NAMES = [
@@ -35,8 +36,21 @@ export const CORE_COMPATIBILITY_PAPER_FILES = [
   "src/paper/types.ts",
 ] as const;
 
+/** Paper execution surface; Live-only CLOB fee/order construction is excluded. */
+export const CORE_COMPATIBILITY_EXECUTION_FILES = [
+  "src/execution/capital-sizing.ts",
+  "src/execution/market-data.ts",
+  "src/execution/market-order-constraints.ts",
+  "src/execution/orderbook-matching.ts",
+  "src/execution/signal-integrity.ts",
+  "src/execution/types.ts",
+] as const;
+
 /** Campaign persistence and crash recovery, excluding acceptance/report policy. */
 export const CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES = [
+  "src/cli/observe-only.ts",
+  "src/cli/paper-campaign-run.ts",
+  "src/cli/paper-run.ts",
   "src/infra/source-version.ts",
   "src/operator/safe-child-environment.ts",
   "src/live/clob-clock-safety-provider.ts",
@@ -50,6 +64,7 @@ export const CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES = [
   "src/paper-validation/runtime-recovery.ts",
   "src/paper-validation/service.ts",
   "src/paper-validation/store.ts",
+  "src/validation/scoped-invariants.ts",
 ] as const;
 
 /** Runtime domain implementation. versioning.ts rules are represented by paperRules. */
@@ -88,6 +103,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/027_signal_target_binding.sql",
   "src/infra/sqlite/028_observe_projection_snapshots.sql",
   "src/infra/sqlite/029_observe_campaign_binding.sql",
+  "src/infra/sqlite/030_paper_runtime_resilience.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
@@ -134,19 +150,84 @@ export interface RuntimeCompatibilityDescriptor {
   runtimeDependencies: Record<string, string> | null;
 }
 
-export interface CompatibilityEvidenceHashes {
-  validationPolicyHash: string;
-  operatorBuildHash: string;
-  artifactProvenanceHash: string;
+export interface CompatibilityEvidenceHashes extends CompatibilityIdentity {
   artifactProvenanceSnapshotJson: string;
+}
+
+export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
+  "tests/api-contract.test.ts",
+  "tests/campaign-session-runtime.test.ts",
+  "tests/capital-estimator.test.ts",
+  "tests/capital-sizing.test.ts",
+  "tests/capture-manifest.test.ts",
+  "tests/capture-payload-storage.test.ts",
+  "tests/core-compatibility.test.ts",
+  "tests/database-immutability.test.ts",
+  "tests/database.test.ts",
+  "tests/diagnostic-redaction.test.ts",
+  "tests/execution-market-data.test.ts",
+  "tests/fixed.test.ts",
+  "tests/golden-expectations.test.ts",
+  "tests/idempotency.test.ts",
+  "tests/isolated-proof.test.ts",
+  "tests/live-executor.test.ts",
+  "tests/live-gate.test.ts",
+  "tests/live-risk-manager.test.ts",
+  "tests/market-order-constraints.test.ts",
+  "tests/observe-runner.test.ts",
+  "tests/operational-validation.test.ts",
+  "tests/operator-paper-campaign-shell.test.ts",
+  "tests/operator-process-lifecycle.test.ts",
+  "tests/paper-acceptance-summary.test.ts",
+  "tests/paper-account-selection.test.ts",
+  "tests/paper-campaign-clock-safety.test.ts",
+  "tests/paper-campaign-operator-evidence.test.ts",
+  "tests/paper-campaign-operator-policy.test.ts",
+  "tests/paper-executor.test.ts",
+  "tests/paper-gate-evaluator.test.ts",
+  "tests/paper-replay-evidence.test.ts",
+  "tests/paper-runner-options.test.ts",
+  "tests/paper-session-runtime.test.ts",
+  "tests/paper-validation-campaign.test.ts",
+  "tests/polymarket-clob-adapter.test.ts",
+  "tests/position-baseline.test.ts",
+  "tests/public-api-pagination.test.ts",
+  "tests/public-api-safety.test.ts",
+  "tests/replay-engine.test.ts",
+  "tests/run-snapshot-retention.test.ts",
+  "tests/runtime-database-preparation.test.ts",
+  "tests/safe-child-environment.test.ts",
+  "tests/settlement-service.test.ts",
+  "tests/signal-target-binding.test.ts",
+  "tests/source-version.test.ts",
+  "tests/state-machine.test.ts",
+  "tests/validation-framework.test.ts",
+  "tests/wallet-identity.test.ts",
+] as const;
+
+function semanticTypeScript(source: string, relativePath: string): string {
+  const sourceFile = ts.createSourceFile(
+    relativePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  return ts.createPrinter({
+    newLine: ts.NewLineKind.LineFeed,
+    removeComments: true,
+  }).printFile(sourceFile);
 }
 
 function hashFiles(projectRoot: string, relativePaths: readonly string[]): string {
   const digest = createHash("sha256");
   for (const relativePath of [...new Set(relativePaths)].sort()) {
+    const content = readFileSync(join(projectRoot, relativePath));
     digest.update(relativePath);
     digest.update("\0");
-    digest.update(readFileSync(join(projectRoot, relativePath)));
+    digest.update(relativePath.endsWith(".ts")
+      ? semanticTypeScript(content.toString("utf8"), relativePath)
+      : content);
     digest.update("\0");
   }
   return digest.digest("hex");
@@ -229,7 +310,7 @@ function importedPackageNames(projectRoot: string, relativePaths: readonly strin
 
 export function buildCurrentCoreCompatibilityManifest(projectRoot: string): CoreCompatibilityManifest {
   const domain = [...CORE_COMPATIBILITY_DOMAIN_FILES];
-  const execution = sourceFiles(projectRoot, "src/execution");
+  const execution = [...CORE_COMPATIBILITY_EXECUTION_FILES];
   const observe = sourceFiles(projectRoot, "src/observe");
   const signalContext = sourceFiles(projectRoot, "src/signal-context");
   const adapters = sourceFiles(projectRoot, "src/adapters");
@@ -357,10 +438,31 @@ export function computeOperatorBuildHash(projectRoot: string): string {
   });
 }
 
+export function computeVerificationSuiteHash(projectRoot: string): string {
+  const packageDefinition = readPackageDefinition(projectRoot);
+  const toolchain = Object.fromEntries([
+    "@types/node",
+    "tsx",
+    "typescript",
+    "vitest",
+  ].map((name) => [name, packageDefinition.devDependencies?.[name] ?? null]));
+  return hashValue({
+    version: "paper-verification-suite-v1",
+    testFiles: PAPER_CAMPAIGN_ISOLATED_TEST_FILES,
+    toolchain,
+    fileHash: hashFiles(projectRoot, [
+      ...filesUnder(projectRoot, "tests", (name) => name.endsWith(".ts")),
+      "tsconfig.json",
+      "pnpm-lock.yaml",
+    ]),
+  });
+}
+
 export function buildCurrentCompatibilityEvidence(projectRoot: string): CompatibilityEvidenceHashes {
   return {
     validationPolicyHash: computeValidationPolicyHash(projectRoot),
     operatorBuildHash: computeOperatorBuildHash(projectRoot),
+    verificationSuiteHash: computeVerificationSuiteHash(projectRoot),
     artifactProvenanceHash: ARTIFACT_PROVENANCE_HASH,
     artifactProvenanceSnapshotJson: ARTIFACT_PROVENANCE_SNAPSHOT_JSON,
   };

@@ -11,9 +11,11 @@ export interface SettlementCandidate {
 
 export interface SettlementStore {
   settlementCandidates(accountId: string): SettlementCandidate[];
+  settlementRetryDue?(candidate: SettlementCandidate): boolean;
   markSettlementPending(positionId: string, reason: string): void;
   redeemSettledPosition(positionId: string, resolution: PaperResolutionSnapshot): string;
   recordSettlementError?(candidate: SettlementCandidate, error: unknown): void;
+  recordSettlementUnresolved?(candidate: SettlementCandidate, resolution: PaperResolutionSnapshot): void;
   recordSettlementSuccess?(candidate: SettlementCandidate): void;
 }
 
@@ -29,6 +31,7 @@ export class SettlementService {
     const resolutions = new Map<string, Promise<PaperResolutionSnapshot>>();
     for (const candidate of this.store.settlementCandidates(accountId)) {
       if (signal?.aborted) break;
+      if (this.store.settlementRetryDue?.(candidate) === false) continue;
       const marketEnd = Date.parse(candidate.marketEndTime);
       if (!Number.isFinite(marketEnd)) {
         this.store.recordSettlementError?.(candidate, new Error("INVALID_MARKET_END_TIME"));
@@ -53,8 +56,11 @@ export class SettlementService {
         continue;
       }
       if (signal?.aborted) break;
+      if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) {
+        this.store.recordSettlementUnresolved?.(candidate, resolution);
+        continue;
+      }
       this.store.recordSettlementSuccess?.(candidate);
-      if (!resolution.resolved || resolution.payoutNumerator === null || resolution.payoutDenominator === null) continue;
       try {
         completed.push(this.store.redeemSettledPosition(candidate.positionId, resolution));
       } catch (error) {

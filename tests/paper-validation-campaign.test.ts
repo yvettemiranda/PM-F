@@ -6,7 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS } from "../src/domain/versioning.js";
+import {
+  ARTIFACT_PROVENANCE_HASH,
+  ARTIFACT_PROVENANCE_SNAPSHOT_JSON,
+  RULESET,
+  RULESET_HASH,
+  RULESET_SNAPSHOT_JSON,
+  VERSIONS,
+} from "../src/domain/versioning.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { ObserveOnlyRunner } from "../src/observe/observe-runner.js";
@@ -41,6 +48,13 @@ const directories: string[] = [];
 const runtimeChildren = new Set<ChildProcess>();
 const sourceVersion: SourceVersion = { commit: "campaign-test-commit", dirty: false };
 const wallet = "0x0000000000000000000000000000000000000001";
+const compatibilityEvidence = {
+  validationPolicyHash: "a".repeat(64),
+  verificationSuiteHash: "b".repeat(64),
+  operatorBuildHash: "c".repeat(64),
+  artifactProvenanceHash: ARTIFACT_PROVENANCE_HASH,
+  artifactProvenanceSnapshotJson: ARTIFACT_PROVENANCE_SNAPSHOT_JSON,
+};
 
 interface Fixture {
   databasePath: string;
@@ -183,6 +197,7 @@ function createCampaign(input: Fixture, overrides: { requiredActiveRuntimeMs?: n
     baselineRunId: input.baselineRunId,
     paperAccountId: input.accountId,
     coreManifest: input.manifest,
+    compatibilityEvidence,
     sourceVersion,
     now: at(0),
     campaignId: "PC-TESTCAMPAIGN",
@@ -284,6 +299,7 @@ function startSession(input: Fixture, campaignId: string, hour: number, sessionI
   return input.service.startSession({
     campaignId,
     coreManifest: input.manifest,
+    compatibilityEvidence,
     sourceVersion,
     now: at(hour),
     sessionId,
@@ -683,6 +699,32 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
+  it("uses explicit monotonic elapsed runtime even when the wall clock moves backward", () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const session = startSession(input, campaign.campaignId, 0, "PS-MONOTONIC-CLOCK");
+    input.service.recordCheckpoint({
+      sessionId: session.sessionId,
+      checkpointKind: "START",
+      observedAt: at(0),
+      elapsedRuntimeMs: 0,
+      idempotencyKey: "monotonic:start",
+      evidence: { observeActive: false, paperActive: false, consistencySafe: true },
+    });
+
+    const heartbeat = input.service.recordCheckpoint({
+      sessionId: session.sessionId,
+      checkpointKind: "HEARTBEAT",
+      observedAt: "2026-07-15T23:59:59.000Z",
+      elapsedRuntimeMs: 60_000,
+      idempotencyKey: "monotonic:heartbeat",
+      evidence: { observeActive: true, paperActive: true, consistencySafe: true },
+    });
+
+    expect(heartbeat.elapsedRuntimeMs).toBe(60_000);
+    input.service.close();
+  });
+
   it("computes a stable core hash and changes it when a core component changes", () => {
     const original = manifest();
     expect(computeCoreCompatibilityHash(original)).toHaveLength(64);
@@ -782,6 +824,7 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: input.accountId,
       coreManifest: input.manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(0),
       requiredContinuousRuntimeMs: 1,
@@ -791,6 +834,7 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: input.accountId,
       coreManifest: input.manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(0),
       qualifyingRuntimeMs: 1,
@@ -800,6 +844,7 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: input.accountId,
       coreManifest: input.manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(0),
       checkpointIntervalMs: 1,
@@ -814,6 +859,7 @@ describe("PaperValidationCampaignService", () => {
     const session = input.service.startSession({
       campaignId: campaign.campaignId,
       coreManifest: input.manifest,
+      compatibilityEvidence,
       sourceVersion: { commit: "ui-and-docs-only-commit", dirty: false },
       now: at(1),
       sessionId: "PS-DISPLAY-COMMIT",
@@ -836,6 +882,7 @@ describe("PaperValidationCampaignService", () => {
     expect(() => input.service.startSession({
       campaignId: original.campaignId,
       coreManifest: repairedManifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(1),
       sessionId: "PS-FREEZE-OLD-CORE",
@@ -858,6 +905,7 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: replacementAccountId,
       coreManifest: repairedManifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(2),
       campaignId: "PC-REPLACEMENT",
@@ -867,7 +915,7 @@ describe("PaperValidationCampaignService", () => {
     expect(() => input.service.createCampaign({
       ...replacementInput,
       supersedesCampaignId: original.campaignId,
-      replacementReason: "CORE_REPAIR_MARKET_DATA",
+      replacementReason: "INVALID_REPLACEMENT_REASON" as never,
     })).toThrow(`PAPER_VALIDATION_REPLACEMENT_NOT_AUTHORIZED:${original.campaignId}`);
 
     const replacement = input.service.createCampaign({
@@ -883,19 +931,20 @@ describe("PaperValidationCampaignService", () => {
       `SELECT reason,evidence_json FROM paper_validation_transitions
        WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence DESC LIMIT 1`,
     ).get(replacement.campaignId) as { reason: string; evidence_json: string };
-    expect(transition.reason).toBe("CAMPAIGN_CREATED_AFTER_CORE_REPAIR");
+    expect(transition.reason).toBe("CAMPAIGN_CREATED_AFTER_CORE_CHANGE");
     expect(JSON.parse(transition.evidence_json)).toMatchObject({
       supersedesCampaignId: original.campaignId,
       supersededCampaignState: "FROZEN",
       supersededCoreCompatibilityHash: original.coreCompatibilityHash,
       replacementReason: "CORE_VERSION_REPLACEMENT",
+      changedCoreComponents: ["paperExecution"],
       executionMode: "PAPER",
       liveGateState: "LIVE_DISABLED",
     });
     input.service.close();
   });
 
-  it("replaces only the blocked grace-period Campaign with a new reconciliation core", () => {
+  it("replaces a blocked Campaign with a new reconciliation core", () => {
     const input = fixture();
     const original = createCampaign(input);
     const session = startSession(input, original.campaignId, 0, "PS-GRACE-BLOCKED");
@@ -945,11 +994,12 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: replacementAccountId,
       coreManifest: repairedManifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(3),
       campaignId: "PC-GRACE-REPLACEMENT",
       supersedesCampaignId: original.campaignId,
-      replacementReason: "CORE_REPAIR_RECONCILIATION_GRACE",
+      replacementReason: "CORE_VERSION_REPLACEMENT",
     });
     expect(replacement).toMatchObject({
       state: "QUALIFYING",
@@ -964,12 +1014,13 @@ describe("PaperValidationCampaignService", () => {
       supersedesCampaignId: original.campaignId,
       supersededCampaignState: "BLOCKED",
       supersededCoreCompatibilityHash: original.coreCompatibilityHash,
-      replacementReason: "CORE_REPAIR_RECONCILIATION_GRACE",
+      replacementReason: "CORE_VERSION_REPLACEMENT",
+      changedCoreComponents: ["observeRecovery"],
     });
     input.service.close();
   });
 
-  it("replaces only the exact clock-safety failure with a new zero-runtime Campaign", () => {
+  it("replaces a blocked clock-safety Campaign with a new zero-runtime core", () => {
     const input = fixture();
     const original = createCampaign(input);
     const session = startSession(input, original.campaignId, 0, "PS-CLOCK-BLOCKED");
@@ -1022,11 +1073,12 @@ describe("PaperValidationCampaignService", () => {
       baselineRunId: input.baselineRunId,
       paperAccountId: replacementAccountId,
       coreManifest: repairedManifest,
+      compatibilityEvidence,
       sourceVersion,
       now: at(3),
       campaignId: "PC-CLOCK-REPLACEMENT",
       supersedesCampaignId: original.campaignId,
-      replacementReason: "CORE_REPAIR_CLOCK_SAFETY",
+      replacementReason: "CORE_VERSION_REPLACEMENT",
     });
     expect(replacement).toMatchObject({
       state: "QUALIFYING",
@@ -1042,7 +1094,8 @@ describe("PaperValidationCampaignService", () => {
       supersedesCampaignId: original.campaignId,
       supersededCampaignState: "BLOCKED",
       supersededCoreCompatibilityHash: original.coreCompatibilityHash,
-      replacementReason: "CORE_REPAIR_CLOCK_SAFETY",
+      replacementReason: "CORE_VERSION_REPLACEMENT",
+      changedCoreComponents: ["paperExecution"],
     });
     input.service.close();
   });
@@ -1284,6 +1337,59 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
+  it("keeps verified runtime but requalifies and rejudges coverage after a policy change", () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const qualifying = startSession(input, campaign.campaignId, 0, "PS-POLICY-OLD");
+    recordHealthySession(input, qualifying, 0, 2);
+    const first = finalizeHealthy(input, qualifying, at(2), completeCoverage());
+    expect(first.campaign).toMatchObject({
+      qualified: true,
+      accumulatedActiveRuntimeMs: 2 * 60 * 60 * 1_000,
+      coverageStatus: "COMPLETE",
+    });
+
+    const changedPolicy = {
+      ...compatibilityEvidence,
+      validationPolicyHash: "d".repeat(64),
+    };
+    const requalifying = input.service.startSession({
+      campaignId: campaign.campaignId,
+      coreManifest: input.manifest,
+      compatibilityEvidence: changedPolicy,
+      sourceVersion,
+      now: at(3),
+      sessionId: "PS-POLICY-NEW",
+    });
+    expect(requalifying.sessionKind).toBe("QUALIFYING");
+    expect(input.service.store.database.prepare(
+      `SELECT decision FROM paper_validation_evidence_adjudications
+       WHERE session_id=?`,
+    ).get(qualifying.sessionId)).toEqual({ decision: "KEEP_RUNTIME_REJUDGE_COVERAGE" });
+
+    recordHealthySession(input, requalifying, 3, 1);
+    const afterPolicyChange = input.service.finalizeSession({
+      sessionId: requalifying.sessionId,
+      outcome: "SAFE_STOP",
+      acceptanceStatus: "INCOMPLETE_COVERAGE",
+      consistencyPassed: true,
+      recoveryConfirmed: true,
+      stopReason: "USER_SAFE_PAUSE_SIGTERM",
+      blockers: [],
+      coverage: {},
+      stoppedAt: at(4),
+    });
+    expect(afterPolicyChange.campaign).toMatchObject({
+      qualified: false,
+      accumulatedActiveRuntimeMs: 3 * 60 * 60 * 1_000,
+      coverageStatus: "INCOMPLETE",
+    });
+    expect(() => input.service.store.database.prepare(
+      "UPDATE paper_validation_evidence_adjudications SET decision='KEEP_ALL'",
+    ).run()).toThrow("paper_validation_evidence_adjudications is immutable");
+    input.service.close();
+  });
+
   it("requires one 12-hour session and reaches 72 hours without mixing paused time", () => {
     const input = fixture();
     const campaign = createCampaign(input);
@@ -1465,6 +1571,7 @@ describe("PaperValidationCampaignService", () => {
     const resumed = input.service.startSession({
       campaignId: campaign.campaignId,
       coreManifest: input.manifest,
+      compatibilityEvidence,
       sourceVersion,
       now: atMinute(186),
       sessionId: "PS-AFTER-SIGKILL",
@@ -1862,6 +1969,7 @@ describe("PaperValidationCampaignService", () => {
     expect(() => versionInput.service.startSession({
       campaignId: versionCampaign.campaignId,
       coreManifest: changedManifest,
+      compatibilityEvidence,
       sourceVersion: { commit: "display-only-new-commit", dirty: false },
       now: at(1),
     })).toThrow("PAPER_VALIDATION_CAMPAIGN_FROZEN");

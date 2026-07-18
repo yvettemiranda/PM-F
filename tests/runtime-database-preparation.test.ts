@@ -127,6 +127,33 @@ describe("runtime database preparation", () => {
     database.close();
   });
 
+  it("rejects a new validation Session whose compatibility identity is NULL", async () => {
+    const root = directory();
+    const databasePath = join(root, "compatibility-identity.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const database = new DatabaseSync(databasePath);
+    try {
+      expect(() => database.prepare(
+        `INSERT INTO paper_validation_sessions(
+          session_id,campaign_id,sequence,session_kind,planned_duration_ms,
+          core_compatibility_hash,schema_version,ruleset_hash,config_version,
+          source_code_commit,source_code_dirty,live_gate_transition_count_at_start,
+          started_at,created_at
+        )
+        SELECT 'PS-MISSING-IDENTITY','PC-MISSING',1,'QUALIFYING',7200000,
+               ?,schema_version,ruleset_hash,config_version,?,0,0,?,?
+        FROM rulesets LIMIT 1`,
+      ).run(
+        "a".repeat(64),
+        sourceVersion.commit,
+        "2026-07-18T00:00:00.000Z",
+        "2026-07-18T00:00:00.000Z",
+      )).toThrow("paper validation session compatibility identity required");
+    } finally {
+      database.close();
+    }
+  });
+
   it("creates an Online Backup before migrating the prior schema and verifies safety", async () => {
     const root = directory();
     const databasePath = join(root, "data", "phase0", "phase0.sqlite");

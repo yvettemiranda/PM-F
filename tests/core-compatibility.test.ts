@@ -28,10 +28,12 @@ import {
   buildCurrentCompatibilityEvidence,
   buildCurrentCoreCompatibilityManifest,
   CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES,
+  CORE_COMPATIBILITY_EXECUTION_FILES,
   CORE_COMPATIBILITY_PAPER_FILES,
   computeCoreCompatibilityHash,
   computeOperatorBuildHash,
   computeValidationPolicyHash,
+  computeVerificationSuiteHash,
   runtimeCompatibilityDescriptor,
 } from "../src/paper-validation/core-compatibility.js";
 
@@ -41,7 +43,10 @@ function createProjectFixture(): string {
   const fixture = mkdtempSync(join(tmpdir(), "ni-k-core-compatibility-"));
   cpSync(join(projectRoot, "src"), join(fixture, "src"), { recursive: true });
   cpSync(join(projectRoot, "操作入口"), join(fixture, "操作入口"), { recursive: true });
+  cpSync(join(projectRoot, "tests"), join(fixture, "tests"), { recursive: true });
   cpSync(join(projectRoot, "package.json"), join(fixture, "package.json"));
+  cpSync(join(projectRoot, "pnpm-lock.yaml"), join(fixture, "pnpm-lock.yaml"));
+  cpSync(join(projectRoot, "tsconfig.json"), join(fixture, "tsconfig.json"));
   return fixture;
 }
 
@@ -177,13 +182,19 @@ describe("Paper Campaign core compatibility", () => {
       const baselinePolicy = computeValidationPolicyHash(fixture);
       const baselineOperator = computeOperatorBuildHash(fixture);
 
-      appendFileSync(join(fixture, "src/paper/paper-acceptance-summary.ts"), "\n// validation-policy-mutation\n");
+      appendFileSync(
+        join(fixture, "src/paper/paper-acceptance-summary.ts"),
+        "\nexport const validationPolicyMutation = 1;\n",
+      );
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
       expect(computeValidationPolicyHash(fixture)).not.toBe(baselinePolicy);
       expect(computeOperatorBuildHash(fixture)).toBe(baselineOperator);
 
       const policyBeforeOperatorEvidence = computeValidationPolicyHash(fixture);
-      appendFileSync(join(fixture, "src/paper-validation/operator-evidence.ts"), "\n// evidence-report-mutation\n");
+      appendFileSync(
+        join(fixture, "src/paper-validation/operator-evidence.ts"),
+        "\nexport const evidenceReportMutation = 1;\n",
+      );
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
       expect(computeValidationPolicyHash(fixture)).not.toBe(policyBeforeOperatorEvidence);
 
@@ -192,9 +203,12 @@ describe("Paper Campaign core compatibility", () => {
       expect(computeOperatorBuildHash(fixture)).not.toBe(baselineOperator);
 
       const operatorBeforeCliMutation = computeOperatorBuildHash(fixture);
-      appendFileSync(join(fixture, "src/cli/paper-campaign-run.ts"), "\n// operator-orchestration-mutation\n");
-      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+      const campaignCliPath = join(fixture, "src/cli/paper-campaign-run.ts");
+      const campaignCliSource = readFileSync(campaignCliPath, "utf8");
+      appendFileSync(campaignCliPath, "\nvoid \"operator-orchestration-mutation\";\n");
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).not.toBe(baselineCore);
       expect(computeOperatorBuildHash(fixture)).not.toBe(operatorBeforeCliMutation);
+      writeFileSync(campaignCliPath, campaignCliSource);
 
       appendFileSync(join(fixture, "src/infra/sqlite/database.ts"), "\n// non-paper-migration-registration\n");
       appendFileSync(
@@ -205,13 +219,13 @@ describe("Paper Campaign core compatibility", () => {
 
       const schemaContractPath = join(fixture, "src/infra/sqlite/paper-runtime-schema-contract.ts");
       const schemaContractSource = readFileSync(schemaContractPath, "utf8");
-      appendFileSync(schemaContractPath, "\n// paper-schema-contract-mutation\n");
+      appendFileSync(schemaContractPath, "\nexport const paperSchemaContractMutation = 1;\n");
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).not.toBe(baselineCore);
       writeFileSync(schemaContractPath, schemaContractSource);
 
       const recoveryPath = join(fixture, "src/paper-validation/runtime-recovery.ts");
       const recoverySource = readFileSync(recoveryPath, "utf8");
-      appendFileSync(recoveryPath, "\n// recovery-mutation\n");
+      appendFileSync(recoveryPath, "\nexport const recoveryMutation = 1;\n");
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).not.toBe(baselineCore);
       writeFileSync(recoveryPath, recoverySource);
 
@@ -228,7 +242,7 @@ describe("Paper Campaign core compatibility", () => {
       ]) {
         const path = join(fixture, runtimeBoundaryPath);
         const source = readFileSync(path, "utf8");
-        appendFileSync(path, "\n// runtime-boundary-mutation\n");
+        appendFileSync(path, "\nvoid \"runtime-boundary-mutation\";\n");
         expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).not.toBe(baselineCore);
         writeFileSync(path, source);
       }
@@ -251,6 +265,12 @@ describe("Paper Campaign core compatibility", () => {
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
       writeFileSync(packagePath, originalPackage);
 
+      appendFileSync(join(fixture, "src/execution/clob-fee.ts"), "\nvoid \"live-only-fee-mutation\";\n");
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+
+      appendFileSync(join(fixture, "src/paper/paper-executor.ts"), "\n// comment-only core mutation\n");
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+
       appendFileSync(
         join(fixture, "src/paper/paper-executor.ts"),
         "\nimport type { Address } from \"viem\";\n// runtime-behavior-mutation\n",
@@ -270,10 +290,26 @@ describe("Paper Campaign core compatibility", () => {
     const evidence = buildCurrentCompatibilityEvidence(projectRoot);
     expect(evidence.validationPolicyHash).toMatch(/^[a-f0-9]{64}$/);
     expect(evidence.operatorBuildHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(evidence.verificationSuiteHash).toBe(computeVerificationSuiteHash(projectRoot));
     expect(evidence.artifactProvenanceHash).toBe(ARTIFACT_PROVENANCE_HASH);
     expect(evidence.artifactProvenanceSnapshotJson).toBe(ARTIFACT_PROVENANCE_SNAPSHOT_JSON);
     expect(computeCoreCompatibilityHash(manifest)).not.toBe(evidence.validationPolicyHash);
     expect(computeCoreCompatibilityHash(manifest)).not.toBe(evidence.operatorBuildHash);
+    expect(computeCoreCompatibilityHash(manifest)).not.toBe(evidence.verificationSuiteHash);
+  });
+
+  it("invalidates isolated proof identity when a listed test changes", () => {
+    const fixture = createProjectFixture();
+    try {
+      const baseline = computeVerificationSuiteHash(fixture);
+      appendFileSync(
+        join(fixture, "tests/settlement-service.test.ts"),
+        "\nvoid \"verification-suite-mutation\";\n",
+      );
+      expect(computeVerificationSuiteHash(fixture)).not.toBe(baseline);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("keeps presentation reports outside while retaining runtime accounting and orchestration", () => {
@@ -288,9 +324,10 @@ describe("Paper Campaign core compatibility", () => {
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/operator-policy.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/clock-safety.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/live/clob-clock-safety-provider.ts");
-    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/observe-only.ts");
-    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/paper-campaign-run.ts");
-    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/paper-run.ts");
+    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/cli/observe-only.ts");
+    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/cli/paper-campaign-run.ts");
+    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/cli/paper-run.ts");
+    expect(CORE_COMPATIBILITY_EXECUTION_FILES).not.toContain("src/execution/clob-fee.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/paper-validation/operator-evidence.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/paper-validation/preflight.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/report.ts");

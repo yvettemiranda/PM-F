@@ -15,6 +15,8 @@ import {
   isolatedVerificationProofsAreWellFormed,
   type IsolatedVerificationProofs,
 } from "./isolated-proof.js";
+import { PAPER_CAMPAIGN_ISOLATED_TEST_FILES } from "./core-compatibility.js";
+export { PAPER_CAMPAIGN_ISOLATED_TEST_FILES } from "./core-compatibility.js";
 
 export interface ObserveCampaignReport {
   mode: "OBSERVE_ONLY";
@@ -22,6 +24,7 @@ export interface ObserveCampaignReport {
   sourceCodeDirty: boolean;
   campaignId: string | null;
   sessionId: string | null;
+  marketClockOffsetMs: number;
   baselineRunId: string;
   metrics: {
     observeRunId: string;
@@ -76,6 +79,7 @@ export interface PaperCampaignReport {
 export interface IsolatedVerificationEvidence {
   status: "PASSED" | "FAILED";
   coreCompatibilityHash: string;
+  verificationSuiteHash: string;
   sourceCodeCommit: string;
   artifactHash: string;
   generatedAt: string;
@@ -93,34 +97,6 @@ export interface IsolatedVerificationEvidence {
   };
 }
 
-export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
-  "tests/core-compatibility.test.ts",
-  "tests/paper-campaign-clock-safety.test.ts",
-  "tests/campaign-session-runtime.test.ts",
-  "tests/paper-session-runtime.test.ts",
-  "tests/safe-child-environment.test.ts",
-  "tests/signal-target-binding.test.ts",
-  "tests/capital-sizing.test.ts",
-  "tests/market-order-constraints.test.ts",
-  "tests/execution-market-data.test.ts",
-  "tests/live-executor.test.ts",
-  "tests/paper-executor.test.ts",
-  "tests/paper-runner-options.test.ts",
-  "tests/paper-acceptance-summary.test.ts",
-  "tests/paper-gate-evaluator.test.ts",
-  "tests/paper-validation-campaign.test.ts",
-  "tests/paper-campaign-operator-evidence.test.ts",
-  "tests/paper-campaign-operator-policy.test.ts",
-  "tests/operator-paper-campaign-shell.test.ts",
-  "tests/observe-runner.test.ts",
-  "tests/runtime-database-preparation.test.ts",
-  "tests/replay-engine.test.ts",
-  "tests/diagnostic-redaction.test.ts",
-  "tests/isolated-proof.test.ts",
-  "tests/paper-replay-evidence.test.ts",
-  "tests/validation-framework.test.ts",
-] as const;
-
 export type IsolatedVerificationEvidenceInput = Omit<IsolatedVerificationEvidence, "artifactHash">;
 
 function sha256(value: unknown): string {
@@ -136,10 +112,12 @@ export function buildIsolatedVerificationEvidence(
 export function verifyIsolatedVerificationEvidence(
   evidence: IsolatedVerificationEvidence,
   expectedCoreCompatibilityHash: string,
+  expectedVerificationSuiteHash: string,
 ): boolean {
   const { artifactHash, ...payload } = evidence;
   return evidence.status === "PASSED"
     && evidence.coreCompatibilityHash === expectedCoreCompatibilityHash
+    && evidence.verificationSuiteHash === expectedVerificationSuiteHash
     && evidence.sourceCodeCommit.trim().length > 0
     && evidence.replayStatus === evidence.proofs.phase0ReplayStatus
     && evidence.testFiles.length === PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length

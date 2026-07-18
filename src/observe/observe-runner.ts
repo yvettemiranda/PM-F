@@ -17,6 +17,7 @@ import type {
 import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { observeSchedulingGapThresholdMs } from "./scheduling.js";
+import { marketClockOffsetIsValid } from "../execution/market-data.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
@@ -29,7 +30,9 @@ export interface ObserveRunnerOptions {
   durationMs?: number;
   staleRunAfterMs?: number;
   now?: () => Date;
+  monotonicNow?: () => number;
   wait?: (milliseconds: number) => Promise<void>;
+  marketClockOffsetMs?: number;
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
   sourceVersion?: SourceVersion;
 }
@@ -51,6 +54,7 @@ function assertRecoveryCoverage(snapshot: Awaited<ReturnType<ObserveDataSource["
 
 export class ObserveOnlyRunner {
   private readonly now: () => Date;
+  private readonly monotonicNow: () => number;
   private readonly wait: (milliseconds: number) => Promise<void>;
   private started: StartedObserveRun | null = null;
   private gapActive = true;
@@ -58,6 +62,7 @@ export class ObserveOnlyRunner {
   private checkpointHashMismatch = false;
   private lastSuccessfulAt: string | null = null;
   private lastPollCompletedAt: string | null = null;
+  private readonly marketClockOffsetMs: number;
 
   constructor(
     private readonly store: ObserveStore,
@@ -65,7 +70,23 @@ export class ObserveOnlyRunner {
     private readonly options: ObserveRunnerOptions,
   ) {
     this.now = options.now ?? (() => new Date());
+    this.monotonicNow = options.monotonicNow
+      ?? (options.now ? () => this.now().valueOf() : () => performance.now());
     this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.marketClockOffsetMs = options.marketClockOffsetMs ?? 0;
+    if (!marketClockOffsetIsValid(this.marketClockOffsetMs)) {
+      throw new Error("OBSERVE_MARKET_CLOCK_OFFSET_INVALID");
+    }
+  }
+
+  private marketTime(value: Date | string): Date {
+    const localMs = typeof value === "string" ? Date.parse(value) : value.valueOf();
+    if (!Number.isFinite(localMs)) throw new Error("OBSERVE_LOCAL_TIME_INVALID");
+    return new Date(localMs + this.marketClockOffsetMs);
+  }
+
+  private recoveryStartAt(started: StartedObserveRun): string {
+    return this.lastSuccessfulAt ?? this.marketTime(started.gapFrom).toISOString();
   }
 
   start(): StartedObserveRun {
@@ -102,19 +123,22 @@ export class ObserveOnlyRunner {
         throw new Error("CHECKPOINT_PROJECTION_HASH_MISMATCH");
       }
     }
-    this.lastSuccessfulAt = this.started.checkpoint?.createdAt ?? this.started.baseline.snapshotTime;
+    this.lastSuccessfulAt = this.marketTime(
+      this.started.checkpoint?.createdAt ?? this.started.baseline.snapshotTime,
+    ).toISOString();
     this.gapActive = true;
     // Only events that happened on or before startup belong to the offline
     // window. An event arriving after this runner started but before its first
     // successful poll is live data and must remain execution eligible.
-    this.gapCutoffAt = now;
+    this.gapCutoffAt = this.marketTime(now).toISOString();
     return this.started;
   }
 
-  async pollOnce(): Promise<boolean> {
+  async pollOnce(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return false;
     const started = this.start();
     const storedEvents = this.store.loadObservedEvents(started.baseline.baselineRunId);
-    const baselineSecond = Math.floor(Date.parse(started.baseline.snapshotTime) / 1_000);
+    const baselineSecond = Math.floor(this.marketTime(started.baseline.snapshotTime).valueOf() / 1_000);
     const oldestUnconfirmedTradeTimestamp = storedEvents
       .filter((event) => event.trade && !event.activityConfirmed)
       .reduce<number | null>((oldest, event) => (
@@ -141,22 +165,24 @@ export class ObserveOnlyRunner {
         > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
     ) {
       this.gapActive = true;
-      this.gapCutoffAt = pollStartedAt;
+      this.gapCutoffAt = this.marketTime(pollStartedAt).toISOString();
     }
-    let recoveryFrom = this.gapActive ? (this.lastSuccessfulAt ?? started.gapFrom) : null;
+    let recoveryFrom = this.gapActive ? this.recoveryStartAt(started) : null;
     let snapshot;
     try {
       snapshot = await this.source.poll(
         this.options.walletAddress,
         recoveryFrom ? Math.floor(Date.parse(recoveryFrom) / 1_000) : undefined,
         activityFromTimestamp,
+        signal,
       );
     } catch (error) {
+      if (signal?.aborted) return false;
       const failedAt = this.now().toISOString();
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
       this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
-      this.gapCutoffAt = failedAt;
+      this.gapCutoffAt = this.marketTime(failedAt).toISOString();
       return false;
     }
 
@@ -166,21 +192,23 @@ export class ObserveOnlyRunner {
         > observeSchedulingGapThresholdMs(this.options.pollIntervalMs)
     ) {
       this.gapActive = true;
-      this.gapCutoffAt = completedAt;
-      recoveryFrom = this.lastSuccessfulAt ?? started.gapFrom;
+      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
+      recoveryFrom = this.recoveryStartAt(started);
       try {
         snapshot = await this.source.poll(
           this.options.walletAddress,
           Math.floor(Date.parse(recoveryFrom) / 1_000),
           activityFromTimestamp,
+          signal,
         );
         completedAt = this.now().toISOString();
       } catch (error) {
+        if (signal?.aborted) return false;
         const failedAt = this.now().toISOString();
         this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
         this.lastPollCompletedAt = failedAt;
         this.gapActive = true;
-        this.gapCutoffAt = failedAt;
+        this.gapCutoffAt = this.marketTime(failedAt).toISOString();
         return false;
       }
     }
@@ -191,7 +219,7 @@ export class ObserveOnlyRunner {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error, "PROCESSING_FAILED");
       this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
-      this.gapCutoffAt = failedAt;
+      this.gapCutoffAt = this.marketTime(failedAt).toISOString();
       return false;
     }
 
@@ -355,17 +383,17 @@ export class ObserveOnlyRunner {
       const eventByKey = new Map(
         [...storedEvents, ...newEvents].map((event) => [event.sourceEventKey, event]),
       );
-      for (const signal of signalsToEmit.filter((item) => item.executionEligible)) {
-        const event = eventByKey.get(signal.sourceEventKey);
-        if (!event?.trade) throw new Error(`Signal event missing: ${signal.signalId}`);
-        let market = marketCache.get(signal.conditionId);
+      for (const candidateSignal of signalsToEmit.filter((item) => item.executionEligible)) {
+        const event = eventByKey.get(candidateSignal.sourceEventKey);
+        if (!event?.trade) throw new Error(`Signal event missing: ${candidateSignal.signalId}`);
+        let market = marketCache.get(candidateSignal.conditionId);
         if (!market) {
-          market = await this.options.signalMarketMetadataProvider.market(signal.conditionId);
-          marketCache.set(signal.conditionId, market);
+          market = await this.options.signalMarketMetadataProvider.market(candidateSignal.conditionId, signal);
+          marketCache.set(candidateSignal.conditionId, market);
         }
-        const capitalDecision = signal.signalType === "TARGET_BUY" ? estimateTargetCapital({
+        const capitalDecision = candidateSignal.signalType === "TARGET_BUY" ? estimateTargetCapital({
           walletAddress: this.options.walletAddress,
-          sourceEventKey: signal.sourceEventKey,
+          sourceEventKey: candidateSignal.sourceEventKey,
           identityStatus: "IDENTITY_CONFIRMED",
           syncStatus: reconciliation.syncStatus,
           positions: snapshot.positions.data,
@@ -375,10 +403,10 @@ export class ObserveOnlyRunner {
           targetTrade: event.trade,
         }) : null;
         signalContexts.push({
-          signal,
+          signal: candidateSignal,
           capitalDecision,
           context: buildSignalExecutionContext({
-            signal,
+            signal: candidateSignal,
             event,
             market: market.market,
             marketSourceUrl: market.sourceUrl,
@@ -394,7 +422,7 @@ export class ObserveOnlyRunner {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
       this.lastPollCompletedAt = completedAt;
       this.gapActive = true;
-      this.gapCutoffAt = completedAt;
+      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
       return false;
     }
     this.store.commitSuccessfulPoll({
@@ -415,7 +443,7 @@ export class ObserveOnlyRunner {
       replayState: this.gapActive ? "GAP_RECOVERED" : "ONLINE",
       gapRecovered: this.gapActive,
     });
-    this.lastSuccessfulAt = completedAt;
+    this.lastSuccessfulAt = this.marketTime(completedAt).toISOString();
     this.lastPollCompletedAt = completedAt;
     this.gapActive = false;
     this.gapCutoffAt = null;
@@ -424,18 +452,25 @@ export class ObserveOnlyRunner {
 
   async run(signal?: AbortSignal): Promise<ObserveRunMetrics> {
     const started = this.start();
-    const runStartedMs = this.now().valueOf();
+    const runStartedMs = this.monotonicNow();
     const deadline = this.options.durationMs && this.options.durationMs > 0
       ? runStartedMs + this.options.durationMs
       : Number.POSITIVE_INFINITY;
+    let scheduledPollAt = runStartedMs;
     let failed = false;
     let reason = "DURATION_COMPLETE";
     try {
-      while (!signal?.aborted && this.now().valueOf() < deadline) {
-        await this.pollOnce();
-        const remaining = deadline - this.now().valueOf();
+      while (!signal?.aborted && this.monotonicNow() < deadline) {
+        await this.pollOnce(signal);
+        const completedAt = this.monotonicNow();
+        const nextPollAt = Math.max(scheduledPollAt + this.options.pollIntervalMs, completedAt);
+        const remaining = deadline - completedAt;
         if (remaining <= 0) break;
-        await this.wait(Math.min(this.options.pollIntervalMs, remaining));
+        await this.waitForNextPoll(
+          Math.min(Math.max(0, nextPollAt - completedAt), remaining),
+          signal,
+        );
+        scheduledPollAt = nextPollAt;
       }
       if (signal?.aborted) reason = "ABORTED";
     } catch (error) {
@@ -451,5 +486,17 @@ export class ObserveOnlyRunner {
       metrics.checkpointProjectionHashMismatch = true;
     }
     return metrics;
+  }
+
+  private async waitForNextPoll(milliseconds: number, signal?: AbortSignal): Promise<void> {
+    if (milliseconds <= 0 || signal?.aborted) return;
+    if (!signal) {
+      await this.wait(milliseconds);
+      return;
+    }
+    await Promise.race([
+      this.wait(milliseconds),
+      new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
+    ]);
   }
 }

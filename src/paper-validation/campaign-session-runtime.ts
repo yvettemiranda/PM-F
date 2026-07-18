@@ -59,6 +59,7 @@ export function buildObserveChildSpec(input: {
       `--campaign-id=${input.binding.campaignId}`,
       `--session-id=${input.binding.sessionId}`,
       `--baseline-run-id=${input.binding.baselineRunId}`,
+      `--market-clock-offset-ms=${input.binding.marketClockOffsetMs}`,
     ],
   };
 }
@@ -134,6 +135,48 @@ export function qualificationMilestoneReached(input: {
   return input.sessionKind === "QUALIFYING"
     && !input.alreadyRecorded
     && input.nowMs - input.activeStartedAtMs >= input.qualifyingRuntimeMs;
+}
+
+export function deriveCampaignRuntimeTick(input: {
+  sessionStartedMonotonicMs: number;
+  activeStartedMonotonicMs: number;
+  nowMonotonicMs: number;
+  nextCheckpointMonotonicMs: number;
+  plannedDurationMs: number;
+}): {
+  elapsedRuntimeMs: number;
+  activeRuntimeMs: number;
+  checkpointDue: boolean;
+  durationReached: boolean;
+} {
+  const values = [
+    input.sessionStartedMonotonicMs,
+    input.activeStartedMonotonicMs,
+    input.nowMonotonicMs,
+    input.nextCheckpointMonotonicMs,
+    input.plannedDurationMs,
+  ];
+  if (values.some((value) => !Number.isFinite(value)) || input.plannedDurationMs <= 0) {
+    throw new Error("CAMPAIGN_MONOTONIC_TIMING_INVALID");
+  }
+  return {
+    elapsedRuntimeMs: Math.max(0, Math.floor(input.nowMonotonicMs - input.sessionStartedMonotonicMs)),
+    activeRuntimeMs: Math.max(0, Math.floor(input.nowMonotonicMs - input.activeStartedMonotonicMs)),
+    checkpointDue: input.nowMonotonicMs >= input.nextCheckpointMonotonicMs,
+    durationReached: input.nowMonotonicMs - input.activeStartedMonotonicMs >= input.plannedDurationMs,
+  };
+}
+
+export function nextCampaignCheckpointAt(
+  nowMonotonicMs: number,
+  checkpointIntervalMs: number,
+): number {
+  if (!Number.isFinite(nowMonotonicMs)
+    || !Number.isSafeInteger(checkpointIntervalMs)
+    || checkpointIntervalMs <= 0) {
+    throw new Error("CAMPAIGN_CHECKPOINT_TIMING_INVALID");
+  }
+  return nowMonotonicMs + checkpointIntervalMs;
 }
 
 export function campaignCheckpointEvidenceInput(input: {

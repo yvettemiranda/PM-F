@@ -147,6 +147,18 @@ interface MarketDataHealthRow {
   frozen_at: string | null;
 }
 
+interface SettlementRetryStateRow {
+  state: "UNRESOLVED" | "ERROR";
+  consecutive_attempts: number;
+  next_retry_at: string;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+}
+
+const PAPER_SETTLEMENT_INITIAL_BACKOFF_MS = 5_000;
+const PAPER_SETTLEMENT_MAX_BACKOFF_MS = 5 * 60 * 1_000;
+
 export interface ConsumerCutoffResult {
   accountId: string;
   cutoffAt: string;
@@ -599,7 +611,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const execution = this.execution(executionId);
     if (!["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) return execution.state;
     if (signal?.aborted) return execution.state;
-    if (execution.execution_type === "TARGET_BUY" && execution.deadline_at && this.now().valueOf() > Date.parse(execution.deadline_at)) {
+    if (execution.execution_type === "TARGET_BUY" && execution.deadline_at && this.marketNowMs() > Date.parse(execution.deadline_at)) {
       this.expireBuy(execution);
       return "EXPIRED";
     }
@@ -839,7 +851,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   async processSettlements(accountId: string, signal?: AbortSignal): Promise<string[]> {
-    return new SettlementService(this.marketData, this, this.now).process(accountId, signal);
+    return new SettlementService(
+      this.marketData,
+      this,
+      () => new Date(this.marketNowMs()),
+    ).process(accountId, signal);
   }
 
   async accountSnapshot(accountId: string, signal?: AbortSignal): Promise<PaperAccountSnapshot> {
@@ -898,13 +914,55 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return this.settle(positionId, resolution);
   }
 
+  settlementRetryDue(candidate: SettlementCandidate): boolean {
+    const retry = this.settlementRetryState(candidate.positionId);
+    return retry === undefined || Date.parse(retry.next_retry_at) <= this.marketNowMs();
+  }
+
   recordSettlementError(candidate: SettlementCandidate, error: unknown): void {
-    const now = this.now().toISOString();
+    const message = error instanceof Error ? error.message : String(error);
+    this.recordSettlementRetry(candidate, "ERROR", message.slice(0, 120), message);
+  }
+
+  recordSettlementUnresolved(
+    candidate: SettlementCandidate,
+    _resolution: PaperResolutionSnapshot,
+  ): void {
+    this.recordSettlementRetry(candidate, "UNRESOLVED", null, null);
+  }
+
+  recordSettlementSuccess(candidate: SettlementCandidate): void {
+    const previous = this.settlementRetryState(candidate.positionId);
+    if (!previous) return;
+    const now = new Date(this.marketNowMs()).toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (previous.state === "ERROR") this.auditSettlementRecovered(candidate, now);
+      this.database.prepare(
+        "DELETE FROM paper_settlement_retry_state WHERE paper_position_id=?",
+      ).run(candidate.positionId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private settlementRetryState(positionId: string): SettlementRetryStateRow | undefined {
+    return this.database.prepare(
+      `SELECT state,consecutive_attempts,next_retry_at,last_error_code,
+              last_error_message,created_at
+       FROM paper_settlement_retry_state
+       WHERE paper_position_id=?`,
+    ).get(positionId) as SettlementRetryStateRow | undefined;
+  }
+
+  private auditSettlementRecovered(candidate: SettlementCandidate, now: string): void {
     this.audit(
       "PAPER_POSITION",
       candidate.positionId,
-      "SETTLEMENT_DEFERRED",
-      error instanceof Error ? error.message : String(error),
+      "SETTLEMENT_RECOVERED",
+      "SETTLEMENT_DATA_SOURCE_RECOVERED",
       now,
       {
         accountId: candidate.accountId,
@@ -914,26 +972,107 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     );
   }
 
-  recordSettlementSuccess(candidate: SettlementCandidate): void {
-    const latest = this.database.prepare(
-      `SELECT action FROM audit_log
-       WHERE entity_type='PAPER_POSITION' AND entity_id=?
-         AND action IN ('SETTLEMENT_DEFERRED','SETTLEMENT_RECOVERED')
-       ORDER BY timestamp DESC,audit_id DESC LIMIT 1`,
-    ).get(candidate.positionId) as { action: string } | undefined;
-    if (latest?.action !== "SETTLEMENT_DEFERRED") return;
-    this.audit(
-      "PAPER_POSITION",
-      candidate.positionId,
-      "SETTLEMENT_RECOVERED",
-      "SETTLEMENT_DATA_SOURCE_RECOVERED",
-      this.now().toISOString(),
-      {
-        accountId: candidate.accountId,
-        assetId: candidate.assetId,
-        conditionId: candidate.conditionId,
-      },
+  private recordSettlementRetry(
+    candidate: SettlementCandidate,
+    state: SettlementRetryStateRow["state"],
+    errorCode: string | null,
+    errorMessage: string | null,
+  ): void {
+    const previous = this.settlementRetryState(candidate.positionId);
+    const attempts = (previous?.consecutive_attempts ?? 0) + 1;
+    const exponent = Math.min(30, attempts - 1);
+    const delayMs = Math.min(
+      PAPER_SETTLEMENT_MAX_BACKOFF_MS,
+      PAPER_SETTLEMENT_INITIAL_BACKOFF_MS * 2 ** exponent,
     );
+    const nowMs = this.marketNowMs();
+    const now = new Date(nowMs).toISOString();
+    const nextRetryAt = new Date(nowMs + delayMs).toISOString();
+    const position = this.position(candidate.positionId);
+    const shouldAuditError = state === "ERROR" && (
+      previous?.state !== "ERROR" || previous.last_error_code !== errorCode
+    );
+    const shouldAuditPending = state === "UNRESOLVED" && previous === undefined;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (state === "UNRESOLVED" && previous?.state === "ERROR") {
+        this.auditSettlementRecovered(candidate, now);
+      }
+      this.database.prepare(
+        `INSERT INTO paper_settlement_retry_state(
+          paper_position_id,paper_account_id,condition_id,asset_id,state,
+          consecutive_attempts,next_retry_at,last_error_code,last_error_message,
+          last_attempt_at,last_success_at,ruleset_hash,source_code_commit,
+          source_code_dirty,config_version,created_at,updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(paper_position_id) DO UPDATE SET
+          state=excluded.state,
+          consecutive_attempts=excluded.consecutive_attempts,
+          next_retry_at=excluded.next_retry_at,
+          last_error_code=excluded.last_error_code,
+          last_error_message=excluded.last_error_message,
+          last_attempt_at=excluded.last_attempt_at,
+          last_success_at=excluded.last_success_at,
+          source_code_commit=excluded.source_code_commit,
+          source_code_dirty=excluded.source_code_dirty,
+          config_version=excluded.config_version,
+          updated_at=excluded.updated_at`,
+      ).run(
+        candidate.positionId,
+        candidate.accountId,
+        candidate.conditionId,
+        candidate.assetId,
+        state,
+        attempts,
+        nextRetryAt,
+        errorCode,
+        errorMessage?.slice(0, 500) ?? null,
+        now,
+        state === "UNRESOLVED" ? now : null,
+        position.ruleset_hash,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        position.config_version,
+        previous?.created_at ?? now,
+        now,
+      );
+      if (shouldAuditError) {
+        this.audit(
+          "PAPER_POSITION",
+          candidate.positionId,
+          "SETTLEMENT_DEFERRED",
+          errorCode ?? "SETTLEMENT_PROBE_FAILED",
+          now,
+          {
+            accountId: candidate.accountId,
+            assetId: candidate.assetId,
+            conditionId: candidate.conditionId,
+            consecutiveAttempts: attempts,
+            nextRetryAt,
+            errorMessage: errorMessage?.slice(0, 500) ?? null,
+          },
+        );
+      } else if (shouldAuditPending) {
+        this.audit(
+          "PAPER_POSITION",
+          candidate.positionId,
+          "SETTLEMENT_RESULT_PENDING",
+          "RESOLUTION_NOT_FINAL",
+          now,
+          {
+            accountId: candidate.accountId,
+            assetId: candidate.assetId,
+            conditionId: candidate.conditionId,
+            consecutiveAttempts: attempts,
+            nextRetryAt,
+          },
+        );
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   executionState(executionId: string): PaperExecutionState {
@@ -985,7 +1124,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         } else {
           const amount = capital.amount!;
           const deadline = this.buyDeadline(signal);
-          if (this.now().valueOf() >= Date.parse(deadline)) {
+          if (this.marketNowMs() >= Date.parse(deadline)) {
             this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXPIRED", amount, null, capital.mode, deadline, "WAIT_TIMEOUT", now, risk);
           } else {
             this.reserve(accountId, executionId, signal, idempotency, amount, capital.mode!, deadline, now, risk);
@@ -1068,6 +1207,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const remaining = Math.max(0, end - target);
     const wait = Math.min((remaining * rules.waitRatioPpm) / 1_000_000, rules.maxWaitMs);
     return new Date(target + wait).toISOString();
+  }
+
+  private marketNowMs(): number {
+    return this.now().valueOf() + this.marketClockOffsetMs;
   }
 
   private reserve(

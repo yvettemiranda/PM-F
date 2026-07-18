@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
+  computeVerificationSuiteHash,
 } from "../src/paper-validation/core-compatibility.js";
 import {
   buildIsolatedVerificationEvidence,
@@ -38,6 +39,7 @@ function isolatedEvidence(sourceCodeCommit: string, coreCompatibilityHash: strin
   return buildIsolatedVerificationEvidence({
     status: "PASSED",
     coreCompatibilityHash,
+    verificationSuiteHash: computeVerificationSuiteHash(projectRoot),
     sourceCodeCommit,
     generatedAt: "2026-07-17T00:00:00.000Z",
     coverage: [],
@@ -455,34 +457,36 @@ describe("Paper Campaign operator shell", () => {
     expect(selected.stdout.trim()).toBe(zipPath);
   });
 
-  it("excludes stale isolated proof while retaining only current launch failure evidence", () => {
+  it.each([
+    "source commit",
+    "core compatibility hash",
+  ] as const)("excludes isolated proof with stale %s while retaining current launch failure evidence", (staleField) => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
       cwd: projectRoot,
       encoding: "utf8",
     }).stdout.trim();
     const currentCoreHash = computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(projectRoot));
-
-    for (const stale of [
-      { evidenceSourceCommit: "b".repeat(40), evidenceCoreCompatibilityHash: currentCoreHash },
-      { evidenceSourceCommit: currentCommit, evidenceCoreCompatibilityHash: "c".repeat(64) },
-    ]) {
-      const bundled = campaignBundleFixture(stale);
-      expect(bundled.entries).not.toContain("paper-isolated-verification.json");
-      expect(bundled.entries).toEqual(expect.arrayContaining([
-        "paper-isolated-test-results-redacted.json",
-        "paper-phase0-validation-attempt-1-redacted.json",
-        "paper-replay-validation-attempt-1-redacted.json",
-        "run-log-redacted.log",
-      ]));
-      expect(bundled.manifest).toMatchObject({
-        campaignId: "UNKNOWN",
-        sessionId: "UNKNOWN",
-        reportId: "UNKNOWN",
-        sourceCommit: currentCommit,
-        sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
-        coreCompatibilityHash: bundled.expectedCurrentCoreHash,
-      });
-    }
+    const bundled = campaignBundleFixture({
+      evidenceSourceCommit: staleField === "source commit" ? "b".repeat(40) : currentCommit,
+      evidenceCoreCompatibilityHash: staleField === "core compatibility hash"
+        ? "c".repeat(64)
+        : currentCoreHash,
+    });
+    expect(bundled.entries).not.toContain("paper-isolated-verification.json");
+    expect(bundled.entries).toEqual(expect.arrayContaining([
+      "paper-isolated-test-results-redacted.json",
+      "paper-phase0-validation-attempt-1-redacted.json",
+      "paper-replay-validation-attempt-1-redacted.json",
+      "run-log-redacted.log",
+    ]));
+    expect(bundled.manifest).toMatchObject({
+      campaignId: "UNKNOWN",
+      sessionId: "UNKNOWN",
+      reportId: "UNKNOWN",
+      sourceCommit: currentCommit,
+      sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
+      coreCompatibilityHash: bundled.expectedCurrentCoreHash,
+    });
   });
 
   it("packages every Phase0 and Replay attempt from the current launch only", () => {

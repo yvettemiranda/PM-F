@@ -399,8 +399,7 @@ describe("ObserveOnlyRunner", () => {
         stopReason: "END_OF_DATA",
       });
       const api = {
-        trades: async () => paged("trades-recovery", []),
-        activity: async () => paged("activity-recovery", []),
+        tradesSince: async () => paged("trades-recovery", []),
         recentTrades: async (_address: string, limit: number) => {
           tradeLimits.push(limit);
           return capture("trades-head", [buy], now.toISOString());
@@ -473,7 +472,11 @@ describe("ObserveOnlyRunner", () => {
     const optimized = await runScenario();
 
     expect(optimized.tradeLimits).toEqual([100, 100]);
-    expect(optimized.activityStarts).toEqual([baselineSecond - 1, baselineSecond - 230]);
+    expect(optimized.activityStarts).toEqual([
+      baselineSecond - 1,
+      baselineSecond - 230,
+      baselineSecond - 230,
+    ]);
     expect(optimized.events).toHaveLength(2);
     expect(optimized.signals).toHaveLength(1);
     expect(optimized.semanticMetrics).toMatchObject({
@@ -914,6 +917,111 @@ describe("ObserveOnlyRunner", () => {
     store.close();
   });
 
+  it("keeps poll starts on a monotonic fixed-rate cadence without overlapping polls", async () => {
+    const { databasePath } = setup();
+    const baseMs = Date.parse("2026-07-08T00:01:00.000Z");
+    let monotonicMs = 0;
+    const pollStarts: number[] = [];
+    const waits: number[] = [];
+    const source: ObserveDataSource = {
+      async poll() {
+        pollStarts.push(monotonicMs);
+        monotonicMs += 1_200;
+        return snapshot([], [position("100")], new Date(baseMs + monotonicMs).toISOString());
+      },
+    };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 15_000,
+      durationMs: 30_000,
+      now: () => new Date(baseMs + monotonicMs),
+      monotonicNow: () => monotonicMs,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+        monotonicMs += milliseconds;
+      },
+    });
+
+    await runner.run();
+
+    expect(pollStarts).toEqual([0, 15_000]);
+    expect(waits).toEqual([13_800, 13_800]);
+    store.close();
+  });
+
+  it("cancels an in-flight poll without recording an API failure or partial checkpoint", async () => {
+    const { databasePath } = setup();
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const source: ObserveDataSource = {
+      async poll(_walletAddress, _recoveryFromTimestamp, _activityFromTimestamp, signal) {
+        receivedSignal = signal;
+        controller.abort(new Error("TEST_SAFE_STOP"));
+        throw controller.signal.reason;
+      },
+    };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    expect(await runner.pollOnce(controller.signal)).toBe(false);
+    expect(receivedSignal).toBe(controller.signal);
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 0,
+      failedPolls: 0,
+      lastCheckpointId: null,
+    });
+    store.close();
+  });
+
+  it("passes one AbortSignal through every recovery data read", async () => {
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const controller = new AbortController();
+    const received: AbortSignal[] = [];
+    const paged = <T>(endpoint: string, rows: T[]) => ({
+      rows,
+      captures: [capture(endpoint, rows, now.toISOString())],
+      boundaryOverlapRows: [],
+      historyComplete: true,
+      stopReason: "END_OF_DATA",
+    });
+    const api = {
+      tradesSince: async (_address: string, _start: number, signal?: AbortSignal) => {
+        if (signal) received.push(signal);
+        return paged<PublicTrade>("trades", []);
+      },
+      activitySince: async (_address: string, _start: number, signal?: AbortSignal) => {
+        if (signal) received.push(signal);
+        return paged<PublicActivity>("activity", []);
+      },
+      allPositions: async (_address: string, signal?: AbortSignal) => {
+        if (signal) received.push(signal);
+        const result = paged<PublicPosition>("positions", []);
+        return { ...result, merged: capture("positions", [], now.toISOString()) };
+      },
+      pUsdBalance: async (_address: string, signal?: AbortSignal) => {
+        if (signal) received.push(signal);
+        return capture("balance", { jsonrpc: "2.0", id: 2, result: "0x0" }, now.toISOString());
+      },
+    };
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+
+    await source.poll(wallet, baselineSecond, baselineSecond, controller.signal);
+
+    expect(received).toEqual([
+      controller.signal,
+      controller.signal,
+      controller.signal,
+      controller.signal,
+    ]);
+  });
+
   it("keeps an event after runner startup eligible even when it arrives in the first poll", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
@@ -942,6 +1050,45 @@ describe("ObserveOnlyRunner", () => {
       execution_eligible: 1,
       execution_block_reason: null,
       event_classification: "STANDARD_TRADE",
+    });
+    check.close();
+  });
+
+  it("uses the calibrated market clock to keep a pre-start event inside the no-catch-up gap", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const preStartByMarketClock = trade({
+      transactionHash: "0xmarket-clock-pre-start",
+      timestamp: baselineSecond + 61,
+    });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([
+        snapshot([preStartByMarketClock], [position("110")], "2026-07-08T00:01:02.000Z"),
+      ]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        marketClockOffsetMs: 1_700,
+        now: () => now,
+      },
+    );
+
+    runner.start();
+    now = new Date("2026-07-08T00:01:02.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT execution_eligible,execution_block_reason,event_classification
+       FROM signals WHERE producer_mode='OBSERVE_ONLY'`,
+    ).get()).toEqual({
+      execution_eligible: 0,
+      execution_block_reason: "GAP_EVENT",
+      event_classification: "GAP_TRADE",
     });
     check.close();
   });

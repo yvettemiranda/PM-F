@@ -3,11 +3,7 @@ import type { CampaignSnapshot } from "./types.js";
 export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
 
 export type PaperCampaignStartDisposition = "CONTINUE" | "CREATE_REPLACEMENT" | "REFUSE_TERMINAL";
-export type PaperCampaignReplacementReason =
-  | "CORE_REPAIR_CLOCK_SAFETY"
-  | "CORE_REPAIR_MARKET_DATA"
-  | "CORE_REPAIR_RECONCILIATION_GRACE"
-  | "CORE_VERSION_REPLACEMENT";
+export type PaperCampaignReplacementReason = "CORE_VERSION_REPLACEMENT";
 
 function replacementReason(input: {
   campaignState: string;
@@ -16,41 +12,9 @@ function replacementReason(input: {
   currentCoreCompatibilityHash: string;
 }): PaperCampaignReplacementReason | null {
   if (input.previousCoreCompatibilityHash === input.currentCoreCompatibilityHash) return null;
-  if (input.campaignState === "FROZEN" && input.blockers.length === 0) {
-    return "CORE_VERSION_REPLACEMENT";
-  }
-  if (input.campaignState !== "BLOCKED") return null;
-  const clockSafetyFailureBlockers = [
-    "FINAL_VALUATION_INCOMPLETE",
-    "PAPER_EXIT_CODE:1",
-    "PAPER_FINAL_VALUATION_INCOMPLETE",
-    "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS",
-    "UNRECOVERED_MARKET_DATA_BLOCKER",
-  ];
-  if (
-    input.blockers.length === clockSafetyFailureBlockers.length
-    && JSON.stringify([...input.blockers].sort()) === JSON.stringify(clockSafetyFailureBlockers.sort())
-  ) {
-    return "CORE_REPAIR_CLOCK_SAFETY";
-  }
-  if (
-    input.blockers.includes("UNRECOVERED_MARKET_DATA_BLOCKER")
-    && input.blockers.every((blocker) => (
-      blocker === "UNRECOVERED_MARKET_DATA_BLOCKER"
-      || blocker === "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS"
-      || blocker === "PAPER_EXIT_CODE:1"
-    ))
-  ) {
-    return "CORE_REPAIR_MARKET_DATA";
-  }
-  if (
-    input.blockers.length === 2
-    && input.blockers.includes("MAJOR_DESYNC:1")
-    && input.blockers.includes("OBSERVE_STATUS:SHORT_SOAK_FAILED")
-  ) {
-    return "CORE_REPAIR_RECONCILIATION_GRACE";
-  }
-  return null;
+  return ["PASSED", "BLOCKED", "FROZEN"].includes(input.campaignState)
+    ? "CORE_VERSION_REPLACEMENT"
+    : null;
 }
 
 export function paperCampaignReplacementAuthorized(input: {

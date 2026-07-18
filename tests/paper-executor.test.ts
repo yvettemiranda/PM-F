@@ -153,6 +153,7 @@ class FakeMarketData implements PaperMarketDataProvider {
   book: PaperOrderbookSnapshot;
   feeSnapshot: PaperFeeSnapshot;
   resolutionSnapshot: PaperResolutionSnapshot;
+  resolutionError: Error | null = null;
   orderbookError: Error | null = null;
   orderbookCalls = 0;
   feeCalls = 0;
@@ -212,6 +213,7 @@ class FakeMarketData implements PaperMarketDataProvider {
 
   async resolution(): Promise<PaperResolutionSnapshot> {
     this.resolutionCalls += 1;
+    if (this.resolutionError) throw this.resolutionError;
     return { ...this.resolutionSnapshot, snapshotTime: this.clock().toISOString() };
   }
 
@@ -1045,6 +1047,24 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("uses the calibrated market clock for a waiting BUY deadline", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"), 1_000_000_000n, 1_700);
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "calibrated-timeout",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:11.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "calibrated-timeout");
+    env.setClock(new Date("2026-07-08T00:00:04.500Z"));
+
+    expect(await env.executor.attemptExecution(executionId)).toBe("EXPIRED");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
+    env.executor.close();
+  });
+
   it("serializes reservations using available cash", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"), 15_000_000n);
     env.market.book = env.market.makeBook([], []);
@@ -1343,11 +1363,107 @@ describe("PaperExecutor", () => {
     env.setClock(new Date("2026-07-08T00:00:03.000Z"));
     expect(await env.executor.processSettlements(env.accountId)).toEqual([]);
     env.market.resolutionSnapshot = { ...env.market.resolutionSnapshot, resolved: true, payoutNumerator: "1", payoutDenominator: "1", raw: { closed: true, winner: assetId } };
+    env.setClock(new Date("2026-07-08T00:00:08.000Z"));
     expect((await env.executor.processSettlements(env.accountId)).length).toBe(1);
     expect(count(env.databasePath, "paper_settlements")).toBe(1);
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((db.prepare("SELECT status FROM paper_positions").get() as { status: string }).status).toBe("REDEEMED");
     db.close();
+    env.executor.close();
+  });
+
+  it("persists unresolved settlement backoff across executor restarts", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "settlement-backoff",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:02.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "settlement-backoff");
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+
+    await env.executor.processSettlements(env.accountId);
+    await env.executor.processSettlements(env.accountId);
+    expect(env.market.resolutionCalls).toBe(1);
+    env.executor.close();
+
+    const restarted = new PaperExecutor(env.databasePath, env.market, {
+      sourceVersion,
+      now: () => env.getClock(),
+    });
+    env.setClock(new Date("2026-07-08T00:00:07.999Z"));
+    await restarted.processSettlements(env.accountId);
+    expect(env.market.resolutionCalls).toBe(1);
+    env.setClock(new Date("2026-07-08T00:00:08.000Z"));
+    await restarted.processSettlements(env.accountId);
+    expect(env.market.resolutionCalls).toBe(2);
+
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      `SELECT state,consecutive_attempts,next_retry_at
+       FROM paper_settlement_retry_state`,
+    ).get()).toEqual({
+      state: "UNRESOLVED",
+      consecutive_attempts: 2,
+      next_retry_at: "2026-07-08T00:00:18.000Z",
+    });
+    database.close();
+    restarted.close();
+  });
+
+  it("audits a repeated settlement error only when its code changes and records one recovery", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "settlement-error-dedup",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:02.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "settlement-error-dedup");
+    env.market.resolutionError = new Error("RESOLUTION_API_DOWN");
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    await env.executor.processSettlements(env.accountId);
+    env.setClock(new Date("2026-07-08T00:00:08.000Z"));
+    await env.executor.processSettlements(env.accountId);
+    env.market.resolutionError = new Error("RESOLUTION_SCHEMA_INVALID");
+    env.setClock(new Date("2026-07-08T00:00:18.000Z"));
+    await env.executor.processSettlements(env.accountId);
+    env.market.resolutionError = null;
+    env.setClock(new Date("2026-07-08T00:00:38.000Z"));
+    await env.executor.processSettlements(env.accountId);
+
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare(
+      "SELECT count(*) count FROM audit_log WHERE action='SETTLEMENT_DEFERRED'",
+    ).get() as { count: number }).count).toBe(2);
+    expect((database.prepare(
+      "SELECT count(*) count FROM audit_log WHERE action='SETTLEMENT_RECOVERED'",
+    ).get() as { count: number }).count).toBe(1);
+    expect(database.prepare(
+      "SELECT state,last_error_code FROM paper_settlement_retry_state",
+    ).get()).toEqual({ state: "UNRESOLVED", last_error_code: null });
+    database.close();
+    env.executor.close();
+  });
+
+  it("uses the calibrated market clock for the settlement market-end boundary", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"), 1_000_000_000n, 1_700);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "calibrated-settlement",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "2026-07-08T00:00:10.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "calibrated-settlement");
+    env.setClock(new Date("2026-07-08T00:00:08.500Z"));
+
+    await env.executor.processSettlements(env.accountId);
+
+    expect(env.market.resolutionCalls).toBe(1);
     env.executor.close();
   });
 
@@ -1464,6 +1580,7 @@ describe("PaperExecutor", () => {
     sabotage.close();
     env.executor.close();
     const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    env.setClock(new Date("2026-07-08T00:00:08.000Z"));
     expect(await restarted.processSettlements(env.accountId)).toHaveLength(1);
     expect(await restarted.processSettlements(env.accountId)).toEqual([]);
     expect(count(env.databasePath, "paper_settlements")).toBe(1);

@@ -5,6 +5,7 @@ import type { SourceVersion } from "../infra/source-version.js";
 import type {
   CampaignDefinition,
   CampaignState,
+  CompatibilityIdentity,
   CoreCompatibilityManifest,
   SessionValidationReport,
   ValidationCheckpoint,
@@ -43,6 +44,10 @@ interface SessionRow {
   source_code_commit: string;
   source_code_dirty: number;
   live_gate_transition_count_at_start: number;
+  validation_policy_hash: string | null;
+  verification_suite_hash: string | null;
+  operator_build_hash: string | null;
+  artifact_provenance_hash: string | null;
   started_at: string;
 }
 
@@ -90,6 +95,21 @@ function sha256(value: unknown): string {
 
 function sourceVersion(commit: string, dirty: number): SourceVersion {
   return { commit, dirty: dirty === 1 };
+}
+
+function compatibilityIdentity(row: SessionRow): CompatibilityIdentity | null {
+  if (
+    row.validation_policy_hash === null
+    || row.verification_suite_hash === null
+    || row.operator_build_hash === null
+    || row.artifact_provenance_hash === null
+  ) return null;
+  return {
+    validationPolicyHash: row.validation_policy_hash,
+    verificationSuiteHash: row.verification_suite_hash,
+    operatorBuildHash: row.operator_build_hash,
+    artifactProvenanceHash: row.artifact_provenance_hash,
+  };
 }
 
 function parseJson<T>(value: string, label: string): T {
@@ -357,6 +377,7 @@ export class PaperValidationStore {
     rulesetHash: string;
     configVersion: string;
     sourceVersion: SourceVersion;
+    compatibilityIdentity: CompatibilityIdentity;
     liveGateTransitionCountAtStart: number;
     startedAt: string;
   }): void {
@@ -364,9 +385,10 @@ export class PaperValidationStore {
       `INSERT INTO paper_validation_sessions(
         session_id,campaign_id,sequence,session_kind,planned_duration_ms,
         core_compatibility_hash,schema_version,ruleset_hash,config_version,
-        source_code_commit,source_code_dirty,live_gate_transition_count_at_start,
-        started_at,created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        source_code_commit,source_code_dirty,validation_policy_hash,
+        verification_suite_hash,operator_build_hash,artifact_provenance_hash,
+        live_gate_transition_count_at_start,started_at,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.sessionId,
       input.campaignId,
@@ -379,6 +401,10 @@ export class PaperValidationStore {
       input.configVersion,
       input.sourceVersion.commit,
       input.sourceVersion.dirty ? 1 : 0,
+      input.compatibilityIdentity.validationPolicyHash,
+      input.compatibilityIdentity.verificationSuiteHash,
+      input.compatibilityIdentity.operatorBuildHash,
+      input.compatibilityIdentity.artifactProvenanceHash,
       input.liveGateTransitionCountAtStart,
       input.startedAt,
       input.startedAt,
@@ -398,6 +424,7 @@ export class PaperValidationStore {
       plannedDurationMs: row.planned_duration_ms,
       state: this.sessionState(sessionId),
       sourceVersion: sourceVersion(row.source_code_commit, row.source_code_dirty),
+      compatibilityIdentity: compatibilityIdentity(row),
       liveGateTransitionCountAtStart: row.live_gate_transition_count_at_start,
       startedAt: row.started_at,
     };
@@ -702,6 +729,56 @@ export class PaperValidationStore {
        ORDER BY created_at,report_id`,
     ).all(campaignId) as unknown as ReportRow[];
     return rows.map((row) => parseJson<SessionValidationReport>(row.report_json, `PAPER_VALIDATION_REPORT:${row.report_id}`));
+  }
+
+  insertEvidenceAdjudication(input: {
+    campaignId: string;
+    sessionId: string;
+    decision: "KEEP_ALL" | "KEEP_RUNTIME_REFRESH_ISOLATED" | "KEEP_RUNTIME_REJUDGE_COVERAGE";
+    previousIdentity: CompatibilityIdentity | null;
+    currentIdentity: CompatibilityIdentity;
+    evidence: Record<string, unknown>;
+    sourceVersion: SourceVersion;
+    idempotencyKey: string;
+    now: string;
+  }): void {
+    const evidenceJson = stableJson(input.evidence);
+    const evidenceHash = sha256(input.evidence);
+    const existing = this.database.prepare(
+      `SELECT evidence_hash FROM paper_validation_evidence_adjudications
+       WHERE idempotency_key=?`,
+    ).get(input.idempotencyKey) as { evidence_hash: string } | undefined;
+    if (existing) {
+      if (existing.evidence_hash !== evidenceHash) {
+        throw new Error("PAPER_VALIDATION_ADJUDICATION_IDEMPOTENCY_CONFLICT");
+      }
+      return;
+    }
+    const adjudicationId = `pva-${sha256([input.idempotencyKey, evidenceHash]).slice(0, 32)}`;
+    this.database.prepare(
+      `INSERT INTO paper_validation_evidence_adjudications(
+        adjudication_id,campaign_id,session_id,decision,
+        previous_validation_policy_hash,current_validation_policy_hash,
+        previous_verification_suite_hash,current_verification_suite_hash,
+        evidence_json,evidence_hash,source_code_commit,source_code_dirty,
+        idempotency_key,created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      adjudicationId,
+      input.campaignId,
+      input.sessionId,
+      input.decision,
+      input.previousIdentity?.validationPolicyHash ?? null,
+      input.currentIdentity.validationPolicyHash,
+      input.previousIdentity?.verificationSuiteHash ?? null,
+      input.currentIdentity.verificationSuiteHash,
+      evidenceJson,
+      evidenceHash,
+      input.sourceVersion.commit,
+      input.sourceVersion.dirty ? 1 : 0,
+      input.idempotencyKey,
+      input.now,
+    );
   }
 
   latestCampaignReport(campaignId: string): CampaignValidationReport | null {

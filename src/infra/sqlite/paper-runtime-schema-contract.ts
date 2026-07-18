@@ -23,11 +23,14 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.22.0",
   "2.23.0",
   "2.24.0",
+  "2.25.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
   "observe_projection_snapshots",
   "paper_market_constraint_evidence",
+  "paper_settlement_retry_state",
+  "paper_validation_evidence_adjudications",
   "paper_validation_campaigns",
   "paper_validation_sessions",
   "paper_validation_checkpoints",
@@ -50,6 +53,12 @@ export const PAPER_RUNTIME_REQUIRED_COLUMNS = Object.freeze({
     "source_capture_id",
   ],
   paper_fee_snapshots: ["source_capture_id"],
+  paper_validation_sessions: [
+    "validation_policy_hash",
+    "verification_suite_hash",
+    "operator_build_hash",
+    "artifact_provenance_hash",
+  ],
 } satisfies Record<string, readonly string[]>);
 
 export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
@@ -90,6 +99,9 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
   "paper_validation_session_transition_insert_guard",
   "paper_validation_sessions_no_delete",
   "paper_validation_sessions_no_update",
+  "paper_validation_sessions_compatibility_identity_required",
+  "paper_validation_evidence_adjudications_no_delete",
+  "paper_validation_evidence_adjudications_no_update",
   "paper_validation_transitions_no_delete",
   "paper_validation_transitions_no_update",
   "position_baseline_items_no_delete",
@@ -117,6 +129,8 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_INDEXES = [
+  "paper_settlement_retry_due_idx",
+  "paper_validation_evidence_adjudications_campaign_idx",
   "paper_validation_campaign_transition_sequence_idx",
   "paper_validation_session_transition_sequence_idx",
 ] as const;

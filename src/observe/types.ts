@@ -73,6 +73,7 @@ export interface ObserveDataSource {
     walletAddress: string,
     recoveryFromTimestamp?: number,
     activityFromTimestamp?: number,
+    signal?: AbortSignal,
   ): Promise<ObservePollSnapshot>;
 }
 

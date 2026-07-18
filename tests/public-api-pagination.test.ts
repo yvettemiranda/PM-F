@@ -93,6 +93,38 @@ describe("Polymarket public API pagination", () => {
     expect(result.boundaryOverlapRows).toEqual([boundary]);
   });
 
+  it("stops recovery trade pagination once the persisted cursor is covered", async () => {
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const requests: string[] = [];
+    const trade = (timestamp: number) => ({
+      proxyWallet: wallet,
+      transactionHash: `0x${timestamp.toString(16).padStart(64, "0")}`,
+      conditionId,
+      asset: String(timestamp),
+      side: "BUY" as const,
+      price: "0.5",
+      size: "1",
+      timestamp,
+    });
+    const firstPage = Array.from({ length: 1_000 }, (_, index) => trade(3_000 - index));
+    const secondPage = Array.from({ length: 1_000 }, (_, index) => trade(2_000 - index));
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      const offset = Number(new URL(url).searchParams.get("offset"));
+      return new Response(JSON.stringify(offset === 0 ? firstPage : secondPage), { status: 200 });
+    }));
+
+    const result = await new PolymarketPublicApi({ maxRetries: 0 }).tradesSince(wallet, 1_500);
+
+    expect(result).toMatchObject({
+      historyComplete: true,
+      stopReason: "RECOVERY_CURSOR_COVERED",
+    });
+    expect(result.rows).toHaveLength(2_000);
+    expect(requests.map((url) => new URL(url).searchParams.get("offset"))).toEqual(["0", "1000", "0"]);
+  });
+
   it("fails closed when a successful HTTP response violates the runtime schema", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([{ asset: "missing-fields" }]), { status: 200 })));
     await expect(new PolymarketPublicApi({ maxRetries: 0 }).allPositions(
@@ -190,8 +222,7 @@ describe("Polymarket public API pagination", () => {
       stopReason: "END_OF_DATA",
     });
     const api = {
-      trades: async () => paged("fake://trades-recovery", page),
-      activity: async () => paged("fake://activity-recovery", []),
+      tradesSince: async () => paged("fake://trades-recovery", page),
       recentTrades: async () => ({ url: "fake://trades", fetchedAt, latencyMs: 0, status: 200, data: page }),
       activitySince: async (_address: string, start: number) => {
         activityStarts.push(start);
@@ -213,7 +244,7 @@ describe("Polymarket public API pagination", () => {
     await expect(source.poll(wallet, 1_700_000_999)).resolves.toBeDefined();
     await expect(source.poll(wallet, undefined, 1_699_999_900))
       .resolves.toMatchObject({ trades: { data: { length: 1_000 } } });
-    expect(activityStarts).toEqual([1_699_999_900]);
+    expect(activityStarts).toEqual([1_700_000_999, 1_699_999_900]);
   });
 
   it("uses a bounded trade head after recovery when it already overlaps the committed watermark", async () => {
@@ -239,8 +270,7 @@ describe("Polymarket public API pagination", () => {
     const requestedTradeLimits: number[] = [];
     const boundedHead = Array.from({ length: 100 }, (_, index) => trade(1_700_000_100 - index));
     const api = {
-      trades: async () => paged("fake://trades-recovery", recoveryRows),
-      activity: async () => paged("fake://activity-recovery", []),
+      tradesSince: async () => paged("fake://trades-recovery", recoveryRows),
       recentTrades: async (_address: string, limit: number) => {
         requestedTradeLimits.push(limit);
         return { url: `fake://trades?limit=${limit}`, fetchedAt, latencyMs: 0, status: 200, data: boundedHead };
@@ -285,12 +315,11 @@ describe("Polymarket public API pagination", () => {
     };
     const activityStarts: number[] = [];
     const api = {
-      trades: async () => paged("fake://trades-recovery", []),
-      activity: async () => paged("fake://activity-recovery", [activityRow]),
+      tradesSince: async () => paged("fake://trades-recovery", []),
       recentTrades: async () => ({ url: "fake://trades", fetchedAt, latencyMs: 0, status: 200, data: [] }),
       activitySince: async (_address: string, start: number) => {
         activityStarts.push(start);
-        return paged("fake://activity-since", []);
+        return paged("fake://activity-since", [activityRow]);
       },
       allPositions: async () => ({
         ...paged("fake://positions", []),
@@ -310,6 +339,6 @@ describe("Polymarket public API pagination", () => {
     await source.poll(wallet, undefined, 1_699_999_800);
     await source.poll(wallet, undefined, 1_699_999_800);
 
-    expect(activityStarts).toEqual([1_699_999_800, 1_699_999_800]);
+    expect(activityStarts).toEqual([1_699_999_000, 1_699_999_800, 1_699_999_800]);
   });
 });

@@ -44,6 +44,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.22.0",
   "2.23.0",
   "2.24.0",
+  "2.25.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -129,9 +130,12 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "paper_validation_campaigns_no_update",
   "paper_validation_checkpoints_no_delete",
   "paper_validation_checkpoints_no_update",
+  "paper_validation_evidence_adjudications_no_delete",
+  "paper_validation_evidence_adjudications_no_update",
   "paper_validation_reports_no_delete",
   "paper_validation_reports_no_update",
   "paper_validation_session_transition_insert_guard",
+  "paper_validation_sessions_compatibility_identity_required",
   "paper_validation_sessions_no_delete",
   "paper_validation_sessions_no_update",
   "paper_validation_transitions_no_delete",
@@ -222,6 +226,8 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
   const requiredTables = [
     "observe_projection_snapshots",
     "paper_market_constraint_evidence",
+    "paper_settlement_retry_state",
+    "paper_validation_evidence_adjudications",
     "paper_validation_campaigns",
     "paper_validation_sessions",
     "paper_validation_checkpoints",
@@ -249,6 +255,12 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
       "source_capture_id",
     ],
     paper_fee_snapshots: ["source_capture_id"],
+    paper_validation_sessions: [
+      "validation_policy_hash",
+      "verification_suite_hash",
+      "operator_build_hash",
+      "artifact_provenance_hash",
+    ],
   };
   for (const [table, columns] of Object.entries(requiredColumns)) {
     const actual = new Set(

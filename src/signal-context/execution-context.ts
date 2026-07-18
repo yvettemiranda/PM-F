@@ -13,7 +13,10 @@ export interface SignalContextBundle {
 }
 
 export interface SignalMarketMetadataProvider {
-  market(conditionId: string): Promise<{ sourceUrl: string; fetchedAt: string; market: ClobMarket }>;
+  market(
+    conditionId: string,
+    signal?: AbortSignal,
+  ): Promise<{ sourceUrl: string; fetchedAt: string; market: ClobMarket }>;
 }
 
 export function buildSignalExecutionContext(input: {

@@ -21,8 +21,12 @@ export class PublicObserveDataSource implements ObserveDataSource {
 
   constructor(private readonly api = new PolymarketPublicApi()) {}
 
-  private async incrementalTrades(walletAddress: string, tradeWatermark?: number) {
-    const head = await this.api.recentTrades(walletAddress, INCREMENTAL_TRADE_HEAD_LIMIT);
+  private async incrementalTrades(
+    walletAddress: string,
+    tradeWatermark?: number,
+    signal?: AbortSignal,
+  ) {
+    const head = await this.api.recentTrades(walletAddress, INCREMENTAL_TRADE_HEAD_LIMIT, signal);
     const oldest = head.data.length === 0 ? null : Math.min(...head.data.map((row) => row.timestamp));
     if (
       head.data.length < INCREMENTAL_TRADE_HEAD_LIMIT
@@ -30,21 +34,29 @@ export class PublicObserveDataSource implements ObserveDataSource {
     ) {
       return head;
     }
-    return this.api.recentTrades(walletAddress);
+    return this.api.recentTrades(walletAddress, 1_000, signal);
   }
 
   async poll(
     walletAddress: string,
     recoveryFromTimestamp?: number,
     activityFromTimestamp?: number,
+    signal?: AbortSignal,
   ): Promise<ObservePollSnapshot> {
     if (recoveryFromTimestamp !== undefined) {
       const [tradeHistory, activityHistory, positionHistory, pUsdBalance] = await Promise.all([
-        this.api.trades(walletAddress),
-        this.api.activity(walletAddress),
-        this.api.allPositions(walletAddress),
-        this.api.pUsdBalance(walletAddress),
+        this.api.tradesSince(walletAddress, recoveryFromTimestamp, signal),
+        this.api.activitySince(
+          walletAddress,
+          activityFromTimestamp ?? recoveryFromTimestamp,
+          signal,
+        ),
+        this.api.allPositions(walletAddress, signal),
+        this.api.pUsdBalance(walletAddress, signal),
       ]);
+      if (!tradeHistory.historyComplete || !activityHistory.historyComplete) {
+        throw new Error("OBSERVE_RECOVERY_PAGE_SATURATED");
+      }
       this.tradeCoverageWatermarks.set(walletAddress, Math.max(
         recoveryFromTimestamp,
         ...tradeHistory.rows.map((row) => row.timestamp),
@@ -58,12 +70,12 @@ export class PublicObserveDataSource implements ObserveDataSource {
     }
     const tradeWatermark = this.tradeCoverageWatermarks.get(walletAddress);
     const [trades, activityHistory, positionHistory, pUsdBalance] = await Promise.all([
-      this.incrementalTrades(walletAddress, tradeWatermark),
+      this.incrementalTrades(walletAddress, tradeWatermark, signal),
       activityFromTimestamp === undefined
-        ? this.api.activity(walletAddress)
-        : this.api.activitySince(walletAddress, activityFromTimestamp),
-      this.api.allPositions(walletAddress),
-      this.api.pUsdBalance(walletAddress),
+        ? this.api.activity(walletAddress, signal)
+        : this.api.activitySince(walletAddress, activityFromTimestamp, signal),
+      this.api.allPositions(walletAddress, signal),
+      this.api.pUsdBalance(walletAddress, signal),
     ]);
     const activity = mergeCaptures("activity", activityHistory.captures, activityHistory.rows);
     const oldestTrade = trades.data.length === 0 ? null : Math.min(...trades.data.map((row) => row.timestamp));

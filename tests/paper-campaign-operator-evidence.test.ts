@@ -30,6 +30,13 @@ import type { ValidationCheckpoint } from "../src/paper-validation/types.js";
 
 const directories: string[] = [];
 const sourceVersion: SourceVersion = { commit: "operator-evidence-test", dirty: false };
+const verificationSuiteHash = "d".repeat(64);
+const compatibilityIdentity = {
+  validationPolicyHash: "a".repeat(64),
+  verificationSuiteHash,
+  operatorBuildHash: "b".repeat(64),
+  artifactProvenanceHash: "c".repeat(64),
+};
 const proofHashes = (passedTestFileCount: number) => ({
   vitestResultSha256: "1".repeat(64),
   phase0ResultSha256: "2".repeat(64),
@@ -129,8 +136,9 @@ function insertScope(
     `INSERT INTO paper_validation_sessions(
       session_id,campaign_id,sequence,session_kind,planned_duration_ms,core_compatibility_hash,
       schema_version,ruleset_hash,config_version,source_code_commit,source_code_dirty,
+      validation_policy_hash,verification_suite_hash,operator_build_hash,artifact_provenance_hash,
       live_gate_transition_count_at_start,started_at,created_at
-    ) VALUES (?,?,1,'QUALIFYING',7200000,?,?,?,?,?,0,0,
+    ) VALUES (?,?,1,'QUALIFYING',7200000,?,?,?,?,?,0,?,?,?,?,0,
       '2026-07-16T00:00:00.000Z','2026-07-16T00:00:00.000Z')`,
   ).run(
     sessionId,
@@ -140,6 +148,10 @@ function insertScope(
     RULESET_HASH,
     VERSIONS.configVersion,
     sourceVersion.commit,
+    compatibilityIdentity.validationPolicyHash,
+    compatibilityIdentity.verificationSuiteHash,
+    compatibilityIdentity.operatorBuildHash,
+    compatibilityIdentity.artifactProvenanceHash,
   );
   database.close();
   return { campaignId, sessionId, accountId, targetId, baselineRunId, coreHash };
@@ -241,6 +253,7 @@ describe("Paper Campaign operator evidence", () => {
     const evidence = buildIsolatedVerificationEvidence({
       status: "PASSED",
       coreCompatibilityHash: "a".repeat(64),
+      verificationSuiteHash,
       sourceCodeCommit: "commit",
       generatedAt: "2026-07-16T00:00:00.000Z",
       coverage: ["MIN_ORDER_REJECT", "CRASH_RECOVERY"],
@@ -256,19 +269,36 @@ describe("Paper Campaign operator evidence", () => {
         chainWrites: 0,
       },
     });
-    expect(verifyIsolatedVerificationEvidence(evidence, "a".repeat(64))).toBe(true);
-    expect(verifyIsolatedVerificationEvidence({ ...evidence, coverage: ["BUY"] }, "a".repeat(64))).toBe(false);
-    expect(verifyIsolatedVerificationEvidence(evidence, "b".repeat(64))).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(evidence, "a".repeat(64), verificationSuiteHash)).toBe(true);
+    expect(verifyIsolatedVerificationEvidence(
+      { ...evidence, coverage: ["BUY"] },
+      "a".repeat(64),
+      verificationSuiteHash,
+    )).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(evidence, "b".repeat(64), verificationSuiteHash)).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      evidence,
+      "a".repeat(64),
+      "e".repeat(64),
+    )).toBe(false);
     const incompleteTestEvidence = buildIsolatedVerificationEvidence({
       ...evidence,
       testFiles: ["tests/capital-sizing.test.ts"],
     });
-    expect(verifyIsolatedVerificationEvidence(incompleteTestEvidence, "a".repeat(64))).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      incompleteTestEvidence,
+      "a".repeat(64),
+      verificationSuiteHash,
+    )).toBe(false);
     const prooflessEvidence = buildIsolatedVerificationEvidence({
       ...evidence,
       proofs: { ...evidence.proofs, passedTestFileCount: 0 },
     });
-    expect(verifyIsolatedVerificationEvidence(prooflessEvidence, "a".repeat(64))).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      prooflessEvidence,
+      "a".repeat(64),
+      verificationSuiteHash,
+    )).toBe(false);
     const reasonlessIncomplete = buildIsolatedVerificationEvidence({
       ...evidence,
       replayStatus: "INCOMPLETE_KNOWN_LIMITATIONS",
@@ -278,7 +308,11 @@ describe("Paper Campaign operator evidence", () => {
         acceptedIncompleteReasons: [],
       },
     });
-    expect(verifyIsolatedVerificationEvidence(reasonlessIncomplete, "a".repeat(64))).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      reasonlessIncomplete,
+      "a".repeat(64),
+      verificationSuiteHash,
+    )).toBe(false);
   });
 
   it("keeps natural and isolated coverage sources distinct", () => {
@@ -286,6 +320,7 @@ describe("Paper Campaign operator evidence", () => {
     const isolated = buildIsolatedVerificationEvidence({
       status: "PASSED",
       coreCompatibilityHash: "a".repeat(64),
+      verificationSuiteHash,
       sourceCodeCommit: "commit",
       generatedAt: "2026-07-16T00:00:00.000Z",
       coverage: ["MIN_ORDER_REJECT", "CRASH_RECOVERY"],
@@ -332,6 +367,7 @@ describe("Paper Campaign operator evidence", () => {
       sourceCodeDirty: false,
       campaignId: "PC-1",
       sessionId: "PS-1",
+      marketClockOffsetMs: 1_700,
       baselineRunId: "baseline-1",
       metrics: {
         observeRunId: "internal",

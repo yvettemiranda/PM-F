@@ -74,6 +74,13 @@ export interface ScenarioEvidence {
 export type SessionCoverage = Partial<Record<PaperValidationScenario, ScenarioEvidence>>;
 export type CumulativeCoverage = Record<PaperValidationScenario, ScenarioEvidence | null>;
 
+export interface CompatibilityIdentity {
+  validationPolicyHash: string;
+  verificationSuiteHash: string;
+  operatorBuildHash: string;
+  artifactProvenanceHash: string;
+}
+
 export interface CoreCompatibilityManifest {
   schemaVersion: string;
   signalVersion: string;
@@ -135,6 +142,7 @@ export interface ValidationSessionDefinition {
   plannedDurationMs: number;
   state: ValidationSessionState;
   sourceVersion: SourceVersion;
+  compatibilityIdentity: CompatibilityIdentity | null;
   liveGateTransitionCountAtStart: number;
   startedAt: string;
 }
@@ -242,6 +250,7 @@ export interface SessionValidationReport {
   finalizationInputHash: string;
   sourceVersion: SourceVersion;
   coreCompatibilityHash: string;
+  compatibilityIdentity: CompatibilityIdentity | null;
   startedAt: string;
   stoppedAt: string;
   createdAt: string;

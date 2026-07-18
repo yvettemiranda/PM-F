@@ -32,6 +32,12 @@ const sourceVersion: SourceVersion = { commit: "validation-test", dirty: false }
 const now = () => new Date("2026-07-09T00:00:00.000Z");
 const wallet = "0x0000000000000000000000000000000000000001";
 const baselineTime = "2026-07-08T00:00:00.000Z";
+const compatibilityIdentityHashes = [
+  "a".repeat(64),
+  "b".repeat(64),
+  "c".repeat(64),
+  "d".repeat(64),
+] as const;
 
 function setup(prefix = "ni-k-validation-") {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -163,8 +169,9 @@ function createValidationScope(
     `INSERT INTO paper_validation_sessions(
       session_id,campaign_id,sequence,session_kind,planned_duration_ms,
       core_compatibility_hash,schema_version,ruleset_hash,config_version,
-      source_code_commit,source_code_dirty,live_gate_transition_count_at_start,started_at,created_at
-    ) VALUES (?,?,1,'QUALIFYING',7200000,?,?,?,?,?,0,0,?,?)`,
+      source_code_commit,source_code_dirty,validation_policy_hash,verification_suite_hash,
+      operator_build_hash,artifact_provenance_hash,live_gate_transition_count_at_start,started_at,created_at
+    ) VALUES (?,?,1,'QUALIFYING',7200000,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
   ).run(
     sessionId,
     campaignId,
@@ -173,6 +180,7 @@ function createValidationScope(
     RULESET_HASH,
     VERSIONS.configVersion,
     sourceVersion.commit,
+    ...compatibilityIdentityHashes,
     baselineTime,
     baselineTime,
   );
@@ -457,8 +465,9 @@ describe("Final validation framework", () => {
       `INSERT INTO paper_validation_sessions(
         session_id,campaign_id,sequence,session_kind,planned_duration_ms,
         core_compatibility_hash,schema_version,ruleset_hash,config_version,
-        source_code_commit,source_code_dirty,live_gate_transition_count_at_start,started_at,created_at
-      ) VALUES ('session-next',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,0,?,?)`,
+        source_code_commit,source_code_dirty,validation_policy_hash,verification_suite_hash,
+        operator_build_hash,artifact_provenance_hash,live_gate_transition_count_at_start,started_at,created_at
+      ) VALUES ('session-next',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
     ).run(
       env.scope.campaignId,
       env.scope.coreHash,
@@ -466,6 +475,7 @@ describe("Final validation framework", () => {
       RULESET_HASH,
       VERSIONS.configVersion,
       sourceVersion.commit,
+      ...compatibilityIdentityHashes,
       nextStartedAt,
       nextStartedAt,
     );
@@ -561,8 +571,9 @@ describe("Final validation framework", () => {
       `INSERT INTO paper_validation_sessions(
         session_id,campaign_id,sequence,session_kind,planned_duration_ms,
         core_compatibility_hash,schema_version,ruleset_hash,config_version,
-        source_code_commit,source_code_dirty,live_gate_transition_count_at_start,started_at,created_at
-      ) VALUES ('session-other',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,0,?,?)`,
+        source_code_commit,source_code_dirty,validation_policy_hash,verification_suite_hash,
+        operator_build_hash,artifact_provenance_hash,live_gate_transition_count_at_start,started_at,created_at
+      ) VALUES ('session-other',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
     ).run(
       env.scope.campaignId,
       env.scope.coreHash,
@@ -570,6 +581,7 @@ describe("Final validation framework", () => {
       RULESET_HASH,
       VERSIONS.configVersion,
       sourceVersion.commit,
+      ...compatibilityIdentityHashes,
       nextStartedAt,
       nextStartedAt,
     );
@@ -1081,8 +1093,9 @@ describe("Final validation framework", () => {
       `INSERT INTO paper_validation_sessions(
         session_id,campaign_id,sequence,session_kind,planned_duration_ms,
         core_compatibility_hash,schema_version,ruleset_hash,config_version,
-        source_code_commit,source_code_dirty,live_gate_transition_count_at_start,started_at,created_at
-      ) VALUES ('session-empty-next',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,0,?,?)`,
+        source_code_commit,source_code_dirty,validation_policy_hash,verification_suite_hash,
+        operator_build_hash,artifact_provenance_hash,live_gate_transition_count_at_start,started_at,created_at
+      ) VALUES ('session-empty-next',?,2,'LONG_RUNNING',43200000,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
     ).run(
       env.scope.campaignId,
       env.scope.coreHash,
@@ -1090,6 +1103,7 @@ describe("Final validation framework", () => {
       RULESET_HASH,
       VERSIONS.configVersion,
       sourceVersion.commit,
+      ...compatibilityIdentityHashes,
       nextStartedAt,
       nextStartedAt,
     );

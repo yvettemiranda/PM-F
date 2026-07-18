@@ -205,12 +205,13 @@ export class PolymarketPublicApi {
     return this.request(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(assertAddress(address))}&sizeThreshold=0&limit=500&offset=0`, undefined, parsePublicPositions);
   }
 
-  async allPositions(address: string): Promise<MergedPagedResult<PublicPosition>> {
+  async allPositions(address: string, signal?: AbortSignal): Promise<MergedPagedResult<PublicPosition>> {
     const wallet = encodeURIComponent(assertAddress(address));
     const result = await this.paged<PublicPosition>(
       (offset) => `https://data-api.polymarket.com/positions?user=${wallet}&sizeThreshold=0&limit=500&offset=${offset}`,
       500,
       parsePublicPositions,
+      signal,
     );
     const last = result.captures.at(-1);
     if (!last) throw new Error("Positions pagination returned no capture");
@@ -233,40 +234,75 @@ export class PolymarketPublicApi {
     };
   }
 
-  async trades(address: string): Promise<PagedResult<PublicTrade>> {
+  async trades(address: string, signal?: AbortSignal): Promise<PagedResult<PublicTrade>> {
     const wallet = encodeURIComponent(assertAddress(address));
     return this.paged<PublicTrade>(
       (offset) => `https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=1000&offset=${offset}`,
       1_000,
       parsePublicTrades,
+      signal,
     );
   }
 
-  async recentTrades(address: string, limit = 1_000): Promise<ApiCapture<PublicTrade[]>> {
+  async tradesSince(
+    address: string,
+    startTimestamp: number,
+    signal?: AbortSignal,
+  ): Promise<PagedResult<PublicTrade>> {
+    if (!Number.isSafeInteger(startTimestamp) || startTimestamp < 0) {
+      throw new Error("INVALID_TRADE_START_TIMESTAMP");
+    }
     const wallet = encodeURIComponent(assertAddress(address));
-    return this.request(`https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=${assertPageLimit("trades", limit, 1_000)}&offset=0`, undefined, parsePublicTrades);
+    return this.paged<PublicTrade>(
+      (offset) => `https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=1000&offset=${offset}`,
+      1_000,
+      parsePublicTrades,
+      signal,
+      (page) => page.some((row) => row.timestamp <= startTimestamp)
+        ? "RECOVERY_CURSOR_COVERED"
+        : null,
+    );
   }
 
-  async activity(address: string): Promise<PagedResult<PublicActivity>> {
+  async recentTrades(
+    address: string,
+    limit = 1_000,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<PublicTrade[]>> {
+    const wallet = encodeURIComponent(assertAddress(address));
+    return this.request(`https://data-api.polymarket.com/trades?user=${wallet}&takerOnly=false&limit=${assertPageLimit("trades", limit, 1_000)}&offset=0`, undefined, parsePublicTrades, signal);
+  }
+
+  async activity(address: string, signal?: AbortSignal): Promise<PagedResult<PublicActivity>> {
     const wallet = encodeURIComponent(assertAddress(address));
     return this.paged<PublicActivity>(
       (offset) =>
         `https://data-api.polymarket.com/activity?user=${wallet}&limit=500&offset=${offset}&sortBy=TIMESTAMP&sortDirection=DESC`,
       500,
       parsePublicActivity,
+      signal,
     );
   }
 
-  async recentActivity(address: string, limit = 500): Promise<ApiCapture<PublicActivity[]>> {
+  async recentActivity(
+    address: string,
+    limit = 500,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<PublicActivity[]>> {
     const wallet = encodeURIComponent(assertAddress(address));
     return this.request(
       `https://data-api.polymarket.com/activity?user=${wallet}&limit=${assertPageLimit("activity", limit, 500)}&offset=0&sortBy=TIMESTAMP&sortDirection=DESC`,
       undefined,
       parsePublicActivity,
+      signal,
     );
   }
 
-  async activitySince(address: string, startTimestamp: number): Promise<PagedResult<PublicActivity>> {
+  async activitySince(
+    address: string,
+    startTimestamp: number,
+    signal?: AbortSignal,
+  ): Promise<PagedResult<PublicActivity>> {
     if (!Number.isSafeInteger(startTimestamp) || startTimestamp < 0) {
       throw new Error("INVALID_ACTIVITY_START_TIMESTAMP");
     }
@@ -275,6 +311,7 @@ export class PolymarketPublicApi {
       (offset) => `https://data-api.polymarket.com/activity?user=${wallet}&limit=500&offset=${offset}&start=${startTimestamp}&sortBy=TIMESTAMP&sortDirection=ASC`,
       500,
       parsePublicActivity,
+      signal,
     );
   }
 
@@ -282,6 +319,8 @@ export class PolymarketPublicApi {
     urlForOffset: (offset: number) => string,
     pageSize: number,
     parsePage: (value: unknown) => T[],
+    signal?: AbortSignal,
+    boundedStopReason?: (page: readonly T[]) => string | null,
   ): Promise<PagedResult<T>> {
     const rows: T[] = [];
     const captures: ApiCapture<T[]>[] = [];
@@ -290,7 +329,7 @@ export class PolymarketPublicApi {
       // later offsets were being read, the merged history can contain a hole;
       // fail closed and let the caller retry from its persisted cursor.
       if (captures.length > 1) {
-        const head = await this.request<T[]>(urlForOffset(0), undefined, parsePage);
+        const head = await this.request<T[]>(urlForOffset(0), undefined, parsePage, signal);
         if (stableJson(head.data) !== stableJson(captures[0]!.data)) {
           throw new Error("PAGINATION_SNAPSHOT_DRIFT");
         }
@@ -305,9 +344,13 @@ export class PolymarketPublicApi {
     };
     for (let offset = 0; offset <= 10_000; offset += pageSize) {
       try {
-        const capture = await this.request<T[]>(urlForOffset(offset), undefined, parsePage);
+        const capture = await this.request<T[]>(urlForOffset(offset), undefined, parsePage, signal);
         captures.push(capture);
         rows.push(...capture.data);
+        const boundedStop = boundedStopReason?.(capture.data) ?? null;
+        if (boundedStop) {
+          return finish(true, boundedStop);
+        }
         if (capture.data.length < pageSize) {
           return finish(true, "END_OF_DATA");
         }
@@ -355,7 +398,10 @@ export class PolymarketPublicApi {
     }, parseRpcResponse);
   }
 
-  async pUsdBalance(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {
+  async pUsdBalance(
+    address: string,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {
     const token = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
     const account = assertAddress(address).replace(/^0x/, "").padStart(64, "0");
     return this.request(this.polygonRpcUrl, {
@@ -367,7 +413,7 @@ export class PolymarketPublicApi {
         method: "eth_call",
         params: [{ to: token, data: `0x70a08231${account}` }, "latest"],
       }),
-    }, parseRpcResponse);
+    }, parseRpcResponse, signal);
   }
 
   async relayerDeployed(address: string, type: "SAFE" | "WALLET"): Promise<ApiCapture<{ deployed: boolean }> | null> {

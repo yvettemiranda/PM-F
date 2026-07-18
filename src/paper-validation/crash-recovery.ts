@@ -51,6 +51,7 @@ export function validationCheckpointChainBlockers(input: {
   const startedAt = Date.parse(input.sessionStartedAt);
   if (!Number.isFinite(startedAt)) return ["RECOVERY_SESSION_STARTED_AT_INVALID"];
   let previousObservedAt = startedAt;
+  let previousElapsedRuntimeMs = 0;
   for (const [index, checkpoint] of input.checkpoints.entries()) {
     const expectedSequence = index + 1;
     if (checkpoint.sequence !== expectedSequence) blockers.push(`RECOVERY_CHECKPOINT_SEQUENCE_INVALID:${checkpoint.sequence}`);
@@ -58,13 +59,21 @@ export function validationCheckpointChainBlockers(input: {
       blockers.push(`RECOVERY_CHECKPOINT_BINDING_INVALID:${checkpoint.checkpointId}`);
     }
     const observedAt = Date.parse(checkpoint.observedAt);
-    if (!Number.isFinite(observedAt) || observedAt < previousObservedAt) {
+    const monotonicRuntime = checkpoint.evidence.detail?.runtimeClock === "MONOTONIC_V1";
+    if (!Number.isFinite(observedAt) || (!monotonicRuntime && observedAt < previousObservedAt)) {
       blockers.push(`RECOVERY_CHECKPOINT_TIME_INVALID:${checkpoint.checkpointId}`);
     }
-    if (Number.isFinite(observedAt) && checkpoint.elapsedRuntimeMs !== observedAt - startedAt) {
+    if (monotonicRuntime) {
+      if (!Number.isSafeInteger(checkpoint.elapsedRuntimeMs)
+        || checkpoint.elapsedRuntimeMs < previousElapsedRuntimeMs
+        || checkpoint.evidence.detail?.monotonicElapsedRuntimeMs !== checkpoint.elapsedRuntimeMs) {
+        blockers.push(`RECOVERY_CHECKPOINT_ELAPSED_INVALID:${checkpoint.checkpointId}`);
+      }
+    } else if (Number.isFinite(observedAt) && checkpoint.elapsedRuntimeMs !== observedAt - startedAt) {
       blockers.push(`RECOVERY_CHECKPOINT_ELAPSED_INVALID:${checkpoint.checkpointId}`);
     }
     previousObservedAt = Number.isFinite(observedAt) ? observedAt : previousObservedAt;
+    previousElapsedRuntimeMs = checkpoint.elapsedRuntimeMs;
     if (checkpoint.executionMode !== "PAPER" || checkpoint.liveGateState !== "LIVE_DISABLED") {
       blockers.push(`RECOVERY_CHECKPOINT_SAFETY_INVALID:${checkpoint.checkpointId}`);
     }
@@ -78,6 +87,7 @@ export function validationCheckpointChainBlockers(input: {
       executionMode: checkpoint.executionMode,
       liveGateState: checkpoint.liveGateState,
       liveGateTransitionCount: checkpoint.liveGateTransitionCount,
+      ...(monotonicRuntime ? { elapsedRuntimeMs: checkpoint.elapsedRuntimeMs } : {}),
       evidence: checkpoint.evidence,
     });
     if (checkpoint.checkpointHash !== expectedHash) {

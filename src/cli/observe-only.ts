@@ -6,6 +6,7 @@ import { ObserveOnlyRunner } from "../observe/observe-runner.js";
 import { ObserveStore } from "../observe/observe-store.js";
 import { PublicObserveDataSource } from "../observe/public-data-source.js";
 import { PublicSignalMarketMetadataProvider } from "../signal-context/public-market-metadata.js";
+import { marketClockOffsetIsValid } from "../execution/market-data.js";
 
 const args = process.argv.slice(2);
 const address = args.find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
@@ -20,6 +21,11 @@ const durationSeconds = numberArg("duration-seconds", 0);
 const pollSeconds = numberArg("poll-seconds", 15);
 const minimumSoakSeconds = numberArg("minimum-soak-seconds", 24 * 60 * 60);
 const valueArg = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
+const marketClockOffsetText = valueArg("market-clock-offset-ms") ?? "0";
+const marketClockOffsetMs = Number(marketClockOffsetText);
+if (!Number.isSafeInteger(marketClockOffsetMs) || !marketClockOffsetIsValid(marketClockOffsetMs)) {
+  throw new Error(`Invalid --market-clock-offset-ms: ${marketClockOffsetText}`);
+}
 const campaignId = valueArg("campaign-id") ?? null;
 const sessionId = valueArg("session-id") ?? null;
 if ((campaignId === null) !== (sessionId === null)) {
@@ -41,6 +47,7 @@ const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
   ...(baselineRunId ? { baselineRunId } : {}),
   ...(campaignId && sessionId ? { campaignId, campaignSessionId: sessionId } : {}),
   pollIntervalMs: pollSeconds * 1_000,
+  marketClockOffsetMs,
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
   signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),
   sourceVersion,
@@ -72,6 +79,7 @@ try {
     sourceCodeDirty: sourceVersion.dirty,
     databasePreparation,
     mode: "OBSERVE_ONLY",
+    marketClockOffsetMs,
     campaignId,
     sessionId,
     baselineRunId: metrics.baselineRunId,

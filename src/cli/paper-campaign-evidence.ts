@@ -5,6 +5,7 @@ import { resolveSourceVersion } from "../infra/source-version.js";
 import {
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
+  computeVerificationSuiteHash,
 } from "../paper-validation/core-compatibility.js";
 import {
   buildIsolatedVerificationEvidence,
@@ -52,10 +53,19 @@ if (command === "list-tests") {
   process.exit(0);
 }
 
-const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
-const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
+function currentCompatibilityHashes(): {
+  coreCompatibilityHash: string;
+  verificationSuiteHash: string;
+} {
+  const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
+  return {
+    coreCompatibilityHash: computeCoreCompatibilityHash(manifest),
+    verificationSuiteHash: computeVerificationSuiteHash(projectRoot),
+  };
+}
 
 if (command === "write-passed") {
+  const { coreCompatibilityHash, verificationSuiteHash } = currentCompatibilityHashes();
   const sourceVersion = resolveSourceVersion(projectRoot);
   if (sourceVersion.dirty) throw new Error("ISOLATED_EVIDENCE_REQUIRES_CLEAN_SOURCE");
   const testResultsPath = valueArg("test-results");
@@ -75,6 +85,7 @@ if (command === "write-passed") {
   const evidence = buildIsolatedVerificationEvidence({
     status: "PASSED",
     coreCompatibilityHash,
+    verificationSuiteHash,
     sourceCodeCommit: sourceVersion.commit,
     generatedAt: new Date().toISOString(),
     coverage: deterministicCoverage,
@@ -99,8 +110,9 @@ if (command === "write-passed") {
     acceptedIncompleteReasons: evidence.proofs.acceptedIncompleteReasons,
   }));
 } else if (command === "verify") {
+  const { coreCompatibilityHash, verificationSuiteHash } = currentCompatibilityHashes();
   const evidence = JSON.parse(await readFile(output, "utf8")) as IsolatedVerificationEvidence;
-  if (!verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash)) {
+  if (!verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash, verificationSuiteHash)) {
     throw new Error("ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
   }
   console.log(JSON.stringify({
@@ -123,7 +135,12 @@ if (command === "write-passed") {
   if (
     evidence.sourceCodeCommit !== expectedSourceCommit
     || evidence.coreCompatibilityHash !== expectedCoreCompatibilityHash
-    || !verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash)
+  ) {
+    throw new Error("ISOLATED_EVIDENCE_NOT_COMPATIBLE_WITH_BUNDLE");
+  }
+  const { coreCompatibilityHash, verificationSuiteHash } = currentCompatibilityHashes();
+  if (
+    !verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash, verificationSuiteHash)
   ) {
     throw new Error("ISOLATED_EVIDENCE_NOT_COMPATIBLE_WITH_BUNDLE");
   }

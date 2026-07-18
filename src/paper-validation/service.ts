@@ -2,7 +2,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { RULESET, RULESET_HASH, VERSIONS, stableJson } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import { buildPaperExecutionFunnel } from "../paper/paper-execution-funnel.js";
-import { assertCoreCompatibility, computeCoreCompatibilityHash } from "./core-compatibility.js";
+import {
+  assertCoreCompatibility,
+  computeCoreCompatibilityHash,
+  type CompatibilityEvidenceHashes,
+} from "./core-compatibility.js";
 import {
   calculateSessionRuntime,
   deriveCampaignState,
@@ -12,6 +16,7 @@ import {
 } from "./report.js";
 import { PaperValidationStore } from "./store.js";
 import {
+  PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS,
   paperCampaignReplacementReason,
   paperCampaignStartDisposition,
   type PaperCampaignReplacementReason,
@@ -26,6 +31,7 @@ import {
   type CampaignSnapshot,
   type CampaignValidationReport,
   type CheckpointEvidence,
+  type CompatibilityIdentity,
   type CoreCompatibilityManifest,
   type FinalizeSessionInput,
   type FinalizeSessionResult,
@@ -39,8 +45,6 @@ import {
   type ValidationSessionState,
 } from "./types.js";
 
-const LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
-
 export interface CreateCampaignInput {
   targetId: string;
   baselineRunId: string;
@@ -51,6 +55,7 @@ export interface CreateCampaignInput {
   campaignId?: string;
   supersedesCampaignId?: string;
   replacementReason?: PaperCampaignReplacementReason;
+  compatibilityEvidence: CompatibilityEvidenceHashes;
   requiredActiveRuntimeMs?: number;
   requiredContinuousRuntimeMs?: number;
   qualifyingRuntimeMs?: number;
@@ -65,12 +70,14 @@ export interface StartSessionInput {
   now: string;
   sessionId?: string;
   plannedDurationMs?: number;
+  compatibilityEvidence: CompatibilityEvidenceHashes;
 }
 
 export interface RecordCheckpointInput {
   sessionId: string;
   checkpointKind: ValidationCheckpointKind;
   observedAt: string;
+  elapsedRuntimeMs?: number;
   idempotencyKey: string;
   evidence: CheckpointEvidence;
 }
@@ -107,6 +114,33 @@ function assertPositiveSafeInteger(value: number, label: string): void {
 
 function normalizedBlockers(blockers: string[]): string[] {
   return [...new Set(blockers.map((blocker) => blocker.trim()).filter(Boolean))].sort();
+}
+
+function identityFromEvidence(evidence: CompatibilityEvidenceHashes): CompatibilityIdentity {
+  return {
+    validationPolicyHash: evidence.validationPolicyHash,
+    verificationSuiteHash: evidence.verificationSuiteHash,
+    operatorBuildHash: evidence.operatorBuildHash,
+    artifactProvenanceHash: evidence.artifactProvenanceHash,
+  };
+}
+
+function reportIdentity(report: SessionValidationReport): CompatibilityIdentity | null {
+  return report.compatibilityIdentity ?? null;
+}
+
+function validationPolicyMatches(
+  report: SessionValidationReport,
+  current: CompatibilityIdentity,
+): boolean {
+  return reportIdentity(report)?.validationPolicyHash === current.validationPolicyHash;
+}
+
+function verificationSuiteMatches(
+  report: SessionValidationReport,
+  current: CompatibilityIdentity,
+): boolean {
+  return reportIdentity(report)?.verificationSuiteHash === current.verificationSuiteHash;
 }
 
 function emptyObserveMetrics(): ObserveOperationalMetrics {
@@ -156,6 +190,37 @@ function reportQualifiesCampaign(
     && report.runtime.effectiveActiveRuntimeMs >= campaign.qualifyingRuntimeMs;
 }
 
+function reportQualifiesCurrentCompatibility(
+  report: SessionValidationReport,
+  campaign: CampaignDefinition,
+  current: CompatibilityIdentity,
+): boolean {
+  if (!validationPolicyMatches(report, current)) return false;
+  if (
+    report.acceptanceStatus === "PASSED_WITH_SUPPLEMENTAL_EVIDENCE"
+    && !verificationSuiteMatches(report, current)
+  ) return false;
+  return reportQualifiesCampaign(report, campaign);
+}
+
+function coverageForCurrentCompatibility(
+  reports: readonly SessionValidationReport[],
+  current: CompatibilityIdentity,
+): SessionValidationReport[] {
+  return reports.map((report) => {
+    if (!validationPolicyMatches(report, current)) return { ...report, coverage: {} };
+    if (verificationSuiteMatches(report, current)) return report;
+    return {
+      ...report,
+      coverage: Object.fromEntries(
+        Object.entries(report.coverage).filter(([, evidence]) => (
+          evidence?.source !== "ISOLATED_CONTROLLED"
+        )),
+      ),
+    };
+  });
+}
+
 function frozenRecoveryFinalization(checkpoint: ValidationCheckpoint): FinalizeSessionInput {
   const candidate = checkpoint.evidence.detail?.recoveryFinalizationInput;
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
@@ -191,6 +256,7 @@ export class PaperValidationCampaignService {
   createCampaign(input: CreateCampaignInput): CampaignSnapshot {
     this.assertCleanSource(input.sourceVersion);
     this.assertCurrentManifest(input.coreManifest);
+    this.assertCompatibilityEvidence(input.compatibilityEvidence);
     const requiredActiveRuntimeMs = input.requiredActiveRuntimeMs ?? PAPER_VALIDATION_REQUIRED_ACTIVE_MS;
     const requiredContinuousRuntimeMs = input.requiredContinuousRuntimeMs ?? PAPER_VALIDATION_REQUIRED_CONTINUOUS_MS;
     const qualifyingRuntimeMs = input.qualifyingRuntimeMs ?? PAPER_VALIDATION_QUALIFYING_MS;
@@ -275,7 +341,23 @@ export class PaperValidationCampaignService {
           supersedesCampaignId: previous.campaignId,
           supersededCampaignState: previous.state,
           supersededCoreCompatibilityHash: previous.coreCompatibilityHash,
+          replacementCoreCompatibilityHash: coreCompatibilityHash,
           replacementReason: input.replacementReason,
+          changedCoreComponents: Object.keys(input.coreManifest.components)
+            .filter((name) => (
+              previous.coreManifest.components[name as keyof CoreCompatibilityManifest["components"]]
+              !== input.coreManifest.components[name as keyof CoreCompatibilityManifest["components"]]
+            ))
+            .sort(),
+          changedBehaviorVersions: [
+            "signalVersion",
+            "strategyVersion",
+            "riskVersion",
+            "paperVersion",
+          ].filter((name) => (
+            previous.coreManifest[name as "signalVersion" | "strategyVersion" | "riskVersion" | "paperVersion"]
+            !== input.coreManifest[name as "signalVersion" | "strategyVersion" | "riskVersion" | "paperVersion"]
+          )),
         };
       } else if (input.supersedesCampaignId || input.replacementReason) {
         throw new Error("PAPER_VALIDATION_REPLACEMENT_SOURCE_NOT_FOUND");
@@ -309,13 +391,14 @@ export class PaperValidationCampaignService {
         toState: "QUALIFYING",
         reason: latestCampaignId === null
           ? "CAMPAIGN_CREATED"
-          : "CAMPAIGN_CREATED_AFTER_CORE_REPAIR",
+          : "CAMPAIGN_CREATED_AFTER_CORE_CHANGE",
         evidence: {
           targetId: input.targetId,
           baselineRunId: input.baselineRunId,
           paperAccountId: input.paperAccountId,
           executionMode: "PAPER",
           liveGateState: "LIVE_DISABLED",
+          compatibilityEvidence: input.compatibilityEvidence,
           ...replacementEvidence,
         },
         coreCompatibilityHash,
@@ -331,6 +414,7 @@ export class PaperValidationCampaignService {
   startSession(input: StartSessionInput): ValidationSessionDefinition {
     this.assertCleanSource(input.sourceVersion);
     this.assertCurrentManifest(input.coreManifest);
+    this.assertCompatibilityEvidence(input.compatibilityEvidence);
     parseTime(input.now, "SESSION_STARTED_AT");
     const actualCoreHash = computeCoreCompatibilityHash(input.coreManifest);
     const initialSnapshot = this.campaignSnapshot(input.campaignId);
@@ -340,7 +424,12 @@ export class PaperValidationCampaignService {
     this.freezeAndThrowIfIncompatible(input.campaignId, actualCoreHash, input.sourceVersion, input.now);
 
     const snapshot = this.campaignSnapshot(input.campaignId);
-    const sessionKind = snapshot.qualified ? "LONG_RUNNING" : "QUALIFYING";
+    const currentIdentity = identityFromEvidence(input.compatibilityEvidence);
+    const priorReports = this.store.sessionReports(input.campaignId);
+    const qualifiedForCurrentCompatibility = priorReports.some((report) => (
+      reportQualifiesCurrentCompatibility(report, snapshot, currentIdentity)
+    ));
+    const sessionKind = qualifiedForCurrentCompatibility ? "LONG_RUNNING" : "QUALIFYING";
     const defaultDuration = sessionKind === "QUALIFYING"
       // The first healthy run can satisfy both the two-hour qualification gate
       // and the twelve-hour continuity gate without an artificial restart.
@@ -360,6 +449,39 @@ export class PaperValidationCampaignService {
         throw new Error(`PAPER_VALIDATION_CAMPAIGN_NOT_STARTABLE:${currentState}`);
       }
       const sequence = this.store.nextSessionSequence(input.campaignId);
+      for (const report of priorReports) {
+        const previousIdentity = reportIdentity(report);
+        const policyChanged = previousIdentity?.validationPolicyHash !== currentIdentity.validationPolicyHash;
+        const suiteChanged = previousIdentity?.verificationSuiteHash !== currentIdentity.verificationSuiteHash;
+        const provenanceChanged = previousIdentity?.operatorBuildHash !== currentIdentity.operatorBuildHash
+          || previousIdentity?.artifactProvenanceHash !== currentIdentity.artifactProvenanceHash;
+        if (!policyChanged && !suiteChanged && !provenanceChanged) continue;
+        const decision = policyChanged
+          ? "KEEP_RUNTIME_REJUDGE_COVERAGE" as const
+          : suiteChanged
+            ? "KEEP_RUNTIME_REFRESH_ISOLATED" as const
+            : "KEEP_ALL" as const;
+        this.store.insertEvidenceAdjudication({
+          campaignId: input.campaignId,
+          sessionId: report.sessionId,
+          decision,
+          previousIdentity,
+          currentIdentity,
+          evidence: {
+            decision,
+            reportId: report.reportId,
+            retainedEffectiveActiveRuntimeMs: report.countsTowardCampaign
+              ? report.runtime.effectiveActiveRuntimeMs
+              : 0,
+            validationPolicyChanged: policyChanged,
+            verificationSuiteChanged: suiteChanged,
+            operatorOrArtifactProvenanceChanged: provenanceChanged,
+          },
+          sourceVersion: input.sourceVersion,
+          idempotencyKey: `SESSION:${report.sessionId}:ADJUDICATE:${currentIdentity.validationPolicyHash}:${currentIdentity.verificationSuiteHash}:${currentIdentity.operatorBuildHash}:${currentIdentity.artifactProvenanceHash}`,
+          now: input.now,
+        });
+      }
       this.store.insertSession({
         sessionId,
         campaignId: input.campaignId,
@@ -371,6 +493,7 @@ export class PaperValidationCampaignService {
         rulesetHash: input.coreManifest.rulesetHash,
         configVersion: input.coreManifest.configVersion,
         sourceVersion: input.sourceVersion,
+        compatibilityIdentity: currentIdentity,
         liveGateTransitionCountAtStart: safety.transitionCount,
         startedAt: input.now,
       });
@@ -385,6 +508,7 @@ export class PaperValidationCampaignService {
           sessionKind,
           plannedDurationMs,
           sequence,
+          compatibilityIdentity: currentIdentity,
           liveGateTransitionCountAtStart: safety.transitionCount,
         },
         coreCompatibilityHash: actualCoreHash,
@@ -404,6 +528,7 @@ export class PaperValidationCampaignService {
           sessionKind,
           plannedDurationMs,
           sequence,
+          compatibilityIdentity: currentIdentity,
           liveGateTransitionCountAtStart: safety.transitionCount,
         },
         coreCompatibilityHash: actualCoreHash,
@@ -418,15 +543,27 @@ export class PaperValidationCampaignService {
 
   recordCheckpoint(input: RecordCheckpointInput): ValidationCheckpoint {
     parseTime(input.observedAt, "CHECKPOINT_OBSERVED_AT");
+    if (input.elapsedRuntimeMs !== undefined
+      && (!Number.isSafeInteger(input.elapsedRuntimeMs) || input.elapsedRuntimeMs < 0)) {
+      throw new Error("CHECKPOINT_ELAPSED_RUNTIME_MS_INVALID");
+    }
     return this.store.transaction(() => {
       const session = this.store.session(input.sessionId);
       const safety = this.store.assertPaperSafetyState();
       const liveGateTransitionDetected = safety.transitionCount !== session.liveGateTransitionCountAtStart;
+      const explicitMonotonicRuntime = input.elapsedRuntimeMs !== undefined;
       const evidence: CheckpointEvidence = {
         ...input.evidence,
         consistencySafe: input.evidence.consistencySafe && !liveGateTransitionDetected,
         detail: {
           ...(input.evidence.detail ?? {}),
+          ...(explicitMonotonicRuntime
+            ? {
+                runtimeClock: "MONOTONIC_V1",
+                monotonicElapsedRuntimeMs: input.elapsedRuntimeMs,
+              }
+            : {}),
+          compatibilityIdentity: session.compatibilityIdentity,
           liveGateTransitionCountAtStart: session.liveGateTransitionCountAtStart,
           liveGateTransitionCount: safety.transitionCount,
           liveGateTransitionDetected,
@@ -439,6 +576,7 @@ export class PaperValidationCampaignService {
         executionMode: safety.executionMode,
         liveGateState: safety.liveGateState,
         liveGateTransitionCount: safety.transitionCount,
+        ...(explicitMonotonicRuntime ? { elapsedRuntimeMs: input.elapsedRuntimeMs } : {}),
         evidence,
       };
       const checkpointHash = hash(checkpointPayload);
@@ -455,10 +593,20 @@ export class PaperValidationCampaignService {
       }
       const observedMs = parseTime(input.observedAt, "CHECKPOINT_OBSERVED_AT");
       const startedMs = parseTime(session.startedAt, "SESSION_STARTED_AT");
-      if (observedMs < startedMs) throw new Error("PAPER_VALIDATION_CHECKPOINT_BEFORE_SESSION");
       const previous = this.store.latestCheckpoint(input.sessionId);
-      if (previous && parseTime(previous.observedAt, "PREVIOUS_CHECKPOINT_AT") > observedMs) {
-        throw new Error("PAPER_VALIDATION_CHECKPOINT_OUT_OF_ORDER");
+      const elapsedRuntimeMs = input.elapsedRuntimeMs ?? observedMs - startedMs;
+      if (explicitMonotonicRuntime) {
+        if (previous && previous.elapsedRuntimeMs > elapsedRuntimeMs) {
+          throw new Error("PAPER_VALIDATION_CHECKPOINT_ELAPSED_OUT_OF_ORDER");
+        }
+        if (!previous && elapsedRuntimeMs !== 0) {
+          throw new Error("PAPER_VALIDATION_START_CHECKPOINT_ELAPSED_NONZERO");
+        }
+      } else {
+        if (observedMs < startedMs) throw new Error("PAPER_VALIDATION_CHECKPOINT_BEFORE_SESSION");
+        if (previous && parseTime(previous.observedAt, "PREVIOUS_CHECKPOINT_AT") > observedMs) {
+          throw new Error("PAPER_VALIDATION_CHECKPOINT_OUT_OF_ORDER");
+        }
       }
       if (!previous && input.checkpointKind !== "START") {
         throw new Error("PAPER_VALIDATION_FIRST_CHECKPOINT_MUST_BE_START");
@@ -475,7 +623,7 @@ export class PaperValidationCampaignService {
         sequence,
         checkpointKind: input.checkpointKind,
         observedAt: input.observedAt,
-        elapsedRuntimeMs: observedMs - startedMs,
+        elapsedRuntimeMs,
         liveGateTransitionCount: safety.transitionCount,
         evidence,
         checkpointHash,
@@ -506,6 +654,9 @@ export class PaperValidationCampaignService {
 
       const session = this.store.session(input.sessionId);
       if (session.state !== "RUNNING") throw new Error(`PAPER_VALIDATION_SESSION_NOT_RUNNING:${session.state}`);
+      if (!session.compatibilityIdentity) {
+        throw new Error("PAPER_VALIDATION_SESSION_COMPATIBILITY_IDENTITY_MISSING");
+      }
       const safety = this.store.assertPaperSafetyState();
       const liveGateTransitionDetected = safety.transitionCount !== session.liveGateTransitionCountAtStart;
       const blockers = normalizedBlockers([
@@ -538,7 +689,11 @@ export class PaperValidationCampaignService {
         && input.acceptanceStatus !== "FAILED"
         && !["FAILED", "CRASH_UNVERIFIED"].includes(input.outcome);
       const previouslyQualified = this.store.sessionReports(session.campaignId)
-        .some((report) => reportQualifiesCampaign(report, campaign));
+        .some((report) => reportQualifiesCurrentCompatibility(
+          report,
+          campaign,
+          session.compatibilityIdentity!,
+        ));
       const qualifyingPassed = session.sessionKind === "QUALIFYING"
         && safetyPassed
         && ["SAFE_STOP", "AUTO_STOP"].includes(input.outcome)
@@ -578,6 +733,7 @@ export class PaperValidationCampaignService {
         finalizationInputHash,
         sourceVersion: session.sourceVersion,
         coreCompatibilityHash: campaign.coreCompatibilityHash,
+        compatibilityIdentity: session.compatibilityIdentity,
         startedAt: session.startedAt,
         stoppedAt: input.stoppedAt,
         createdAt: input.stoppedAt,
@@ -625,7 +781,10 @@ export class PaperValidationCampaignService {
         (longest, report) => Math.max(longest, report.runtime.qualifyingContinuousRuntimeMs),
         0,
       );
-      const coverage = mergeCampaignCoverage(countedReports);
+      const coverage = mergeCampaignCoverage(coverageForCurrentCompatibility(
+        countedReports,
+        session.compatibilityIdentity,
+      ));
       const missingScenarios = missingCoverageScenarios(coverage);
       const campaignState = deriveCampaignState({
         blocked: fatal,
@@ -652,7 +811,11 @@ export class PaperValidationCampaignService {
         campaignId: session.campaignId,
         afterSessionId: session.sessionId,
         campaignState,
-        qualified: allReports.some((report) => reportQualifiesCampaign(report, campaign)),
+        qualified: allReports.some((report) => reportQualifiesCurrentCompatibility(
+          report,
+          campaign,
+          session.compatibilityIdentity!,
+        )),
         accumulatedActiveRuntimeMs,
         longestContinuousRuntimeMs,
         completedSessionCount: allReports.length,
@@ -788,16 +951,32 @@ export class PaperValidationCampaignService {
   }
 
   private defaultLongSessionDuration(snapshot: CampaignSnapshot): number {
-    if (snapshot.longestContinuousRuntimeMs < snapshot.requiredContinuousRuntimeMs) return LONG_SESSION_MS;
+    if (snapshot.longestContinuousRuntimeMs < snapshot.requiredContinuousRuntimeMs) {
+      return PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS;
+    }
     const remaining = snapshot.requiredActiveRuntimeMs - snapshot.accumulatedActiveRuntimeMs;
-    if (remaining <= 0) return LONG_SESSION_MS;
-    return Math.min(LONG_SESSION_MS, remaining);
+    if (remaining <= 0) return PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS;
+    return Math.min(PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS, remaining);
   }
 
   private assertCleanSource(sourceVersion: SourceVersion): void {
     if (sourceVersion.dirty) throw new Error("PAPER_VALIDATION_REQUIRES_CLEAN_SOURCE");
     if (!sourceVersion.commit.trim() || sourceVersion.commit === "UNCOMMITTED") {
       throw new Error("PAPER_VALIDATION_SOURCE_COMMIT_REQUIRED");
+    }
+  }
+
+  private assertCompatibilityEvidence(evidence: CompatibilityEvidenceHashes): void {
+    for (const [name, value] of Object.entries(identityFromEvidence(evidence))) {
+      if (!/^[a-f0-9]{64}$/.test(value)) {
+        throw new Error(`PAPER_VALIDATION_COMPATIBILITY_HASH_INVALID:${name}`);
+      }
+    }
+    const snapshotHash = createHash("sha256")
+      .update(evidence.artifactProvenanceSnapshotJson)
+      .digest("hex");
+    if (snapshotHash !== evidence.artifactProvenanceHash) {
+      throw new Error("PAPER_VALIDATION_ARTIFACT_PROVENANCE_MISMATCH");
     }
   }
 

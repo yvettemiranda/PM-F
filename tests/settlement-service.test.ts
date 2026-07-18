@@ -107,7 +107,40 @@ describe("SettlementService", () => {
     expect(state.redeemed).toEqual([]);
   });
 
-  it("records a failed resolution request and records recovery after a later successful fetch", async () => {
+  it("skips a persisted settlement probe until its retry deadline is due", async () => {
+    const resolution = vi.fn(async (_condition: string, asset: string) => resolved(asset, "1"));
+    const state = store([candidate("position-a", "asset-yes")]);
+    state.implementation.settlementRetryDue = vi.fn(() => false);
+
+    await new SettlementService(marketData(resolution), state.implementation, now).process("paper");
+
+    expect(resolution).not.toHaveBeenCalled();
+    expect(state.implementation.markSettlementPending).not.toHaveBeenCalled();
+  });
+
+  it("records an unresolved result so the next probe can be persisted and delayed", async () => {
+    const unresolved = {
+      ...resolved("asset-yes", "0"),
+      resolved: false,
+      payoutNumerator: null,
+      payoutDenominator: null,
+    };
+    const state = store([candidate("position-a", "asset-yes")]);
+    state.implementation.recordSettlementUnresolved = vi.fn();
+
+    await new SettlementService(
+      marketData(vi.fn(async () => unresolved)),
+      state.implementation,
+      now,
+    ).process("paper");
+
+    expect(state.implementation.recordSettlementUnresolved).toHaveBeenCalledWith(
+      expect.objectContaining({ positionId: "position-a" }),
+      unresolved,
+    );
+  });
+
+  it("records a failed resolution request and then the later unresolved result", async () => {
     const resolution = vi.fn()
       .mockRejectedValueOnce(new Error("RESOLUTION_API_DOWN"))
       .mockResolvedValueOnce({
@@ -118,6 +151,7 @@ describe("SettlementService", () => {
       });
     const state = store([candidate("position-a", "asset-yes")]);
     state.implementation.recordSettlementError = vi.fn();
+    state.implementation.recordSettlementUnresolved = vi.fn();
     state.implementation.recordSettlementSuccess = vi.fn();
     const service = new SettlementService(marketData(resolution), state.implementation, now);
 
@@ -125,7 +159,8 @@ describe("SettlementService", () => {
     await service.process("paper");
 
     expect(state.implementation.recordSettlementError).toHaveBeenCalledTimes(1);
-    expect(state.implementation.recordSettlementSuccess).toHaveBeenCalledTimes(1);
+    expect(state.implementation.recordSettlementUnresolved).toHaveBeenCalledTimes(1);
+    expect(state.implementation.recordSettlementSuccess).not.toHaveBeenCalled();
     expect(state.redeemed).toEqual([]);
   });
 });

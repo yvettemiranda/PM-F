@@ -6,7 +6,9 @@ import {
   buildPaperChildSpec,
   campaignCheckpointEvidenceInput,
   classifyCampaignChildExit,
+  deriveCampaignRuntimeTick,
   deriveCampaignStopPlan,
+  nextCampaignCheckpointAt,
   qualificationMilestoneReached,
   type CampaignRuntimeBinding,
 } from "../src/paper-validation/campaign-session-runtime.js";
@@ -45,6 +47,7 @@ describe("Paper Campaign runtime contract", () => {
     expect(observe.script).toBe("/project/src/cli/observe-only.ts");
     expect(observe.args).toContain("--baseline-run-id=baseline-test");
     expect(observe.args).toContain("--minimum-soak-seconds=7200");
+    expect(observe.args).toContain("--market-clock-offset-ms=1700");
   });
 
   it("fails closed on child binding drift", () => {
@@ -92,6 +95,22 @@ describe("Paper Campaign runtime contract", () => {
       sessionId: binding.sessionId,
       baselineRunId: binding.baselineRunId,
     });
+  });
+
+  it("derives duration and checkpoint timing from monotonic time without catch-up writes", () => {
+    expect(deriveCampaignRuntimeTick({
+      sessionStartedMonotonicMs: 1_000,
+      activeStartedMonotonicMs: 2_000,
+      nowMonotonicMs: 122_000,
+      nextCheckpointMonotonicMs: 62_000,
+      plannedDurationMs: 600_000,
+    })).toEqual({
+      elapsedRuntimeMs: 121_000,
+      activeRuntimeMs: 120_000,
+      checkpointDue: true,
+      durationReached: false,
+    });
+    expect(nextCampaignCheckpointAt(122_000, 60_000)).toBe(182_000);
   });
 
   it("derives finalization outcome without report coupling", () => {

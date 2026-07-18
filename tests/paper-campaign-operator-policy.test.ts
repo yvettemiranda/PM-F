@@ -60,7 +60,7 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
 }
 
 describe("paper Campaign operator policy", () => {
-  it("starts a replacement only when an explicitly started terminal Campaign belongs to an older core", () => {
+  it("starts a replacement for any terminal Campaign on a different core", () => {
     const clockBlocked = snapshot({
       state: "BLOCKED",
       coreCompatibilityHash: "a".repeat(64),
@@ -73,7 +73,7 @@ describe("paper Campaign operator policy", () => {
       ],
     });
     expect(paperCampaignReplacementReason(clockBlocked, "b".repeat(64)))
-      .toBe("CORE_REPAIR_CLOCK_SAFETY");
+      .toBe("CORE_VERSION_REPLACEMENT");
     expect(paperCampaignStartDisposition(clockBlocked, "b".repeat(64)))
       .toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
@@ -107,7 +107,7 @@ describe("paper Campaign operator policy", () => {
         blockers: ["PAPER_EXIT_CODE:1"],
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({
         state: "BLOCKED",
@@ -115,21 +115,21 @@ describe("paper Campaign operator policy", () => {
         blockers: ["UNRECOVERED_MARKET_DATA_BLOCKER", "PAPER_EXIT_CODE:137"],
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({
         ...clockBlocked,
         blockers: clockBlocked.blockers.filter((blocker) => blocker !== "PAPER_FINAL_VALUATION_INCOMPLETE"),
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({
         ...clockBlocked,
         blockers: [...clockBlocked.blockers, "PAPER_CONSISTENCY_FAILED"],
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({ state: "PAUSED", coreCompatibilityHash: "a".repeat(64) }),
       "a".repeat(64),
@@ -141,7 +141,7 @@ describe("paper Campaign operator policy", () => {
         blockers: ["PAPER_ACCEPTANCE_INCONSISTENT"],
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({
         state: "BLOCKED",
@@ -149,7 +149,15 @@ describe("paper Campaign operator policy", () => {
         blockers: ["MAJOR_DESYNC:1", "OBSERVE_STATUS:SHORT_SOAK_FAILED", "PAPER_CONSISTENCY_FAILED"],
       }),
       "b".repeat(64),
-    )).toBe("REFUSE_TERMINAL");
+    )).toBe("CREATE_REPLACEMENT");
+    expect(paperCampaignStartDisposition(
+      snapshot({ state: "PASSED", coreCompatibilityHash: "a".repeat(64) }),
+      "b".repeat(64),
+    )).toBe("CREATE_REPLACEMENT");
+    expect(paperCampaignStartDisposition(
+      snapshot({ state: "FROZEN", coreCompatibilityHash: "a".repeat(64) }),
+      "b".repeat(64),
+    )).toBe("CREATE_REPLACEMENT");
   });
 
   it("keeps a coverage-incomplete Campaign on a useful 12-hour session", () => {

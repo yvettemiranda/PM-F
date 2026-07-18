@@ -11,7 +11,11 @@ import { OperationalLock } from "../src/operational/operational-lock.js";
 import { OperationalConsistencyMonitor } from "../src/operational/consistency-monitor.js";
 import { OperationalRunner } from "../src/operational/operational-runner.js";
 import { OperationalStore } from "../src/operational/operational-store.js";
-import { buildCurrentCoreCompatibilityManifest, computeCoreCompatibilityHash } from "../src/paper-validation/core-compatibility.js";
+import {
+  buildCurrentCompatibilityEvidence,
+  buildCurrentCoreCompatibilityManifest,
+  computeCoreCompatibilityHash,
+} from "../src/paper-validation/core-compatibility.js";
 import { PaperValidationCampaignService } from "../src/paper-validation/service.js";
 import { PaperExecutor } from "../src/paper/paper-executor.js";
 import { PublicPaperMarketDataProvider } from "../src/paper/public-market-data.js";
@@ -133,6 +137,7 @@ function createOperationalValidationScope(databasePath: string): ValidationScope
   const accountId = executor.createAccount("Operational Scoped Account", 1_000_000_000n, targetId);
   executor.close();
   const coreManifest = buildCurrentCoreCompatibilityManifest(process.cwd());
+  const compatibilityEvidence = buildCurrentCompatibilityEvidence(process.cwd());
   const campaignId = "campaign-explicit";
   const sessionId = "session-explicit";
   const service = new PaperValidationCampaignService(databasePath);
@@ -142,10 +147,18 @@ function createOperationalValidationScope(databasePath: string): ValidationScope
     baselineRunId: baseline.baselineRunId,
     paperAccountId: accountId,
     coreManifest,
+    compatibilityEvidence,
     sourceVersion,
     now: timestamp,
   });
-  service.startSession({ campaignId, sessionId, coreManifest, sourceVersion, now: timestamp });
+  service.startSession({
+    campaignId,
+    sessionId,
+    coreManifest,
+    compatibilityEvidence,
+    sourceVersion,
+    now: timestamp,
+  });
   service.close();
   return {
     campaignId,
