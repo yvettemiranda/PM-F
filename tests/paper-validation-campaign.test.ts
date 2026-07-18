@@ -969,6 +969,84 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
+  it("replaces only the exact clock-safety failure with a new zero-runtime Campaign", () => {
+    const input = fixture();
+    const original = createCampaign(input);
+    const session = startSession(input, original.campaignId, 0, "PS-CLOCK-BLOCKED");
+    recordHealthySession(input, session, 0, 2);
+    const blockers = [
+      "FINAL_VALUATION_INCOMPLETE",
+      "PAPER_EXIT_CODE:1",
+      "PAPER_FINAL_VALUATION_INCOMPLETE",
+      "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS",
+      "UNRECOVERED_MARKET_DATA_BLOCKER",
+    ];
+    const blocked = input.service.finalizeSession({
+      sessionId: session.sessionId,
+      outcome: "FAILED",
+      acceptanceStatus: "FAILED",
+      consistencyPassed: true,
+      recoveryConfirmed: true,
+      stopReason: "TEST_CLOCK_SAFETY_DEFECT",
+      blockers,
+      coverage: {},
+      observeMetrics: observeMetrics(120, 0),
+      stoppedAt: at(2),
+    });
+    expect(blocked.campaign).toMatchObject({
+      campaignState: "BLOCKED",
+      blockers,
+    });
+
+    const repairedManifest: CoreCompatibilityManifest = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        paperExecution: componentHash("clock-safety-repaired-paper-execution"),
+      },
+    };
+    const executor = new PaperExecutor(
+      input.databasePath,
+      new PublicPaperMarketDataProvider(),
+      { sourceVersion },
+    );
+    const replacementAccountId = executor.createAccount(
+      "Clock Safety Replacement",
+      BigInt(RULESET.paperInitialBalanceMicros),
+      input.targetId,
+    );
+    executor.close();
+
+    const replacement = input.service.createCampaign({
+      targetId: input.targetId,
+      baselineRunId: input.baselineRunId,
+      paperAccountId: replacementAccountId,
+      coreManifest: repairedManifest,
+      sourceVersion,
+      now: at(3),
+      campaignId: "PC-CLOCK-REPLACEMENT",
+      supersedesCampaignId: original.campaignId,
+      replacementReason: "CORE_REPAIR_CLOCK_SAFETY",
+    });
+    expect(replacement).toMatchObject({
+      state: "QUALIFYING",
+      accumulatedActiveRuntimeMs: 0,
+      longestContinuousRuntimeMs: 0,
+      paperAccountId: replacementAccountId,
+    });
+    const transition = input.service.store.database.prepare(
+      `SELECT evidence_json FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence DESC LIMIT 1`,
+    ).get(replacement.campaignId) as { evidence_json: string };
+    expect(JSON.parse(transition.evidence_json)).toMatchObject({
+      supersedesCampaignId: original.campaignId,
+      supersededCampaignState: "BLOCKED",
+      supersededCoreCompatibilityHash: original.coreCompatibilityHash,
+      replacementReason: "CORE_REPAIR_CLOCK_SAFETY",
+    });
+    input.service.close();
+  });
+
   it("rejects an unclean fixed account and an unsafe runtime state", () => {
     const accountInput = fixture();
     accountInput.service.store.database.prepare(

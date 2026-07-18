@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { PolymarketPublicApi, PolymarketPublicHttpError } from "../src/adapters/polymarket-public.js";
+import { RULESET } from "../src/domain/versioning.js";
 import { parseClobMarketInfo } from "../src/adapters/public-api-schema.js";
 import {
+  assessExecutableOrderbookTiming,
   executableOrderbookAgeMs,
+  executableOrderbookTimingFailure,
   PublicExecutionMarketDataProvider,
 } from "../src/execution/market-data.js";
 
@@ -21,6 +24,43 @@ describe("PublicExecutionMarketDataProvider", () => {
         payload: {},
       },
     }, now)).toBe(2_501);
+  });
+
+  it("accepts bounded source clock skew but rejects an unsafe future snapshot", () => {
+    const now = Date.parse("2026-07-08T00:00:00.000Z");
+    const book = {
+      marketSnapshotTime: new Date(now + RULESET.clockUnsafeThresholdMs).toISOString(),
+      receivedAt: new Date(now).toISOString(),
+      publicCapture: {
+        endpoint: "clob-orderbook" as const,
+        requestUrl: "https://clob.polymarket.com/book?token_id=asset",
+        fetchedAt: new Date(now).toISOString(),
+        latencyMs: 10.25,
+        httpStatus: 200,
+        payload: {},
+      },
+    };
+
+    expect(assessExecutableOrderbookTiming(book, now)).toEqual({
+      status: "VALID",
+      ageMs: 11,
+      sourceClockOffsetMs: RULESET.clockUnsafeThresholdMs,
+    });
+    const unsafeBook = {
+      ...book,
+      marketSnapshotTime: new Date(now + RULESET.clockUnsafeThresholdMs + 1).toISOString(),
+    };
+    const unsafeTiming = assessExecutableOrderbookTiming(unsafeBook, now);
+    expect(unsafeTiming).toEqual({
+      status: "CLOCK_UNSAFE",
+      ageMs: Number.NaN,
+      sourceClockOffsetMs: RULESET.clockUnsafeThresholdMs + 1,
+    });
+    expect(executableOrderbookTimingFailure(unsafeTiming)).toEqual({
+      code: "ORDERBOOK_CLOCK_UNSAFE",
+      message: `Orderbook source clock offset ${RULESET.clockUnsafeThresholdMs + 1}ms exceeds ${RULESET.clockUnsafeThresholdMs}ms`,
+    });
+    expect(executableOrderbookAgeMs(unsafeBook, now)).toBeNaN();
   });
 
   it("accepts the current public market-info shape when legacy fee fields are absent", () => {

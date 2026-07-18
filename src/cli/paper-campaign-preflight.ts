@@ -5,6 +5,7 @@ import {
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
+import { checkPaperCampaignClockSafety } from "../paper-validation/clock-safety.js";
 import { paperCampaignReplacementAuthorized } from "../paper-validation/operator-policy.js";
 import {
   assertPaperCampaignPreMigrationCompatible,
@@ -16,6 +17,18 @@ const sourceVersion = resolveSourceVersion(projectRoot);
 if (sourceVersion.dirty) throw new Error("PAPER_CAMPAIGN_REQUIRES_CLEAN_SOURCE");
 const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
 const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
+const clockSafety = await checkPaperCampaignClockSafety();
+if (clockSafety.status !== "PASSED") {
+  console.error(JSON.stringify({
+    status: "BLOCKED",
+    reason: "CLOCK_SAFETY_FAILED",
+    clockSafety,
+    sourceCodeCommit: sourceVersion.commit,
+    coreCompatibilityHash,
+    safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
+  }));
+  throw new Error(`PAPER_CAMPAIGN_CLOCK_SAFETY_BLOCKED:${clockSafety.reason ?? "UNKNOWN"}`);
+}
 const databasePath = resolve(projectRoot, "data/phase0/phase0.sqlite");
 let result: ReturnType<typeof assertPaperCampaignPreMigrationCompatible>;
 try {
@@ -52,5 +65,6 @@ console.log(JSON.stringify({
     }),
   sourceCodeCommit: sourceVersion.commit,
   coreCompatibilityHash,
+  clockSafety,
   safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
 }));

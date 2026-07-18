@@ -1,11 +1,11 @@
 # Progress
 
 ## Current task
-- 2026-07-17 Campaign `PC-AB62B3FFCEDFC944FEAF` 运行约 3 小时 10 分钟后安全暂停；Session 因 1 次 `MAJOR_DESYNC` 与 `SHORT_SOAK_FAILED` 保守失败，累计时间为 0，失败 ZIP、数据库与报告只读保留。
-- 根因已由真实时序确认：Positions 先反映两笔合计 `189.91` 的 SELL，Trades/Activity 在重大失步判定后约 15.7 秒才补齐；配置虽定义 `reconciliationGraceMs=120000`，旧实现却仅按三次轮询、约 31 秒升级。
-- 修复已按 TDD 完成：同一具体差异必须同时满足连续 3 次和持续 120 秒才升级；宽限期内补齐保持历史 `majorDesyncCount=0`，持续满 120 秒的真实失步仍永久阻断。新核心允许且仅允许精确旧 blocker 创建审计化替代 Campaign。
-- 2026-07-17 20:42 再次启动在 Campaign 创建前连续三次失败；诊断 ZIP 完整且三次 Replay 稳定，唯一新增阻断为同一笔历史 BUY 在 Trades 相邻 offset 页首尾各出现一次，而 Activity 只出现一次。
-- 分页重叠修复已按 TDD 完成：原始 16,500 行与 3 个重复行计数不变，1 行经相邻页位置和 Activity 独立 multiplicity 确认后归类为分页重叠；真实双重 SELL 仍保留两笔，单源或冲突证据继续 fail closed。
+- 2026-07-18 Campaign `PC-A90AEC5B17EA925E5AF1` 的 Session `PS-F76E83CEABE73C181068` 实际运行 `43,200,002ms`，Observe 与 Paper 主流程健康，但最终 1 个持仓因 `ORDERBOOK_STALE / Orderbook age NaNms` 无法估值，Session FAILED 且累计为 0。
+- 根因已由 ZIP、系统时间和 CLOB 公开时间共同确认：本机时钟约慢 2 秒，旧逻辑对任何大于 0ms 的源端未来时间立即返回 `NaN`，与既有 `clockUnsafeThresholdMs=1000` 安全规则不一致。
+- 系统时间已通过 macOS 管理员确认的 Apple NTP 校正；校正后 Apple/Cloudflare/Google 偏差约在 ±40ms，CLOB `/time` 与订单簿样本均回到阈值内。
+- 修复已按 TDD 完成：订单簿允许阈值内微小偏差，超限明确记录 `ORDERBOOK_CLOCK_UNSAFE`；每次 Campaign 启动前必须用无认证 CLOB `/time` 做只读、fail-closed 检查。
+- 替代策略仅接受本次精确五项 blocker 且新旧核心不同；新 Campaign 固定从累计 0 开始并记录 `CORE_REPAIR_CLOCK_SAFETY` supersedes 证据。
 - 全程固定 `PAPER + LIVE_DISABLED`；未启动新 Campaign，未修改任何历史失败证据。
 
 ## Completed implementation
@@ -41,6 +41,10 @@
 - `reconciliationGraceMs` 已进入 Paper ruleset identity；对账实现与替换策略均进入 `coreCompatibilityHash`，旧 Campaign 不会与修复后时长混算。
 - Campaign 替换白名单新增唯一的对账宽限期修复路径：仅接受旧核心、`BLOCKED` 且 blocker 精确为 `MAJOR_DESYNC:1` 与 `OBSERVE_STATUS:SHORT_SOAK_FAILED`；任何附加错误继续拒绝。
 - 公开分页捕获保存 `boundaryOverlapRows` 而不删除原始行；Phase 0 与 capture Replay 使用同一重建规则，并在报告中单独输出 `reconciledPaginationOverlapRows`。
+- Orderbook 源端时间不再以 1ms 的绝对未来判断误伤正常网络/时钟微差；阈值内沿用收到时间与请求延迟计算 freshness，阈值外明确冻结为 `ORDERBOOK_CLOCK_UNSAFE`。
+- Paper Campaign preflight 新增 CLOB `/time` 公共只读安全门；非 `LIVE_READONLY`、请求不可用、来源错误、证据非法或绝对偏差超过 1000ms 均在 Campaign 创建前停止。
+- `clockUnsafeThresholdMs`、时钟 preflight 及其公开 provider 已纳入 Paper ruleset/core identity；修复后时间不得与旧核心混算。
+- 本次精确五 blocker 的终态 Campaign 可由不同核心创建审计化替代；少/多任一 blocker 均继续拒绝。
 
 ## Verification completed
 - Node `24.14.0`、pnpm `11.9.0`。
@@ -72,8 +76,12 @@
 - HTTPS query/fragment 路径脱敏与 scanner 回归 10 项通过；legacy/Campaign manifest 失败端到端不发布结果的 shell 回归通过；TypeScript、zsh 语法与 diff check 通过。
 - 真实业务库通过只读 Online Backup 复制后演练 2.21.0→2.24.0：`integrity_check=ok`、0 外键异常、0 target/source/context 错配、0 缺失 Projection Snapshot、0 非法 Observe 绑定、0 active Reservation；安全状态仍为 `PAPER + LIVE_DISABLED`。源数据库 SHA-256 前后完全相同。
 - 独立 RC 复审确认无 P0/P1 阻断；尚未验证的只有新核心实际 12 小时/72 小时自然运行。
+- 时钟回归先稳定复现阈值内源端偏差被旧实现返回 `NaN`；修复后 5 个定向测试文件、95 项通过，替代 Campaign 服务层验证确认新累计与最长连续时长均为 0。
+- 最新全量验证：48 个测试文件、550 项全部通过；TypeScript、全部 `.command/.sh` zsh 语法和 `git diff --check` 通过。
+- Schema 保持 `2.24.0`；时钟修复后的 `coreCompatibilityHash=637191cd09eff0ddcdb8309b71226be62fdb6c08dbd13087208e6ca04cc17d08`，Paper ruleset hash 为 `96e307f8ec0b3ff6a672403dfe17d15e5095f290b6d7c85a117761ec6ddb0429`。
 
 ## Next steps
-1. 用户双击桌面“1_开始或继续Paper累计验证.command”；入口将为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始。
-2. 建议第一次直接健康运行满 12 小时；安全停止后用第三个按钮定位 ZIP 并交给 Codex。
-3. 累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。
+1. 在干净修复提交上执行一次只读 preflight，确认当前 CLOB clock、旧 Campaign 精确 blocker 和 replacementRequired。
+2. 用户双击桌面“1_开始或继续Paper累计验证.command”；入口将为旧失败 Campaign 创建带 supersedes 证据的新 Campaign，累计从 0 开始。
+3. 建议第一次直接健康运行满 12 小时；安全停止后用第三个按钮定位 ZIP 并交给 Codex。
+4. 累计 72 小时、场景覆盖与最终 Observe 全部通过前，不进入 Live 准备。

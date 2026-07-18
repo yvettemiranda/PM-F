@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS,
+  paperCampaignReplacementReason,
   paperCampaignStartDisposition,
   paperCampaignPlannedDurationOverride,
   paperQualifyingFinalizationPolicy,
@@ -60,6 +61,21 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
 
 describe("paper Campaign operator policy", () => {
   it("starts a replacement only when an explicitly started terminal Campaign belongs to an older core", () => {
+    const clockBlocked = snapshot({
+      state: "BLOCKED",
+      coreCompatibilityHash: "a".repeat(64),
+      blockers: [
+        "FINAL_VALUATION_INCOMPLETE",
+        "PAPER_EXIT_CODE:1",
+        "PAPER_FINAL_VALUATION_INCOMPLETE",
+        "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS",
+        "UNRECOVERED_MARKET_DATA_BLOCKER",
+      ],
+    });
+    expect(paperCampaignReplacementReason(clockBlocked, "b".repeat(64)))
+      .toBe("CORE_REPAIR_CLOCK_SAFETY");
+    expect(paperCampaignStartDisposition(clockBlocked, "b".repeat(64)))
+      .toBe("CREATE_REPLACEMENT");
     expect(paperCampaignStartDisposition(
       snapshot({
         state: "BLOCKED",
@@ -97,6 +113,20 @@ describe("paper Campaign operator policy", () => {
         state: "BLOCKED",
         coreCompatibilityHash: "a".repeat(64),
         blockers: ["UNRECOVERED_MARKET_DATA_BLOCKER", "PAPER_EXIT_CODE:137"],
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        ...clockBlocked,
+        blockers: clockBlocked.blockers.filter((blocker) => blocker !== "PAPER_FINAL_VALUATION_INCOMPLETE"),
+      }),
+      "b".repeat(64),
+    )).toBe("REFUSE_TERMINAL");
+    expect(paperCampaignStartDisposition(
+      snapshot({
+        ...clockBlocked,
+        blockers: [...clockBlocked.blockers, "PAPER_CONSISTENCY_FAILED"],
       }),
       "b".repeat(64),
     )).toBe("REFUSE_TERMINAL");

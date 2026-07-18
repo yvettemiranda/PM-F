@@ -97,7 +97,7 @@ describe("Paper Campaign core compatibility", () => {
   it("uses only Paper-relevant rules for the Campaign reset identity", () => {
     expect(PAPER_RULESET_KEYS.some((key) => key.startsWith("live"))).toBe(false);
     expect(PAPER_RULESET_KEYS).toContain("reconciliationGraceMs");
-    expect(PAPER_RULESET_KEYS).not.toContain("clockUnsafeThresholdMs");
+    expect(PAPER_RULESET_KEYS).toContain("clockUnsafeThresholdMs");
     expect(PAPER_RULESET_KEYS).not.toContain("reconciliationCashAbsToleranceMicros");
     expect(PAPER_RULESET_KEYS).not.toContain("requestTimeoutMs");
     const liveOnlyVersionChange = {
@@ -286,6 +286,8 @@ describe("Paper Campaign core compatibility", () => {
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/service.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/final-integrity.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/operator-policy.ts");
+    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/paper-validation/clock-safety.ts");
+    expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).toContain("src/live/clob-clock-safety-provider.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/observe-only.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/paper-campaign-run.ts");
     expect(CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES).not.toContain("src/cli/paper-run.ts");

@@ -4,6 +4,7 @@ export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
 
 export type PaperCampaignStartDisposition = "CONTINUE" | "CREATE_REPLACEMENT" | "REFUSE_TERMINAL";
 export type PaperCampaignReplacementReason =
+  | "CORE_REPAIR_CLOCK_SAFETY"
   | "CORE_REPAIR_MARKET_DATA"
   | "CORE_REPAIR_RECONCILIATION_GRACE"
   | "CORE_VERSION_REPLACEMENT";
@@ -19,6 +20,19 @@ function replacementReason(input: {
     return "CORE_VERSION_REPLACEMENT";
   }
   if (input.campaignState !== "BLOCKED") return null;
+  const clockSafetyFailureBlockers = [
+    "FINAL_VALUATION_INCOMPLETE",
+    "PAPER_EXIT_CODE:1",
+    "PAPER_FINAL_VALUATION_INCOMPLETE",
+    "PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS",
+    "UNRECOVERED_MARKET_DATA_BLOCKER",
+  ];
+  if (
+    input.blockers.length === clockSafetyFailureBlockers.length
+    && JSON.stringify([...input.blockers].sort()) === JSON.stringify(clockSafetyFailureBlockers.sort())
+  ) {
+    return "CORE_REPAIR_CLOCK_SAFETY";
+  }
   if (
     input.blockers.includes("UNRECOVERED_MARKET_DATA_BLOCKER")
     && input.blockers.every((blocker) => (

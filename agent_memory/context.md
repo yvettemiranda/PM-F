@@ -33,14 +33,14 @@
 
 ## Operator workflow
 - 用户只使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
-- 历史 Campaign `PC-6D45BA731F325AA7370D` 因市场数据核心缺陷保守 BLOCKED；其后 Campaign `PC-AB62B3FFCEDFC944FEAF` 在旧核心 `c1b844ea01a42d1d4797dac11f0391eb827e6c86` 上因对账宽限期未生效而 BLOCKED。两组失败报告均只读保留。
-- 新核心入口只允许对 `MAJOR_DESYNC:1 + OBSERVE_STATUS:SHORT_SOAK_FAILED` 这一组精确 blocker 创建带不可变 supersedes 链接的新 Campaign 和新账户；出现任何额外一致性 blocker 都拒绝替换。
+- 历史失败 Campaign 均只读保留且不计入新核心；最新失败 Campaign 为 `PC-A90AEC5B17EA925E5AF1`，Session `PS-F76E83CEABE73C181068` 实际运行 `43,200,002ms` 后因本机时钟约慢 2 秒触发订单簿未来时间误判，状态为 `BLOCKED`、累计为 0。
+- 修复后入口仅允许旧核心且 blocker 精确等于本次五项时钟/最终估值失败集合时，以 `CORE_REPAIR_CLOCK_SAFETY` 创建带不可变 supersedes 链接的新 Campaign 和新账户；缺项、增项、同核心或其他失败原因均拒绝替换。
 - 2026-07-17 20:42 的启动前检查未创建 Campaign：同一历史交易在 Trades offset 0/1000 相邻页首尾重复，而 Activity 仅出现一次，三次新抓取均因此得到 `ambiguousEvents=1`。修复只识别双源确认的相邻页重叠，不放宽普通歧义。
 - 新 Campaign 第一次默认最多运行 12 小时：满 2 小时记录资格里程碑并继续运行，健康跑满 12 小时可同时满足资格和连续运行门槛；每次安全停止自动生成 Session 报告、Campaign 报告和脱敏 ZIP。
 - 首次 Session 若不足 2 小时就安全暂停，已验证健康时长仍计入 72 小时，但 `qualified` 保持 false；下次仍是资格 Session。
 
 ## Remaining gates
-- 2026-07-17 Campaign `PC-AB62B3FFCEDFC944FEAF` 的资格 Session `PS-67D4C0BC5DAFAB08296D` 有效运行 `11,439,062ms`，但因旧核心把约 47 秒的跨接口延迟错误升级为 `MAJOR_DESYNC` 而 FAILED，`countsTowardCampaign=false`、累计时间为 0。
-- 修复后不能跨核心混算；分页重叠修复后的新 `coreCompatibilityHash=2c9bcf2cdcf45703fa15f71ff290a2ac07c0a904f0cea7aaeebccc87d79d6b42` 的 Campaign 尚未创建。
+- 2026-07-18 Campaign `PC-A90AEC5B17EA925E5AF1` 的 12 小时 Session `PS-F76E83CEABE73C181068` 因 `FINAL_VALUATION_INCOMPLETE`、`PAPER_EXIT_CODE:1`、`PAPER_FINAL_VALUATION_INCOMPLETE`、`PAPER_STATUS:COMPLETED_WITH_SAFETY_BLOCKERS`、`UNRECOVERED_MARKET_DATA_BLOCKER` 失败，`countsTowardCampaign=false`、累计时间为 0。
+- 修复后不能跨核心混算；时钟安全修复后的 `coreCompatibilityHash=637191cd09eff0ddcdb8309b71226be62fdb6c08dbd13087208e6ca04cc17d08`，新 Campaign 尚未创建。
 - 新 Campaign 仍需累计 72 小时、至少一个连续 12 小时 Session，并补足关键场景覆盖；代码 RC 通过不等于 Paper 长期验收通过。
 - Live 前仍需长期稳定性、Crash/重启验证、最终 reconciliation、合规地区 geoblock/clock 检查、隔离钱包与用户再次明确授权。

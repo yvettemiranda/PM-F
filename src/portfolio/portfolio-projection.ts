@@ -9,7 +9,8 @@ import {
 } from "../infra/sqlite/public-market-capture.js";
 import { calculateUnrealizedPnl } from "../pnl/pnl-model.js";
 import {
-  executableOrderbookAgeMs,
+  assessExecutableOrderbookTiming,
+  executableOrderbookTimingFailure,
   isOrderbookUnavailableError,
   loadFeeThenOrderbook,
 } from "../execution/market-data.js";
@@ -144,14 +145,16 @@ export class PortfolioProjectionService {
           unpricedPositionCount += group.length;
           continue;
         }
-        const age = executableOrderbookAgeMs(book, this.now().valueOf());
-        if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+        const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+        const timingFailure = executableOrderbookTimingFailure(timing);
+        const age = timing.ageMs;
+        if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
           this.marketHealth?.onFailure(
             accountId,
             first.asset_id,
             first.condition_id,
-            "ORDERBOOK_STALE",
-            `Orderbook age ${String(age)}ms`,
+            timingFailure?.code ?? "ORDERBOOK_STALE",
+            timingFailure?.message ?? `Orderbook age ${String(age)}ms`,
           );
           unpricedPositionCount += group.length;
           continue;

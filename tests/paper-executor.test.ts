@@ -937,6 +937,36 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("reports an unsafe source clock explicitly instead of calling it a stale book", async () => {
+    const now = new Date("2026-07-08T00:00:00.000Z");
+    const env = setup(now);
+    env.market.book = {
+      ...env.market.makeBook(
+        [{ price: "0.5", size: "1000" }],
+        [],
+        new Date(now.valueOf() + RULESET.clockUnsafeThresholdMs + 1).toISOString(),
+      ),
+      receivedAt: now.toISOString(),
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "clock-unsafe",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "clock-unsafe");
+
+    expect(env.executor.executionState(executionId)).toBe("WAITING_EXECUTION");
+    expect(env.executor.getMarketDataHealth(env.accountId, assetId, conditionId)).toMatchObject({
+      state: "FROZEN",
+      lastErrorCode: "ORDERBOOK_CLOCK_UNSAFE",
+      lastErrorMessage: `Orderbook source clock offset ${RULESET.clockUnsafeThresholdMs + 1}ms exceeds ${RULESET.clockUnsafeThresholdMs}ms`,
+    });
+    expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1000000000");
+    env.executor.close();
+  });
+
   it("fetches fee before the book so a slow fee lookup cannot age a newly fetched snapshot", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     const calls: string[] = [];

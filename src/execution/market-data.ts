@@ -1,5 +1,6 @@
 import { PolymarketPublicApi, PolymarketPublicHttpError } from "../adapters/polymarket-public.js";
 import { decimalToScaled } from "../domain/fixed.js";
+import { RULESET } from "../domain/versioning.js";
 
 export interface ExecutionOrderbookLevel {
   price: string;
@@ -99,12 +100,24 @@ export async function loadFeeThenOrderbook(
 /**
  * Freshness is the age of this authoritative HTTP capture, not the age of the
  * last orderbook content change. The raw source timestamp remains immutable
- * audit evidence and is still rejected when invalid or in the future.
+ * audit evidence and is still rejected when invalid or beyond the shared
+ * clock-safety threshold.
  */
-export function executableOrderbookAgeMs(
+export interface ExecutableOrderbookTimingAssessment {
+  status: "VALID" | "INVALID" | "CLOCK_UNSAFE";
+  ageMs: number;
+  sourceClockOffsetMs: number;
+}
+
+export interface ExecutableOrderbookTimingFailure {
+  code: "ORDERBOOK_STALE" | "ORDERBOOK_CLOCK_UNSAFE";
+  message: string;
+}
+
+export function assessExecutableOrderbookTiming(
   book: Pick<ExecutionOrderbookSnapshot, "marketSnapshotTime" | "receivedAt" | "publicCapture">,
   nowMs: number,
-): number {
+): ExecutableOrderbookTimingAssessment {
   const sourceTimeMs = Date.parse(book.marketSnapshotTime);
   const receivedAtMs = Date.parse(book.receivedAt);
   const requestLatencyMs = book.publicCapture?.endpoint === "clob-orderbook"
@@ -116,13 +129,53 @@ export function executableOrderbookAgeMs(
     || !Number.isFinite(receivedAtMs)
     || !Number.isFinite(requestLatencyMs)
     || requestLatencyMs < 0
-    || sourceTimeMs > nowMs
-  ) return Number.NaN;
+  ) {
+    return {
+      status: "INVALID",
+      ageMs: Number.NaN,
+      sourceClockOffsetMs: Number.NaN,
+    };
+  }
+  const sourceClockOffsetMs = sourceTimeMs - nowMs;
+  if (sourceClockOffsetMs > RULESET.clockUnsafeThresholdMs) {
+    return {
+      status: "CLOCK_UNSAFE",
+      ageMs: Number.NaN,
+      sourceClockOffsetMs,
+    };
+  }
   // A fresh receipt can still be unsafe when the HTTP request itself took
   // longer than the execution freshness budget. Conservatively age public
   // captures from request start; fake/isolated snapshots have no capture and
   // retain receipt-time semantics.
-  return Math.ceil(nowMs - receivedAtMs + requestLatencyMs);
+  return {
+    status: "VALID",
+    ageMs: Math.ceil(nowMs - receivedAtMs + requestLatencyMs),
+    sourceClockOffsetMs,
+  };
+}
+
+export function executableOrderbookAgeMs(
+  book: Pick<ExecutionOrderbookSnapshot, "marketSnapshotTime" | "receivedAt" | "publicCapture">,
+  nowMs: number,
+): number {
+  return assessExecutableOrderbookTiming(book, nowMs).ageMs;
+}
+
+export function executableOrderbookTimingFailure(
+  assessment: ExecutableOrderbookTimingAssessment,
+): ExecutableOrderbookTimingFailure | null {
+  if (assessment.status === "VALID") return null;
+  if (assessment.status === "CLOCK_UNSAFE") {
+    return {
+      code: "ORDERBOOK_CLOCK_UNSAFE",
+      message: `Orderbook source clock offset ${assessment.sourceClockOffsetMs}ms exceeds ${RULESET.clockUnsafeThresholdMs}ms`,
+    };
+  }
+  return {
+    code: "ORDERBOOK_STALE",
+    message: "Orderbook timing evidence is invalid",
+  };
 }
 
 function sourceTime(value: string): string {

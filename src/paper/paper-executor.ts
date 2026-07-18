@@ -9,7 +9,8 @@ import {
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../domain/versioning.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import {
-  executableOrderbookAgeMs,
+  assessExecutableOrderbookTiming,
+  executableOrderbookTimingFailure,
   isOrderbookUnavailableError,
   loadFeeThenOrderbook,
 } from "../execution/market-data.js";
@@ -540,9 +541,17 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, identityError, identityError);
           continue;
         }
-        const age = executableOrderbookAgeMs(book, this.now().valueOf());
-        if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
-          this.recordMarketDataFailure(accountId, row.asset_id, row.condition_id, "ORDERBOOK_STALE", `Orderbook age ${String(age)}ms`);
+        const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+        const timingFailure = executableOrderbookTimingFailure(timing);
+        const age = timing.ageMs;
+        if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+          this.recordMarketDataFailure(
+            accountId,
+            row.asset_id,
+            row.condition_id,
+            timingFailure?.code ?? "ORDERBOOK_STALE",
+            timingFailure?.message ?? `Orderbook age ${String(age)}ms`,
+          );
           continue;
         }
         const constraintError = orderbookConstraintAvailability({
@@ -628,16 +637,18 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.recordMarketDataFailure(execution.paper_account_id, execution.asset_id, execution.condition_id, identityError, identityError);
       return execution.state;
     }
-    const age = executableOrderbookAgeMs(book, this.now().valueOf());
-    if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+    const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+    const timingFailure = executableOrderbookTimingFailure(timing);
+    const age = timing.ageMs;
+    if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
       this.recordMarketDataFailure(
         execution.paper_account_id,
         execution.asset_id,
         execution.condition_id,
-        "ORDERBOOK_STALE",
-        `Orderbook age ${String(age)}ms`,
+        timingFailure?.code ?? "ORDERBOOK_STALE",
+        timingFailure?.message ?? `Orderbook age ${String(age)}ms`,
       );
-      this.updatePendingReason(execution, "ORDERBOOK_STALE");
+      this.updatePendingReason(execution, timingFailure?.code ?? "ORDERBOOK_STALE");
       return execution.state;
     }
     const constraintError = orderbookConstraintAvailability({
@@ -717,14 +728,16 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         this.recordMarketDataFailure(accountId, first.asset_id, first.condition_id, identityError, identityError);
         continue;
       }
-      const age = executableOrderbookAgeMs(book, this.now().valueOf());
-      if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+      const timing = assessExecutableOrderbookTiming(book, this.now().valueOf());
+      const timingFailure = executableOrderbookTimingFailure(timing);
+      const age = timing.ageMs;
+      if (timingFailure || !Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
         this.recordMarketDataFailure(
           accountId,
           first.asset_id,
           first.condition_id,
-          "ORDERBOOK_STALE",
-          `Orderbook age ${String(age)}ms during stop-loss check`,
+          timingFailure?.code ?? "ORDERBOOK_STALE",
+          timingFailure?.message ?? `Orderbook age ${String(age)}ms during stop-loss check`,
         );
         continue;
       }

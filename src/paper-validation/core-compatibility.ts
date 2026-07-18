@@ -39,8 +39,10 @@ export const CORE_COMPATIBILITY_PAPER_FILES = [
 export const CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES = [
   "src/infra/source-version.ts",
   "src/operator/safe-child-environment.ts",
+  "src/live/clob-clock-safety-provider.ts",
   "src/paper-validation/campaign-session-runtime.ts",
   "src/paper-validation/checkpoint-evidence.ts",
+  "src/paper-validation/clock-safety.ts",
   "src/paper-validation/crash-recovery.ts",
   "src/paper-validation/final-integrity.ts",
   "src/paper-validation/operator-policy.ts",

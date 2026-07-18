@@ -4,7 +4,7 @@ import type {
   ClockSafetyResult,
 } from "./live-safety-provider.js";
 
-const CLOB_TIME_ENDPOINT = "https://clob.polymarket.com/time";
+export const CLOB_TIME_ENDPOINT = "https://clob.polymarket.com/time";
 
 interface ClobClockSafetyProviderOptions {
   fetchImpl?: typeof fetch;
