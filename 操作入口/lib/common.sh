@@ -543,7 +543,7 @@ operator_is_bundle_compatible_isolated_evidence() {
 operator_create_codex_bundle() {
   local marker="$1"
   local log_file="$2"
-  local run_label="${3:-24小时联合验证}"
+  local run_label="${3:-8小时联合验证}"
   local paper_status="${4:-UNKNOWN}"
   local observe_status="${5:-UNKNOWN}"
   local run_started_at="${6:-UNKNOWN}"

@@ -10,6 +10,7 @@ import type { SourceVersion } from "../src/infra/source-version.js";
 import { OperationalLock } from "../src/operational/operational-lock.js";
 import { OperationalConsistencyMonitor } from "../src/operational/consistency-monitor.js";
 import { OperationalRunner } from "../src/operational/operational-runner.js";
+import { buildOperationalReport } from "../src/operational/report-generator.js";
 import { OperationalStore } from "../src/operational/operational-store.js";
 import {
   buildCurrentCompatibilityEvidence,
@@ -176,6 +177,29 @@ afterEach(() => {
 });
 
 describe("Operational validation framework", () => {
+  it("treats eight hours as the completed final Observe soak threshold", () => {
+    const env = setup();
+    const build = (runtimeDurationMs: number) => buildOperationalReport({
+      databasePath: env.databasePath,
+      operationalRunId: "run-duration-policy",
+      validationSessionId: "session-duration-policy",
+      mode: "HEALTH_MONITOR_ONLY",
+      status: "COMPLETED",
+      startedAt: "2026-07-09T00:00:00.000Z",
+      stoppedAt: "2026-07-09T08:00:00.000Z",
+      runtimeDurationMs,
+      sourceVersion,
+      sourceDatabasePath: env.databasePath,
+      workingDatabasePath: env.databasePath,
+      checks: [],
+    });
+
+    expect(build(8 * 60 * 60 * 1_000).finalResult.warnings)
+      .not.toContain("OPERATIONAL:LONG_SOAK_NOT_RUN");
+    expect(build(8 * 60 * 60 * 1_000 - 1).finalResult.warnings)
+      .toContain("OPERATIONAL:LONG_SOAK_NOT_RUN");
+  });
+
   it("runs health validation on a snapshot and leaves source operational tables unchanged", async () => {
     const env = setup();
     const result = await new OperationalRunner(sourceVersion, now).run({

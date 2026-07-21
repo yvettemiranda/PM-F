@@ -5,6 +5,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { RULESET_HASH, VERSIONS, stableJson } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import type { ValidationCheckResult } from "../validation/types.js";
+import { PAPER_VALIDATION_FINAL_OBSERVE_MS } from "../paper-validation/types.js";
 import type { OperationalReport, OperationalRunStatus, OperationalMode } from "./types.js";
 
 function sha256(value: string): string {
@@ -82,7 +83,7 @@ export function buildOperationalReport(input: {
     const warnings = input.checks
       .filter((check) => check.status === "WARN" || check.status === "SKIPPED" || check.status === "NOT_RUN")
       .map((check) => `${check.checkType}:${check.checkName}:${check.reason}`);
-    if (input.runtimeDurationMs < 24 * 60 * 60 * 1_000) warnings.push("OPERATIONAL:LONG_SOAK_NOT_RUN");
+    if (input.runtimeDurationMs < PAPER_VALIDATION_FINAL_OBSERVE_MS) warnings.push("OPERATIONAL:LONG_SOAK_NOT_RUN");
     const finalStatus = blockingFailures.length === 0 ? "OPERATIONAL_FRAMEWORK_READY" : "OPERATIONAL_FAILED";
     const resultStatus = blockingFailures.length > 0 ? "FAIL" : warnings.length > 0 ? "INCOMPLETE" : "PASS";
     const reportWithoutHash = {

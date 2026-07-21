@@ -15,9 +15,9 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
     baselineRunId: "baseline",
     paperAccountId: "account",
     initialBalanceMicros: "1000000000",
-    requiredActiveRuntimeMs: 72 * 60 * 60 * 1_000,
-    requiredContinuousRuntimeMs: 12 * 60 * 60 * 1_000,
-    qualifyingRuntimeMs: 2 * 60 * 60 * 1_000,
+    requiredActiveRuntimeMs: 24 * 60 * 60 * 1_000,
+    requiredContinuousRuntimeMs: 4 * 60 * 60 * 1_000,
+    qualifyingRuntimeMs: 40 * 60 * 1_000,
     checkpointIntervalMs: 60_000,
     maxCheckpointGapMs: 90_000,
     coreCompatibilityHash: "a".repeat(64),
@@ -46,8 +46,8 @@ function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
     state: "PAUSED",
     qualified: true,
     completedSessionCount: 7,
-    accumulatedActiveRuntimeMs: 72 * 60 * 60 * 1_000,
-    longestContinuousRuntimeMs: 12 * 60 * 60 * 1_000,
+    accumulatedActiveRuntimeMs: 24 * 60 * 60 * 1_000,
+    longestContinuousRuntimeMs: 4 * 60 * 60 * 1_000,
     coverageStatus: "INCOMPLETE",
     coverage: {} as CampaignSnapshot["coverage"],
     missingScenarios: ["FILL"],
@@ -184,7 +184,7 @@ describe("paper Campaign operator policy", () => {
     )).toBe("REFUSE_TERMINAL");
   });
 
-  it("keeps a coverage-incomplete Campaign on a useful 12-hour session", () => {
+  it("keeps a coverage-incomplete Campaign on a useful 4-hour session", () => {
     expect(paperCampaignPlannedDurationOverride(snapshot({ state: "INCOMPLETE_COVERAGE" })))
       .toBe(PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS);
   });
@@ -193,7 +193,7 @@ describe("paper Campaign operator policy", () => {
     expect(paperCampaignPlannedDurationOverride(snapshot({ state: "PAUSED" }))).toBeUndefined();
     expect(paperCampaignPlannedDurationOverride(snapshot({
       state: "INCOMPLETE_COVERAGE",
-      accumulatedActiveRuntimeMs: 71 * 60 * 60 * 1_000,
+      accumulatedActiveRuntimeMs: 23 * 60 * 60 * 1_000,
     }))).toBeUndefined();
   });
 

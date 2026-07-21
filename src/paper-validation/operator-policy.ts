@@ -1,6 +1,10 @@
-import type { CampaignSnapshot, CompatibilityIdentity } from "./types.js";
+import {
+  PAPER_VALIDATION_REQUIRED_CONTINUOUS_MS,
+  type CampaignSnapshot,
+  type CompatibilityIdentity,
+} from "./types.js";
 
-export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = 12 * 60 * 60 * 1_000;
+export const PAPER_CAMPAIGN_DEFAULT_LONG_SESSION_MS = PAPER_VALIDATION_REQUIRED_CONTINUOUS_MS;
 
 export type PaperCampaignStartDisposition =
   | "CONTINUE"
@@ -70,7 +74,7 @@ export function paperCampaignStartDisposition(
 
 /**
  * A campaign that has already met both runtime gates but is still missing
- * scenario coverage must keep running useful 12-hour sessions. The service's
+ * scenario coverage must keep running useful four-hour sessions. The service's
  * ordinary "remaining runtime" calculation is intentionally left untouched;
  * this is an operator-only continuation policy.
  */
@@ -90,9 +94,9 @@ export interface QualifyingFinalizationPolicy {
 }
 
 /**
- * A deliberate operator pause before the initial two-hour qualification is a
+ * A deliberate operator pause before the initial 40-minute qualification is a
  * safe, resumable stop rather than a system failure. Its verified runtime counts
- * toward the 72-hour total, but it never replaces the separate full two-hour
+ * toward the 24-hour total, but it never replaces the separate full 40-minute
  * qualifying Session.
  */
 export function paperQualifyingFinalizationPolicy(input: {

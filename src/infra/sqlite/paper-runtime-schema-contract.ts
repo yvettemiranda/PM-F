@@ -24,6 +24,7 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.23.0",
   "2.24.0",
   "2.25.0",
+  "2.26.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
@@ -135,6 +136,14 @@ export const PAPER_RUNTIME_REQUIRED_INDEXES = [
   "paper_validation_session_transition_sequence_idx",
 ] as const;
 
+export const PAPER_RUNTIME_REQUIRED_SQL_FRAGMENTS = Object.freeze({
+  paper_validation_campaigns: [
+    "CHECK(required_active_runtime_ms >= 86400000)",
+    "CHECK(required_continuous_runtime_ms >= 14400000)",
+    "CHECK(qualifying_runtime_ms >= 2400000)",
+  ],
+} satisfies Record<string, readonly string[]>);
+
 export function assertPaperRuntimeSchemaContract(
   database: DatabaseSync,
   appliedMigrationVersions: ReadonlySet<string>,
@@ -166,5 +175,15 @@ export function assertPaperRuntimeSchemaContract(
     if (!database.prepare(
       "SELECT 1 ok FROM sqlite_master WHERE type='index' AND name=?",
     ).get(index)) throw new Error(`RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:index:${index}`);
+  }
+  for (const [object, fragments] of Object.entries(PAPER_RUNTIME_REQUIRED_SQL_FRAGMENTS)) {
+    const row = database.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+    ).get(object) as { sql: string } | undefined;
+    for (const fragment of fragments) {
+      if (!row?.sql.includes(fragment)) {
+        throw new Error(`RUNTIME_DATABASE_SCHEMA_SQL_MISMATCH:table:${object}:${fragment}`);
+      }
+    }
   }
 }

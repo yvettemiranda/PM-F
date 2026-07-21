@@ -1,9 +1,10 @@
 import type { SourceVersion } from "../infra/source-version.js";
 import type { PaperExecutionFunnel } from "../paper/paper-execution-funnel.js";
 
-export const PAPER_VALIDATION_REQUIRED_ACTIVE_MS = 72 * 60 * 60 * 1_000;
-export const PAPER_VALIDATION_REQUIRED_CONTINUOUS_MS = 12 * 60 * 60 * 1_000;
-export const PAPER_VALIDATION_QUALIFYING_MS = 2 * 60 * 60 * 1_000;
+export const PAPER_VALIDATION_REQUIRED_ACTIVE_MS = 24 * 60 * 60 * 1_000;
+export const PAPER_VALIDATION_REQUIRED_CONTINUOUS_MS = 4 * 60 * 60 * 1_000;
+export const PAPER_VALIDATION_QUALIFYING_MS = 40 * 60 * 1_000;
+export const PAPER_VALIDATION_FINAL_OBSERVE_MS = 8 * 60 * 60 * 1_000;
 export const PAPER_VALIDATION_CHECKPOINT_INTERVAL_MS = 60 * 1_000;
 export const PAPER_VALIDATION_MAX_CHECKPOINT_GAP_MS = 90 * 1_000;
 

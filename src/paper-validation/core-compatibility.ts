@@ -105,6 +105,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/028_observe_projection_snapshots.sql",
   "src/infra/sqlite/029_observe_campaign_binding.sql",
   "src/infra/sqlite/030_paper_runtime_resilience.sql",
+  "src/infra/sqlite/031_validation_duration_policy.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [

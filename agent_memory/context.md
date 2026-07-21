@@ -8,7 +8,7 @@
 ## Architecture
 - Observe：公开 Trades/Activity/Positions 增量抓取、Gap/Cursor、Activity confirmation、Position projection、对账与 checkpoint。
 - Paper：不可变 Signal/Execution Context、精确比例金额、Risk、完整深度 VWAP/FAK、Reservation、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
-- Validation：固定账户/目标/基线/核心的 Campaign，累计 72 小时、至少一次连续 12 小时、资格里程碑、场景覆盖、不可变 checkpoint/report/transition。
+- Validation：固定账户/目标/基线/核心的 Campaign，累计 24 小时、至少一次连续 4 小时、40 分钟资格里程碑、场景覆盖、不可变 checkpoint/report/transition；最终同版本 Observe 为 8 小时。
 - Live：只有显式 fail-closed 架构和 Fake 测试；没有真实 signer、认证交易客户端或资金操作。
 
 ## Safety boundary
@@ -18,10 +18,10 @@
 - Gap Signal 固定不可执行；数据、版本、恢复或账本状态不确定时必须 fail closed。
 
 ## Current implementation baseline
-- 当前代码 Schema 为 `2.25.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
-- 真实业务库已为 Schema `2.25.0`，仍安全暂停；下一次正式启动只注册新 ruleset/创建 replacement，不需要 Schema 迁移。
+- 当前代码 Schema 为 `2.26.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
+- 真实业务库仍为 Schema `2.25.0` 且安全暂停；下一次正式启动会先自动备份，再迁移到 `2.26.0`，旧 Campaign/Session 证据逐列保留。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
-- Session 时长、12/72 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
+- Session 时长、4/24 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
 - Observe 使用固定频率调度，AbortSignal 贯穿公开请求、分页和退避；恢复只抓 cursor 之后的增量历史。
 - Settlement 对未决/错误结果使用数据库持久化指数退避，避免每秒重复请求和重复不可变审计。
 - `coreCompatibilityHash` 覆盖实际 Paper/Observe/恢复/计时/安全/Schema 语义，TypeScript 按去注释 AST 规范化；Live-only 和注释变化不重置 Campaign。
@@ -48,5 +48,5 @@
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
 - 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；下一次正式启动可开始新核心累计验证。
-- 修复完成后的下一次正式启动会按核心变化冻结旧 Campaign 的后续累计资格并创建 replacement；建议新 Campaign 第一次连续运行满 12 小时。
-- 累计 72 小时、场景覆盖和最终 24 小时 Observe 完成前绝不进入 Live。
+- 修复完成后的下一次正式启动会按核心变化冻结旧 Campaign 的后续累计资格并创建 replacement；建议新 Campaign 第一次连续运行满 4 小时。
+- 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

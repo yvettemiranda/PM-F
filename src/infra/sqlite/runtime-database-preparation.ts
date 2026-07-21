@@ -45,6 +45,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.23.0",
   "2.24.0",
   "2.25.0",
+  "2.26.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [

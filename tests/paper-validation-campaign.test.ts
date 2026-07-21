@@ -890,6 +890,15 @@ describe("PaperValidationCampaignService", () => {
       checkpointIntervalMs: 1,
       maxCheckpointGapMs: 90_000,
     })).toThrow("PAPER_VALIDATION_CHECKPOINT_POLICY_MISMATCH");
+
+    const campaign = createCampaign(input);
+    expect(campaign).toMatchObject({
+      requiredActiveRuntimeMs: 24 * 60 * 60 * 1_000,
+      requiredContinuousRuntimeMs: 4 * 60 * 60 * 1_000,
+      qualifyingRuntimeMs: 40 * 60 * 1_000,
+    });
+    const qualifying = startSession(input, campaign.campaignId, 0, "PS-NEW-DURATION-POLICY");
+    expect(qualifying.plannedDurationMs).toBe(4 * 60 * 60 * 1_000);
     input.service.close();
   });
 
@@ -1300,7 +1309,7 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
-  it("qualifies a two-hour session, counts a healthy early pause, and keeps finalize idempotent", () => {
+  it("qualifies a session, counts a healthy early pause, and keeps finalize idempotent", () => {
     const input = fixture();
     const campaign = createCampaign(input);
     expect(campaign).toMatchObject({
@@ -1309,7 +1318,7 @@ describe("PaperValidationCampaignService", () => {
       qualified: false,
     });
     const qualifying = startSession(input, campaign.campaignId, 0, "PS-QUALIFYING");
-    expect(qualifying.plannedDurationMs).toBe(12 * 60 * 60 * 1_000);
+    expect(qualifying.plannedDurationMs).toBe(4 * 60 * 60 * 1_000);
     recordHealthySession(input, qualifying, 0, 2);
     const qualifyingObserveMetrics = observeMetrics(2, 0);
     const finalized = finalizeHealthy(input, qualifying, at(2), {}, qualifyingObserveMetrics);
@@ -1348,7 +1357,7 @@ describe("PaperValidationCampaignService", () => {
     const input = fixture();
     const campaign = createCampaign(input);
     const qualifying = startSession(input, campaign.campaignId, 0, "PS-Q-EARLY-SAFE");
-    recordHealthySession(input, qualifying, 0, 1);
+    recordHealthySession(input, qualifying, 0, 1 / 3);
     const paused = input.service.finalizeSession({
       sessionId: qualifying.sessionId,
       outcome: "SAFE_STOP",
@@ -1358,7 +1367,7 @@ describe("PaperValidationCampaignService", () => {
       stopReason: "USER_SAFE_PAUSE_SIGTERM",
       blockers: [],
       coverage: {},
-      stoppedAt: at(1),
+      stoppedAt: atMinute(20),
     });
     expect(paused.session).toMatchObject({
       sessionState: "COMPLETED",
@@ -1368,12 +1377,12 @@ describe("PaperValidationCampaignService", () => {
     expect(paused.campaign).toMatchObject({
       campaignState: "PAUSED",
       qualified: false,
-      accumulatedActiveRuntimeMs: 60 * 60 * 1_000,
+      accumulatedActiveRuntimeMs: 20 * 60 * 1_000,
       canContinue: true,
     });
     const retry = startSession(input, campaign.campaignId, 2, "PS-Q-EARLY-RETRY");
     expect(retry.sessionKind).toBe("QUALIFYING");
-    expect(retry.plannedDurationMs).toBe(12 * 60 * 60 * 1_000);
+    expect(retry.plannedDurationMs).toBe(4 * 60 * 60 * 1_000);
     input.service.close();
   });
 
@@ -1407,7 +1416,7 @@ describe("PaperValidationCampaignService", () => {
        WHERE session_id=?`,
     ).get(qualifying.sessionId)).toEqual({ decision: "KEEP_RUNTIME_REJUDGE_COVERAGE" });
 
-    recordHealthySession(input, requalifying, 3, 1);
+    recordHealthySession(input, requalifying, 3, 1 / 3);
     const afterPolicyChange = input.service.finalizeSession({
       sessionId: requalifying.sessionId,
       outcome: "SAFE_STOP",
@@ -1417,11 +1426,11 @@ describe("PaperValidationCampaignService", () => {
       stopReason: "USER_SAFE_PAUSE_SIGTERM",
       blockers: [],
       coverage: {},
-      stoppedAt: at(4),
+      stoppedAt: atMinute((3 * 60) + 20),
     });
     expect(afterPolicyChange.campaign).toMatchObject({
       qualified: false,
-      accumulatedActiveRuntimeMs: 3 * 60 * 60 * 1_000,
+      accumulatedActiveRuntimeMs: (2 * 60 * 60 * 1_000) + (20 * 60 * 1_000),
       coverageStatus: "INCOMPLETE",
     });
     expect(() => input.service.store.database.prepare(
@@ -1430,7 +1439,7 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
-  it("requires one 12-hour session and reaches 72 hours without mixing paused time", () => {
+  it("requires one continuous session and reaches the cumulative target without mixing paused time", () => {
     const input = fixture();
     const campaign = createCampaign(input);
     const qualifying = startSession(input, campaign.campaignId, 0, "PS-Q72");
@@ -1440,18 +1449,18 @@ describe("PaperValidationCampaignService", () => {
     let startHour = 3;
     for (let sequence = 1; sequence <= 5; sequence += 1) {
       const session = startSession(input, campaign.campaignId, startHour, `PS-LONG-${sequence}`);
-      recordHealthySession(input, session, startHour, 12);
-      finalizeHealthy(input, session, at(startHour + 12));
-      startHour += 13;
+      recordHealthySession(input, session, startHour, 4);
+      finalizeHealthy(input, session, at(startHour + 4));
+      startHour += 5;
     }
     const finalSession = startSession(input, campaign.campaignId, startHour, "PS-LONG-FINAL");
-    expect(finalSession.plannedDurationMs).toBe(10 * 60 * 60 * 1_000);
-    recordHealthySession(input, finalSession, startHour, 10);
-    const result = finalizeHealthy(input, finalSession, at(startHour + 10), completeCoverage());
+    expect(finalSession.plannedDurationMs).toBe(2 * 60 * 60 * 1_000);
+    recordHealthySession(input, finalSession, startHour, 2);
+    const result = finalizeHealthy(input, finalSession, at(startHour + 2), completeCoverage());
     expect(result.campaign).toMatchObject({
       campaignState: "PASSED",
-      accumulatedActiveRuntimeMs: 72 * 60 * 60 * 1_000,
-      longestContinuousRuntimeMs: 12 * 60 * 60 * 1_000,
+      accumulatedActiveRuntimeMs: 24 * 60 * 60 * 1_000,
+      longestContinuousRuntimeMs: 4 * 60 * 60 * 1_000,
       coverageStatus: "COMPLETE",
       canContinue: false,
     });
@@ -1481,7 +1490,7 @@ describe("PaperValidationCampaignService", () => {
     expect(revalidation.sessionKind).toBe("QUALIFYING");
     expect(input.service.campaignSnapshot(campaign.campaignId)).toMatchObject({
       state: "RUNNING",
-      accumulatedActiveRuntimeMs: 72 * 60 * 60 * 1_000,
+      accumulatedActiveRuntimeMs: 24 * 60 * 60 * 1_000,
       latestCompatibilityIdentity: {
         validationPolicyHash: changedPolicy.validationPolicyHash,
         verificationSuiteHash: changedPolicy.verificationSuiteHash,
@@ -1497,7 +1506,7 @@ describe("PaperValidationCampaignService", () => {
     input.service.close();
   });
 
-  it("counts only verified pre-crash runtime and never uses it for the 12-hour continuous gate", () => {
+  it("counts only verified pre-crash runtime and never uses it for the four-hour continuous gate", () => {
     const input = fixture();
     const campaign = createCampaign(input);
     const qualifying = startSession(input, campaign.campaignId, 0, "PS-QCRASH");

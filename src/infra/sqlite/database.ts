@@ -559,6 +559,36 @@ export class Phase0Database {
         throw error;
       }
     }
+    const validationDurationPolicyApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.26.0");
+    if (!validationDurationPolicyApplied) {
+      const validationDurationPolicySql = readFileSync(
+        new URL("./031_validation_duration_policy.sql", import.meta.url),
+        "utf8",
+      );
+      let transactionStarted = false;
+      this.database.exec("PRAGMA foreign_keys=OFF");
+      try {
+        this.database.exec("BEGIN IMMEDIATE");
+        transactionStarted = true;
+        this.database.exec(validationDurationPolicySql);
+        const foreignKeyFailures = this.database.prepare("PRAGMA foreign_key_check").all();
+        if (foreignKeyFailures.length > 0) {
+          throw new Error("MIGRATION_031_FOREIGN_KEY_CHECK_FAILED");
+        }
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.26.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+        transactionStarted = false;
+      } catch (error) {
+        if (transactionStarted) this.database.exec("ROLLBACK");
+        throw error;
+      } finally {
+        this.database.exec("PRAGMA foreign_keys=ON");
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

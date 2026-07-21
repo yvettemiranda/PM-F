@@ -31,7 +31,7 @@
 
 不熟悉命令行时，只使用仓库里的 `操作入口/` 文件夹；旧的 `点这里运行/` 已移除，避免误点失效入口：
 
-1. 双击 `1_开始或继续Paper累计验证.command`。第一次默认最多连续运行 12 小时；满 2 小时记录资格里程碑但不强制重启，继续到 12 小时可同时满足连续门槛。后续继续使用同一个 Campaign 和 1000 pUSD 模拟账户累计验证时间。
+1. 双击 `1_开始或继续Paper累计验证.command`。第一次默认最多连续运行 4 小时；满 40 分钟记录资格里程碑但不强制重启，继续到 4 小时可同时满足连续门槛。后续继续使用同一个 Campaign 和 1000 pUSD 模拟账户累计到 24 小时。
 2. 想暂停或关机时，双击 `2_安全暂停并生成报告.command`。它会停止 Observe、让 Paper 安全收尾，并自动生成报告和诊断 ZIP。
 3. 双击 `3_查看进度和打开最新结果.command`。Finder 会选中应发给 Codex 的最新 ZIP，无需手工寻找数据库或日志。
 
@@ -53,13 +53,13 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。
 
-`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 24 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
+`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
 
-用户已将 24 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
+用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
 
-`validate:final` 必须显式指定同一个 `campaign-id` 和 `session-id`，并通过 SQLite Online Backup 把 `data/phase0/phase0.sqlite` 的一致性快照写入 `data/validation/<validation-session-id>/` 后运行；它不会把旧 Campaign、其他账户或其他目标钱包的数据混进本次结论。源库即使处于 WAL 模式也不会漏掉已提交数据，验证过程不会污染业务库。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；存在未运行项、警告或历史数据不足时，顶层结果明确为 `INCOMPLETE`，不会用 framework session 的 `PASSED` 冒充最终验收通过。无论结果如何，`liveAllowed` 均固定为 `false`。真实资金前仍必须实际执行长周期 Paper Validation、24 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。
+`validate:final` 必须显式指定同一个 `campaign-id` 和 `session-id`，并通过 SQLite Online Backup 把 `data/phase0/phase0.sqlite` 的一致性快照写入 `data/validation/<validation-session-id>/` 后运行；它不会把旧 Campaign、其他账户或其他目标钱包的数据混进本次结论。源库即使处于 WAL 模式也不会漏掉已提交数据，验证过程不会污染业务库。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；存在未运行项、警告或历史数据不足时，顶层结果明确为 `INCOMPLETE`，不会用 framework session 的 `PASSED` 冒充最终验收通过。无论结果如何，`liveAllowed` 均固定为 `false`。真实资金前仍必须实际执行累计 24 小时 Paper Validation、8 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。
 
 `operational:validate` 默认同样使用 SQLite Online Backup 在 `data/operational/<run-id>/` 建立一致性快照，避免污染业务库。可选 `--mode=health_monitor|consistency_monitor|observe_only|paper_validation|crash_recovery`。`consistency_monitor` 和 `crash_recovery` 只有在同时提供 `--campaign-id=PC-... --session-id=PS-...` 时才会运行账户、账本和恢复检查；缺少明确作用域时只记录 `EXPLICIT_CAMPAIGN_SCOPE_REQUIRED`，不会拿全库旧数据冒充本次结论。其中：
 
@@ -68,12 +68,12 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 - `paper_validation` 使用 dedicated Paper validation account 和 fake market data，只验证执行框架，不连接真实盘口或真实交易。
 - `crash_recovery` 只在 snapshot DB 中做事务回滚和恢复检查。
 
-Operational Report 的最高默认状态是 `OPERATIONAL_FRAMEWORK_READY`，并固定 `liveAllowed=false`。它证明“长期运行验证框架已经具备”，不等于 24 小时/7 天 soak 已经完成，也不等于 Live Gate 通过。
+Operational Report 的最高默认状态是 `OPERATIONAL_FRAMEWORK_READY`，并固定 `liveAllowed=false`。它证明“长期运行验证框架已经具备”，不等于 8 小时 soak 已经完成，也不等于 Live Gate 通过。
 
 ## Live 前不可跳过的人工门禁
 
 - 使用干净、已记录 commit 的构建，并在隔离环境重新执行全量测试和迁移演练。
-- 完成 24 小时 Observe、长周期 Paper、Crash Recovery 长测与长期账本/仓位一致性验证。
+- 完成 8 小时 Observe、累计 24 小时 Paper、Crash Recovery 长测与长期账本/仓位一致性验证。
 - 配置专用隔离钱包和系统安全存储中的 signer/凭据；不得把私钥或 seed 写入仓库、环境示例或日志。
 - 使用官方只读 geoblock、时钟、余额、订单、成交、仓位证据；Live 账户本金必须与 Gate 配置一致，风险预算不得超过配置敞口，外部现金必须与 Live ledger 在容差内一致。
 - 由用户再次明确授权，再完成 `LIVE_ARMING` 和精确确认短语；程序不会自动从 Paper 升级到 Live，重启后也不会自动恢复 `LIVE_ACTIVE`。

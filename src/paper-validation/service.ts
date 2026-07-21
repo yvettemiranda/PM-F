@@ -439,8 +439,8 @@ export class PaperValidationCampaignService {
     ));
     const sessionKind = qualifiedForCurrentCompatibility ? "LONG_RUNNING" : "QUALIFYING";
     const defaultDuration = sessionKind === "QUALIFYING"
-      // The first healthy run can satisfy both the two-hour qualification gate
-      // and the twelve-hour continuity gate without an artificial restart.
+      // The first healthy run can satisfy both the 40-minute qualification gate
+      // and the four-hour continuity gate without an artificial restart.
       ? Math.max(snapshot.qualifyingRuntimeMs, snapshot.requiredContinuousRuntimeMs)
       : this.defaultLongSessionDuration(snapshot);
     const plannedDurationMs = input.plannedDurationMs ?? defaultDuration;

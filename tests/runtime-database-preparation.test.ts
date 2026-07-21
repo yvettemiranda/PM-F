@@ -3,7 +3,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ApiCapture } from "../src/adapters/polymarket-public.js";
 import { VERSIONS } from "../src/domain/versioning.js";
+import { Phase0Database } from "../src/infra/sqlite/database.js";
+import { PaperExecutor } from "../src/paper/paper-executor.js";
+import { PublicPaperMarketDataProvider } from "../src/paper/public-market-data.js";
+import {
+  buildCurrentCompatibilityEvidence,
+  buildCurrentCoreCompatibilityManifest,
+} from "../src/paper-validation/core-compatibility.js";
+import { PaperValidationCampaignService } from "../src/paper-validation/service.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import {
   prepareRuntimeDatabase,
@@ -11,6 +20,8 @@ import {
   RUNTIME_SCHEMA_MIGRATION_VERSIONS,
 } from "../src/infra/sqlite/runtime-database-preparation.js";
 import { preparePhase0ValidationDatabase } from "../src/infra/sqlite/phase0-validation-database.js";
+import { buildCaptureManifest, captureIdentity } from "../src/services/capture-manifest.js";
+import { buildPositionBaseline } from "../src/services/position-baseline.js";
 
 const directories: string[] = [];
 const sourceVersion: SourceVersion = { commit: "runtime-preparation-test", dirty: false };
@@ -72,6 +83,76 @@ function createPreviousSchema(path: string): void {
   }
 }
 
+function createLegacyDurationCampaign(databasePath: string): { campaignId: string; sessionId: string } {
+  const timestamp = "2026-07-20T00:00:00.000Z";
+  const walletAddress = "0x00000000000000000000000000000000000000aa";
+  const positionsCapture: ApiCapture<[]> = {
+    url: "https://example.test/positions",
+    fetchedAt: timestamp,
+    latencyMs: 1,
+    status: 200,
+    data: [],
+  };
+  const phase0 = new Phase0Database(databasePath, sourceVersion);
+  const targetId = phase0.ensureTarget(walletAddress, "IDENTITY_CONFIRMED");
+  phase0.saveCapture("data-positions", positionsCapture);
+  const captureManifest = buildCaptureManifest({
+    walletAddress,
+    sampleRole: "TARGET",
+    purpose: "MIGRATION_031_TEST",
+    sourceVersion,
+    sources: [{ endpoint: "data-positions", capture: positionsCapture, paginationStatus: "END_OF_DATA" }],
+  });
+  phase0.saveCaptureManifest(targetId, captureManifest);
+  const baseline = buildPositionBaseline({
+    captureRunId: captureManifest.captureRunId,
+    targetId,
+    walletAddress,
+    positionCaptureId: captureIdentity(positionsCapture).captureId,
+    fetchedAt: timestamp,
+    latencyMs: positionsCapture.latencyMs,
+    positions: [],
+  });
+  phase0.savePositionBaseline(baseline);
+  phase0.close();
+
+  const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), {
+    sourceVersion,
+    now: () => new Date(timestamp),
+  });
+  const accountId = executor.createAccount("Migration 031", 1_000_000_000n, targetId);
+  executor.close();
+
+  const campaignId = "PC-MIGRATION-031";
+  const sessionId = "PS-MIGRATION-031";
+  const coreManifest = buildCurrentCoreCompatibilityManifest(process.cwd());
+  const compatibilityEvidence = buildCurrentCompatibilityEvidence(process.cwd());
+  const service = new PaperValidationCampaignService(databasePath);
+  service.createCampaign({
+    campaignId,
+    targetId,
+    baselineRunId: baseline.baselineRunId,
+    paperAccountId: accountId,
+    requiredActiveRuntimeMs: 72 * 60 * 60 * 1_000,
+    requiredContinuousRuntimeMs: 12 * 60 * 60 * 1_000,
+    qualifyingRuntimeMs: 2 * 60 * 60 * 1_000,
+    coreManifest,
+    compatibilityEvidence,
+    sourceVersion,
+    now: timestamp,
+  });
+  service.startSession({
+    campaignId,
+    sessionId,
+    coreManifest,
+    compatibilityEvidence,
+    sourceVersion,
+    now: timestamp,
+  });
+  service.close();
+  return { campaignId, sessionId };
+}
+
 describe("runtime database preparation", () => {
   it("keeps the current safety-trigger registry synchronized with every migration trigger", () => {
     const sqliteDirectory = join(process.cwd(), "src", "infra", "sqlite");
@@ -125,6 +206,64 @@ describe("runtime database preparation", () => {
       .sort();
     expect(actualVersions).toEqual([...RUNTIME_SCHEMA_MIGRATION_VERSIONS].sort());
     database.close();
+  });
+
+  it("preserves legacy Campaign and Session evidence while relaxing duration constraints", async () => {
+    const root = directory();
+    const databasePath = join(root, "legacy-duration", "phase0.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const identity = createLegacyDurationCampaign(databasePath);
+
+    const legacy = new DatabaseSync(databasePath);
+    const campaignBefore = legacy.prepare(
+      "SELECT * FROM paper_validation_campaigns WHERE campaign_id=?",
+    ).get(identity.campaignId);
+    const sessionBefore = legacy.prepare(
+      "SELECT * FROM paper_validation_sessions WHERE session_id=?",
+    ).get(identity.sessionId);
+    const downgradeSql = readFileSync(
+      new URL("../src/infra/sqlite/031_validation_duration_policy.sql", import.meta.url),
+      "utf8",
+    )
+      .replace("86400000", "259200000")
+      .replace("14400000", "43200000")
+      .replace("2400000", "7200000");
+    legacy.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
+    try {
+      legacy.exec(downgradeSql);
+      legacy.prepare("DELETE FROM schema_migrations WHERE version='2.26.0'").run();
+      expect(legacy.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      legacy.exec("COMMIT");
+    } catch (error) {
+      legacy.exec("ROLLBACK");
+      throw error;
+    } finally {
+      legacy.exec("PRAGMA foreign_keys=ON");
+      legacy.close();
+    }
+
+    const result = await prepareRuntimeDatabase({
+      databasePath,
+      backupDirectory: join(root, "backups"),
+      sourceVersion,
+    });
+    expect(result).toMatchObject({ migrated: true, schemaVersion: "2.26.0" });
+
+    const migrated = new DatabaseSync(databasePath, { readOnly: true });
+    expect(migrated.prepare(
+      "SELECT * FROM paper_validation_campaigns WHERE campaign_id=?",
+    ).get(identity.campaignId)).toEqual(campaignBefore);
+    expect(migrated.prepare(
+      "SELECT * FROM paper_validation_sessions WHERE session_id=?",
+    ).get(identity.sessionId)).toEqual(sessionBefore);
+    expect(migrated.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    const campaignSql = migrated.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='paper_validation_campaigns'",
+    ).get() as { sql: string };
+    expect(campaignSql.sql).toContain("CHECK(required_active_runtime_ms >= 86400000)");
+    expect(campaignSql.sql).toContain("CHECK(required_continuous_runtime_ms >= 14400000)");
+    expect(campaignSql.sql).toContain("CHECK(qualifying_runtime_ms >= 2400000)");
+    migrated.close();
   });
 
   it("rejects a new validation Session whose compatibility identity is NULL", async () => {

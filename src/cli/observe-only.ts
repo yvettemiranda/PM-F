@@ -7,6 +7,7 @@ import { ObserveStore } from "../observe/observe-store.js";
 import { PublicObserveDataSource } from "../observe/public-data-source.js";
 import { PublicSignalMarketMetadataProvider } from "../signal-context/public-market-metadata.js";
 import { marketClockOffsetIsValid } from "../execution/market-data.js";
+import { PAPER_VALIDATION_FINAL_OBSERVE_MS } from "../paper-validation/types.js";
 
 const args = process.argv.slice(2);
 const address = args.find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
@@ -19,7 +20,7 @@ const numberArg = (name: string, fallback: number): number => {
 };
 const durationSeconds = numberArg("duration-seconds", 0);
 const pollSeconds = numberArg("poll-seconds", 15);
-const minimumSoakSeconds = numberArg("minimum-soak-seconds", 24 * 60 * 60);
+const minimumSoakSeconds = numberArg("minimum-soak-seconds", PAPER_VALIDATION_FINAL_OBSERVE_MS / 1_000);
 const valueArg = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
 const marketClockOffsetText = valueArg("market-clock-offset-ms") ?? "0";
 const marketClockOffsetMs = Number(marketClockOffsetText);

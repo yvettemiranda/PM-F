@@ -1,18 +1,18 @@
 # Bugs And Risks
 
 ## Active blockers
-- 修复后的新核心尚未执行自然 Paper Campaign，因此资格、连续 12 小时、累计 72 小时和最终 24 小时 Observe 均未通过。
+- 修复后的新核心尚未执行自然 Paper Campaign，因此 40 分钟资格、连续 4 小时、累计 24 小时和最终 8 小时 Observe 均未通过。
 - 最新旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已安全暂停；约 44.12 小时只保留为旧核心历史证据，修复后 replacement 必须从 0 开始。
 - 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景仍需长期运行或明确标注的同版本隔离证据；不能伪装成自然行情。
 - Live 所需长期稳定、geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
 ## Active risks
-- 当前 Live 严格禁用。BUY 策略的 Paper/隔离 Live 代码与回归已对齐，但这不替代自然 72 小时 Paper、场景覆盖、最终 24 小时 Observe、geoblock/compliance、隔离钱包和真实 signer 的后续验证与再次授权。
+- 当前 Live 严格禁用。BUY 策略的 Paper/隔离 Live 代码与回归已对齐，但这不替代自然 24 小时 Paper、场景覆盖、最终 8 小时 Observe、geoblock/compliance、隔离钱包和真实 signer 的后续验证与再次授权。
 - Data API 历史 offset 限制和相邻页边界重复仍可能发生；只有另一独立公开接口精确确认 multiplicity 才能核销，否则继续阻断。
 - Positions 与 Trades/Activity 可能短暂不同步；同一差异连续达到阈值且持续满 120 秒仍升级 `MAJOR_DESYNC`。
 - CLOB `/time` 偏移在 Session 内固定；运行中系统时钟继续漂移时，订单簿安全检查必须 fail closed。
 - Settlement resolution 是公开网络依赖；持久化退避减少请求风暴，但不能保证外部接口及时恢复。
-- `node:sqlite` 在 Node 24 仍有 experimental warning，长期稳定性只能由 12/72 小时自然 Campaign 证明。
+- `node:sqlite` 在 Node 24 仍有 experimental warning，长期稳定性仍需由 4/24 小时自然 Campaign 证明。
 - 真实数据库约 1.3GB；当前去重/压缩可控，但历史证据不可破坏性压缩，长跑后仍需观察增长率。
 - 公开 HTTP 响应没有服务器数字签名；当前只能证明官方 URL、内容寻址、本地 append-only capture 与解析一致。
 

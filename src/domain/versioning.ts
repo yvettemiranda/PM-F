@@ -3,15 +3,15 @@ import { stableJson } from "./canonical-json.js";
 export { stableJson } from "./canonical-json.js";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.25.0",
+  schemaVersion: "2.26.0",
   signalVersion: "1.5.0",
   strategyVersion: "2.2.0",
   riskVersion: "1.6.0",
   replayVersion: "1.8.0",
   paperVersion: "1.6.0",
   liveVersion: "1.6.0",
-  validationVersion: "1.2.0",
-  operationalVersion: "1.2.0",
+  validationVersion: "1.3.0",
+  operationalVersion: "1.3.0",
   rulesetVersion: "v1.5.0",
   feeModelVersion: "clob-fd-v1",
   configVersion: "v1.3.0",
