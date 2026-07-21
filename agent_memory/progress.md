@@ -1,6 +1,7 @@
 # Progress
 
 ## Current task
+- 2026-07-21 已核验诊断包 `Paper累计验证_PC-0969675B1A77CA978A5B_PS-AFA27860811094DDA3C8_20260721-145028-80432.zip`：首个新核心 4 小时 Session 正常完成，无 blocker，不需要代码修复。
 - 2026-07-21 用户明确要求推进到最终 Live 准备阶段，将所有验证等待时间统一压缩为原来的三分之一：资格 2 小时→40 分钟、连续 12 小时→4 小时、累计 72 小时→24 小时、最终 Observe 24 小时→8 小时。
 - 只压缩验证门槛，不修改请求超时、订单簿新鲜度、重试退避、对账宽限等交易安全计时；Live 继续禁用。
 - 2026-07-21 用户进一步明确：所有测试最终服务于 Live，Paper 与未来 Live 对同一 BUY 策略必须端到端一致，不能把 Live 市场最低额抬升留作以后处理；该端到端补齐已完成。
@@ -43,10 +44,13 @@
 - Artifact provenance：`1eb3c0703da723b8a5a891e705acb54f202425da2afc8c4a46c25900cad64e23`。
 
 ## Runtime state before handoff
-- 真实业务库 Schema `2.25.0`，最新旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 为 `PAUSED`，active Reservation 为 0。
-- 运行模式保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；本轮实现期间没有启动累计验证进程。
+- 真实业务库 Schema `2.26.0`；新核心 Campaign `PC-0969675B1A77CA978A5B` 为 `PAUSED`，资格已通过，累计/最长连续均为 `14,400,006ms`，active Reservation 为 0。
+- 首个 Session `PS-AFA27860811094DDA3C8` 为 `COMPLETED/AUTO_STOP`，`countsTowardCampaign=true`，无 blocker；隔离验证 48 文件/603 测试通过。
+- 本次自然数据只有 42 个 SELL、没有 BUY，因无新核心 tracked BUY 仓位而正确不生成 SELL Signal；Signal/Order/Fill 均为 0。
+- Observe 最终 `SYNCED`；18 次失败轮询和 6 次 `MINOR_DIFF` 均已恢复，Gap、MAJOR_DESYNC、调度缺口和未恢复连接均为 0。
+- 运行模式保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；当前没有累计验证进程。
 
 ## Next steps
-1. 用户下一次双击“1_开始或继续Paper累计验证.command”；入口先备份并迁移数据库，再因核心变化创建 replacement Campaign，从 0 开始累计。
-2. 新核心先完成 40 分钟资格和至少一次连续 4 小时，再累计 24 小时、补齐关键场景覆盖，最后完成同版本 8 小时 Observe。
-3. 完成上述自然验证、真实 Live 合规/geoblock/隔离钱包/signer 设计和用户再次明确授权前，继续保持 `LIVE_DISABLED`。
+1. 用户下一次双击“1_开始或继续Paper累计验证.command”，继续同一新核心 Campaign；每次最多 4 小时，当前累计约 4/24 小时。
+2. 累计到 24 小时并等待自然 BUY 形成 `ORDER/FILL/POSITION_UPDATE/FEE/PnL` 场景；如自然行情仍未覆盖，再基于明确证据讨论剩余场景，不重置已验证时长。
+3. 完成同版本 8 小时 Observe；上述自然验证、真实 Live 合规/geoblock/隔离钱包/signer 设计和用户再次明确授权完成前，继续保持 `LIVE_DISABLED`。

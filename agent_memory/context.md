@@ -19,7 +19,7 @@
 
 ## Current implementation baseline
 - 当前代码 Schema 为 `2.26.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
-- 真实业务库仍为 Schema `2.25.0` 且安全暂停；下一次正式启动会先自动备份，再迁移到 `2.26.0`，旧 Campaign/Session 证据逐列保留。
+- 真实业务库已完成 backup-first 迁移并处于 Schema `2.26.0`；旧 Campaign/Session 证据逐列保留。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
 - Session 时长、4/24 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
 - Observe 使用固定频率调度，AbortSignal 贯穿公开请求、分页和退避；恢复只抓 cursor 之后的增量历史。
@@ -31,10 +31,12 @@
 - scoped invariants 复用实体扫描并批量核对 transition audit；历史数据库不做破坏性压缩或覆盖。
 
 ## Current runtime and Campaign
-- 2026-07-21 最新 Campaign：`PC-94D81ECAD5EF89852D2A`，共完成 4 个 Session；最新 Session `PS-036F2727330B179A458F` 达到计划 12 小时后正常完成。
-- 该 Campaign 当前为 `PAUSED`，累计有效运行 `158,829,517ms`（约 44.12 小时），包含 3 次完整连续 12 小时和 1 次用户安全暂停；历史证据必须保留。
-- 最新 Session 暴露 BUY 高价边界与极小比例金额策略缺口。用户已确认新规则会改变核心语义，因此修复后的新核心必须创建 replacement Campaign 并从 0 累计，旧 44.12 小时不得混算。
-- 真实业务库 Schema 为 `2.25.0`；`PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
+- 2026-07-21 新核心 Campaign：`PC-0969675B1A77CA978A5B`；首个 Session `PS-AFA27860811094DDA3C8` 按计划运行满 4 小时并自动安全结束。
+- 当前 Campaign 为 `PAUSED`，已资格通过，累计/最长连续均为 `14,400,006ms`，完成 Session 数为 1，无 blocker，可继续；累计目标为 24 小时，尚余约 20 小时。
+- 本次 Observe 成功轮询 942 次、失败 18 次，处理 42 个目标 SELL、没有 BUY；这些 SELL 之前没有本 Campaign 跟随产生的 tracked BUY 仓位，因此按“不补停机历史、不卖旧仓”规则不生成 Signal。最终 `SYNCED`，Gap/MAJOR_DESYNC/调度缺口均为 0。
+- 自然执行漏斗仍为 Signal 0、Order 0、Fill 0；Campaign 尚缺 `ORDER/FILL/POSITION_UPDATE/FEE/REALIZED_PNL/UNREALIZED_PNL`，需后续自然 BUY 才可能补齐。
+- 旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已 `FROZEN` 并只读保留约 44.12 小时历史证据，不与新核心混算。
+- 真实业务库为 Schema `2.26.0`；`PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
 
 ## Confirmed BUY policy for next core
 - 规则值进入不可变 ruleset snapshot，不写成分散魔法数；当前默认：首开最低 `1 pUSD`、市场最低额自动抬升上限 `5 pUSD`、BUY 最高价格 `0.95`。
@@ -47,6 +49,6 @@
 ## Operator workflow
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
-- 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；下一次正式启动可开始新核心累计验证。
-- 修复完成后的下一次正式启动会按核心变化冻结旧 Campaign 的后续累计资格并创建 replacement；建议新 Campaign 第一次连续运行满 4 小时。
+- 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；新核心累计验证已经开始。
+- 首个 4 小时 Session 已同时完成 40 分钟资格和连续 4 小时门槛；下一次启动会继续同一 Campaign 累计，不会重建或清零。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

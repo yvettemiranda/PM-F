@@ -1,9 +1,9 @@
 # Bugs And Risks
 
 ## Active blockers
-- 修复后的新核心尚未执行自然 Paper Campaign，因此 40 分钟资格、连续 4 小时、累计 24 小时和最终 8 小时 Observe 均未通过。
-- 最新旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已安全暂停；约 44.12 小时只保留为旧核心历史证据，修复后 replacement 必须从 0 开始。
-- 自然 SELL、Partial Fill、Stop Loss、Settlement/Redeem 等稀有场景仍需长期运行或明确标注的同版本隔离证据；不能伪装成自然行情。
+- 新核心已通过 40 分钟资格及连续 4 小时门槛，但累计仅约 4/24 小时，最终 8 小时 Observe 尚未执行。
+- 新 Campaign 尚未出现自然 BUY，因此自然 Signal/Order/Fill/Position/Fee/PnL 为 0；当前缺 `ORDER/FILL/POSITION_UPDATE/FEE/REALIZED_PNL/UNREALIZED_PNL`。同核心隔离证据已覆盖多数稀有逻辑，但不能伪装成自然成交。
+- 旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已冻结；约 44.12 小时只保留为历史证据，不得混入新 Campaign。
 - Live 所需长期稳定、geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
 ## Active risks
