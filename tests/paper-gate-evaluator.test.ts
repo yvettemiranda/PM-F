@@ -126,6 +126,26 @@ describe("evaluatePaperShortGate", () => {
     }
   });
 
+  it("treats an internal BUY order-constraint input error as a validation blocker", () => {
+    const report = acceptance("EXECUTION_PRECONDITION_REJECTED");
+    report.funnel.execution.rejectedBeforeOrder = 1;
+    report.funnel.execution.rejectedBeforeOrderReasons = { BUY_ORDER_CONSTRAINT_INPUT_INVALID: 1 };
+    const decision = evaluatePaperShortGate({
+      durationMs: 7_200_000,
+      minimumDurationMs: 7_170_000,
+      finalValuationComplete: true,
+      runnerErrorCount: 0,
+      versionsMatch: true,
+      safety: safe,
+      acceptance: report,
+      supplementalEvidence: [{ source: "ISOLATED_CONTROLLED", status: "PASSED", artifactHash: "b".repeat(64), versionsMatch: true }],
+    });
+    expect(decision.status).toBe("SHORT_RUNTIME_FAILED");
+    expect(decision.blockingReasons).toContain(
+      "SIZING_OR_INTEGRITY_FAILURE:BUY_ORDER_CONSTRAINT_INPUT_INVALID",
+    );
+  });
+
   it("keeps an audited below-account-precision rejection eligible for supplemental coverage", () => {
     const report = acceptance("RISK_REJECTED");
     report.funnel.risk = {

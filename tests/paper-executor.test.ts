@@ -7,7 +7,11 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
 import { EXECUTOR_REQUIRED_CONTEXT_FIELDS } from "../src/execution/types.js";
-import { buildExactCapitalRatio, capitalSizingHash } from "../src/execution/capital-sizing.js";
+import {
+  buildExactCapitalRatio,
+  capitalSizingHash,
+  type BuyCapitalSizingDecision,
+} from "../src/execution/capital-sizing.js";
 import type { MarketOrderConstraintEvidence } from "../src/execution/market-order-constraints.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
@@ -567,7 +571,7 @@ afterEach(() => {
 });
 
 describe("PaperExecutor", () => {
-  it("preserves the real sub-1-ppm amount, then rejects it at CLOB amount precision without an order or fill", async () => {
+  it("keeps the exact proportional evidence but lifts a first entry to the actual market minimum", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = {
       ...env.market.book,
@@ -586,7 +590,7 @@ describe("PaperExecutor", () => {
       },
     });
     const executionId = await env.executor.consumeSignal(env.accountId, "buy-sub-ppm");
-    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
 
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const execution = db.prepare(
@@ -604,28 +608,76 @@ describe("PaperExecutor", () => {
        WHERE risk_decision_id=(SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?)`,
     ).get(executionId) as { capital_sizing_decision_json: string };
     expect(execution).toEqual({
-      requested_amount_micros: "974",
-      reason: "ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION",
+      requested_amount_micros: "2550000",
+      reason: "FAK_FILLED",
     });
-    expect(reservation).toEqual({ status: "RELEASED", remaining_amount_micros: "0" });
+    expect(reservation).toEqual({ status: "CONSUMED", remaining_amount_micros: "0" });
     expect(constraint).toMatchObject({
-      check_result: "REJECT",
-      reason: "ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION",
-      proposed_amount_micros: "974",
-      normalized_order_amount_micros: "0",
+      check_result: "PASS",
+      reason: "MARKET_MIN_ORDER_SIZE_SATISFIED",
+      proposed_amount_micros: "2550000",
+      normalized_order_amount_micros: "2550000",
     });
     expect(JSON.parse(risk.capital_sizing_decision_json).calculatedAmountMicros).toBe("974");
-    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
-    expect(db.prepare("SELECT count(*) count FROM paper_fill_ledger").get()).toEqual({ count: 0 });
-    expect(db.prepare("SELECT count(*) count FROM paper_positions").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT requested_amount_micros FROM risk_decisions WHERE risk_decision_id=(SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?)").get(executionId))
+      .toEqual({ requested_amount_micros: "2550000" });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) count FROM paper_fill_ledger").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) count FROM paper_positions").get()).toEqual({ count: 1 });
     db.close();
     const snapshot = await env.executor.accountSnapshot(env.accountId);
-    expect(snapshot.cashBalanceMicros).toBe("1000000000");
+    expect(BigInt(snapshot.cashBalanceMicros)).toBeLessThan(1_000_000_000n);
     expect(snapshot.reservedBalanceMicros).toBe("0");
+    const acceptance = env.executor.acceptanceSummary(env.accountId, {
+      startAt: "2026-07-08T00:00:00.000Z",
+      endAt: "2026-07-08T00:00:02.000Z",
+    });
+    expect(acceptance.funnel.risk.allow).toBe(1);
+    expect(acceptance.funnel.capital.sizingDecisionCount).toBe(1);
     env.executor.close();
   });
 
-  it("rejects a BUY below min_order_size and releases its reservation without fabricating an order", async () => {
+  it("uses the first-entry minimum when a positive exact ratio rounds below one pUSD micro", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.1", size: "1000" }],
+      [{ price: "0.1", size: "1000" }],
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-below-account-micro",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      exactSizing: {
+        targetPriceUnits: "100000000000000000",
+        targetSizeMicros: "1",
+        targetVisibleCapitalMicros: "999999999999999999",
+      },
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-below-account-micro");
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.requested_amount_micros,r.requested_amount_micros risk_amount,
+              r.capital_sizing_decision_json
+       FROM paper_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(executionId)).toMatchObject({ requested_amount_micros: "1000000", risk_amount: "1000000" });
+    const sizing = JSON.parse((db.prepare(
+      `SELECT r.capital_sizing_decision_json value
+       FROM paper_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(executionId) as { value: string }).value) as BuyCapitalSizingDecision;
+    expect(sizing).toMatchObject({
+      result: "REJECTED",
+      reason: "PROPORTIONAL_AMOUNT_BELOW_ACCOUNT_PRECISION",
+      calculatedAmountMicros: "0",
+    });
+    db.close();
+    env.executor.close();
+  });
+
+  it("lifts an eligible first entry to min_order_size when the required amount is within the configured cap", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
     insertSignal({
@@ -636,15 +688,141 @@ describe("PaperExecutor", () => {
       ratioPpm: "1000",
     });
     const executionId = await env.executor.consumeSignal(env.accountId, "buy-below-market-min");
-    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const evidence = db.prepare(
       "SELECT reason,derived_min_notional_micros FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
     ).get(executionId) as { reason: string; derived_min_notional_micros: string };
-    expect(evidence).toEqual({ reason: "BELOW_MARKET_MIN_ORDER_SIZE", derived_min_notional_micros: "2550000" });
-    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
+    expect(evidence).toEqual({ reason: "MARKET_MIN_ORDER_SIZE_SATISFIED", derived_min_notional_micros: "2550000" });
+    expect(db.prepare("SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?").get(executionId))
+      .toEqual({ requested_amount_micros: "2550000" });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT status FROM paper_reservations WHERE paper_execution_id=?").get(executionId))
-      .toEqual({ status: "RELEASED" });
+      .toEqual({ status: "CONSUMED" });
+    db.close();
+    env.executor.close();
+  });
+
+  it("does not apply the minimum again while the asset already has a Paper position", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "existing-position-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "existing-position-buy");
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "existing-position-tiny-buy",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "2460160",
+        targetVisibleCapitalMicros: "1261997070000",
+      },
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "existing-position-tiny-buy");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const rejected = db.prepare(
+      "SELECT requested_amount_micros,reason FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId) as { requested_amount_micros: string; reason: string };
+    expect(BigInt(rejected.requested_amount_micros)).toBeLessThan(1_000_000n);
+    expect(rejected.reason).toBe("ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION");
+    expect(db.prepare("SELECT count(*) count FROM paper_positions").get()).toEqual({ count: 1 });
+    db.close();
+    env.executor.close();
+  });
+
+  it("does not apply the first-entry minimum to a second BUY while the first entry is still pending", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    const exactSizing = {
+      targetPriceUnits: "500000000000000000",
+      targetSizeMicros: "2460160",
+      targetVisibleCapitalMicros: "1261997070000",
+    };
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-first-entry", createdAt: "2026-07-08T00:00:01.000Z", exactSizing });
+    const first = await env.executor.consumeSignal(env.accountId, "pending-first-entry");
+    expect(env.executor.executionState(first)).toBe("WAITING_EXECUTION");
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-second-entry", createdAt: "2026-07-08T00:00:02.000Z", exactSizing });
+    const second = await env.executor.consumeSignal(env.accountId, "pending-second-entry");
+    expect(env.executor.executionState(second)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const rows = db.prepare(
+      "SELECT paper_execution_id,requested_amount_micros FROM paper_executions ORDER BY created_at,paper_execution_id",
+    ).all() as Array<{ paper_execution_id: string; requested_amount_micros: string }>;
+    expect(rows.find((row) => row.paper_execution_id === first)?.requested_amount_micros).toBe("2550000");
+    expect(BigInt(rows.find((row) => row.paper_execution_id === second)!.requested_amount_micros)).toBeLessThan(1_000_000n);
+    db.close();
+    env.executor.close();
+  });
+
+  it("allows the minimum again after the prior position has been fully closed", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "cycle-open", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "cycle-open");
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "cycle-close", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "1", createdAt: "2026-07-08T00:00:02.000Z" });
+    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "cycle-close"))).toBe("EXECUTED");
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "cycle-reopen-tiny",
+      createdAt: "2026-07-08T00:00:03.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "2460160",
+        targetVisibleCapitalMicros: "1261997070000",
+      },
+    });
+    const reopened = await env.executor.consumeSignal(env.accountId, "cycle-reopen-tiny");
+    expect(env.executor.executionState(reopened)).toBe("EXECUTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?").get(reopened))
+      .toEqual({ requested_amount_micros: "2550000" });
+    expect(db.prepare("SELECT count(*) count FROM paper_positions WHERE CAST(current_size_micros AS INTEGER)>0").get())
+      .toEqual({ count: 1 });
+    db.close();
+    env.executor.close();
+  });
+
+  it("rejects rather than auto-lifting when the actual market minimum would exceed 5 pUSD", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = { ...env.market.book, minOrderSize: "11", tickSize: "0.01" };
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "market-min-over-cap", createdAt: "2026-07-08T00:00:01.000Z", ratioPpm: "1000" });
+    const executionId = await env.executor.consumeSignal(env.accountId, "market-min-over-cap");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT requested_amount_micros,reason FROM paper_executions WHERE paper_execution_id=?").get(executionId))
+      .toEqual({ requested_amount_micros: "1000000", reason: "BUY_MARKET_MINIMUM_ABOVE_AUTO_LIFT_CAP" });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
+    db.close();
+    env.executor.close();
+  });
+
+  it("rejects a target BUY above 0.95 before creating a reservation", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "target-price-over-cap", createdAt: "2026-07-08T00:00:01.000Z", targetPriceUnits: "951000000000000000" });
+    const executionId = await env.executor.consumeSignal(env.accountId, "target-price-over-cap");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT reason FROM paper_executions WHERE paper_execution_id=?").get(executionId))
+      .toEqual({ reason: "TARGET_BUY_PRICE_ABOVE_MAX" });
+    expect(db.prepare("SELECT count(*) count FROM paper_reservations").get()).toEqual({ count: 0 });
+    db.close();
+    env.executor.close();
+  });
+
+  it("caps the BUY limit at 0.95 and skips immediately when the best current ask is higher", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([{ price: "0.96", size: "1000" }], [{ price: "0.95", size: "1000" }]);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "current-price-over-cap", createdAt: "2026-07-08T00:00:01.000Z", targetPriceUnits: "940000000000000000" });
+    const executionId = await env.executor.consumeSignal(env.accountId, "current-price-over-cap");
+    expect(env.executor.executionState(executionId)).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT price_limit_upper_units,reason FROM paper_executions WHERE paper_execution_id=?").get(executionId))
+      .toEqual({ price_limit_upper_units: "950000000000000000", reason: "BUY_EXECUTION_PRICE_ABOVE_MAX" });
+    expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
     db.close();
     env.executor.close();
   });
@@ -2186,6 +2364,38 @@ describe("PaperExecutor", () => {
     expect(row.risk_decision_id).toBe(risk.riskDecisionId);
     expect(count(env.databasePath, "risk_decisions")).toBe(1);
     db.close();
+    env.executor.close();
+  });
+
+  it("does not reuse a pre-approved BUY Risk Decision for the pre-floor amount", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "interface-risk-pre-floor",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      ratioPpm: "1",
+    });
+    const signal = loadPaperSignal(env.databasePath, "interface-risk-pre-floor");
+    const riskDb = new DatabaseSync(env.databasePath);
+    const risk = new RiskManager(riskDb, sourceVersion).evaluate({
+      mode: "PAPER",
+      accountId: env.accountId,
+      signal,
+      requestedAmountMicros: 1_000n,
+      requestedSizeMicros: null,
+      now: "2026-07-08T00:00:00.000Z",
+    });
+    riskDb.close();
+
+    await expect(env.executor.executeBuy({
+      accountId: env.accountId,
+      signal,
+      context: signal.context!,
+      riskDecisionId: risk.riskDecisionId,
+    })).rejects.toThrow("PAPER_PREAPPROVED_RISK_AMOUNT_MISMATCH");
+    expect(count(env.databasePath, "paper_executions")).toBe(0);
+    expect(count(env.databasePath, "paper_reservations")).toBe(0);
     env.executor.close();
   });
 

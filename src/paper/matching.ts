@@ -1,4 +1,5 @@
 export {
+  bestExecutionAskPriceUnits,
   executableSellVwap,
   matchExecutionBuy,
   matchExecutionSell,

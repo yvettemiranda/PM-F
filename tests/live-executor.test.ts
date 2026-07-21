@@ -1249,6 +1249,65 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("caps the Live BUY band at 0.95 and rejects when the current best ask is higher", async () => {
+    const env = setup();
+    const capped = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-current-price-over-cap",
+      riskDecisionId: "risk-live-current-price-over-cap",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      targetPriceUnits: "940000000000000000",
+    });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.96", size: "1000" }],
+      }),
+    });
+    const result = await executor.executeBuy({
+      accountId,
+      signal: capped.signal,
+      context: capped.context,
+      riskDecisionId: "risk-live-current-price-over-cap",
+    });
+    expect(result.state).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT outcome,reason,upper_price_units FROM live_market_checks WHERE live_execution_id=?").get(result.executionId))
+      .toEqual({ outcome: "REJECT", reason: "BUY_EXECUTION_PRICE_ABOVE_MAX", upper_price_units: "950000000000000000" });
+    expect(db.prepare("SELECT count(*) count FROM live_orders WHERE live_execution_id=?").get(result.executionId))
+      .toEqual({ count: 0 });
+    db.close();
+    executor.close();
+  });
+
+  it("rejects a Live target BUY above 0.95 even if a prebuilt test Risk Decision says ALLOW", async () => {
+    const env = setup();
+    const high = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-target-price-over-cap",
+      riskDecisionId: "risk-live-target-price-over-cap",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      targetPriceUnits: "951000000000000000",
+    });
+    const executor = liveExecutor(env.databasePath);
+    const result = await executor.executeBuy({
+      accountId,
+      signal: high.signal,
+      context: high.context,
+      riskDecisionId: "risk-live-target-price-over-cap",
+    });
+    expect(result.state).toBe("REJECTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT reason FROM live_executions WHERE live_execution_id=?").get(result.executionId))
+      .toEqual({ reason: "TARGET_BUY_PRICE_ABOVE_MAX" });
+    expect(db.prepare("SELECT count(*) count FROM live_orders WHERE live_execution_id=?").get(result.executionId))
+      .toEqual({ count: 0 });
+    db.close();
+    executor.close();
+  });
+
   it("keeps a TARGET_SELL in EXIT_PENDING when full-depth bids breach the 10% slippage floor", async () => {
     const env = setup();
     const buyer = liveExecutor(env.databasePath);
@@ -1530,6 +1589,27 @@ describe("LiveExecutor", () => {
       "SELECT last_signal_id FROM live_consumer_checkpoints WHERE live_account_id=?",
     ).get(accountId) as { last_signal_id: string };
     expect(checkpoint.last_signal_id).toBe(sell.signal.signalId);
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("derives the configurable 1 pUSD first-entry minimum before Live risk and reservation", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+    expect(result).toMatchObject({ state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.requested_amount_micros execution_amount,r.requested_amount_micros risk_amount
+       FROM live_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.live_execution_id=?`,
+    ).get(result!.executionId)).toEqual({ execution_amount: "1000000", risk_amount: "1000000" });
+    const checks = JSON.parse((db.prepare(
+      `SELECT checks_json FROM risk_decisions WHERE risk_decision_id=?`,
+    ).get(result!.riskDecisionId) as { checks_json: string }).checks_json) as Array<{ name: string; detail?: string }>;
+    expect(checks.find((check) => check.name === "buy_amount_policy")?.detail).toContain("FIRST_ENTRY_MINIMUM_APPLIED");
     db.close();
     consumer.close();
     executor.close();

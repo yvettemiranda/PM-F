@@ -10,6 +10,10 @@ import {
   isBuyCapitalSizingDecisionValid,
   type BuyCapitalSizingDecision,
 } from "../execution/capital-sizing.js";
+import {
+  isBuyAmountPolicyDecisionValid,
+  type BuyAmountPolicyDecision,
+} from "../execution/buy-amount-policy.js";
 
 const PPM = 1_000_000n;
 
@@ -30,6 +34,8 @@ export interface RiskEvaluationInput {
   requestedAmountMicros: bigint | null;
   requestedSizeMicros: bigint | null;
   capitalSizingDecision?: BuyCapitalSizingDecision | null;
+  buyAmountPolicyDecision?: BuyAmountPolicyDecision | null;
+  replacingReservedAmountMicros?: bigint;
   now: string;
 }
 
@@ -154,6 +160,16 @@ export class RiskManager {
     }
 
     if (input.signal.signalType === "TARGET_BUY") {
+      let targetBuyPrice: bigint;
+      try {
+        targetBuyPrice = BigInt(input.signal.targetPriceUnits);
+      } catch {
+        return fail("target_buy_price", "TARGET_BUY_PRICE_INVALID");
+      }
+      if (targetBuyPrice > registeredRules.buyMaximumPriceUnits) {
+        return fail("target_buy_price", "TARGET_BUY_PRICE_ABOVE_MAX");
+      }
+      pass("target_buy_price", `${targetBuyPrice}/${registeredRules.buyMaximumPriceUnits}`);
       const capital = input.signal.capitalDecision;
       if (!capital || capital.confidence === "LOW" || capital.status === "FAILED") {
         return fail("capital_decision", "CAPITAL_CONFIDENCE_LOW");
@@ -168,7 +184,24 @@ export class RiskManager {
           return fail("capital_sizing", "CAPITAL_SIZING_EVIDENCE_HASH_MISMATCH");
         }
         const sizedAmount = input.capitalSizingDecision.calculatedAmountMicros;
-        if (
+        const amountPolicy = input.buyAmountPolicyDecision ?? null;
+        if (amountPolicy) {
+          if (!isBuyAmountPolicyDecisionValid(amountPolicy)) {
+            return fail("buy_amount_policy", "BUY_AMOUNT_POLICY_EVIDENCE_HASH_MISMATCH");
+          }
+          if (
+            amountPolicy.calculatedAmountMicros !== sizedAmount
+            || amountPolicy.firstEntryMinimumAmountMicros
+              !== registeredRules.buyFirstEntryMinimumAmountMicros.toString()
+            || amountPolicy.marketMinimumAutoLiftCapMicros
+              !== registeredRules.buyMarketMinimumAutoLiftCapMicros.toString()
+          ) return fail("buy_amount_policy", "BUY_AMOUNT_POLICY_RULESET_MISMATCH");
+          if (
+            input.requestedAmountMicros === null
+            || amountPolicy.finalAmountMicros !== input.requestedAmountMicros.toString()
+          ) return fail("buy_amount_policy", "BUY_AMOUNT_POLICY_AMOUNT_MISMATCH");
+          pass("buy_amount_policy", stableJson(amountPolicy));
+        } else if (
           input.requestedAmountMicros !== null
           && sizedAmount !== input.requestedAmountMicros.toString()
         ) return fail("capital_sizing", "CAPITAL_SIZING_AMOUNT_MISMATCH");
@@ -180,7 +213,12 @@ export class RiskManager {
           input.capitalSizingDecision?.reason ?? "BUY_AMOUNT_UNAVAILABLE",
         );
       }
-      const available = account.cashBalanceMicros - account.reservedBalanceMicros;
+      const reservationCredit = input.replacingReservedAmountMicros ?? 0n;
+      if (reservationCredit < 0n || reservationCredit > account.reservedBalanceMicros) {
+        return fail("reservation_credit", "RISK_RESERVATION_CREDIT_INVALID");
+      }
+      if (reservationCredit > 0n) pass("reservation_credit", reservationCredit.toString());
+      const available = account.cashBalanceMicros - account.reservedBalanceMicros + reservationCredit;
       if (input.requestedAmountMicros > available) return fail("account_balance", "INSUFFICIENT_AVAILABLE_CASH");
       pass("account_balance");
       const limitRejection = input.mode === "LIVE"
@@ -257,6 +295,8 @@ export class RiskManager {
       input.requestedAmountMicros?.toString() ?? "NONE",
       input.requestedSizeMicros?.toString() ?? "NONE",
       input.capitalSizingDecision?.evidenceHash ?? "NO_CAPITAL_SIZING_EVIDENCE",
+      input.buyAmountPolicyDecision?.evidenceHash ?? "NO_BUY_AMOUNT_POLICY_EVIDENCE",
+      input.replacingReservedAmountMicros?.toString() ?? "NO_RESERVATION_CREDIT",
       decision,
       riskReason,
       stableJson(checks),

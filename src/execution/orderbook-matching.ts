@@ -140,6 +140,10 @@ export function executableSellVwap(bids: ExecutionOrderbookLevel[], requestedSiz
   return matched.complete && matched.vwapPriceUnits !== null ? BigInt(matched.vwapPriceUnits) : null;
 }
 
+export function bestExecutionAskPriceUnits(asks: ExecutionOrderbookLevel[]): bigint | null {
+  return parsed(asks, false)[0]?.price ?? null;
+}
+
 // Backwards-compatible Paper names. The implementation is deliberately shared
 // so future Live planning never calls a Paper executor or Paper state machine.
 export const matchPaperBuy = matchExecutionBuy;

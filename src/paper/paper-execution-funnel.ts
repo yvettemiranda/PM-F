@@ -187,10 +187,12 @@ export function buildPaperExecutionFunnel(
   const gapSignals = ineligibleSignals.filter((row) => row.execution_block_reason === "GAP_EVENT");
 
   const riskRows = database.prepare(
-    `SELECT decision,risk_reject_reason,capital_sizing_decision_json,capital_sizing_decision_hash
-     FROM risk_decisions
-     WHERE executor_mode='PAPER' AND paper_account_id=? AND created_at>=? AND created_at<=?
-     ORDER BY created_at,risk_decision_id`,
+    `SELECT rd.decision,rd.risk_reject_reason,rd.capital_sizing_decision_json,
+            rd.capital_sizing_decision_hash
+     FROM paper_executions e
+     JOIN risk_decisions rd ON rd.risk_decision_id=e.risk_decision_id
+     WHERE e.paper_account_id=? AND e.created_at>=? AND e.created_at<=?
+     ORDER BY e.created_at,e.paper_execution_id`,
   ).all(paperAccountId, startAt, windowEndAt) as unknown as Array<{
     decision: "ALLOW" | "REJECT";
     risk_reject_reason: string | null;
@@ -267,9 +269,11 @@ export function buildPaperExecutionFunnel(
   const risksForSignalType = (signalType: "TARGET_BUY" | "TARGET_SELL"): { allow: number; reject: number } => {
     const rows = database.prepare(
       `SELECT rd.decision,count(*) count
-       FROM risk_decisions rd JOIN signals s ON s.signal_id=rd.signal_id
-       WHERE rd.executor_mode='PAPER' AND rd.paper_account_id=? AND s.signal_type=?
-         AND rd.created_at>=? AND rd.created_at<=?
+       FROM paper_executions e
+       JOIN risk_decisions rd ON rd.risk_decision_id=e.risk_decision_id
+       JOIN signals s ON s.signal_id=e.signal_id
+       WHERE e.paper_account_id=? AND s.signal_type=?
+         AND e.created_at>=? AND e.created_at<=?
        GROUP BY rd.decision`,
     ).all(paperAccountId, signalType, startAt, windowEndAt) as unknown as Array<{ decision: string; count: number }>;
     return {

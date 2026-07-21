@@ -1,63 +1,41 @@
 # Progress
 
 ## Current task
-- 2026-07-19 用户首次启动优化版本时，旧核心 Campaign 被安全冻结，但预检无条件抛出 `PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION`，入口生成 `UNKNOWN_UNKNOWN` 包后退出。
-- 已修复并提交为同一次预检先冻结旧证据、再只读重查并返回 replacement；不会再要求用户靠第二次点击跨过该状态。
-- 2026-07-18 已按用户授权安全停止刚开始的 12 小时验证，完成全系统运行时韧性、证据身份和长期 Campaign 语义优化。
-- 停止未修改历史证据；旧核心约 0.54 小时运行保留但不得计入优化后核心。
-- 尚未启动优化后核心的新验证。
+- 2026-07-21 用户授权实施 BUY 策略：首开最低金额、市场最低额有限自动抬升、高价 BUY 上限，默认值均进入版本化 ruleset。
+- Paper 核心实现和回归验证已完成；旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 的约 44.12 小时只能保留为历史证据，新核心必须从 0 创建 replacement Campaign。
+- 本轮未启用 Live、未接入 private key/signer、未提交或取消真实订单，也未执行任何链上写操作。
 
 ## Completed implementation
-- MarketClock 同时进入 Observe、Paper BUY deadline、订单簿、恢复、Stop Loss、估值和 Settlement 边界；报告校验偏移不一致并阻断。
-- 12/72 小时期限、资格里程碑和 checkpoint 改为单调时钟；checkpoint 记录 `MONOTONIC_V1`，避免系统拨时制造时长或补发突发 checkpoint。
-- Observe 改为固定频率且不重叠调度；AbortSignal 贯穿 Data API/CLOB 请求、分页、退避和 pUSD。
-- Public API 新增 cursor-aware `tradesSince`；恢复保留首页漂移检查，但不再每次拉完整历史。
-- Settlement 新增 `paper_settlement_retry_state`：5 秒到 5 分钟持久化指数退避，相同错误只写一次审计，恢复与成功可追溯。
-- Schema 升至 `2.25.0`，新增 Session 四类兼容身份及 append-only evidence adjudication；数据库触发器拒绝新 Session 的 NULL、长度错误或非小写十六进制身份。
-- 核心哈希纳入真实 CLI、scoped invariants 和 `030_paper_runtime_resilience.sql`，排除 Live-only CLOB fee；注释变化不重置，语义变化会重置。
-- 隔离验证身份扩展到 48 个测试文件、fixtures、TypeScript 配置、lockfile 和 Node/tsx/TypeScript/Vitest 工具链版本。
-- 策略/测试套件/操作器/产物变化可保留同核心运行时长，但会按规则重新判断资格、覆盖或 isolated proof，并写不可变 adjudication。
-- replacement 策略从缺陷白名单升级为通用规则：终态且核心不同才新建；transition 记录旧/新核心与变化组件。
-- scoped invariant 去掉重复实体扫描，将 transition→audit 的 N+1 查询改为分批精确匹配。
-- 删除全仓库无引用的 `src/live/paper-balance-provider.ts`，合并重复的 12 小时常量；保留 Live fail-closed 占位器。
-- 诊断打包对明显过期 isolated proof 先轻量拒绝，再执行完整核心/套件校验；两个独立旧证据场景分开受 5 秒测试限额约束。
+- 默认首开最低金额 `1,000,000` micros（1 pUSD），市场最低额自动抬升上限 `5,000,000` micros（5 pUSD），BUY 最高价 `0.95`；全部进入 immutable ruleset snapshot 和 Paper core identity。
+- 比例金额足够时保持原值；不足时只允许无现有仓位且无另一待处理首开 BUY 的首单抬升。完全平仓后恢复首开资格，已有仓位不补足、不累计、不追单。
+- 市场最低额在 5 pUSD 内时精确抬至 SDK/tick/share 可通过的最小金额；最终金额重新通过 Risk，并同步 Execution、Reservation、Cash ledger 和审计。超过 5 pUSD 时明确拒绝。
+- 目标价高于 `0.95` 在 Risk 阶段拒绝；执行上限为 `min(target * 1.02, 0.95)`；当前最佳 ask 高于 `0.95` 时不创建订单。
+- `BUY_ORDER_CONSTRAINT_INPUT_INVALID` 已进入 Paper 验证 blocker；验收漏斗只统计 Execution 最终绑定的 Risk Decision。
+- Executor Interface 的预审批 BUY Risk Decision 现在必须与首开/市场规则处理后的最终金额一致，否则事务回滚且不创建 Execution/Reservation。
+- SELL、Stop Loss、Settlement 未改变；旧 ruleset 仍可按历史语义读取，避免旧 Position 的退出/结算被新 BUY 字段阻断。
+- 重复的 BUY 上限计算已收敛为共享实现，Paper 与 Live 的 0.95 价格边界一致。
 
 ## Verification completed
-- `pnpm typecheck` 通过。
-- 最新全量：48 个测试文件、574 项全部通过。
-- 新增“同一次预检冻结并进入 replacement-ready”回归测试，先稳定复现原错误，再在修复后通过。
-- Campaign 服务目标测试 28 项、操作入口目标测试 12 项、policy/evidence/clock 目标测试 12 项全部通过。
-- 修复提交后的真实库预检通过：Campaign `FROZEN`、`replacementRequired=true`、当前核心 hash 匹配、市场时钟 5/5 样本校准成功，且仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-- 目标迁移测试：13 项通过；新增数据库级 NULL 身份回归先复现外键错误，修复后按预期由兼容身份触发器拒绝。
-- 所有 `.command` / `.sh` 通过 `zsh -n`；`git diff --check` 通过。
-- 真实业务库只读核验：
-  - Schema `2.24.0`；
-  - `PRAGMA integrity_check=ok`；
-  - 外键异常 0；
-  - active Reservation 0；
-  - RUNNING Session 0；
-  - `PAPER + LIVE_DISABLED`；
-  - 最新旧核心 Campaign `FROZEN`、Session `COMPLETED`，冻结原因 `CORE_COMPATIBILITY_MISMATCH_BEFORE_MIGRATION`。
-- 真实库 Online Backup 临时副本演练 `2.24.0→2.25.0` 通过：完整性正常、外键异常 0、安全状态不变、旧 Campaign/Session 保留。
-- 演练前后源数据库 SHA-256 均为 `a4c9c00fa41adb746d78322623190205141513bbcea9995977a8b0dde82d6f7e`，源库未被修改。
-- 最终迁移副本确认 `PASSED→RUNNING` 重验边存在、旧 7 个 Session 身份保持 NULL legacy 语义，新 Session 仍由触发器强制完整身份。
-- 演练临时副本已移到废纸篓，不属于项目证据。
+- 全量：48 个测试文件、588 项全部通过。
+- `pnpm typecheck` 通过；`git diff --check` 通过。
+- 覆盖：首开 1 pUSD、正比例落为 0 micro、市场最低额 5 pUSD 内抬升/超过上限拒绝、已有仓位/待处理首单防重复、完全平仓重置、最终 Risk/Reservation/验收计数、预审批金额不一致回滚、目标价/实际 ask 0.95 上限、内部 invalid blocker。
+- Standards 审查发现的重复上限算法和交接记录冲突已修正；Spec 审查确认 Paper 规则完整。
 
-## Current Git state
-- 本轮基准 HEAD：`baa23c87d35ae2c6124166892599cb9ce182df43`，分支 `main`。
-- 主优化提交：`62ebfb1699f1df7615b15e81e3c7ac5a109ce275`。
-- Standards/Spec 双重复核完成并已提交：追加 fail-closed 测试清单一致性、移除 replacement 无效参数、修复 Observe abort 后遗留 cadence timer，并关闭同核心 PASSED Campaign 的 policy/suite 重验死锁。
-- `UNKNOWN_UNKNOWN` 根因修复已提交，最终版本以当前 Git HEAD 为准。
-- 最终代码版本以当前 Git HEAD 为准；交接记录不固化自引用 HEAD。
-- Schema：`2.25.0`。
-- Core compatibility：`e490b5d1a91ec38242558e27e2e9fa40cdcca102e84dd64d248e40e3f70fac00`。
-- Validation policy：`99a26397bdea7ea8911be4e5d268805b195d129aae43c52f64ada94f4d6672ce`。
+## Current identity
+- Schema `2.25.0`；Strategy `2.2.0`；Risk `1.6.0`；Paper `1.6.0`；Live `1.5.0`；Ruleset `v1.5.0`；Config `v1.3.0`。
+- Ruleset：`df8972bec64fff074eeb2c5d67ed500dcd2dfac32f3da2a21cbe546dc4edabad`。
+- Paper ruleset：`2eea639f551be44fa8abfe32c11d6b01973c0167bbe505595643b1d77825e93f`。
+- Core compatibility：`cc538a1db25932877754acc2ee04defbe5559306c0cbb556164065701d04645b`。
+- Validation policy：`b798450c845d7a7429ee1239b3e8feb1d5f146e3ab028d20eefbe6cab5587aac`。
 - Operator build：`0b5e3e2fa74e1f5291bc3fed357635f2135058d335898271ee904b5990d87ff8`。
-- Verification suite：`9f674bbbd25be0948b8eb741c8974e36bb69a0810508a358a4f3958df45f93b2`。
-- Artifact provenance：`7597ff65e894c1d3367a4ba1d7dcb7dddcc7999a23659fb14cfc82dcb5090b23`。
+- Verification suite：`1613c8196f8578d7602f39553c445b4dae1931d5edb0cc13087511abb12f4128`。
+- Artifact provenance：`9c434a6a5a06d32a1d3c8eb3e2b79c66449b40e60941aeb15c454599d0e6cf77`。
+
+## Runtime state before handoff
+- 真实业务库 Schema `2.25.0`，最新旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 为 `PAUSED`，active Reservation 为 0。
+- 运行模式保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；本轮实现期间没有启动累计验证进程。
 
 ## Next steps
-1. 用户下一步双击“1_开始或继续Paper累计验证.command”。
-2. 正式启动流程识别已 `FROZEN` 的旧核心，重建当前隔离 proof，先备份并将真实业务库从 `2.24.0` 迁移到 `2.25.0`，随后为优化后核心从 0 创建 replacement Campaign。
-3. 首先完成连续 12 小时资格验证；通过后继续累计 72 小时、关键场景覆盖及最终版本 24 小时 Observe。
-4. 全程保持 `PAPER + LIVE_DISABLED`；未完成所有验证前不得启用 Live。
+1. 用户下一次双击“1_开始或继续Paper累计验证.command”；入口应因核心变化创建 replacement Campaign，并从 0 开始累计。
+2. 新核心先完成至少一次连续 12 小时，再累计 72 小时、补齐关键场景覆盖，最后完成同版本 24 小时 Observe。
+3. 在任何 Live 授权讨论前，必须先补齐 Live 市场最低额动态抬升的最终 Risk/Gate/钱包检查/预留一致性，并完成隔离回归；当前不得启用 Live。

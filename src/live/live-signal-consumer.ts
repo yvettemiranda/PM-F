@@ -10,6 +10,8 @@ import {
   type BuyCapitalSizingDecision,
   type ExactCapitalRatioSnapshot,
 } from "../execution/capital-sizing.js";
+import { applyBuyAmountPolicy, type BuyAmountPolicyDecision } from "../execution/buy-amount-policy.js";
+import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 
 export interface LiveSignalConsumptionResult {
   signalId: string;
@@ -73,12 +75,22 @@ export class LiveSignalConsumer {
     const results: LiveSignalConsumptionResult[] = [];
     for (const row of rows) {
       let loaded: LoadedLiveSignal;
-      let requested: { amount: bigint | null; size: bigint | null; capitalSizingDecision: BuyCapitalSizingDecision | null };
+      let requested: {
+        amount: bigint | null;
+        size: bigint | null;
+        capitalSizingDecision: BuyCapitalSizingDecision | null;
+        buyAmountPolicyDecision: BuyAmountPolicyDecision | null;
+      };
       try {
         loaded = this.loadSignal(row.signal_id, row.signal_sequence);
         requested = loaded.signal.signalType === "TARGET_BUY"
           ? { ...this.buyAmount(accountId, loaded.signal), size: null }
-          : { amount: null, size: this.sellSize(accountId, loaded.signal), capitalSizingDecision: null };
+          : {
+            amount: null,
+            size: this.sellSize(accountId, loaded.signal),
+            capitalSizingDecision: null,
+            buyAmountPolicyDecision: null,
+          };
       } catch (error) {
         const reason = error instanceof Error ? error.message : "LIVE_SIGNAL_PREPARATION_FAILED";
         this.recordQuarantine(accountId, row.signal_id, row.signal_sequence, "PRE_RISK_VALIDATION", reason);
@@ -98,6 +110,7 @@ export class LiveSignalConsumer {
         requestedAmountMicros: requested.amount,
         requestedSizeMicros: requested.size,
         capitalSizingDecision: requested.capitalSizingDecision,
+        buyAmountPolicyDecision: requested.buyAmountPolicyDecision,
         now: this.now().toISOString(),
       });
       let result: { executionId: string; state: string };
@@ -364,6 +377,7 @@ export class LiveSignalConsumer {
   private buyAmount(accountId: string, signal: PaperSignalEnvelope): {
     amount: bigint | null;
     capitalSizingDecision: BuyCapitalSizingDecision;
+    buyAmountPolicyDecision: BuyAmountPolicyDecision | null;
   } {
     const account = this.database.prepare(
       "SELECT initial_bankroll_micros FROM live_accounts WHERE live_account_id=?",
@@ -383,13 +397,49 @@ export class LiveSignalConsumer {
       exactRatio: signal.context?.capitalSizingRatio ?? null,
       exactRatioHash: signal.context?.capitalSizingRatioHash ?? null,
     });
+    const calculatedAmount = capitalSizingDecision.calculatedAmountMicros !== null
+      && (
+        capitalSizingDecision.result === "CALCULATED"
+        || capitalSizingDecision.reason === "PROPORTIONAL_AMOUNT_BELOW_ACCOUNT_PRECISION"
+      )
+      ? BigInt(capitalSizingDecision.calculatedAmountMicros)
+      : null;
+    const rules = signal.context
+      ? registeredExecutionRules(this.database, signal.context.rulesetHash)
+      : null;
+    if (signal.context && !rules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${signal.context.rulesetHash}`);
+    const buyAmountPolicyDecision = calculatedAmount !== null
+      && rules !== null
+      && rules.buyFirstEntryMinimumAmountMicros > 0n
+      ? applyBuyAmountPolicy({
+        calculatedAmountMicros: calculatedAmount,
+        firstEntryEligible: this.firstEntryMinimumEligible(accountId, signal.assetId),
+        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+      })
+      : null;
     return {
-      amount: capitalSizingDecision.result === "CALCULATED"
-        && capitalSizingDecision.calculatedAmountMicros !== null
-        ? BigInt(capitalSizingDecision.calculatedAmountMicros)
-        : null,
+      amount: buyAmountPolicyDecision
+        ? BigInt(buyAmountPolicyDecision.finalAmountMicros)
+        : calculatedAmount,
       capitalSizingDecision,
+      buyAmountPolicyDecision,
     };
+  }
+
+  private firstEntryMinimumEligible(accountId: string, assetId: string): boolean {
+    const positions = this.database.prepare(
+      `SELECT current_size_micros FROM live_positions
+       WHERE live_account_id=? AND asset_id=?`,
+    ).all(accountId, assetId) as unknown as Array<{ current_size_micros: string }>;
+    if (positions.some((position) => BigInt(position.current_size_micros) > 0n)) return false;
+    const pending = this.database.prepare(
+      `SELECT 1 present FROM live_executions
+       WHERE live_account_id=? AND asset_id=? AND execution_type='TARGET_BUY'
+         AND state='WAITING_EXECUTION'
+       LIMIT 1`,
+    ).get(accountId, assetId);
+    return !pending;
   }
 
   private sellSize(accountId: string, signal: PaperSignalEnvelope): bigint | null {

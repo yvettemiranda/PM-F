@@ -41,6 +41,32 @@ describe("market order constraints", () => {
     expect(allowed.result).toBe("PASS");
   });
 
+  it("caps a high BUY band at the configured maximum instead of treating target times slippage as invalid", () => {
+    const evidence = evaluateBuyMarketConstraint({
+      minOrderSize: "5",
+      tickSize: "0.001",
+      requestedAmountMicros: 10_000_000n,
+      upperPriceUnits: 1_001_640_000_000_000_000n,
+      maximumBuyPriceUnits: 950_000_000_000_000_000n,
+    });
+    expect(evidence.result).toBe("PASS");
+    expect(evidence.reason).toBe("MARKET_MIN_ORDER_SIZE_SATISFIED");
+    expect(evidence.effectivePriceUnits).toBe("950000000000000000");
+  });
+
+  it("reports the smallest SDK-normalized BUY amount that can satisfy the market minimum", () => {
+    const evidence = evaluateBuyMarketConstraint({
+      minOrderSize: "5",
+      tickSize: "0.01",
+      requestedAmountMicros: 1_000_000n,
+      upperPriceUnits: 515_000_000_000_000_000n,
+      maximumBuyPriceUnits: 950_000_000_000_000_000n,
+    });
+    expect(evidence.result).toBe("REJECT");
+    expect(evidence.derivedMinNotionalMicros).toBe("2550000");
+    expect(evidence.minimumPassingAmountMicros).toBe("2550000");
+  });
+
   it("keeps undersized normal and stop exits pending by rejecting the order precondition", () => {
     const evidence = evaluateSellMarketConstraint({
       minOrderSize: "5",

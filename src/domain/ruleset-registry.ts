@@ -11,6 +11,9 @@ export interface RegisteredStopLossRules {
 export interface RegisteredExecutionRules extends RegisteredStopLossRules {
   buyPriceMinRatioPpm: number;
   buyPriceMaxRatioPpm: number;
+  buyMaximumPriceUnits: bigint;
+  buyFirstEntryMinimumAmountMicros: bigint;
+  buyMarketMinimumAutoLiftCapMicros: bigint;
   followSellMaxSlippagePpm: number;
   waitRatioPpm: number;
   maxWaitMs: number;
@@ -36,6 +39,10 @@ function validRatioPpm(value: unknown): value is number {
 
 function validPriceRatioPpm(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0 && Number(value) < 2_000_000;
+}
+
+function validPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
 /**
@@ -76,11 +83,19 @@ export function registeredExecutionRules(
   const snapshotTrigger = (rules as { stopTriggerRatioPpm?: unknown }).stopTriggerRatioPpm;
   const snapshotBuyMin = (rules as { buyPriceMinRatioPpm?: unknown }).buyPriceMinRatioPpm;
   const snapshotBuyMax = (rules as { buyPriceMaxRatioPpm?: unknown }).buyPriceMaxRatioPpm;
+  const snapshotBuyMaximumPrice = (rules as { buyMaximumPricePpm?: unknown }).buyMaximumPricePpm;
+  const snapshotBuyFirstEntryMinimum = (rules as { buyFirstEntryMinimumAmountMicros?: unknown })
+    .buyFirstEntryMinimumAmountMicros;
+  const snapshotBuyAutoLiftCap = (rules as { buyMarketMinimumAutoLiftCapMicros?: unknown })
+    .buyMarketMinimumAutoLiftCapMicros;
   const snapshotWaitRatio = (rules as { waitRatioPpm?: unknown }).waitRatioPpm;
   const snapshotMaxWait = (rules as { maxWaitMs?: unknown }).maxWaitMs;
   const snapshotConfig = (versions as { configVersion?: unknown }).configVersion;
   const snapshotRulesetVersion = (versions as { rulesetVersion?: unknown }).rulesetVersion;
   const snapshotFeeModelVersion = (versions as { feeModelVersion?: unknown }).feeModelVersion;
+  const legacyBuyAmountPolicy = snapshotBuyMaximumPrice === undefined
+    && snapshotBuyFirstEntryMinimum === undefined
+    && snapshotBuyAutoLiftCap === undefined;
   if (
     !validRatioPpm(row.stop_loss_ratio_ppm)
     || !validRatioPpm(snapshotTrigger)
@@ -90,6 +105,12 @@ export function registeredExecutionRules(
     || !validPriceRatioPpm(snapshotBuyMin)
     || !validPriceRatioPpm(snapshotBuyMax)
     || snapshotBuyMin >= snapshotBuyMax
+    || (!legacyBuyAmountPolicy && (
+      !validRatioPpm(snapshotBuyMaximumPrice)
+      || !validPositiveSafeInteger(snapshotBuyFirstEntryMinimum)
+      || !validPositiveSafeInteger(snapshotBuyAutoLiftCap)
+      || Number(snapshotBuyAutoLiftCap) < Number(snapshotBuyFirstEntryMinimum)
+    ))
     || row.buy_price_lower_ratio_ppm !== snapshotBuyMin
     || row.buy_price_upper_ratio_ppm !== snapshotBuyMax
     || !validRatioPpm(snapshotWaitRatio)
@@ -108,6 +129,15 @@ export function registeredExecutionRules(
     maxSlippagePpm,
     buyPriceMinRatioPpm: row.buy_price_lower_ratio_ppm,
     buyPriceMaxRatioPpm: row.buy_price_upper_ratio_ppm,
+    buyMaximumPriceUnits: legacyBuyAmountPolicy
+      ? 999_999_999_999_999_999n
+      : (BigInt(snapshotBuyMaximumPrice as number) * 1_000_000_000_000_000_000n) / 1_000_000n,
+    buyFirstEntryMinimumAmountMicros: legacyBuyAmountPolicy
+      ? 0n
+      : BigInt(snapshotBuyFirstEntryMinimum as number),
+    buyMarketMinimumAutoLiftCapMicros: legacyBuyAmountPolicy
+      ? 0n
+      : BigInt(snapshotBuyAutoLiftCap as number),
     followSellMaxSlippagePpm,
     waitRatioPpm: row.wait_ratio_ppm,
     maxWaitMs: row.max_wait_time_ms,

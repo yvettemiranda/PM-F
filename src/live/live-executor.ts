@@ -14,8 +14,18 @@ import type { PaperAccountSnapshot, PaperSignalEnvelope, SignalExecutionContext 
 import { PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS, scaledToDecimal } from "../domain/fixed.js";
 import { RULESET, RULESET_HASH } from "../domain/versioning.js";
 import { registeredExecutionRules, registeredStopLossRules } from "../domain/ruleset-registry.js";
-import { executableSellVwap, matchExecutionBuy, matchExecutionSell, type ExecutionMatchResult } from "../execution/orderbook-matching.js";
-import { evaluateBuyMarketConstraint, evaluateSellMarketConstraint } from "../execution/market-order-constraints.js";
+import {
+  bestExecutionAskPriceUnits,
+  executableSellVwap,
+  matchExecutionBuy,
+  matchExecutionSell,
+  type ExecutionMatchResult,
+} from "../execution/orderbook-matching.js";
+import {
+  cappedBuyPriceUpperUnits,
+  evaluateBuyMarketConstraint,
+  evaluateSellMarketConstraint,
+} from "../execution/market-order-constraints.js";
 import {
   executableOrderbookAgeMs,
   type ExecutionFeeSnapshot,
@@ -1736,7 +1746,13 @@ export class LiveExecutor implements ExecutorInterface {
       throw new Error(`HISTORICAL_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
     }
     const lower = side === "BUY" ? ratio(target, executionRules.buyPriceMinRatioPpm) : null;
-    const upper = side === "BUY" ? ratio(target, executionRules.buyPriceMaxRatioPpm) : null;
+    const upper = side === "BUY"
+      ? cappedBuyPriceUpperUnits({
+        targetPriceUnits: target,
+        maximumRatioPpm: executionRules.buyPriceMaxRatioPpm,
+        maximumBuyPriceUnits: executionRules.buyMaximumPriceUnits,
+      })
+      : null;
     const sellSlippage = execution.execution_type === "STOP_LOSS"
       ? executionRules.maxSlippagePpm
       : executionRules.followSellMaxSlippagePpm;
@@ -1779,12 +1795,27 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const feeRate = BigInt(fee.feeRatePpm);
     if (side === "BUY") {
+      if (target > executionRules.buyMaximumPriceUnits) {
+        return {
+          book,
+          fee,
+          ageMs,
+          match: emptyMatch(),
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: upper!.toString(),
+          outcome: "REJECT",
+          reason: "TARGET_BUY_PRICE_ABOVE_MAX",
+        };
+      }
       const budget = BigInt(approval.requested_amount_micros!);
       const constraint = evaluateBuyMarketConstraint({
         minOrderSize: book.minOrderSize,
         tickSize: book.tickSize,
         requestedAmountMicros: budget,
         upperPriceUnits: upper!,
+        maximumBuyPriceUnits: executionRules.buyMaximumPriceUnits,
       });
       if (constraint.result !== "PASS") {
         return {
@@ -1798,6 +1829,21 @@ export class LiveExecutor implements ExecutorInterface {
           limitPriceUnits: constraint.effectivePriceUnits ?? upper!.toString(),
           outcome: "REJECT",
           reason: constraint.reason,
+        };
+      }
+      const bestAsk = bestExecutionAskPriceUnits(book.asks);
+      if (bestAsk !== null && bestAsk > executionRules.buyMaximumPriceUnits) {
+        return {
+          book,
+          fee,
+          ageMs,
+          match: emptyMatch(),
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: upper!.toString(),
+          outcome: "REJECT",
+          reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
         };
       }
       const normalizedBudget = BigInt(constraint.normalizedOrderAmountMicros!);

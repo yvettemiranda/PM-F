@@ -38,6 +38,7 @@ export const CORE_COMPATIBILITY_PAPER_FILES = [
 
 /** Paper execution surface; Live-only CLOB fee/order construction is excluded. */
 export const CORE_COMPATIBILITY_EXECUTION_FILES = [
+  "src/execution/buy-amount-policy.ts",
   "src/execution/capital-sizing.ts",
   "src/execution/market-data.ts",
   "src/execution/market-order-constraints.ts",
@@ -351,12 +352,14 @@ export function buildCurrentCoreCompatibilityManifest(projectRoot: string): Core
     components: {
       amountCalculation: hashFiles(projectRoot, [
         "src/domain/fixed.ts",
+        "src/execution/buy-amount-policy.ts",
         "src/execution/capital-sizing.ts",
         "src/services/capital-estimator.ts",
       ]),
       signalContext: hashFiles(projectRoot, [
         ...domain,
         ...signalContext,
+        "src/execution/buy-amount-policy.ts",
         "src/execution/capital-sizing.ts",
         "src/execution/signal-integrity.ts",
         "src/execution/types.ts",
