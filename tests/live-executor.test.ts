@@ -182,6 +182,15 @@ class MutatingFakeSigner implements Signer {
   }
 }
 
+class RecordingFakeSigner extends FakeSigner {
+  readonly payloads: Array<Record<string, unknown>> = [];
+
+  override async signOrder(payload: Record<string, unknown>): Promise<SignedPayload> {
+    this.payloads.push({ ...payload });
+    return super.signOrder(payload);
+  }
+}
+
 class BlockingFakeSigner implements Signer {
   readonly signerType = "FAKE" as const;
   readonly started: Promise<void>;
@@ -1281,6 +1290,37 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("checks the 0.95 executable-price cap before applying a Live market-minimum lift", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.96", size: "1000" }],
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "REJECTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.reason,e.requested_amount_micros,r.requested_amount_micros risk_amount
+       FROM live_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.live_execution_id=?`,
+    ).get(result!.executionId)).toEqual({
+      reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
+      requested_amount_micros: "1000000",
+      risk_amount: "1000000",
+    });
+    db.close();
+    expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
+    consumer.close();
+    executor.close();
+  });
+
   it("rejects a Live target BUY above 0.95 even if a prebuilt test Risk Decision says ALLOW", async () => {
     const env = setup();
     const high = insertSignalAndRisk(env.databasePath, env.targetId, {
@@ -1610,6 +1650,525 @@ describe("LiveExecutor", () => {
       `SELECT checks_json FROM risk_decisions WHERE risk_decision_id=?`,
     ).get(result!.riskDecisionId) as { checks_json: string }).checks_json) as Array<{ name: string; detail?: string }>;
     expect(checks.find((check) => check.name === "buy_amount_policy")?.detail).toContain("FIRST_ENTRY_MINIMUM_APPLIED");
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("applies the same market-minimum auto-lift in Live before signing a first-entry BUY", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const signer = new RecordingFakeSigner();
+    const executor = liveExecutor(env.databasePath, {
+      signer,
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "EXECUTED" });
+    const positions = await executor.getPosition({ accountId, assetId }) as Array<{
+      current_size_micros: string;
+      remaining_cost_micros: string;
+    }>;
+    expect(positions).toHaveLength(1);
+    expect(positions[0]).toMatchObject({
+      current_size_micros: "5100000",
+      remaining_cost_micros: "2550000",
+    });
+    expect(await executor.getBalance({ accountId })).toMatchObject({
+      reservedBalanceMicros: "0",
+    });
+    expect(signer.payloads).toHaveLength(1);
+    expect(signer.payloads[0]).toMatchObject({
+      riskDecisionId: result!.riskDecisionId,
+      budgetMicros: "2550000",
+    });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.requested_amount_micros execution_amount,r.requested_amount_micros risk_amount,
+              c.risk_decision_id consumption_risk,o.budget_micros order_budget
+       FROM live_executions e
+       JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       JOIN live_signal_consumptions c ON c.live_execution_id=e.live_execution_id
+       JOIN live_orders o ON o.live_execution_id=e.live_execution_id
+       WHERE e.live_execution_id=?`,
+    ).get(result!.executionId)).toEqual({
+      execution_amount: "2550000",
+      risk_amount: "2550000",
+      consumption_risk: result!.riskDecisionId,
+      order_budget: "2550000",
+    });
+    const reservationTotal = db.prepare(
+      `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
+       FROM live_reservation_ledger WHERE live_execution_id=?`,
+    ).get(result!.executionId) as { total: number };
+    expect(BigInt(reservationTotal.total)).toBe(0n);
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("rechecks the Live Gate for the final lifted Risk Decision before signing", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    let signed = 0;
+    const executor = liveExecutor(env.databasePath, {
+      liveGate: new FlippingGate(),
+      signer: new MutatingFakeSigner((payload) => {
+        signed += 1;
+        return {
+          orderAmountMicros: String(payload.amountMicros),
+          orderSizeMicros: String(payload.sizeMicros),
+        };
+      }),
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "REJECTED" });
+    expect(signed).toBe(0);
+    expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
+    expect(await executor.getBalance({ accountId })).toMatchObject({ reservedBalanceMicros: "0" });
+    consumer.close();
+    executor.close();
+  });
+
+  it("rejects a Live first entry when the market minimum is above the configured 5 pUSD cap", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const signer = new RecordingFakeSigner();
+    const executor = liveExecutor(env.databasePath, {
+      signer,
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "11",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "REJECTED" });
+    expect(signer.payloads).toHaveLength(0);
+    expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
+    expect(await executor.getBalance({ accountId })).toMatchObject({ reservedBalanceMicros: "0" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT reason,requested_amount_micros FROM live_executions WHERE live_execution_id=?")
+      .get(result!.executionId)).toEqual({
+      reason: "BUY_MARKET_MINIMUM_ABOVE_AUTO_LIFT_CAP",
+      requested_amount_micros: "1000000",
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("rechecks the external wallet allowance against the final Live lifted amount", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const signer = new RecordingFakeSigner();
+    const executor = liveExecutor(env.databasePath, {
+      signer,
+      walletProvider: new FakeWalletProvider({ allowanceMicros: "2000000" }),
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "REJECTED" });
+    expect(signer.payloads).toHaveLength(0);
+    expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
+    expect(await executor.getBalance({ accountId })).toMatchObject({ reservedBalanceMicros: "0" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.reason,e.requested_amount_micros,r.requested_amount_micros risk_amount
+       FROM live_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.live_execution_id=?`,
+    ).get(result!.executionId)).toEqual({
+      reason: "ALLOWANCE_INSUFFICIENT",
+      requested_amount_micros: "2550000",
+      risk_amount: "2550000",
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("rejects and releases the original reservation when final Live re-risk disallows the lift", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const writer = new DatabaseSync(env.databasePath);
+    writer.prepare("UPDATE live_accounts SET risk_budget_micros='2000000' WHERE live_account_id=?")
+      .run(accountId);
+    writer.close();
+    const signer = new RecordingFakeSigner();
+    const executor = liveExecutor(env.databasePath, {
+      signer,
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "REJECTED" });
+    expect(signer.payloads).toHaveLength(0);
+    expect(await executor.getBalance({ accountId })).toMatchObject({ reservedBalanceMicros: "0" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT e.reason,e.requested_amount_micros,r.requested_amount_micros risk_amount,
+              r.decision,c.risk_decision_id consumption_risk
+       FROM live_executions e
+       JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       JOIN live_signal_consumptions c ON c.live_execution_id=e.live_execution_id
+       WHERE e.live_execution_id=?`,
+    ).get(result!.executionId)).toEqual({
+      reason: "LIVE_SINGLE_TRADE_LIMIT_EXCEEDED",
+      requested_amount_micros: "2550000",
+      risk_amount: "2550000",
+      decision: "REJECT",
+      consumption_risk: result!.riskDecisionId,
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("does not auto-lift a later Live BUY while the asset already has a position", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+    const later = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-existing-position-tiny-buy",
+      riskDecisionId: "unused-live-existing-position-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "1",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: later.signal.signalId, state: "REJECTED" });
+    const positions = await executor.getPosition({ accountId, assetId }) as unknown[];
+    expect(positions).toHaveLength(1);
+    consumer.close();
+    executor.close();
+  });
+
+  it("does not auto-lift a second Live BUY while the first entry remains pending", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "WAITING_EXECUTION" });
+    const second = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-pending-second-entry",
+      riskDecisionId: "unused-live-pending-second-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "1",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: second.signal.signalId, state: "REJECTED" });
+    expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
+    expect(await executor.getBalance({ accountId })).toMatchObject({
+      reservedBalanceMicros: "2550000",
+    });
+    consumer.close();
+    executor.close();
+  });
+
+  it("restores Live first-entry auto-lift eligibility after a complete close", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+    const close = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-close-before-reopen",
+      riskDecisionId: "unused-live-close-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "1",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+    expect((await consumer.consumeAvailableSignals(accountId))[0])
+      .toMatchObject({ signalId: close.signal.signalId, state: "EXECUTED" });
+    const reopen = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-reopen-tiny-buy",
+      riskDecisionId: "unused-live-reopen-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "1",
+      createdAt: "2026-07-09T00:00:02.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: reopen.signal.signalId, state: "EXECUTED" });
+    const positions = await executor.getPosition({ accountId, assetId }) as Array<{
+      remaining_cost_micros: string;
+    }>;
+    expect(positions).toHaveLength(1);
+    expect(positions[0]).toMatchObject({ remaining_cost_micros: "2550000" });
+    consumer.close();
+    executor.close();
+  });
+
+  it("keeps a sufficient proportional Live BUY unchanged even when it is above the auto-lift cap", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "11",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ state: "EXECUTED" });
+    const positions = await executor.getPosition({ accountId, assetId }) as Array<{
+      remaining_cost_micros: string;
+    }>;
+    expect(positions[0]).toMatchObject({ remaining_cost_micros: "100000000" });
+    consumer.close();
+    executor.close();
+  });
+
+  it("persists a lifted Live BUY across restart and retries without duplicating Risk or reservation", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const waiting = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, waiting, sourceVersion, () => new Date(now));
+
+    const [first] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(first).toMatchObject({ state: "WAITING_EXECUTION" });
+    const beforeRestart = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(beforeRestart.prepare(
+      `SELECT requested_amount_micros,risk_decision_id FROM live_executions
+       WHERE live_execution_id=?`,
+    ).get(first!.executionId)).toEqual({
+      requested_amount_micros: "2550000",
+      risk_decision_id: first!.riskDecisionId,
+    });
+    expect((beforeRestart.prepare(
+      `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
+       FROM live_reservation_ledger WHERE live_execution_id=?`,
+    ).get(first!.executionId) as { total: number }).total).toBe(2_550_000);
+    const riskCount = (beforeRestart.prepare(
+      "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count;
+    beforeRestart.close();
+    consumer.close();
+    waiting.close();
+
+    const signer = new RecordingFakeSigner();
+    const resumed = liveExecutor(env.databasePath, { signer });
+    expect(await resumed.retryPending(accountId, "BUYS_ONLY")).toEqual([first!.executionId]);
+
+    const afterRestart = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(afterRestart.prepare(
+      `SELECT outcome,reason FROM live_market_checks
+       WHERE live_execution_id=? ORDER BY rowid`,
+    ).all(first!.executionId)).toEqual([
+      { outcome: "WAIT", reason: "BUY_PRICE_OR_LIQUIDITY_WAIT" },
+      { outcome: "ALLOW", reason: "LIVE_BUY_MARKET_CHECK_ALLOW" },
+    ]);
+    expect(afterRestart.prepare(
+      `SELECT state,requested_amount_micros,risk_decision_id FROM live_executions
+       WHERE live_execution_id=?`,
+    ).get(first!.executionId)).toEqual({
+      state: "EXECUTED",
+      requested_amount_micros: "2550000",
+      risk_decision_id: first!.riskDecisionId,
+    });
+    expect((afterRestart.prepare(
+      "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount);
+    const reservationTotal = afterRestart.prepare(
+      `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
+       FROM live_reservation_ledger WHERE live_execution_id=?`,
+    ).get(first!.executionId) as { total: number };
+    expect(BigInt(reservationTotal.total)).toBe(0n);
+    expect(signer.payloads).toHaveLength(1);
+    expect(signer.payloads[0]).toMatchObject({
+      riskDecisionId: first!.riskDecisionId,
+      budgetMicros: "2550000",
+    });
+    afterRestart.close();
+    resumed.close();
+  });
+
+  it("recovers an execution committed before Consumption without recalculating Risk after restart", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const waiting = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const crashAfterExecution = new Proxy(waiting, {
+      get(target, property, receiver) {
+        if (property === "executeBuy") {
+          return async (input: Parameters<LiveExecutor["executeBuy"]>[0]) => {
+            await target.executeBuy(input);
+            throw new Error("TEST_CRASH_BEFORE_CONSUMPTION");
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const interrupted = new LiveSignalConsumer(
+      env.databasePath,
+      crashAfterExecution,
+      sourceVersion,
+      () => new Date(now),
+    );
+
+    await expect(interrupted.consumeAvailableSignals(accountId)).rejects
+      .toThrow("TEST_CRASH_BEFORE_CONSUMPTION");
+
+    const beforeRestart = new DatabaseSync(env.databasePath, { readOnly: true });
+    const execution = beforeRestart.prepare(
+      `SELECT live_execution_id,risk_decision_id,requested_amount_micros,state
+       FROM live_executions WHERE signal_id=?`,
+    ).get(env.signal.signalId) as {
+      live_execution_id: string;
+      risk_decision_id: string;
+      requested_amount_micros: string;
+      state: string;
+    };
+    expect(execution).toMatchObject({ requested_amount_micros: "2550000", state: "WAITING_EXECUTION" });
+    expect((beforeRestart.prepare(
+      "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(0);
+    const riskCount = (beforeRestart.prepare(
+      "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count;
+    beforeRestart.close();
+    interrupted.close();
+    waiting.close();
+
+    const signer = new RecordingFakeSigner();
+    const resumed = liveExecutor(env.databasePath, { signer });
+    const consumer = new LiveSignalConsumer(env.databasePath, resumed, sourceVersion, () => new Date(now));
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toEqual({
+      signalId: env.signal.signalId,
+      riskDecisionId: execution.risk_decision_id,
+      executionId: execution.live_execution_id,
+      state: "EXECUTED",
+    });
+    const afterRestart = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((afterRestart.prepare(
+      "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount);
+    expect((afterRestart.prepare(
+      "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(1);
+    expect(signer.payloads).toHaveLength(1);
+    expect(signer.payloads[0]).toMatchObject({
+      riskDecisionId: execution.risk_decision_id,
+      budgetMicros: "2550000",
+    });
+    afterRestart.close();
+    consumer.close();
+    resumed.close();
+  });
+
+  it("rolls back final Risk rebinding when rejection cleanup cannot commit atomically", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const writer = new DatabaseSync(env.databasePath);
+    writer.prepare("UPDATE live_accounts SET risk_budget_micros='2000000' WHERE live_account_id=?")
+      .run(accountId);
+    writer.exec(
+      `CREATE TRIGGER test_atomic_rejection_abort
+       BEFORE UPDATE OF state ON live_executions
+       WHEN NEW.state='REJECTED'
+       BEGIN
+         SELECT RAISE(ABORT, 'TEST_ATOMIC_REJECTION_ABORT');
+       END`,
+    );
+    writer.close();
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    await expect(consumer.consumeAvailableSignals(accountId)).rejects
+      .toThrow("TEST_ATOMIC_REJECTION_ABORT");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const row = db.prepare(
+      `SELECT e.state,e.requested_amount_micros,r.requested_amount_micros risk_amount,r.decision
+       FROM live_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.signal_id=?`,
+    ).get(env.signal.signalId);
+    expect(row).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "1000000",
+      risk_amount: "1000000",
+      decision: "ALLOW",
+    });
+    expect((db.prepare(
+      `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
+       FROM live_reservation_ledger WHERE live_execution_id=(
+         SELECT live_execution_id FROM live_executions WHERE signal_id=?
+       )`,
+    ).get(env.signal.signalId) as { total: number }).total).toBe(1_000_000);
     db.close();
     consumer.close();
     executor.close();

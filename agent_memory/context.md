@@ -18,7 +18,7 @@
 - Gap Signal 固定不可执行；数据、版本、恢复或账本状态不确定时必须 fail closed。
 
 ## Current implementation baseline
-- 当前代码 Schema 为 `2.25.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.5.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
+- 当前代码 Schema 为 `2.25.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
 - 真实业务库已为 Schema `2.25.0`，仍安全暂停；下一次正式启动只注册新 ruleset/创建 replacement，不需要 Schema 迁移。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
 - Session 时长、12/72 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
@@ -41,10 +41,12 @@
 - 目标 BUY 价格或实际可成交价格高于 `0.95` 时跳过；订单上限为 `min(target * 1.02, 0.95)`。SELL、止损、结算不受该上限影响。
 - 比例金额足够时按原值执行；不足时只允许“该资产当前无仓位”的首开抬到 `1 pUSD`，若市场最低额更高可精确抬升但不得超过 `5 pUSD`。已有仓位时不补足、不累计、不追单；完全平仓后下一次 BUY 可重新视为首开。
 - 风控、现金预留和审计必须使用最终实际金额；任何 `BUY_ORDER_CONSTRAINT_INPUT_INVALID` 必须成为验证 blocker。
+- Paper 与未来 Live 必须使用同一策略结果；Live 若因订单簿最低额改变最终金额，必须在任何签名/提交前重新完成 Risk、钱包余额/授权、Reservation 和 Live Gate 绑定，不能沿用抬升前批准。
+- Live 重试/重启必须从数据库恢复完整 Signal、Execution Context、Capital Decision 和最终 Risk，不得重复抬升、重复预留或退回抬升前金额。
 
 ## Operator workflow
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
-- 上述 BUY 策略的 Paper 实现和全量测试已完成；下一次正式启动可开始新核心累计验证。
+- 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；下一次正式启动可开始新核心累计验证。
 - 修复完成后的下一次正式启动会按核心变化冻结旧 Campaign 的后续累计资格并创建 replacement；建议新 Campaign 第一次连续运行满 12 小时。
 - 累计 72 小时、场景覆盖和最终 24 小时 Observe 完成前绝不进入 Live。

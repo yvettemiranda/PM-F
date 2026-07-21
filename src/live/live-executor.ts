@@ -37,11 +37,14 @@ import { DisabledRedeemAdapter } from "./disabled-redeem-adapter.js";
 import { DisabledSigner } from "./disabled-signer.js";
 import { DisabledWalletProvider } from "./disabled-wallet-provider.js";
 import { DisabledLiveMarketDataProvider, type LiveMarketDataProvider } from "./live-market-data.js";
+import { isLiveFirstEntryBuyEligible } from "./live-buy-eligibility.js";
 import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-adapter.js";
 import type { RedeemAdapter } from "./redeem-adapter.js";
 import type { Signer } from "./signer.js";
 import type { WalletProvider } from "./wallet-provider.js";
 import { RiskManager } from "../risk/risk-manager.js";
+import { applyBuyAmountPolicy } from "../execution/buy-amount-policy.js";
+import type { BuyCapitalSizingDecision, ExactCapitalRatioSnapshot } from "../execution/capital-sizing.js";
 import { withExternalTimeout } from "./external-timeout.js";
 import { validateLiveOrderFills } from "./fill-validation.js";
 import { LiveCrashRecovery } from "./live-crash-recovery.js";
@@ -52,6 +55,7 @@ import {
   liveOrderIdempotencyKey,
   LiveStore,
   redeemIdempotencyKey,
+  type LiveExecutionRow,
   type LiveSettlementConfirmation,
   type LiveSettlementRecord,
 } from "./live-store.js";
@@ -141,7 +145,19 @@ interface LiveMarketPlan {
   limitPriceUnits: string;
   outcome: "ALLOW" | "WAIT" | "EXPIRED" | "REJECT";
   reason: string;
+  minimumPassingAmountMicros?: string | null;
 }
+
+type LiveBuyAutoLiftResult =
+  | { status: "NOT_ELIGIBLE" }
+  | { status: "REJECTED"; execution: LiveExecutionRow; reason: string }
+  | {
+      status: "LIFTED";
+      execution: LiveExecutionRow;
+      approval: ApprovedRiskDecisionRow;
+      walletCheck: Extract<WalletCheckResult, { ok: true }>;
+      effectiveInput: ExecutorSignalInput;
+    };
 
 function notionalMicros(priceUnits: string, sizeMicros: string): bigint {
   return (BigInt(priceUnits) * BigInt(sizeMicros)) / PRICE_SCALE;
@@ -1192,7 +1208,7 @@ export class LiveExecutor implements ExecutorInterface {
     if (gateAttestationFailure) {
       return this.reject(input, side, executionIdempotencyKey, null, gateAttestationFailure, executionType);
     }
-    const approval = this.approvedRiskDecision(input, side, executionType);
+    let approval = this.approvedRiskDecision(input, side, executionType);
     if (typeof approval === "string") {
       return this.reject(input, side, executionIdempotencyKey, liveGateRunId, approval, executionType);
     }
@@ -1228,7 +1244,7 @@ export class LiveExecutor implements ExecutorInterface {
     const requiredWalletAmount = side === "BUY"
       ? BigInt(approval.requested_amount_micros!)
       : requestedSize!;
-    const walletCheck = await this.walletChecks(approval, side, input.signal.assetId, requiredWalletAmount);
+    let walletCheck = await this.walletChecks(approval, side, input.signal.assetId, requiredWalletAmount);
     if (!walletCheck.ok) {
       if (execution) {
         this.store.audit("LIVE_EXECUTION", execution.live_execution_id, "wallet_check_blocked", walletCheck.reason, {});
@@ -1321,12 +1337,51 @@ export class LiveExecutor implements ExecutorInterface {
     }
 
     let plan: LiveMarketPlan;
+    let effectiveInput = input;
     try {
       plan = await this.marketPlan(execution, side, approval);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "LIVE_MARKET_DATA_FAILED";
       this.store.audit("LIVE_EXECUTION", execution.live_execution_id, "market_data_failed", reason, {});
       return { mode: "LIVE", executionId: execution.live_execution_id, state: execution.state };
+    }
+    if (side === "BUY") {
+      let adjustmentAttempts = 0;
+      while (
+        plan.outcome === "REJECT"
+        && ["ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION", "BELOW_MARKET_MIN_ORDER_SIZE"].includes(plan.reason)
+        && plan.minimumPassingAmountMicros !== null
+        && plan.minimumPassingAmountMicros !== undefined
+      ) {
+        if (adjustmentAttempts >= RULESET.maxRetryCount) {
+          plan = { ...plan, reason: "LIVE_BUY_MARKET_MINIMUM_CHANGED_REPEATEDLY" };
+          break;
+        }
+        adjustmentAttempts += 1;
+        const adjustment = await this.tryLiftFirstEntryToMarketMinimum(
+          effectiveInput,
+          execution,
+          approval,
+          BigInt(plan.minimumPassingAmountMicros),
+        );
+        if (adjustment.status === "NOT_ELIGIBLE") break;
+        execution = adjustment.execution;
+        if (adjustment.status === "REJECTED") {
+          plan = { ...plan, reason: adjustment.reason };
+          break;
+        }
+        approval = adjustment.approval;
+        walletCheck = adjustment.walletCheck;
+        effectiveInput = adjustment.effectiveInput;
+        gateInput.riskDecisionId = approval.risk_decision_id;
+        try {
+          plan = await this.marketPlan(execution, side, approval);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "LIVE_MARKET_DATA_FAILED_AFTER_AUTO_LIFT";
+          this.store.audit("LIVE_EXECUTION", execution.live_execution_id, "market_data_failed", reason, {});
+          return { mode: "LIVE", executionId: execution.live_execution_id, state: execution.state };
+        }
+      }
     }
     this.store.transaction(() => this.store.recordMarketCheck({
       execution: execution!,
@@ -1345,18 +1400,34 @@ export class LiveExecutor implements ExecutorInterface {
     }));
     if (plan.outcome !== "ALLOW") {
       if (plan.outcome === "REJECT" && side === "BUY") {
-        this.store.transaction(() => {
-          this.store.releaseReservation(execution!, null, plan.reason);
-          this.store.updateExecutionState(execution!.live_execution_id, "REJECTED", plan.reason, rulesetHash);
-        });
+        if (execution.state !== "REJECTED") {
+          this.store.transaction(() => this.store.rejectPendingExecution(execution!, plan.reason));
+        }
         return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
       }
       return { mode: "LIVE", executionId: execution.live_execution_id, state: execution.state };
     }
 
+    if (side === "BUY" && effectiveInput.riskDecisionId !== input.riskDecisionId) {
+      const repricedGate = await this.options.liveGate.checkExecution(gateInput);
+      if (!repricedGate.allowed) {
+        const reason = `LIVE_GATE_REPRICE_BLOCKED:${repricedGate.blockedReasons.join(",")}`;
+        this.store.transaction(() => this.store.rejectPendingExecution(execution!, reason));
+        return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
+      }
+      const repricedGateAttestationFailure = this.productionGateRunFailure(repricedGate.runId, gateInput);
+      if (repricedGateAttestationFailure) {
+        this.store.transaction(() => this.store.rejectPendingExecution(execution!, repricedGateAttestationFailure));
+        return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
+      }
+      if (this.liveGateRunExists(repricedGate.runId)) {
+        this.store.transaction(() => this.store.bindFinalGateRun(execution!.live_execution_id, repricedGate.runId));
+      }
+    }
+
     let request: LiveOrderRequest;
     try {
-      request = await this.buildOrderRequest(input, execution, side, approval, plan, walletCheck);
+      request = await this.buildOrderRequest(effectiveInput, execution, side, approval, plan, walletCheck);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "LIVE_ORDER_SIGNING_FAILED";
       this.store.transaction(() => this.store.failPendingExecution(execution!, `LIVE_ORDER_SIGNING_FAILED:${reason}`));
@@ -1386,6 +1457,9 @@ export class LiveExecutor implements ExecutorInterface {
     if (finalGateAttestationFailure) {
       this.store.transaction(() => this.store.rejectPendingExecution(execution!, finalGateAttestationFailure));
       return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
+    }
+    if (this.liveGateRunExists(finalGate.runId)) {
+      this.store.transaction(() => this.store.bindFinalGateRun(execution!.live_execution_id, finalGate.runId));
     }
     if (this.emergencyHaltedAccounts.has(input.accountId)) {
       this.store.transaction(() => this.store.rejectPendingExecution(execution!, "LIVE_ACCOUNT_EMERGENCY_HALTED"));
@@ -1641,11 +1715,15 @@ export class LiveExecutor implements ExecutorInterface {
               s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
+              c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
               c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash,c.source_code_commit,c.source_code_dirty,
-              c.config_version,c.created_at context_created_at
+              c.config_version,c.created_at context_created_at,
+              ce.capital_estimate_status,ce.capital_confidence,
+              ce.target_trade_capital_ratio_ppm capital_ratio_ppm,ce.fallback_amount_micros
        FROM signals s
        JOIN signal_execution_contexts c ON c.signal_id=s.signal_id
+       LEFT JOIN capital_estimates ce ON ce.capital_estimate_id=c.capital_decision_id
        WHERE s.signal_id=?`,
     ).get(signalId) as {
       signal_id: string;
@@ -1665,6 +1743,8 @@ export class LiveExecutor implements ExecutorInterface {
       context_target_id: string;
       capital_decision_id: string | null;
       target_trade_capital_ratio_ppm: string | null;
+      capital_sizing_ratio_json: string | null;
+      capital_sizing_ratio_hash: string | null;
       target_trade_timestamp: string;
       market_end_time: string;
       market_metadata_snapshot_json: string;
@@ -1674,6 +1754,10 @@ export class LiveExecutor implements ExecutorInterface {
       source_code_dirty: number;
       config_version: string;
       context_created_at: string;
+      capital_estimate_status: "COMPLETE" | "INCOMPLETE" | "FAILED" | null;
+      capital_confidence: "HIGH" | "MEDIUM" | "LOW" | null;
+      capital_ratio_ppm: string | null;
+      fallback_amount_micros: string | null;
     } | undefined;
     if (!row) throw new Error(`LIVE_SYSTEM_SIGNAL_CONTEXT_NOT_FOUND:${signalId}`);
     const metadata = JSON.parse(row.market_metadata_snapshot_json) as unknown;
@@ -1686,6 +1770,10 @@ export class LiveExecutor implements ExecutorInterface {
       signalId: row.signal_id,
       capitalDecisionId: row.capital_decision_id,
       targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm,
+      capitalSizingRatio: row.capital_sizing_ratio_json
+        ? JSON.parse(row.capital_sizing_ratio_json) as ExactCapitalRatioSnapshot
+        : null,
+      capitalSizingRatioHash: row.capital_sizing_ratio_hash,
       targetTradeTimestamp: row.target_trade_timestamp,
       marketEndTime: row.market_end_time,
       marketMetadataSnapshot: metadata as Record<string, unknown>,
@@ -1713,7 +1801,16 @@ export class LiveExecutor implements ExecutorInterface {
         sellRatioDenominator: row.sell_ratio_denominator,
         createdAt: row.created_at,
         context,
-        capitalDecision: null,
+        capitalDecision: row.capital_estimate_status
+          && row.capital_confidence
+          && row.fallback_amount_micros
+          ? {
+            status: row.capital_estimate_status,
+            confidence: row.capital_confidence,
+            ratioPpm: row.capital_ratio_ppm,
+            fallbackAmountMicros: row.fallback_amount_micros,
+          }
+          : null,
       },
     };
   }
@@ -1809,6 +1906,21 @@ export class LiveExecutor implements ExecutorInterface {
           reason: "TARGET_BUY_PRICE_ABOVE_MAX",
         };
       }
+      const bestAsk = bestExecutionAskPriceUnits(book.asks);
+      if (bestAsk !== null && bestAsk > executionRules.buyMaximumPriceUnits) {
+        return {
+          book,
+          fee,
+          ageMs,
+          match: emptyMatch(),
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: upper!.toString(),
+          outcome: "REJECT",
+          reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
+        };
+      }
       const budget = BigInt(approval.requested_amount_micros!);
       const constraint = evaluateBuyMarketConstraint({
         minOrderSize: book.minOrderSize,
@@ -1829,21 +1941,7 @@ export class LiveExecutor implements ExecutorInterface {
           limitPriceUnits: constraint.effectivePriceUnits ?? upper!.toString(),
           outcome: "REJECT",
           reason: constraint.reason,
-        };
-      }
-      const bestAsk = bestExecutionAskPriceUnits(book.asks);
-      if (bestAsk !== null && bestAsk > executionRules.buyMaximumPriceUnits) {
-        return {
-          book,
-          fee,
-          ageMs,
-          match: emptyMatch(),
-          orderMatch: emptyMatch(),
-          lowerPriceUnits: lower!.toString(),
-          upperPriceUnits: upper!.toString(),
-          limitPriceUnits: upper!.toString(),
-          outcome: "REJECT",
-          reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
+          minimumPassingAmountMicros: constraint.minimumPassingAmountMicros,
         };
       }
       const normalizedBudget = BigInt(constraint.normalizedOrderAmountMicros!);
@@ -1963,6 +2061,110 @@ export class LiveExecutor implements ExecutorInterface {
       limitPriceUnits: effectiveSellMinimum.toString(),
       outcome: "ALLOW",
       reason: "LIVE_SELL_MARKET_CHECK_ALLOW",
+    };
+  }
+
+  private async tryLiftFirstEntryToMarketMinimum(
+    input: ExecutorSignalInput,
+    execution: NonNullable<ReturnType<LiveStore["executionById"]>>,
+    approval: ApprovedRiskDecisionRow,
+    requiredAmountMicros: bigint,
+  ): Promise<LiveBuyAutoLiftResult> {
+    const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+    if (!rules) throw new Error(`HISTORICAL_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
+    if (
+      rules.buyFirstEntryMinimumAmountMicros <= 0n
+      || rules.buyMarketMinimumAutoLiftCapMicros <= 0n
+    ) return { status: "NOT_ELIGIBLE" };
+    if (!isLiveFirstEntryBuyEligible(
+      this.database,
+      execution.live_account_id,
+      execution.asset_id,
+      execution.live_execution_id,
+    )) {
+      return { status: "NOT_ELIGIBLE" };
+    }
+    if (requiredAmountMicros > rules.buyMarketMinimumAutoLiftCapMicros) {
+      return { status: "REJECTED", execution, reason: "BUY_MARKET_MINIMUM_ABOVE_AUTO_LIFT_CAP" };
+    }
+    const priorRisk = this.database.prepare(
+      "SELECT capital_sizing_decision_json FROM risk_decisions WHERE risk_decision_id=?",
+    ).get(approval.risk_decision_id) as { capital_sizing_decision_json: string | null } | undefined;
+    if (!priorRisk?.capital_sizing_decision_json) return { status: "NOT_ELIGIBLE" };
+    const capitalSizing = JSON.parse(priorRisk.capital_sizing_decision_json) as BuyCapitalSizingDecision;
+    if (capitalSizing.calculatedAmountMicros === null) return { status: "NOT_ELIGIBLE" };
+    const amountPolicy = applyBuyAmountPolicy({
+      calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros),
+      firstEntryEligible: true,
+      firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+      marketMinimumAmountMicros: requiredAmountMicros,
+      marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+    });
+    const finalAmount = BigInt(amountPolicy.finalAmountMicros);
+    const currentAmount = BigInt(execution.requested_amount_micros ?? "0");
+    if (finalAmount <= currentAmount) return { status: "NOT_ELIGIBLE" };
+    const walletCheck = await this.walletChecks(approval, "BUY", execution.asset_id, finalAmount);
+    const riskManager = new RiskManager(this.database, this.sourceVersion);
+    let finalRiskDecisionId: string;
+    let rejectionReason: string | null = null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (!isLiveFirstEntryBuyEligible(
+        this.database,
+        execution.live_account_id,
+        execution.asset_id,
+        execution.live_execution_id,
+      )) {
+        this.database.exec("COMMIT");
+        return { status: "NOT_ELIGIBLE" };
+      }
+      const risk = riskManager.evaluate({
+        mode: "LIVE",
+        accountId: execution.live_account_id,
+        signal: input.signal,
+        requestedAmountMicros: finalAmount,
+        requestedSizeMicros: null,
+        capitalSizingDecision: capitalSizing,
+        buyAmountPolicyDecision: amountPolicy,
+        replacingReservedAmountMicros: currentAmount,
+        now: this.now().toISOString(),
+      });
+      finalRiskDecisionId = risk.riskDecisionId;
+      rejectionReason = risk.decision === "REJECT"
+        ? risk.riskRejectReason ?? "BUY_MARKET_MINIMUM_RISK_REJECTED"
+        : !walletCheck.ok ? walletCheck.reason : null;
+      if (risk.decision === "ALLOW" && walletCheck.ok) {
+        this.store.increaseBuyReservationChecked(execution, finalAmount, {
+          walletBalanceMicros: BigInt(walletCheck.balanceMicros),
+          walletAllowanceMicros: BigInt(walletCheck.allowanceMicros),
+        });
+      }
+      execution = this.store.updateBuyApproval(execution, {
+        riskDecisionId: finalRiskDecisionId,
+        finalAmountMicros: finalAmount,
+        reason: rejectionReason ?? "BUY_MARKET_MINIMUM_AUTO_LIFTED",
+        policyEvidenceHash: amountPolicy.evidenceHash,
+      });
+      if (rejectionReason !== null) {
+        this.store.rejectPendingExecution(execution, rejectionReason);
+        execution = this.store.executionById(execution.live_execution_id)!;
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    if (!walletCheck.ok) return { status: "REJECTED", execution, reason: walletCheck.reason };
+    if (rejectionReason !== null) return { status: "REJECTED", execution, reason: rejectionReason };
+    const effectiveInput = { ...input, riskDecisionId: finalRiskDecisionId! };
+    const finalApproval = this.approvedRiskDecision(effectiveInput, "BUY", "TARGET_BUY");
+    if (typeof finalApproval === "string") throw new Error(`LIVE_BUY_AUTO_LIFT_APPROVAL_INVALID:${finalApproval}`);
+    return {
+      status: "LIFTED",
+      execution,
+      approval: finalApproval,
+      walletCheck,
+      effectiveInput,
     };
   }
 

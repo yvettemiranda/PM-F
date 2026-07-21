@@ -12,6 +12,7 @@ import {
 } from "../execution/capital-sizing.js";
 import { applyBuyAmountPolicy, type BuyAmountPolicyDecision } from "../execution/buy-amount-policy.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
+import { isLiveFirstEntryBuyEligible } from "./live-buy-eligibility.js";
 
 export interface LiveSignalConsumptionResult {
   signalId: string;
@@ -75,6 +76,56 @@ export class LiveSignalConsumer {
     const results: LiveSignalConsumptionResult[] = [];
     for (const row of rows) {
       let loaded: LoadedLiveSignal;
+      try {
+        loaded = this.loadSignal(row.signal_id, row.signal_sequence);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "LIVE_SIGNAL_PREPARATION_FAILED";
+        this.recordQuarantine(accountId, row.signal_id, row.signal_sequence, "PRE_RISK_VALIDATION", reason);
+        results.push({
+          signalId: row.signal_id,
+          riskDecisionId: null,
+          executionId: null,
+          state: "QUARANTINED",
+        });
+        continue;
+      }
+      const signal = loaded.signal;
+      const existing = this.database.prepare(
+        `SELECT live_execution_id,risk_decision_id,execution_type,state
+         FROM live_executions
+         WHERE live_account_id=? AND signal_id=?
+           AND execution_type IN ('TARGET_BUY','TARGET_SELL')
+         ORDER BY created_at,live_execution_id LIMIT 1`,
+      ).get(accountId, signal.signalId) as {
+        live_execution_id: string;
+        risk_decision_id: string;
+        execution_type: "TARGET_BUY" | "TARGET_SELL";
+        state: string;
+      } | undefined;
+      if (existing) {
+        if (["WAITING_EXECUTION", "EXIT_PENDING"].includes(existing.state)) {
+          if (!signal.context) {
+            throw new Error("LIVE_EXISTING_EXECUTION_CONTEXT_MISSING");
+          }
+          if (existing.execution_type === "TARGET_BUY") {
+            await this.executor.executeBuy({
+              accountId,
+              signal,
+              context: signal.context,
+              riskDecisionId: existing.risk_decision_id,
+            });
+          } else {
+            await this.executor.executeSell({
+              accountId,
+              signal,
+              context: signal.context,
+              riskDecisionId: existing.risk_decision_id,
+            });
+          }
+        }
+        results.push(this.finishConsumption(accountId, loaded, existing.live_execution_id));
+        continue;
+      }
       let requested: {
         amount: bigint | null;
         size: bigint | null;
@@ -82,12 +133,11 @@ export class LiveSignalConsumer {
         buyAmountPolicyDecision: BuyAmountPolicyDecision | null;
       };
       try {
-        loaded = this.loadSignal(row.signal_id, row.signal_sequence);
-        requested = loaded.signal.signalType === "TARGET_BUY"
-          ? { ...this.buyAmount(accountId, loaded.signal), size: null }
+        requested = signal.signalType === "TARGET_BUY"
+          ? { ...this.buyAmount(accountId, signal), size: null }
           : {
             amount: null,
-            size: this.sellSize(accountId, loaded.signal),
+            size: this.sellSize(accountId, signal),
             capitalSizingDecision: null,
             buyAmountPolicyDecision: null,
           };
@@ -102,7 +152,6 @@ export class LiveSignalConsumer {
         });
         continue;
       }
-      const signal = loaded.signal;
       const risk = this.riskManager.evaluate({
         mode: "LIVE",
         accountId,
@@ -152,19 +201,7 @@ export class LiveSignalConsumer {
             riskDecisionId: risk.riskDecisionId,
           });
       }
-      this.recordConsumption(
-        accountId,
-        loaded,
-        risk.riskDecisionId,
-        result.executionId,
-        result.state,
-      );
-      results.push({
-        signalId: signal.signalId,
-        riskDecisionId: risk.riskDecisionId,
-        executionId: result.executionId,
-        state: result.state,
-      });
+      results.push(this.finishConsumption(accountId, loaded, result.executionId));
     }
     return results;
   }
@@ -413,7 +450,7 @@ export class LiveSignalConsumer {
       && rules.buyFirstEntryMinimumAmountMicros > 0n
       ? applyBuyAmountPolicy({
         calculatedAmountMicros: calculatedAmount,
-        firstEntryEligible: this.firstEntryMinimumEligible(accountId, signal.assetId),
+        firstEntryEligible: isLiveFirstEntryBuyEligible(this.database, accountId, signal.assetId),
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
       })
@@ -425,21 +462,6 @@ export class LiveSignalConsumer {
       capitalSizingDecision,
       buyAmountPolicyDecision,
     };
-  }
-
-  private firstEntryMinimumEligible(accountId: string, assetId: string): boolean {
-    const positions = this.database.prepare(
-      `SELECT current_size_micros FROM live_positions
-       WHERE live_account_id=? AND asset_id=?`,
-    ).all(accountId, assetId) as unknown as Array<{ current_size_micros: string }>;
-    if (positions.some((position) => BigInt(position.current_size_micros) > 0n)) return false;
-    const pending = this.database.prepare(
-      `SELECT 1 present FROM live_executions
-       WHERE live_account_id=? AND asset_id=? AND execution_type='TARGET_BUY'
-         AND state='WAITING_EXECUTION'
-       LIMIT 1`,
-    ).get(accountId, assetId);
-    return !pending;
   }
 
   private sellSize(accountId: string, signal: PaperSignalEnvelope): bigint | null {
@@ -545,6 +567,24 @@ export class LiveSignalConsumer {
       this.database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private finishConsumption(
+    accountId: string,
+    loaded: LoadedLiveSignal,
+    executionId: string,
+  ): LiveSignalConsumptionResult {
+    const final = this.database.prepare(
+      "SELECT risk_decision_id,state FROM live_executions WHERE live_execution_id=?",
+    ).get(executionId) as { risk_decision_id: string; state: string } | undefined;
+    if (!final) throw new Error("LIVE_CONSUMPTION_EXECUTION_NOT_FOUND");
+    this.recordConsumption(accountId, loaded, final.risk_decision_id, executionId, final.state);
+    return {
+      signalId: loaded.signal.signalId,
+      riskDecisionId: final.risk_decision_id,
+      executionId,
+      state: final.state,
+    };
   }
 
   private recordQuarantine(

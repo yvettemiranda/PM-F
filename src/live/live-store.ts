@@ -89,6 +89,11 @@ export interface LiveRecoveryOrderRow {
   execution: LiveExecutionRow;
 }
 
+interface LiveWalletCapacitySnapshot {
+  walletBalanceMicros: bigint;
+  walletAllowanceMicros: bigint;
+}
+
 export interface LiveSettlementConfirmation {
   positionId: string;
   resolved: boolean;
@@ -718,9 +723,19 @@ export class LiveStore {
   reserveChecked(
     execution: LiveExecutionRow,
     amountMicros: bigint,
-    external: { walletBalanceMicros: bigint; walletAllowanceMicros: bigint },
+    external: LiveWalletCapacitySnapshot,
   ): void {
     if (amountMicros <= 0n) throw new Error("LIVE_RESERVATION_AMOUNT_INVALID");
+    this.assertBuyReservationCapacity(execution, amountMicros, amountMicros, external);
+    this.reserve(execution, amountMicros);
+  }
+
+  private assertBuyReservationCapacity(
+    execution: LiveExecutionRow,
+    finalAmountMicros: bigint,
+    additionalAmountMicros: bigint,
+    external: LiveWalletCapacitySnapshot,
+  ): void {
     const account = this.database.prepare(
       `SELECT status,initial_bankroll_micros,risk_budget_micros
        FROM live_accounts WHERE live_account_id=?`,
@@ -737,13 +752,13 @@ export class LiveStore {
       BigInt(RULESET.liveMaxTradeSizeMicros),
       (bankroll * BigInt(RULESET.liveMaxSingleTradePpm)) / 1_000_000n,
     );
-    if (amountMicros > singleLimit) throw new Error("LIVE_RESERVATION_SINGLE_TRADE_LIMIT");
+    if (finalAmountMicros > singleLimit) throw new Error("LIVE_RESERVATION_SINGLE_TRADE_LIMIT");
 
     const pendingTotal = this.pendingReservationTotal(execution.live_account_id);
-    if (pendingTotal + amountMicros > external.walletBalanceMicros) {
+    if (pendingTotal + additionalAmountMicros > external.walletBalanceMicros) {
       throw new Error("LIVE_RESERVATION_WALLET_BALANCE_INSUFFICIENT");
     }
-    if (pendingTotal + amountMicros > external.walletAllowanceMicros) {
+    if (pendingTotal + additionalAmountMicros > external.walletAllowanceMicros) {
       throw new Error("LIVE_RESERVATION_ALLOWANCE_INSUFFICIENT");
     }
 
@@ -753,24 +768,103 @@ export class LiveStore {
       BigInt(RULESET.liveMaxExposureMicros),
       (bankroll * BigInt(RULESET.liveMaxTotalExposurePpm)) / 1_000_000n,
     );
-    if (totalExposure + pendingTotal + amountMicros > totalLimit) {
+    if (totalExposure + pendingTotal + additionalAmountMicros > totalLimit) {
       throw new Error("LIVE_RESERVATION_TOTAL_EXPOSURE_LIMIT");
     }
 
     const marketExposure = this.positionCostTotal(execution.live_account_id, { conditionId: execution.condition_id });
     const marketPending = this.pendingReservationTotal(execution.live_account_id, { conditionId: execution.condition_id });
     const marketLimit = (bankroll * BigInt(RULESET.liveMaxMarketExposurePpm)) / 1_000_000n;
-    if (marketExposure + marketPending + amountMicros > marketLimit) {
+    if (marketExposure + marketPending + additionalAmountMicros > marketLimit) {
       throw new Error("LIVE_RESERVATION_MARKET_EXPOSURE_LIMIT");
     }
 
     const positionExposure = this.positionCostTotal(execution.live_account_id, { assetId: execution.asset_id });
     const positionPending = this.pendingReservationTotal(execution.live_account_id, { assetId: execution.asset_id });
     const positionLimit = (bankroll * BigInt(RULESET.liveMaxPositionExposurePpm)) / 1_000_000n;
-    if (positionExposure + positionPending + amountMicros > positionLimit) {
+    if (positionExposure + positionPending + additionalAmountMicros > positionLimit) {
       throw new Error("LIVE_RESERVATION_POSITION_EXPOSURE_LIMIT");
     }
-    this.reserve(execution, amountMicros);
+  }
+
+  increaseBuyReservationChecked(
+    execution: LiveExecutionRow,
+    finalAmountMicros: bigint,
+    external: LiveWalletCapacitySnapshot,
+  ): void {
+    const currentAmount = this.reservationBalance(execution.live_execution_id);
+    if (currentAmount <= 0n || finalAmountMicros <= currentAmount) {
+      throw new Error("LIVE_RESERVATION_INCREASE_AMOUNT_INVALID");
+    }
+    const delta = finalAmountMicros - currentAmount;
+    this.assertBuyReservationCapacity(execution, finalAmountMicros, delta, external);
+
+    const now = this.now().toISOString();
+    const adjustmentKey = `AUTO_LIFT:${finalAmountMicros.toString()}`;
+    this.database.prepare(
+      `INSERT INTO live_reservation_ledger(
+        reservation_ledger_id,live_execution_id,live_order_id,entry_type,delta_micros,
+        remaining_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, NULL, 'RESERVE', ?, ?, ?, ?)`,
+    ).run(
+      hash(["LIVE_RESERVATION", execution.live_execution_id, adjustmentKey]),
+      execution.live_execution_id,
+      delta.toString(),
+      finalAmountMicros.toString(),
+      `LIVE_RESERVE:${execution.live_execution_id}:${adjustmentKey}`,
+      now,
+    );
+    this.database.prepare(
+      `INSERT INTO live_cash_ledger(
+        cash_ledger_id,live_account_id,live_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES (?, ?, ?, 'RESERVE', '0', ?, NULL, NULL, ?, ?)`,
+    ).run(
+      hash(["LIVE_CASH", execution.live_execution_id, adjustmentKey]),
+      execution.live_account_id,
+      execution.live_execution_id,
+      delta.toString(),
+      `LIVE_CASH_RESERVE:${execution.live_execution_id}:${adjustmentKey}`,
+      now,
+    );
+  }
+
+  updateBuyApproval(
+    execution: LiveExecutionRow,
+    input: { riskDecisionId: string; finalAmountMicros: bigint; reason: string; policyEvidenceHash: string },
+  ): LiveExecutionRow {
+    const now = this.now().toISOString();
+    this.database.prepare(
+      `UPDATE live_executions
+       SET risk_decision_id=?,requested_amount_micros=?,reason=?,updated_at=?
+       WHERE live_execution_id=?`,
+    ).run(
+      input.riskDecisionId,
+      input.finalAmountMicros.toString(),
+      input.reason,
+      now,
+      execution.live_execution_id,
+    );
+    this.audit("LIVE_EXECUTION", execution.live_execution_id, "buy_amount_adjusted", input.reason, {
+      priorAmountMicros: execution.requested_amount_micros,
+      finalAmountMicros: input.finalAmountMicros.toString(),
+      riskDecisionId: input.riskDecisionId,
+      buyAmountPolicyEvidenceHash: input.policyEvidenceHash,
+    });
+    return this.executionById(execution.live_execution_id)!;
+  }
+
+  bindFinalGateRun(executionId: string, liveGateRunId: string): void {
+    const execution = this.executionById(executionId);
+    if (!execution) throw new Error("LIVE_EXECUTION_NOT_FOUND");
+    const now = this.now().toISOString();
+    this.database.prepare(
+      "UPDATE live_executions SET live_gate_run_id=?,updated_at=? WHERE live_execution_id=?",
+    ).run(liveGateRunId, now, executionId);
+    this.audit("LIVE_EXECUTION", executionId, "final_gate_bound", "LIVE_FINAL_GATE_RECHECK_ALLOW", {
+      liveGateRunId,
+      riskDecisionId: execution.risk_decision_id,
+    });
   }
 
   reserveAssetChecked(

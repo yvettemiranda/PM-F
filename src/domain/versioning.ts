@@ -9,7 +9,7 @@ export const VERSIONS = Object.freeze({
   riskVersion: "1.6.0",
   replayVersion: "1.8.0",
   paperVersion: "1.6.0",
-  liveVersion: "1.5.0",
+  liveVersion: "1.6.0",
   validationVersion: "1.2.0",
   operationalVersion: "1.2.0",
   rulesetVersion: "v1.5.0",

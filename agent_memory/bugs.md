@@ -7,7 +7,7 @@
 - Live 所需长期稳定、geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
 ## Active risks
-- 当前 Live 严格禁用。首开 1 pUSD 和 0.95 价格上限已有隔离实现，但“市场最低额不超过 5 pUSD 时动态抬升”尚未在 Live 中完成最终 Risk、Live Gate、外部钱包余额/授权和预留账本的一致重验；允许任何 Live 前必须补齐并隔离验证，不能直接复用 Paper 通过结论。
+- 当前 Live 严格禁用。BUY 策略的 Paper/隔离 Live 代码与回归已对齐，但这不替代自然 72 小时 Paper、场景覆盖、最终 24 小时 Observe、geoblock/compliance、隔离钱包和真实 signer 的后续验证与再次授权。
 - Data API 历史 offset 限制和相邻页边界重复仍可能发生；只有另一独立公开接口精确确认 multiplicity 才能核销，否则继续阻断。
 - Positions 与 Trades/Activity 可能短暂不同步；同一差异连续达到阈值且持续满 120 秒仍升级 `MAJOR_DESYNC`。
 - CLOB `/time` 偏移在 Session 内固定；运行中系统时钟继续漂移时，订单簿安全检查必须 fail closed。
@@ -17,6 +17,9 @@
 - 公开 HTTP 响应没有服务器数字签名；当前只能证明官方 URL、内容寻址、本地 append-only capture 与解析一致。
 
 ## Resolved in current implementation
+- Live 市场最低额抬升曾只完成首开 1 pUSD，未对最终市场金额重新绑定 Risk、钱包/授权、Reservation、Live Gate、Consumption 和签名预算；现已补齐并以 Fake/Disabled 隔离测试覆盖，不启用任何真实交易能力。
+- Live 重启重试曾恢复不完整的 Signal/Execution Context（缺失精确资本比例和 Capital Decision），导致完整性校验提前拦截且 Execution 表面停留在等待；现从不可变数据库证据完整恢复，抬升后的 Risk/Reservation 跨重启幂等且只签名一次。
+- Live Consumer 曾可能在 Execution 已落库、Consumption 未落库的崩溃窗口重新计算 Risk；现优先恢复已有 Execution 的最终 Risk/状态。动态抬升的最终 Risk/金额重绑、REJECTED 状态和 Reservation 释放也已合并为单一事务，中断时整体回滚。
 - 高价 BUY 的 `target * 1.02` 曾可能达到/超过 `1.0` 并被错误归类为 `BUY_ORDER_CONSTRAINT_INPUT_INVALID`；现 upper 在 tick 计算前按 ruleset `0.95` 封顶，目标价和实际最佳 ask 均有明确拒绝路径，内部 invalid 也会成为验证 blocker。
 - 极小比例 BUY 曾只因 pUSD/SDK/min_order_size 精度被拒绝；现保留原始比例证据，仅首开按 1 pUSD 及实际市场最低额（最多 5 pUSD）抬升，最终值重新过风控并完整补记账本。已有仓位/待处理首开不放大，完全平仓后重置。
 - 预检曾在成功冻结旧核心 Campaign 后仍无条件抛出 `PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION`，导致第一次点击生成 `UNKNOWN_UNKNOWN` 并退出、必须第二次点击才能继续；现冻结后立即只读重查并在同一次启动中返回 replacement-ready，同时保持旧证据不可变。
