@@ -39,10 +39,14 @@
 
 `操作入口/` 中没有 Live 入口，不会读取私钥，不会创建真实订单。
 
+目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。未来 localhost UI 复用同一个只读控制面；当前控制面会如实报告 Live 未接线、参数仍是编译期 ruleset，不能显示成可用按钮。
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
+pnpm operator:control -- status
+pnpm operator:control -- set-target --target-wallet=0x目标地址
 pnpm phase0:validate -- 0x目标地址
 pnpm phase05:replay-capture -- capture_run_id
 pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=15
@@ -54,6 +58,8 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。
 
 `observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
+
+普通目标 BUY/SELL 可进入跟单链路；REDEEM 由跟单账户按自身持仓结算。已验证的 negative-risk `CONVERSION` 只形成不可执行审计义务。`MERGE/SPLIT` 尚无可证明的投影或复制语义：Observe 会在发现后立即写入 `UNSUPPORTED_TARGET_ACTIVITY` 并置为 `MAJOR_DESYNC`，而不是等待普通持仓差异宽限期或假装仍然同步。
 
 用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
 

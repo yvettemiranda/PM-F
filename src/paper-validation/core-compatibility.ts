@@ -182,6 +182,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/negative-risk-conversion.test.ts",
   "tests/observe-runner.test.ts",
   "tests/operational-validation.test.ts",
+  "tests/operator-control.test.ts",
   "tests/operator-paper-campaign-shell.test.ts",
   "tests/operator-process-lifecycle.test.ts",
   "tests/paper-acceptance-summary.test.ts",

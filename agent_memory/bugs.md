@@ -3,7 +3,8 @@
 ## Active blockers
 - 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
 - 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
-- 新目标高频使用 `MERGE`，而现有 Observe 只记录 MERGE、不更新 projection、不生成跟单义务；普通 Trades 也未覆盖最近抽样 MERGE。Paper 长测可能因 Position diff 进入 `MAJOR_DESYNC`，小额 Live 前必须补齐语义或明确立即 fail-closed。
+- 新目标高频使用 `MERGE`，普通 Trades 未覆盖最近抽样 MERGE。Observe 现已对 MERGE/SPLIT 明确立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，不会假装同步；但真实投影/复制语义仍未实现，因此它仍是小额 Live 的硬 blocker。
+- UI 参数调节尚不可用：当前 17 个运行模块仍直接读取编译期 `RULESET`。若只增加配置写入而不做完整依赖注入、ruleset hash/registry 与 Campaign core 绑定，会造成界面值和实际执行值不一致，必须保持禁用。
 - tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
 - Live 所需 geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
@@ -19,6 +20,9 @@
 - 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
 
 ## Resolved in current implementation
+- 目标钱包曾是 `操作入口/lib/common.sh` 的代码常量，切换会改变源码版本且不适合 UI；现由原子运行时选择文件和统一 TypeScript 模块管理，operator lock 存在时 fail closed。
+- Live Gate 曾把最终 Observe 前置项错误命名为 24 小时，与实际 8 小时政策冲突；`2.28.0` migration 保留 evidence 地改名，不降低 Paper 24 小时、Crash Recovery、一致性、geoblock 或用户授权门禁。
+- MERGE/SPLIT 曾只记录并依赖持仓差异在宽限期后升级；现当次轮询即写明确不支持原因并置 `MAJOR_DESYNC`。
 - 目标切换曾只替换固定地址但 preflight/runner/status 仍选择全库 Campaign，可能误续跑或冻结旧钱包；现所有入口按目标钱包/target 隔离。
 - 隔离 proof 和 supplemental Replay evidence 曾可能跨钱包复用；现 Phase 0 proof 绑定 `targetWallet`，Replay evidence 只计入当前目标 signal binding。
 - Observe 曾把 `CONVERSION` 只作为 combo Activity 记录并直接跳过 projection，导致源资产残留、目标资产缺失和 `MAJOR_DESYNC`；现用链上 ERC-1155 净额、Adapter 事件与 Positions 三方验证后重分 bucket。

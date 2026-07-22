@@ -1,6 +1,10 @@
 # Progress
 
 ## Current task
+- 2026-07-22 完成第一轮全仓控制面/跟单能力审计：目标地址从源码常量改为原子运行时选择，新增面向未来 localhost UI 的只读 `operator-control` 状态投影；运行锁存在时禁止切换，历史 Campaign/证据不改绑。
+- 修正 Live Gate `OBSERVE_ONLY_24H_SOAK` 与既定“Paper 24 小时 + Observe 8 小时”口径冲突；migration `033` 保留原状态/evidence 地迁移为 `OBSERVE_ONLY_8H_SOAK`，代码 Schema 升至 `2.28.0`。
+- `MERGE/SPLIT` 仍无安全复制语义，但从“记录后等待普通差异升级”改为当次 reconciliation 明确 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，Paper/未来 Live 立即 fail closed；combo TRADE 不受误伤。
+- 架构审计确认 runtime 参数仍由编译期 `RULESET` 分散驱动，尚不能安全交给 UI 调参；控制面明确标记 `COMPILE_TIME_RULESET`，后续必须做不可变 profile、完整依赖注入和新 Campaign/core 绑定，不能只写一份配置文件假装生效。
 - 2026-07-22 已把后续测试目标切换为 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；用户将自行启动，Codex 本轮未创建新目标、未启动 Campaign、未写业务库。
 - 修复目标切换时可能误续跑“全库最新 Campaign”的缺陷：预检、freeze、runner 和状态均按 wallet/target 筛选；不同目标可以保留各自 Campaign，旧目标不会被新目标的核心变化冻结或续跑。
 - 隔离 Phase 0/Replay proof 现在显式绑定目标钱包；旧地址 proof 对新地址验证失败。全局 supplemental Replay evidence 也按目标 signal binding 过滤，不能跨钱包补足覆盖率。
@@ -23,6 +27,7 @@
 - 新增 migration `032_negative_risk_conversion.sql`；代码 Schema 升到 `2.27.0`，Signal 升到 `1.6.0`，Observe Signal 升到 `observe-v1.1.0`。旧 Campaign 时长不得进入新核心。
 
 ## Verification completed
+- 本轮全量：`pnpm typecheck` 通过；50 个测试文件、631 项全部通过。新增覆盖原子地址选择/损坏配置/运行锁/桌面 shell、只读 UI capabilities、8 小时 prerequisite 保证 evidence 的迁移、MERGE/SPLIT 当次 fail-closed。
 - `pnpm typecheck` 通过。
 - 全量：49 个测试文件、623 项全部通过。
 - 聚焦回归：6 个测试文件、69 项通过；覆盖目标 scoped preflight、旧目标 proof 拒绝、目标 evidence binding、operator 参数传递和 Replay evidence。
@@ -33,14 +38,14 @@
 - Standards/Spec 两路独立审查的全部发现均已修复；最终复核均为 0 actionable findings。
 
 ## Current identity
-- 代码 Schema `2.27.0`；Signal `1.6.0`；Strategy `2.2.0`；Risk `1.6.0`；Paper `1.6.0`；Live `1.6.0`；Validation `1.3.0`；Operational `1.3.0`；Ruleset `v1.5.0`；Config `v1.3.0`。
+- 代码 Schema `2.28.0`；Signal `1.6.0`；Strategy `2.2.0`；Risk `1.6.0`；Paper `1.6.0`；Live `1.6.0`；Validation `1.3.0`；Operational `1.3.0`；Ruleset `v1.5.0`；Config `v1.3.0`。
 - Ruleset：`e8b3eede381b889562d51ed39d692d9f106a37b7d220ad28c412a72cdd8daa75`。
 - Paper ruleset：`6c8547d4e526878a1d3d696ad60dd77dd7a32c08937013729018fad0cb9492b7`。
-- Core compatibility：`b4239c719f028e59d6ab64b9c6c97ae20bba7412e32cf0eccf9df2fd770e8b92`。
+- Core compatibility：`8a83d46748b663626fcf28bcceef8982ac3ceb1d06ffbf8bdc37d970d33fcf04`。
 - Validation policy：`d42e37a537f15f9ef4cece7f91cb3bcaffcfcc3b4b8898e2f5d5940ec9fbc9b7`。
-- Verification suite：`7b26227cd99596eace91ad7076b0b194b3c05bf5346037705edaf3d20b6ee567`。
-- Operator build：`33f3ed2abd5be301defaa3d05e45b0a39893d9b5d7c5cbc92e891e6b2b516878`。
-- Artifact provenance：`10e91d2def41ba61aee0fa5b63026de66db968b9536bd60311ddb4169f4e5c80`。
+- Verification suite：`f3c93a8650b99e5182ec7153812aef2c7ffa73ca0231de2bc38339d6542c3b0e`。
+- Operator build：`3bcc624c6a2bec8faac0d46307e383629935338a085018304d667304e45bb2e8`。
+- Artifact provenance：`9e5ad5b295dec148e34a4e66e740c55d9ea5df812b6103c42d3cd038e91aa386`。
 
 ## Runtime state before handoff
 - 目标隔离修复已形成干净提交；新地址只读 preflight 为 `PASSED`，`campaignId=null`、`mismatchFrozen=false`、时钟校准通过。业务数据库文件 mtime 仍为 `2026-07-22T09:52:02+0800`，本轮未写库。
@@ -52,6 +57,7 @@
 - 新表 `negative_risk_conversion_evidence` 当前为 0 行；历史 Campaign/Session 终态未被迁移改变。
 
 ## Next steps
-1. 用户随后双击“1_开始或继续Paper累计验证”；首次运行会重建新目标 Phase 0/Replay proof 并创建独立 Campaign。Codex 本轮不代用户启动。
-2. 首次新目标 Paper 应先短时观察 MERGE/负风险活动是否触发持续 Position diff；若出现 `MINOR_DIFF/MAJOR_DESYNC`，立即安全暂停并把 ZIP 交给 Codex，不能把该时长当作 Live-ready 证明。
-3. `MERGE/SPLIT` projection/copy 和 `TARGET_CONVERSION` 的真实 Paper/Live 执行仍未完成；小额 Live 前必须解决这些 blocker，并另行完成合规、隔离钱包、signer、安全 Gate 和用户再次明确授权。
+1. 完成 `2.28.0` 全量测试、真实库 backup-first 迁移和安全不变量复核后，用户再自行启动新目标短测。
+2. 新目标出现 MERGE/SPLIT 时将立即 `MAJOR_DESYNC`；用户应安全暂停并交回 ZIP。该结果证明“钱包包含当前不可跟操作”，不是程序误漏单。
+3. 下一轮底层工作是 runtime ruleset profile：参数校验、不可变 hash/registry、Observe/Risk/Paper/Live 完整依赖注入、参数变化强制新 core/Campaign；完成前 UI 只能展示参数，不能编辑。
+4. `MERGE/SPLIT` projection/copy 和 `TARGET_CONVERSION` 的真实执行仍未完成；小额 Live 前还必须完成合规、隔离钱包、signer、安全 Gate 和用户再次明确授权。

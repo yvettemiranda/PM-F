@@ -1480,6 +1480,53 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it.each(["MERGE", "SPLIT"] as const)(
+    "fails closed immediately when target %s cannot be projected or copied",
+    async (activityType) => {
+      const { databasePath } = setup();
+      let now = new Date("2026-07-08T00:01:00.000Z");
+      const unsupported = activity({
+        type: activityType,
+        transactionHash: `0xunsupported-${activityType.toLowerCase()}`,
+        timestamp: baselineSecond + 70,
+      });
+      const store = new ObserveStore(databasePath, sourceVersion);
+      const runner = new ObserveOnlyRunner(store, new QueueSource([
+        snapshot([], [position("100")], now.toISOString()),
+        snapshotWithActivity([unsupported], [position("100")], "2026-07-08T00:01:10.000Z"),
+      ]), {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+      });
+
+      await runner.pollOnce();
+      now = new Date("2026-07-08T00:01:10.000Z");
+      await runner.pollOnce();
+      store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+      expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+        processedEvents: 1,
+        emittedSignals: 0,
+        majorDesyncCount: 1,
+        finalSyncStatus: "MAJOR_DESYNC",
+      });
+      store.close();
+
+      const check = new DatabaseSync(databasePath, { readOnly: true });
+      const report = check.prepare(
+        `SELECT detail_json FROM reconciliation_reports
+         WHERE sync_status='MAJOR_DESYNC' ORDER BY created_at DESC LIMIT 1`,
+      ).get() as { detail_json: string };
+      expect(JSON.parse(report.detail_json)).toContainEqual(expect.objectContaining({
+        issueType: "UNSUPPORTED_TARGET_ACTIVITY",
+        activityType,
+      }));
+      expect(check.prepare("SELECT sync_status FROM monitor_targets").get())
+        .toEqual({ sync_status: "MAJOR_DESYNC" });
+      check.close();
+    },
+  );
+
   it("persists verified negative-risk conversion evidence and restores it without another RPC call", async () => {
     const sourceAsset = "100";
     const destinationAssets = ["201", "202", "203", "204"];

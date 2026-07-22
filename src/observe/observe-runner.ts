@@ -14,6 +14,7 @@ import type {
   ObserveEvent,
   ObserveRunMetrics,
   SourceEventMultiplicityAmbiguity,
+  UnsupportedTargetActivity,
 } from "./types.js";
 import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarketMetadataProvider } from "../signal-context/execution-context.js";
 import type { SourceVersion } from "../infra/source-version.js";
@@ -407,6 +408,12 @@ export class ObserveOnlyRunner {
         tradesCount: currentTradeKeys.has(key) || storedTradeKeys.has(key) ? 1 : 0,
         activityCount: currentActivityKeys.has(key) ? 1 : 0,
       }));
+    const unsupportedActivities: UnsupportedTargetActivity[] = allEvents.flatMap((event) => {
+      const activityType = event.activity?.type;
+      return activityType === "MERGE" || activityType === "SPLIT"
+        ? [{ sourceEventKey: event.sourceEventKey, activityType } satisfies UnsupportedTargetActivity]
+        : [];
+    });
     const previousReport = this.store.latestReconciliationReport(started.observeRunId);
     const reconciliation = reconcileProjection(
       projection.projection,
@@ -414,6 +421,7 @@ export class ObserveOnlyRunner {
       completedAt,
       previousReport,
       sourceEventAmbiguities,
+      unsupportedActivities,
     );
     const expectedPositions = new Map(
       projection.projection.map((entry) => [entry.asset, BigInt(entry.expectedTotalMicros)]),

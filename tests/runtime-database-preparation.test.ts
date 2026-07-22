@@ -208,6 +208,40 @@ describe("runtime database preparation", () => {
     database.close();
   });
 
+  it("renames the Observe prerequisite to the actual eight-hour policy without losing evidence", async () => {
+    const root = directory();
+    const databasePath = join(root, "observe-prerequisite", "phase0.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const evidence = JSON.stringify({ evidenceType: "TEST", checkedAt: "2026-07-20T00:00:00.000Z" });
+    const legacy = new DatabaseSync(databasePath);
+    legacy.prepare(
+      `INSERT INTO live_gate_prerequisites(prerequisite_key,status,evidence_json,updated_at)
+       VALUES ('OBSERVE_ONLY_24H_SOAK','PASSED',?,?)`,
+    ).run(evidence, "2026-07-20T00:00:00.000Z");
+    legacy.prepare("DELETE FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'").run();
+    legacy.prepare("DELETE FROM schema_migrations WHERE version='2.28.0'").run();
+    legacy.close();
+
+    const result = await prepareRuntimeDatabase({
+      databasePath,
+      backupDirectory: join(root, "backups"),
+      sourceVersion,
+    });
+    expect(result).toMatchObject({ migrated: true, schemaVersion: "2.28.0" });
+    const migrated = new DatabaseSync(databasePath, { readOnly: true });
+    expect(migrated.prepare(
+      "SELECT status,evidence_json,updated_at FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'",
+    ).get()).toEqual({
+      status: "PASSED",
+      evidence_json: evidence,
+      updated_at: "2026-07-20T00:00:00.000Z",
+    });
+    expect(migrated.prepare(
+      "SELECT 1 ok FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_24H_SOAK'",
+    ).get()).toBeUndefined();
+    migrated.close();
+  });
+
   it("preserves legacy Campaign and Session evidence while relaxing duration constraints", async () => {
     const root = directory();
     const databasePath = join(root, "legacy-duration", "phase0.sqlite");
@@ -236,7 +270,7 @@ describe("runtime database preparation", () => {
         DROP TABLE negative_risk_conversion_evidence;
       `);
       legacy.exec(downgradeSql);
-      legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.26.0','2.27.0')").run();
+      legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.26.0','2.27.0','2.28.0')").run();
       expect(legacy.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       legacy.exec("COMMIT");
     } catch (error) {

@@ -8,6 +8,7 @@ import type {
   ReconciliationResult,
   ReconciliationDetail,
   SourceEventMultiplicityAmbiguity,
+  UnsupportedTargetActivity,
 } from "./types.js";
 
 function absolute(value: bigint): bigint {
@@ -22,11 +23,18 @@ function issueIdentity(detail: ReconciliationDetail): string {
       differenceMicros: detail.differenceMicros,
     });
   }
+  if (detail.issueType === "SOURCE_EVENT_MULTIPLICITY_AMBIGUOUS") {
+    return stableJson({
+      issueType: detail.issueType,
+      sourceEventKey: detail.sourceEventKey,
+      tradesCount: detail.tradesCount,
+      activityCount: detail.activityCount,
+    });
+  }
   return stableJson({
     issueType: detail.issueType,
     sourceEventKey: detail.sourceEventKey,
-    tradesCount: detail.tradesCount,
-    activityCount: detail.activityCount,
+    activityType: detail.activityType,
   });
 }
 
@@ -36,6 +44,7 @@ export function reconcileProjection(
   observedAt: string,
   previousReport: ReconciliationHistoryReport | null,
   sourceEventAmbiguities: readonly SourceEventMultiplicityAmbiguity[] = [],
+  unsupportedActivities: readonly UnsupportedTargetActivity[] = [],
 ): ReconciliationResult {
   const observedAtMs = Date.parse(observedAt);
   if (!Number.isFinite(observedAtMs)) throw new Error("RECONCILIATION_OBSERVED_AT_INVALID");
@@ -67,6 +76,13 @@ export function reconcileProjection(
       sourceEventKey: ambiguity.sourceEventKey,
       tradesCount: ambiguity.tradesCount,
       activityCount: ambiguity.activityCount,
+    });
+  }
+  for (const activity of unsupportedActivities) {
+    currentDetails.push({
+      issueType: "UNSUPPORTED_TARGET_ACTIVITY",
+      sourceEventKey: activity.sourceEventKey,
+      activityType: activity.activityType,
     });
   }
   const previousDetails = new Map(
@@ -105,8 +121,11 @@ export function reconcileProjection(
   let syncStatus: SyncStatus = "SYNCED";
   if (details.length > 0) {
     const major = details.some((detail) => (
-      detail.consecutiveCount! >= RULESET.majorDesyncConsecutiveCount
-      && observedAtMs - Date.parse(detail.firstObservedAt!) >= RULESET.reconciliationGraceMs
+      detail.issueType === "UNSUPPORTED_TARGET_ACTIVITY"
+      || (
+        detail.consecutiveCount! >= RULESET.majorDesyncConsecutiveCount
+        && observedAtMs - Date.parse(detail.firstObservedAt!) >= RULESET.reconciliationGraceMs
+      )
     ));
     syncStatus = major ? "MAJOR_DESYNC" : "MINOR_DIFF";
   }

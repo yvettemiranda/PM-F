@@ -1,7 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
 
-TARGET_WALLET="0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a"
 export PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:$HOME/Library/pnpm:$HOME/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 DATA_DIR="$PROJECT_ROOT/data"
@@ -9,6 +8,20 @@ LOG_DIR="$DATA_DIR/operator/logs"
 RUN_DIR="$DATA_DIR/operator/run"
 PAPER_ACCOUNT_ID_FILE="$DATA_DIR/operator/paper-account-id.txt"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+TARGET_WALLET_FILE="$DATA_DIR/operator/target-wallet.txt"
+TARGET_WALLET_DEFAULT_FILE="$PROJECT_ROOT/config/default-target-wallet.txt"
+if [[ -f "$TARGET_WALLET_FILE" ]]; then
+  TARGET_WALLET="$(<"$TARGET_WALLET_FILE")"
+else
+  TARGET_WALLET="$(<"$TARGET_WALLET_DEFAULT_FILE")"
+fi
+TARGET_WALLET="${TARGET_WALLET:l}"
+if [[ ! "$TARGET_WALLET" =~ ^0x[0-9a-f]{40}$ ]]; then
+  print -u2 "目标钱包配置无效：$TARGET_WALLET"
+  print -u2 "请使用 operator:control 安全设置目标钱包。"
+  return 64 2>/dev/null || exit 64
+fi
 
 typeset -ga OPERATOR_CHILD_PIDS=()
 OPERATOR_SESSION_FILE=""

@@ -16,6 +16,7 @@
     "paper:run": "tsx src/cli/paper-run.ts",
     "paper:campaign": "tsx src/cli/paper-campaign-run.ts",
     "paper:campaign:status": "tsx src/cli/paper-campaign-status.ts",
+    "operator:control": "tsx src/cli/operator-control.ts",
     "validate:final": "tsx src/cli/validate-final.ts",
     "operational:validate": "tsx src/cli/operational-validate.ts"
   },

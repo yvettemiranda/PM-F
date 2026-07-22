@@ -18,7 +18,7 @@
 - Gap Signal 固定不可执行；数据、版本、恢复或账本状态不确定时必须 fail closed。
 
 ## Current implementation baseline
-- 当前代码 Schema 为 `2.27.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
+- 当前代码 Schema 为 `2.28.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
 - 负风险 `CONVERSION` 必须由 Activity、Polygon 成功回执/目标钱包唯一 NegRiskAdapter 日志和 Positions 三方证明；转换涉及资产必须与完整 projection 做 micros 零容差数量核对，证据才可 append-only 保存并进入 checkpoint 恢复。
 - historical-only conversion 只重分 bucket；tracked conversion 当前生成不可执行审计义务并立即闭锁：Paper 账户 `PAUSED`/仓位冻结，Live 紧急停机并强制 `PAPER + LIVE_DISABLED`，绝不静默跳过、越过后续信号或误当 SELL。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
@@ -34,7 +34,7 @@
 ## Current runtime and Campaign
 - 操作入口已切换为新目标 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；预检、Campaign 选择、状态和隔离/Replay 证据均按目标绑定，不能复用旧地址 Campaign、时长、账户、基线或 proof。
 - 新目标已只读确认是活跃 `PROXY_WALLET`（profile `JustAnAussie`），但尚未写入业务库、尚无 Campaign；第一次由用户启动时必须刷新该地址的 Phase 0/Replay proof，并创建独立 target/baseline/account/Campaign。
-- 新目标最近 500 条 Activity 中有 10 次 `MERGE`，均未在最近 1000 条普通 Trades 中发现同交易哈希。当前系统会记录 MERGE 但不投影/复制，后续对账可能升级为 `MAJOR_DESYNC` 并阻断；这是进入小额 Live 前必须解决或形成明确 fail-closed 策略的风险。
+- 新目标最近 500 条 Activity 中有 10 次 `MERGE`，均未在最近 1000 条普通 Trades 中发现同交易哈希。系统仍不伪造 MERGE/SPLIT 的投影或复制能力，但现在会在发现当次明确写入 `UNSUPPORTED_TARGET_ACTIVITY` 并立即 `MAJOR_DESYNC`，不再等待普通持仓差异宽限期。
 - `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6` 已为旧目标创建后按用户要求安全暂停；Session `PS-D50FE31F7FF33A1DCEA4` 最终对账 `SYNCED`，Campaign 为 `PAUSED`、未取得资格、累计有效时长 `26061 ms`、无 blocker。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。
 - 旧 Campaign `PC-94D81ECAD5EF89852D2A` 仍为 `FROZEN`；所有旧核心运行时间均不得计入本轮 `2.27.0` replacement Campaign。
@@ -54,5 +54,6 @@
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
 - 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；conversion 投影修复形成新核心，旧 Campaign 不能继续。
 - 旧目标的 `2.27.0` replacement 已安全暂停；新目标只读验证和入口隔离已完成，首次启动仍必须建立独立 baseline/target/account/Campaign，旧目标 Campaign 的时间不得转移。
-- 目标地址只有 `操作入口/lib/common.sh` 一处权威配置；所有 TypeScript 入口要求显式 `--target-wallet`，旧目标生成的隔离证据会被拒绝，其他目标的 Replay evidence 不计入覆盖率。
+- 目标选择通过 `src/operator/target-wallet.ts` 深模块统一管理：项目默认在 `config/default-target-wallet.txt`，运行时选择在忽略的 `data/operator/target-wallet.txt`，活跃/残留 operator lock 存在时拒绝切换；所有运行入口仍显式传递 `--target-wallet`，旧目标证明和 Replay evidence 不能跨钱包复用。
+- `operator-control` 提供只读 UI 状态投影和原子换地址接口；当前明确暴露 `Live=LIVE_RUNTIME_NOT_WIRED`、`parameters=COMPILE_TIME_RULESET`，避免未来 UI 产生无效控制。模式切换仍以数据库 Live Gate 为唯一权威，不能作为普通配置字段写入。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

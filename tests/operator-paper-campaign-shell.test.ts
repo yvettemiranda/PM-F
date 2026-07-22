@@ -82,6 +82,7 @@ function campaignBundleFixture(input: {
   symlinkSync(resolve(projectRoot, ".git"), join(directory, ".git"), "dir");
   symlinkSync(resolve(projectRoot, "package.json"), join(directory, "package.json"), "file");
   symlinkSync(resolve(projectRoot, "pnpm-lock.yaml"), join(directory, "pnpm-lock.yaml"), "file");
+  symlinkSync(resolve(projectRoot, "config"), join(directory, "config"), "dir");
   const evidenceDirectory = join(directory, "evidence");
   mkdirSync(evidenceDirectory, { recursive: true });
   const isolated = join(evidenceDirectory, "isolated.json");
@@ -300,7 +301,8 @@ describe("Paper Campaign operator shell", () => {
     expect(launcher).toContain("--phase0-results=\"$PHASE0_RESULT_FILE\"");
     expect(launcher).toContain("--replay-results=\"$REPLAY_RESULT_FILE\"");
     expect(launcher.match(/--target-wallet/g)).toHaveLength(5);
-    expect(common).toContain(`TARGET_WALLET="${targetWallet}"`);
+    expect(readFileSync(resolve(projectRoot, "config/default-target-wallet.txt"), "utf8").trim()).toBe(targetWallet);
+    expect(common).toContain('TARGET_WALLET_FILE="$DATA_DIR/operator/target-wallet.txt"');
     expect(common).toContain('"--target-wallet=$TARGET_WALLET"');
     expect(common).toContain('print "代码版本：$report_source_commit"');
     expect(common).toContain("OPERATOR_SOURCE_PROVENANCE");
@@ -366,6 +368,7 @@ describe("Paper Campaign operator shell", () => {
     temporaryDirectories.push(directory);
     symlinkSync(resolve(projectRoot, "src"), join(directory, "src"), "dir");
     symlinkSync(resolve(projectRoot, "node_modules"), join(directory, "node_modules"), "dir");
+    symlinkSync(resolve(projectRoot, "config"), join(directory, "config"), "dir");
     const evidenceDirectory = join(directory, "evidence");
     mkdirSync(evidenceDirectory, { recursive: true });
     const internalUuid = "c5b7cdec-465a-4b3e-9c17-0ff4cce1327f";
@@ -579,6 +582,7 @@ describe("Paper Campaign operator shell", () => {
       [".git", "dir"],
       ["package.json", "file"],
       ["pnpm-lock.yaml", "file"],
+      ["config", "dir"],
     ] as const) {
       symlinkSync(resolve(projectRoot, name), join(directory, name), type);
     }

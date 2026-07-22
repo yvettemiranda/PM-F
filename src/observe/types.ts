@@ -98,6 +98,10 @@ export type ReconciliationDetail = ({
   sourceEventKey: string;
   tradesCount: number;
   activityCount: number;
+} | {
+  issueType: "UNSUPPORTED_TARGET_ACTIVITY";
+  sourceEventKey: string;
+  activityType: "MERGE" | "SPLIT";
 }) & {
   firstObservedAt?: string;
   consecutiveCount?: number;
@@ -112,6 +116,11 @@ export interface SourceEventMultiplicityAmbiguity {
   sourceEventKey: string;
   tradesCount: number;
   activityCount: number;
+}
+
+export interface UnsupportedTargetActivity {
+  sourceEventKey: string;
+  activityType: "MERGE" | "SPLIT";
 }
 
 export interface ObserveRunMetrics {

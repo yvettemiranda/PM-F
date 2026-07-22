@@ -609,6 +609,26 @@ export class Phase0Database {
         throw error;
       }
     }
+    const observeSoakPrerequisiteNameApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.28.0");
+    if (!observeSoakPrerequisiteNameApplied) {
+      const observeSoakPrerequisiteNameSql = readFileSync(
+        new URL("./033_observe_soak_prerequisite_name.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(observeSoakPrerequisiteNameSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.28.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
