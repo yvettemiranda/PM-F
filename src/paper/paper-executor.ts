@@ -291,6 +291,15 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   async consumeSignal(accountId: string, signalId: string, signal?: AbortSignal): Promise<string> {
+    return this.consumeSignalInternal(accountId, signalId, signal, true);
+  }
+
+  private async consumeSignalInternal(
+    accountId: string,
+    signalId: string,
+    signal: AbortSignal | undefined,
+    attemptImmediately: boolean,
+  ): Promise<string> {
     const existing = this.database.prepare(
       "SELECT paper_execution_id FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id=?",
     ).get(accountId, signalId) as { paper_execution_id: string | null } | undefined;
@@ -319,7 +328,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
     const executionId = this.createExecutionForSignal(accountId, envelope);
     const row = this.execution(executionId);
-    if (!signal?.aborted && ["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)) {
+    if (
+      attemptImmediately
+      && !signal?.aborted
+      && ["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(row.state)
+    ) {
       await this.attemptExecution(executionId, signal);
     }
     return executionId;
@@ -329,6 +342,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     accountId: string,
     signal?: AbortSignal,
     scope?: PaperSignalConsumptionScope,
+    options: { deferAttempts?: boolean } = {},
   ): Promise<string[]> {
     const account = this.accountRow(accountId);
     if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
@@ -372,7 +386,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     for (const row of rows) {
       if (signal?.aborted) break;
       this.assertNoBlockingTargetConversion(accountId, scope);
-      executions.push(await this.consumeSignal(accountId, row.signal_id, signal));
+      executions.push(await this.consumeSignalInternal(
+        accountId,
+        row.signal_id,
+        signal,
+        !(options.deferAttempts ?? false),
+      ));
     }
     return executions;
   }
@@ -1291,6 +1310,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
         }
       } else {
+        const waitingBuyAdjustments = this.waitingBuyTargetExitAdjustments(accountId, signal);
         const allocations = this.sellAllocations(accountId, signal);
         const requested = allocations.reduce((sum, item) => sum + item.size, 0n);
         const risk = preapprovedRisk ?? this.riskManager.evaluate({
@@ -1299,6 +1319,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           signal,
           requestedAmountMicros: null,
           requestedSizeMicros: requested > 0n ? requested : null,
+          targetExitSupersession: allocations.length === 0 && waitingBuyAdjustments.length > 0,
           now,
         });
         if (risk.decision === "REJECT") {
@@ -1306,20 +1327,55 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.insertRejectedExecution(accountId, signal, executionId, idempotency, reason, now, risk);
           this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", reason, now);
           this.audit("SIGNAL", signal.signalId, "REJECTED", reason, now, { accountId, riskDecisionId: risk.riskDecisionId });
-        } else if (allocations.length === 0) {
-          this.insertRejectedExecution(accountId, signal, executionId, idempotency, "NO_TRACKED_PAPER_POSITION", now, risk);
-          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", "NO_TRACKED_PAPER_POSITION", now);
-          this.audit("SIGNAL", signal.signalId, "REJECTED", "NO_TRACKED_PAPER_POSITION", now, { accountId, riskDecisionId: risk.riskDecisionId });
         } else {
-          this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXIT_PENDING", null, requested, null, null, "TARGET_SELL_RECEIVED", now, risk);
-          const insert = this.database.prepare(
-            `INSERT INTO paper_execution_positions(
-              paper_execution_id,paper_position_id,requested_size_micros,filled_size_micros,created_at
-            ) VALUES (?, ?, ?, '0', ?)`,
+          const supersededWaitingBuyCount = this.applyWaitingBuyTargetExitAdjustments(
+            accountId,
+            signal,
+            waitingBuyAdjustments,
+            now,
           );
-          for (const item of allocations) insert.run(executionId, item.positionId, item.size.toString(), now);
-          this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
-          this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
+          if (allocations.length === 0 && supersededWaitingBuyCount > 0) {
+            this.insertExecutionFromSignal(
+              accountId,
+              signal,
+              executionId,
+              idempotency,
+              "EXECUTED",
+              null,
+              null,
+              null,
+              null,
+              "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+              now,
+              risk,
+            );
+            this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+            this.audit(
+              "SIGNAL",
+              signal.signalId,
+              "ACCEPTED",
+              "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+              now,
+              { accountId, riskDecisionId: risk.riskDecisionId, supersededWaitingBuyCount },
+            );
+            this.updateCheckpoint(accountId, signal, now);
+            this.database.exec("COMMIT");
+            return executionId;
+          } else if (allocations.length === 0) {
+            this.insertRejectedExecution(accountId, signal, executionId, idempotency, "NO_TRACKED_PAPER_POSITION", now, risk);
+            this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", "NO_TRACKED_PAPER_POSITION", now);
+            this.audit("SIGNAL", signal.signalId, "REJECTED", "NO_TRACKED_PAPER_POSITION", now, { accountId, riskDecisionId: risk.riskDecisionId });
+          } else {
+            this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "EXIT_PENDING", null, requested, null, null, "TARGET_SELL_RECEIVED", now, risk);
+            const insert = this.database.prepare(
+              `INSERT INTO paper_execution_positions(
+                paper_execution_id,paper_position_id,requested_size_micros,filled_size_micros,created_at
+              ) VALUES (?, ?, ?, '0', ?)`,
+            );
+            for (const item of allocations) insert.run(executionId, item.positionId, item.size.toString(), now);
+            this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "ACCEPTED", null, now);
+            this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
+          }
         }
       }
       this.updateCheckpoint(accountId, signal, now);
@@ -1552,7 +1608,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
     });
-    const firstEntryMinimumEligible = this.firstEntryMinimumEligible(
+    const firstEntryMinimumEligible = !this.wasWaitingBuyReducedByTargetExit(
+      activeExecution.paper_execution_id,
+    ) && this.firstEntryMinimumEligible(
       activeExecution.paper_account_id,
       activeExecution.asset_id,
       activeExecution.paper_execution_id,
@@ -3018,6 +3076,151 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         };
       })
       .filter((item) => item.size > 0n);
+  }
+
+  private waitingBuyTargetExitAdjustments(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+  ): Array<{
+    paperExecutionId: string;
+    reservationId: string;
+    released: bigint;
+    retained: bigint;
+  }> {
+    if (!signal.sellRatioNumerator || !signal.sellRatioDenominator) return [];
+    const numerator = BigInt(signal.sellRatioNumerator);
+    const denominator = BigInt(signal.sellRatioDenominator);
+    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return [];
+    const rows = this.database.prepare(
+      `SELECT e.paper_execution_id,r.reservation_id,r.original_amount_micros,
+              r.remaining_amount_micros
+       FROM paper_executions e
+       JOIN paper_reservations r ON r.paper_execution_id=e.paper_execution_id
+       WHERE e.paper_account_id=? AND e.asset_id=? AND e.condition_id=?
+         AND e.execution_type='TARGET_BUY' AND e.state='WAITING_EXECUTION'
+         AND r.status='ACTIVE'
+       ORDER BY e.created_at,e.paper_execution_id`,
+    ).all(accountId, signal.assetId, signal.conditionId) as Array<{
+      paper_execution_id: string;
+      reservation_id: string;
+      original_amount_micros: string;
+      remaining_amount_micros: string;
+    }>;
+    return rows.flatMap((row) => {
+      const original = BigInt(row.original_amount_micros);
+      const remaining = BigInt(row.remaining_amount_micros);
+      if (original !== remaining) throw new Error("PAPER_WAITING_BUY_RESERVATION_MISMATCH");
+      const released = (remaining * numerator) / denominator;
+      return released <= 0n ? [] : [{
+        paperExecutionId: row.paper_execution_id,
+        reservationId: row.reservation_id,
+        released,
+        retained: remaining - released,
+      }];
+    });
+  }
+
+  private applyWaitingBuyTargetExitAdjustments(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    adjustments: Array<{
+      paperExecutionId: string;
+      reservationId: string;
+      released: bigint;
+      retained: bigint;
+    }>,
+    now: string,
+  ): number {
+    for (const adjustment of adjustments) {
+      const { released, retained } = adjustment;
+      const execution = this.execution(adjustment.paperExecutionId);
+      const account = this.accountRow(accountId);
+      const reservedAfter = BigInt(account.reserved_balance_micros) - released;
+      if (reservedAfter < 0n) throw new Error("PAPER_RESERVATION_INVARIANT");
+      this.database.prepare(
+        "UPDATE paper_accounts SET reserved_balance_micros=?,updated_at=? WHERE paper_account_id=?",
+      ).run(reservedAfter.toString(), now, accountId);
+      this.database.prepare(
+        `UPDATE paper_reservations
+         SET original_amount_micros=?,remaining_amount_micros=?,status=?,updated_at=?
+         WHERE reservation_id=?`,
+      ).run(
+        retained.toString(),
+        retained.toString(),
+        retained === 0n ? "RELEASED" : "ACTIVE",
+        now,
+        adjustment.reservationId,
+      );
+      this.database.prepare(
+        `INSERT INTO paper_reservation_ledger(
+          reservation_ledger_id,reservation_id,paper_execution_id,entry_type,delta_micros,
+          remaining_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, 'RELEASE', ?, ?, ?, ?)`,
+      ).run(
+        hash([adjustment.reservationId, "TARGET_SELL_RELEASE", signal.signalId]),
+        adjustment.reservationId,
+        execution.paper_execution_id,
+        (-released).toString(),
+        retained.toString(),
+        hash([adjustment.reservationId, "TARGET_SELL_RELEASE", signal.signalId]),
+        now,
+      );
+      this.database.prepare(
+        `INSERT INTO paper_cash_ledger(
+          cash_ledger_id,paper_account_id,paper_execution_id,entry_type,cash_delta_micros,
+          reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, 'RESERVATION_RELEASE', '0', ?, ?, ?, ?, ?)`,
+      ).run(
+        hash([execution.paper_execution_id, "TARGET_SELL_RELEASE", signal.signalId]),
+        accountId,
+        execution.paper_execution_id,
+        (-released).toString(),
+        account.cash_balance_micros,
+        reservedAfter.toString(),
+        hash([execution.paper_execution_id, "TARGET_SELL_RELEASE", signal.signalId]),
+        now,
+      );
+      const nextState: PaperExecutionState = retained === 0n ? "CANCELLED" : "WAITING_EXECUTION";
+      const reason = retained === 0n
+        ? "TARGET_SELL_SUPERSEDED_WAITING_BUY"
+        : "TARGET_SELL_REDUCED_WAITING_BUY";
+      this.database.prepare(
+        `UPDATE paper_executions
+         SET requested_amount_micros=?,state=?,reason=?,updated_at=?
+         WHERE paper_execution_id=?`,
+      ).run(retained.toString(), nextState, reason, now, execution.paper_execution_id);
+      this.transition(
+        "PAPER_EXECUTION",
+        execution.paper_execution_id,
+        execution.state,
+        nextState,
+        reason,
+        now,
+      );
+      this.audit(
+        "PAPER_EXECUTION",
+        execution.paper_execution_id,
+        retained === 0n ? "RESERVATION_CANCELLED" : "RESERVATION_REDUCED",
+        reason,
+        now,
+        {
+          targetExitSignalId: signal.signalId,
+          releasedAmountMicros: released.toString(),
+          retainedAmountMicros: retained.toString(),
+        },
+      );
+    }
+    return adjustments.length;
+  }
+
+  private wasWaitingBuyReducedByTargetExit(executionId: string): boolean {
+    return Boolean(this.database.prepare(
+      `SELECT 1 reduced FROM audit_log
+       WHERE entity_type='PAPER_EXECUTION' AND entity_id=?
+         AND action='RESERVATION_REDUCED'
+         AND reason='TARGET_SELL_REDUCED_WAITING_BUY'
+       LIMIT 1`,
+    ).get(executionId));
   }
 
   private updateCheckpoint(accountId: string, signal: PaperSignalEnvelope, now: string): void {

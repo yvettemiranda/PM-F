@@ -2520,6 +2520,252 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("cancels a waiting BUY before retry when a full target exit is already available", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "waiting-before-target-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const buyExecutionId = await env.executor.consumeSignal(
+      env.accountId,
+      "waiting-before-target-exit",
+    );
+    expect(env.executor.executionState(buyExecutionId)).toBe("WAITING_EXECUTION");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "target-exited-before-retry",
+      signalType: "TARGET_SELL",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      sellNumerator: "1",
+      sellDenominator: "1",
+      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+      eventClassification: "COMBO_ACTIVITY",
+    });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.5", size: "1000" }],
+      [{ price: "0.5", size: "1000" }],
+    );
+
+    await new PaperRunner(env.executor, {
+      accountId: env.accountId,
+      intervalMs: 1_000,
+      now: () => env.getClock(),
+    }).finalDrain();
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const exit = db.prepare(
+      `SELECT e.state,e.reason FROM paper_executions e
+       JOIN paper_signal_consumptions c ON c.paper_execution_id=e.paper_execution_id
+       WHERE c.paper_account_id=? AND c.signal_id='target-exited-before-retry'`,
+    ).get(env.accountId);
+    expect(env.executor.executionState(buyExecutionId)).toBe("CANCELLED");
+    expect(exit).toEqual({
+      state: "EXECUTED",
+      reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+    });
+    expect(db.prepare(
+      `SELECT count(*) count FROM paper_fill_ledger f
+       JOIN paper_orders o ON o.paper_order_id=f.paper_order_id
+       WHERE o.paper_execution_id=? AND f.side='BUY'`,
+    ).get(buyExecutionId)).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT count(*) count FROM paper_positions WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT reserved_balance_micros FROM paper_accounts WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ reserved_balance_micros: "0" });
+    db.close();
+    env.executor.close();
+  });
+
+  it("reduces a waiting BUY proportionally before retry when the target partially exits", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "waiting-before-partial-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const buyExecutionId = await env.executor.consumeSignal(
+      env.accountId,
+      "waiting-before-partial-exit",
+    );
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "target-partially-exited-before-retry",
+      signalType: "TARGET_SELL",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      sellNumerator: "1",
+      sellDenominator: "4",
+    });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    await new PaperRunner(env.executor, {
+      accountId: env.accountId,
+      intervalMs: 1_000,
+      now: () => env.getClock(),
+    }).finalDrain();
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(env.executor.executionState(buyExecutionId)).toBe("WAITING_EXECUTION");
+    expect(db.prepare(
+      `SELECT original_amount_micros,remaining_amount_micros,status
+       FROM paper_reservations WHERE paper_execution_id=?`,
+    ).get(buyExecutionId)).toEqual({
+      original_amount_micros: "75000000",
+      remaining_amount_micros: "75000000",
+      status: "ACTIVE",
+    });
+    expect(db.prepare(
+      "SELECT reserved_balance_micros FROM paper_accounts WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ reserved_balance_micros: "75000000" });
+    expect(db.prepare(
+      `SELECT entry_type,delta_micros,remaining_after_micros
+       FROM paper_reservation_ledger
+       WHERE paper_execution_id=? ORDER BY rowid`,
+    ).all(buyExecutionId)).toEqual([
+      { entry_type: "RESERVE", delta_micros: "100000000", remaining_after_micros: "100000000" },
+      { entry_type: "RELEASE", delta_micros: "-25000000", remaining_after_micros: "75000000" },
+    ]);
+    expect(db.prepare(
+      `SELECT e.state,e.reason FROM paper_executions e
+       JOIN paper_signal_consumptions c ON c.paper_execution_id=e.paper_execution_id
+       WHERE c.paper_account_id=? AND c.signal_id='target-partially-exited-before-retry'`,
+    ).get(env.accountId)).toEqual({
+      state: "EXECUTED",
+      reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+    });
+    db.close();
+    expect(env.executor.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    env.executor.close();
+  });
+
+  it("does not mutate a waiting BUY when Risk rejects the target exit", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "waiting-before-rejected-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const buyExecutionId = await env.executor.consumeSignal(
+      env.accountId,
+      "waiting-before-rejected-exit",
+    );
+    const writable = new DatabaseSync(env.databasePath);
+    writable.prepare(
+      `INSERT INTO reconciliation_issues(
+        issue_id,target_id,asset_id,issue_type,expected_value,observed_value,
+        sync_status,status,detail_json,created_at
+      ) VALUES ('issue-before-target-exit', ?, ?, 'POSITION_DIFF', '1', '2',
+        'MAJOR_DESYNC', 'OPEN', '{}', ?)`,
+    ).run(env.targetId, assetId, "2026-07-08T00:00:01.500Z");
+    writable.close();
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "rejected-target-exit",
+      signalType: "TARGET_SELL",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      sellNumerator: "1",
+      sellDenominator: "1",
+    });
+
+    const exitExecutionId = await env.executor.consumeSignal(env.accountId, "rejected-target-exit");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(env.executor.executionState(exitExecutionId)).toBe("REJECTED");
+    expect(env.executor.executionState(buyExecutionId)).toBe("WAITING_EXECUTION");
+    expect(db.prepare(
+      `SELECT original_amount_micros,remaining_amount_micros,status
+       FROM paper_reservations WHERE paper_execution_id=?`,
+    ).get(buyExecutionId)).toEqual({
+      original_amount_micros: "100000000",
+      remaining_amount_micros: "100000000",
+      status: "ACTIVE",
+    });
+    db.close();
+    env.executor.close();
+  });
+
+  it("applies one target exit ratio to both an open Position and a waiting BUY", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "filled-before-combined-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "filled-before-combined-exit");
+
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "waiting-before-combined-exit",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+    const waitingExecutionId = await env.executor.consumeSignal(
+      env.accountId,
+      "waiting-before-combined-exit",
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "combined-partial-exit",
+      signalType: "TARGET_SELL",
+      createdAt: "2026-07-08T00:00:03.000Z",
+      sellNumerator: "1",
+      sellDenominator: "2",
+    });
+    env.setClock(new Date("2026-07-08T00:00:04.000Z"));
+    env.market.book = env.market.makeBook(
+      [],
+      [{ price: "0.5", size: "1000" }],
+    );
+
+    await new PaperRunner(env.executor, {
+      accountId: env.accountId,
+      intervalMs: 1_000,
+      now: () => env.getClock(),
+    }).finalDrain();
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const position = db.prepare(
+      "SELECT current_size_micros FROM paper_positions WHERE paper_account_id=?",
+    ).get(env.accountId);
+    const reservation = db.prepare(
+      `SELECT original_amount_micros,remaining_amount_micros,status
+       FROM paper_reservations WHERE paper_execution_id=?`,
+    ).get(waitingExecutionId);
+    const exit = db.prepare(
+      `SELECT e.state,e.reason FROM paper_executions e
+       JOIN paper_signal_consumptions c ON c.paper_execution_id=e.paper_execution_id
+       WHERE c.paper_account_id=? AND c.signal_id='combined-partial-exit'`,
+    ).get(env.accountId);
+    expect({ position, reservation, exit }).toEqual({
+      position: { current_size_micros: "100000000" },
+      reservation: {
+        original_amount_micros: "45000000",
+        remaining_amount_micros: "45000000",
+        status: "ACTIVE",
+      },
+      exit: { state: "EXECUTED", reason: "SELL_COMPLETED" },
+    });
+    db.close();
+    expect(env.executor.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    env.executor.close();
+  });
+
   it("writes an incomplete ledger-only report without market requests after shutdown is requested", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "shutdown-a", createdAt: "2026-07-08T00:00:01.000Z" });

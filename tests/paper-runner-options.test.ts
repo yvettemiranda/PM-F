@@ -194,7 +194,7 @@ describe("PaperRunner options", () => {
     expect(report.errors.every((error) => error.message === "ORDERBOOK_UNAVAILABLE")).toBe(true);
   });
 
-  it("runs market recovery and risk exits before consuming new signals", async () => {
+  it("runs market recovery and risk exits before staging new signals ahead of pending retries", async () => {
     const calls: string[] = [];
     let clock = new Date("2026-07-15T00:00:00.000Z");
     const executor = {
@@ -214,7 +214,7 @@ describe("PaperRunner options", () => {
       wait: async (milliseconds) => { clock = new Date(clock.valueOf() + milliseconds); },
     }).run();
 
-    expect(calls).toEqual(["recover", "settlement", "stop", "pending", "signals"]);
+    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
   });
 
   it("uses market changes to wake pending BUY retries while retaining a REST fallback", async () => {
@@ -352,7 +352,7 @@ describe("PaperRunner options", () => {
       wait: async (milliseconds) => { clock = new Date(clock.valueOf() + milliseconds); },
     }).run();
 
-    expect(calls).toEqual(["recover", "settlement", "stop", "pending", "signals"]);
+    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
     expect(report.errorCount).toBe(1);
     expect(report.errors[0]?.message).toBe("RECOVERY_FAILED");
   });
@@ -370,7 +370,7 @@ describe("PaperRunner options", () => {
     const runner = new PaperRunner(executor, { accountId: "paper" });
 
     await expect(runner.finalDrain()).resolves.toBe(2);
-    expect(calls).toEqual(["recover", "settlement", "stop", "pending", "signals"]);
+    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
   });
 
   it("rejects a final drain that is aborted before every stage completes", async () => {

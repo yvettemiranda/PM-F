@@ -21,6 +21,8 @@
 - 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
+- 目标完整 SELL/MERGE 已到达时，旧 Paper cycle 会先重试 WAITING BUY，再消费退出，可能买入目标已经退出的陈旧仓位；当前先固化新 Signal，再重试 pending，并按 sell ratio 对同 asset/condition 的待买执行完整取消或部分缩量。Risk 拒绝不会改账，只抵消待买时也不会伪造 SELL 成交。
+- 部分目标退出缩减 Reservation 后，首开市场最低额 auto-lift 可能把金额重新放大；当前以不可变 Audit 标记该 Execution，后续只能按缩减金额执行或失败关闭。
 - Data API Trades/Activity 可能晚于链上成交约 30 秒发布，单纯缩短 HTTP 轮询仍会晚发现；当前用 Polygon 已确认 `OrderFilled` 每秒扫描作为快速源，Data API 改为交叉确认和兜底。
 - Polygon 与 Data API 若对同一 transaction/asset/side/size/timestamp 产生不同 source identity，当前不猜测哪一个正确，直接持久化 issue、置 `MAJOR_DESYNC` 并停止。
 - Campaign runner 曾在最终报告已写完、子进程已退出后仍被依赖 worker handle 挂住；当前 flush stdout/stderr 后主动按最终状态码退出，并有真实残留 interval 的进程级测试。

@@ -85,6 +85,8 @@ Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行
 
 用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context；待成交 BUY 使用公开、无认证的 CLOB Market WebSocket 作为盘口变化唤醒信号，但每次执行判断仍重新读取完整 REST 盘口，并保留 15 秒兜底检查。WebSocket 不参与签名、下单或链上写入。
 
+每个 Paper cycle 会先消费已到达的新 Signal，再重试旧的待执行任务，避免目标已经退出时旧 BUY 抢先成交。目标 `TARGET_SELL` 会同时作用于现有 Paper Position 和同一 asset/condition 的待成交 BUY：全量退出直接取消待买并释放全部 Reservation，部分退出按同一比例缩减待买金额；缩减后的金额不会再被首开最低额规则反向放大。只有完整 Signal/Risk 校验通过后才允许改变待买，所有调整都写入 Reservation、Cash 和 Audit 账本。若退出只抵消了尚未成交的 BUY，不会伪造 SELL 订单或成交，而是记录为已处理的 `TARGET_EXIT_APPLIED_TO_WAITING_BUY`。
+
 BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。首开最低仍为 1 pUSD；若真实市场最小单更高，只在首开时精确抬升且不超过 5 pUSD。SELL、止损和结算不受这条 BUY 上限影响。
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。

@@ -36,6 +36,7 @@ export interface RiskEvaluationInput {
   capitalSizingDecision?: BuyCapitalSizingDecision | null;
   buyAmountPolicyDecision?: BuyAmountPolicyDecision | null;
   replacingReservedAmountMicros?: bigint;
+  targetExitSupersession?: boolean;
   now: string;
 }
 
@@ -226,8 +227,12 @@ export class RiskManager {
         : this.evaluatePaperBuyLimits(input, account, fail, pass);
       if (limitRejection) return limitRejection;
     } else {
-      if (input.requestedSizeMicros === null || input.requestedSizeMicros <= 0n) return fail("requested_size", "SELL_SIZE_UNAVAILABLE");
-      pass("requested_size");
+      if (input.requestedSizeMicros === null || input.requestedSizeMicros <= 0n) {
+        if (!input.targetExitSupersession) return fail("requested_size", "SELL_SIZE_UNAVAILABLE");
+        pass("target_exit_supersession");
+      } else {
+        pass("requested_size");
+      }
     }
 
     return this.recordSignalDecision(input, "ALLOW", "ALLOW", null, checks);
@@ -297,6 +302,7 @@ export class RiskManager {
       input.capitalSizingDecision?.evidenceHash ?? "NO_CAPITAL_SIZING_EVIDENCE",
       input.buyAmountPolicyDecision?.evidenceHash ?? "NO_BUY_AMOUNT_POLICY_EVIDENCE",
       input.replacingReservedAmountMicros?.toString() ?? "NO_RESERVATION_CREDIT",
+      ...(input.targetExitSupersession ? ["TARGET_EXIT_SUPERSESSION"] : []),
       decision,
       riskReason,
       stableJson(checks),

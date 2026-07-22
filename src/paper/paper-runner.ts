@@ -167,6 +167,14 @@ export class PaperRunner {
     await runStage(async () => this.executor.recoverMarketData(this.options.accountId, signal));
     await runStage(async () => { await this.executor.processSettlements(this.options.accountId, signal); });
     await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
+    await runStage(async () => {
+      consumedSignals += (await this.executor.consumeAvailableSignals(
+        this.options.accountId,
+        signal,
+        this.options.signalScope,
+        { deferAttempts: true },
+      )).length;
+    });
     let retryOptions: PaperPendingRetryOptions | undefined;
     if (this.options.marketChangeFeed && !forceAllPending) {
       let pendingAssetIds = new Set<string>();
@@ -190,20 +198,15 @@ export class PaperRunner {
         ? new Set(changedAssetIds.filter((assetId) => pendingAssetIds.has(assetId)))
         : new Set<string>();
       if (fallbackDue) this.lastPendingBuyFallbackAtMs = currentTime;
-      retryOptions = fallbackDue
+      retryOptions = consumedSignals > 0
+        ? { includeBuys: true, includeExits: true }
+        : fallbackDue
         ? { includeBuys: true, includeExits: true }
         : changedPendingAssets.size > 0
           ? { includeBuys: true, includeExits: true, buyAssetIds: changedPendingAssets }
           : { includeBuys: false, includeExits: true };
     }
     await runStage(async () => this.executor.retryPending(this.options.accountId, signal, retryOptions));
-    await runStage(async () => {
-      consumedSignals += (await this.executor.consumeAvailableSignals(
-        this.options.accountId,
-        signal,
-        this.options.signalScope,
-      )).length;
-    });
     if (this.options.marketChangeFeed && !forceAllPending) {
       await runStage(async () => {
         const pending = this.executor.pendingBuyMarkets(this.options.accountId);

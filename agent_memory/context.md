@@ -18,7 +18,8 @@
 - Paper：不可变 Signal/Execution Context、Risk、Reservation、完整 REST 盘口、VWAP/FAK、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
 - 待成交 BUY 使用公开无认证 CLOB Market WebSocket 作为盘口变化唤醒；执行前仍读取完整 REST 盘口，断线或无事件时每 `15 s` 兜底。STOP/SELL 安全退出仍按每个 Paper cycle 处理。
 - 完全相同的待成交盘口和 fee 不重复写完整订单尝试；盘口变化后才产生新尝试。等待原因拆分为 `BUY_NO_ASK`、`BUY_BEST_ASK_ABOVE_LIMIT`、`BUY_ZERO_EXECUTABLE_LIQUIDITY` 等。
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.8.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
+- Paper 每轮先消费并固化已到达的新 Signal，再重试旧执行；后续 `TARGET_SELL` 会按同一比例同时减少现有 Position 和同 asset/condition 的 WAITING BUY，完整退出取消待买，部分退出缩减 Reservation，且只有 Risk 通过后才改账。被缩减的待买禁止被首开最低额重新放大。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.9.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
 - Signal Context 将官方市场结束时间分为 `VERIFIED` / `UNAVAILABLE`；Paper 对后者只使用不可变、有限时长的 `execution_deadline_at`，Live 继续拒绝该状态。
 - Observe 先提交事件/projection/checkpoint，再逐个富化 Signal；单市场元数据失败只记 warning 并在后续轮询重试，不能再制造连接 gap 或污染其它市场 Signal。
 - 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成两个独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。无法证明完整 outcome set、余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
@@ -34,10 +35,10 @@
 
 ## Current runtime and Campaign
 - 真实业务库已 backup-first 升到 Schema `2.29.0`；迁移前备份为 `data/operator/backups/phase0-before-2.29.0-2026-07-22T10-11-59-892Z.sqlite`。迁移前后关键业务表逐项同数，`integrity_check=ok`、外键失败 `0`，旧备份与历史记录均保留。
-- 最近一轮 Campaign `PC-80F7ECAFC26347B92117`、Session `PS-94D8F66D8CC9042A3B44` 已于 2026-07-22 18:47 左右安全停止并完成报告：Observe 成功 `626`、失败 `0`、新事件 `3`、Signal/Order/Fill `0`、Active Reservation `0`，Gate 始终为 `PAPER + LIVE_DISABLED`。
-- 这 3 个事件均是目标卖出启动前已有而 Paper baseline 未持有的历史仓位（`565.72`、`101`、`17.05` 份），不是目标新开 BUY；因此按“不得卖空或伪造初始仓位”规则不生成 SELL Signal。
-- 第三笔 SELL 的 Data API 发布比 Positions 变化慢约 `30 s`，说明单靠 3 秒 Data API 轮询不能保证 3 秒发现；正在以 Polygon 已确认 `OrderFilled` 快速源修复。
-- 当前维护窗口内无 Observe/Paper/Campaign supervisor；维护自动化临时 `PAUSED`，防止未提交核心被自动启动。最终全量验证、干净提交和安全预检通过后，按用户已明确要求自动启动新 Campaign 并恢复维护自动化，持续测试到 2026-07-23 08:00（Asia/Shanghai）。
+- 最近一轮 Campaign `PC-FDE74DCF0572D08802EE`、Session `PS-E4B568E00791EA9C2F83` 已于 2026-07-22 20:42 安全暂停：累计 `1.39 h`，Observe 成功 `4273`、失败 `0`、新事件 `18`、Signal `6`、Paper Order `96`、Fill `2`、Active Reservation `0`，Gate 始终为 `PAPER + LIVE_DISABLED`。
+- 本轮取得首个自然完整生命周期：目标 BUY 被约 3 秒发现，Paper 以 `4.10 pUSD` 买入 `5` 份；目标随后 SELL，Paper 卖出 `5` 份并实现 `-0.10 pUSD`。这证明 Polygon 快速发现、Signal、Risk、BUY/SELL FAK、Position/PnL 全链可运行。
+- 同轮第二个目标 BUY 因 ask 超过上限等待；目标随后以标准二元 MERGE 完整退出，但旧 Paper 核心只生成 `SELL_SIZE_UNAVAILABLE`，没有立即取消 WAITING BUY。安全暂停释放了该 Reservation；Paper `1.9.0` 已新增退出优先、待买取消/缩量和账本回归测试。
+- 当前无 Observe/Paper/Campaign supervisor；10 分钟维护自动化临时 `PAUSED`，防止未提交核心被自动启动。最终干净提交和安全预检通过后创建 replacement Campaign，并持续到 2026-07-23 08:00（Asia/Shanghai）。
 
 ## Known blockers before small Live
 - 新目标最近抽样中频繁出现标准二元 `MERGE`；Paper 已有等价双腿退出语义，但仍须用新核心短测取得自然 MERGE/成交证据。无法证明完整集合的 MERGE 继续硬阻断。
