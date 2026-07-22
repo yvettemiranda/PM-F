@@ -37,13 +37,12 @@
 - Artifact provenance：`10e91d2def41ba61aee0fa5b63026de66db968b9536bd60311ddb4169f4e5c80`。
 
 ## Runtime state before handoff
-- 真实业务库仍为 Schema `2.26.0`，尚未应用本轮 migration；必须在代码提交且无运行进程后使用既有 backup-first 入口迁移。
+- 真实业务库已由既有 backup-first 入口从 `2.26.0` 迁移到 `2.27.0`；备份为 `data/operator/backups/phase0-before-2.27.0-2026-07-22T01-24-19-628Z.sqlite`，入口已完成备份/新库 integrity、foreign key、migration history、Schema contract 和安全 Gate 核验。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；失败 Session `PS-6FA97901118724B49713` 为 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`、不计时，历史证据不得修改。
 - 上一完成 Session `PS-D7B6D9BD9AA1C3EBA971` 和安全暂停 Session `PS-75B12304DFFD12CBE912` 均保留原计时证据，但因本轮核心变化不得计入 replacement Campaign。
 - `PAPER + LIVE_DISABLED`，active Reservation 为 0；当前无 Paper、Observe 或 Campaign supervisor 进程。
+- 新表 `negative_risk_conversion_evidence` 当前为 0 行；历史 Campaign/Session 终态未被迁移改变。
 
 ## Next steps
-1. 提交已通过双轴审查与全量验证的收口修复。
-2. 确认无进程后通过既有 backup-first 入口把真实数据库从 `2.26.0` 升到 `2.27.0`，复核 backup、migration history、foreign key、Gate 和历史证据。
-3. 用户下一次启动时创建新核心 replacement Campaign，从 0 进行压缩后的 40 分钟资格、连续 4 小时、累计 24 小时和最终 8 小时 Observe；旧核心运行时间不混算。
-4. `TARGET_CONVERSION` 的真实 Paper/Live 执行仍未授权实现；若未来自然出现 tracked conversion，系统会立即闭锁。进入 Live 前必须另行完成受控 Paper/Fake 转换执行器、真实合规/钱包/signer 设计和再次明确授权。
+1. 用户下一次启动时创建新核心 replacement Campaign，从 0 进行压缩后的 40 分钟资格、连续 4 小时、累计 24 小时和最终 8 小时 Observe；旧核心运行时间不混算。
+2. `TARGET_CONVERSION` 的真实 Paper/Live 执行仍未授权实现；若未来自然出现 tracked conversion，系统会立即闭锁。进入 Live 前必须另行完成受控 Paper/Fake 转换执行器、真实合规/钱包/signer 设计和再次明确授权。

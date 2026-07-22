@@ -1,7 +1,6 @@
 # Bugs And Risks
 
 ## Active blockers
-- 真实业务库仍为 Schema `2.26.0`，代码为 `2.27.0`；提交后必须 backup-first 迁移并核验，迁移前不能启动新验证。
 - 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
 - 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
 - tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
@@ -26,6 +25,7 @@
 - Adapter 转换证明现精确绑定目标钱包 stakeholder 且必须唯一；0 条、重复或歧义证明均失败关闭。
 - 普通 reconciliation 的数量容差不再用于签发 conversion verified evidence；转换涉及资产按 micros 零容差对账。
 - tracked conversion 不再只等到验收时阻断；Paper/Live 在候选选择前和逐笔执行前复核，Paper 立即暂停/冻结，Live 立即 emergency stop，竞态窗口已有注入测试。
+- 真实业务库已 backup-first 升到 `2.27.0`，历史终态、`PAPER + LIVE_DISABLED`、0 active Reservation 和 0 running Observe 均只读复核通过。
 - 回执或 provider 异常曾可能只能表现为后续通用对账差异；现 Poll 在写入前以具体错误失败关闭，不留下半成品。
 - 首开最低 1 pUSD、市场最低额最多 5 pUSD、BUY 最高价 0.95、最终 Risk/Reservation/Gate 绑定和 Live Fake 恢复语义已完成，旧核心证据只读保留。
 - Observe/Paper/Settlement 共用应用内 MarketClock；运行时长和调度使用单调时钟；AbortSignal 贯穿公开请求、分页和退避。

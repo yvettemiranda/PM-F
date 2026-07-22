@@ -34,7 +34,7 @@
 ## Current runtime and Campaign
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。
 - 旧 Campaign `PC-94D81ECAD5EF89852D2A` 仍为 `FROZEN`；所有旧核心运行时间均不得计入本轮 `2.27.0` replacement Campaign。
-- 真实业务库仍为 Schema `2.26.0`，待代码提交后经 backup-first 入口迁移到 `2.27.0`。
+- 真实业务库已通过 backup-first 入口迁移到 Schema `2.27.0`；迁移前备份为 `data/operator/backups/phase0-before-2.27.0-2026-07-22T01-24-19-628Z.sqlite`。
 - `PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
 
 ## Confirmed BUY policy for next core
@@ -49,5 +49,5 @@
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
 - 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；conversion 投影修复形成新核心，旧 Campaign 不能继续。
-- 下一次安全启动必须先迁移数据库，再创建 replacement Campaign 并从 0 验证；旧核心时长不混算。
+- 下一次安全启动可直接创建新核心 replacement Campaign 并从 0 验证；数据库已完成迁移，旧核心时长不混算。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。
