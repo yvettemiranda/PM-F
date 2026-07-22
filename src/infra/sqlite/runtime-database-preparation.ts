@@ -46,6 +46,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.24.0",
   "2.25.0",
   "2.26.0",
+  "2.27.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -104,6 +105,8 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "observe_checkpoints_no_update",
   "observe_projection_snapshots_no_delete",
   "observe_projection_snapshots_no_update",
+  "negative_risk_conversion_evidence_no_delete",
+  "negative_risk_conversion_evidence_no_update",
   "observe_runs_campaign_binding_consistency",
   "observe_runs_campaign_binding_immutable",
   "observe_runs_campaign_binding_pair",
@@ -225,6 +228,7 @@ function assertMigrationHistory(database: DatabaseSync, expectation: SchemaExpec
 function assertCurrentSchemaObjects(database: DatabaseSync): void {
   assertPaperRuntimeSchemaContract(database, new Set(migrationVersions(database)));
   const requiredTables = [
+    "negative_risk_conversion_evidence",
     "observe_projection_snapshots",
     "paper_market_constraint_evidence",
     "paper_settlement_retry_state",

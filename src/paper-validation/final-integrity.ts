@@ -12,6 +12,7 @@ export interface FinalIntegrityEvidence {
   integrityCheck: string;
   foreignKeyIssueCount: number;
   gapExecutionViolationCount: number;
+  unfollowedNegativeRiskConversionCount: number;
   duplicateConsumptionCount: number;
   duplicateOrderIdempotencyCount: number;
   duplicateFillIdempotencyCount: number;
@@ -52,6 +53,14 @@ export function validateFinalCampaignIntegrity(input: {
          AND s.execution_block_reason='GAP_EVENT'
          AND (c.result<>'REJECTED' OR c.paper_execution_id IS NOT NULL)`,
     ).get(input.scope.accountId) as { count: number | bigint }).count);
+    const unfollowedNegativeRiskConversionCount = Number((database.prepare(
+      `SELECT count(*) count
+       FROM signals s
+       JOIN observe_runs o ON o.observe_run_id=s.observe_run_id
+       WHERE o.campaign_id=? AND o.campaign_session_id=?
+         AND s.signal_type='TARGET_CONVERSION'
+         AND s.execution_eligible=0`,
+    ).get(input.scope.campaignId, input.scope.sessionId) as { count: number | bigint }).count);
     const duplicateConsumptionCount = countDuplicates(
       database,
       `SELECT signal_id FROM paper_signal_consumptions
@@ -79,6 +88,9 @@ export function validateFinalCampaignIntegrity(input: {
       ...(foreignKeyIssueCount === 0 ? [] : [`FOREIGN_KEY_ISSUES:${foreignKeyIssueCount}`]),
       ...(input.acceptance.consistency.passed ? [] : ["PAPER_CONSISTENCY_FAILED"]),
       ...(gapExecutionViolationCount === 0 ? [] : [`GAP_EXECUTION_VIOLATIONS:${gapExecutionViolationCount}`]),
+      ...(unfollowedNegativeRiskConversionCount === 0
+        ? []
+        : [`UNFOLLOWED_NEGATIVE_RISK_CONVERSION:${unfollowedNegativeRiskConversionCount}`]),
       ...(duplicateConsumptionCount === 0 ? [] : [`DUPLICATE_SIGNAL_CONSUMPTIONS:${duplicateConsumptionCount}`]),
       ...(duplicateOrderIdempotencyCount === 0 ? [] : [`DUPLICATE_ORDERS:${duplicateOrderIdempotencyCount}`]),
       ...(duplicateFillIdempotencyCount === 0 ? [] : [`DUPLICATE_FILLS:${duplicateFillIdempotencyCount}`]),
@@ -92,6 +104,7 @@ export function validateFinalCampaignIntegrity(input: {
       integrityCheck,
       foreignKeyIssueCount,
       gapExecutionViolationCount,
+      unfollowedNegativeRiskConversionCount,
       duplicateConsumptionCount,
       duplicateOrderIdempotencyCount,
       duplicateFillIdempotencyCount,

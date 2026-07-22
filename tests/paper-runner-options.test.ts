@@ -59,7 +59,7 @@ const acceptanceSummary: PaperAcceptanceSummary = {
     REALIZED_PNL: "NOT_OBSERVED",
   },
   funnel: {
-    signals: { buy: 0, sell: 0, published: 0, executionEligible: 0, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
+    signals: { buy: 0, sell: 0, conversion: 0, published: 0, executionEligible: 0, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
     capital: { high: 0, medium: 0, low: 0, unknown: 0, sizingDecisionCount: 0, sizingRejectReasons: {}, sizingEvidence: [] },
     risk: { allow: 0, reject: 0, rejectReasons: {} },
     execution: { total: 0, waiting: 0, rejectedBeforeOrder: 0, rejectedBeforeOrderReasons: {}, marketConstraintRejects: 0, marketConstraintRejectReasons: {}, expired: 0, cancelled: 0, exitPending: 0, stopExitPending: 0, orders: 0, zeroFillOrders: 0, partialFillOrders: 0, fullFillOrders: 0, fills: 0 },

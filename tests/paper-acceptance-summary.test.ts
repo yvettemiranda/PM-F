@@ -240,7 +240,7 @@ describe("PaperAcceptanceSummaryService", () => {
       REALIZED_PNL: "NOT_OBSERVED",
     });
     expect(summary.funnel).toMatchObject({
-      signals: { buy: 0, sell: 0, executionEligible: 0, gap: 0, unconsumedEligible: 0 },
+      signals: { buy: 0, sell: 0, conversion: 0, executionEligible: 0, gap: 0, unconsumedEligible: 0 },
       risk: { allow: 0, reject: 0 },
       execution: { orders: 0, fills: 0 },
       stage: { BUY: "NO_SIGNAL", SELL: "NO_SIGNAL" },

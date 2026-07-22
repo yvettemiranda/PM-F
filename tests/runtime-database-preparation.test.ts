@@ -230,8 +230,13 @@ describe("runtime database preparation", () => {
       .replace("2400000", "7200000");
     legacy.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
     try {
+      legacy.exec(`
+        DROP TRIGGER negative_risk_conversion_evidence_no_update;
+        DROP TRIGGER negative_risk_conversion_evidence_no_delete;
+        DROP TABLE negative_risk_conversion_evidence;
+      `);
       legacy.exec(downgradeSql);
-      legacy.prepare("DELETE FROM schema_migrations WHERE version='2.26.0'").run();
+      legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.26.0','2.27.0')").run();
       expect(legacy.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       legacy.exec("COMMIT");
     } catch (error) {
@@ -247,7 +252,7 @@ describe("runtime database preparation", () => {
       backupDirectory: join(root, "backups"),
       sourceVersion,
     });
-    expect(result).toMatchObject({ migrated: true, schemaVersion: "2.26.0" });
+    expect(result).toMatchObject({ migrated: true, schemaVersion: VERSIONS.schemaVersion });
 
     const migrated = new DatabaseSync(databasePath, { readOnly: true });
     expect(migrated.prepare(

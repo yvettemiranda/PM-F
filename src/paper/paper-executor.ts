@@ -1090,6 +1090,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope, preapprovedRisk?: RiskDecision): string {
+    if (signal.signalType === "TARGET_CONVERSION") {
+      throw new Error("NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE");
+    }
     const account = this.accountRow(accountId);
     if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
     const signalTargetId = this.signalTargetId(signal.signalId);
@@ -2572,6 +2575,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     now: string,
     risk: RiskDecision,
   ): void {
+    if (signal.signalType === "TARGET_CONVERSION") {
+      throw new Error("NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE");
+    }
     this.insertExecutionFromSignal(accountId, signal, executionId, idempotency, "REJECTED", null, null, null, null, reason, now, risk);
   }
 
@@ -2589,6 +2595,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     now: string,
     risk: RiskDecision,
   ): void {
+    if (signal.signalType === "TARGET_CONVERSION") {
+      throw new Error("NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE");
+    }
     const target = BigInt(signal.targetPriceUnits);
     const rulesetHash = signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId);
     const rules = registeredExecutionRules(this.database, rulesetHash);
@@ -2975,7 +2984,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return {
       signalId: row.signal_id as string,
       targetId: row.target_id as string,
-      signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
+      signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION",
       status: row.status as string,
       executionEligible: (row.execution_eligible as number) !== 0,
       executionBlockReason: row.execution_block_reason as string | null,

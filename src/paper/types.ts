@@ -54,7 +54,7 @@ export interface SignalExecutionContext {
 export interface PaperSignalEnvelope {
   signalId: string;
   targetId: string;
-  signalType: "TARGET_BUY" | "TARGET_SELL";
+  signalType: "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION";
   status: string;
   executionEligible: boolean;
   executionBlockReason: string | null;

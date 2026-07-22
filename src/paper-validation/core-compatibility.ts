@@ -106,6 +106,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/029_observe_campaign_binding.sql",
   "src/infra/sqlite/030_paper_runtime_resilience.sql",
   "src/infra/sqlite/031_validation_duration_policy.sql",
+  "src/infra/sqlite/032_negative_risk_conversion.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
@@ -176,6 +177,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/live-gate.test.ts",
   "tests/live-risk-manager.test.ts",
   "tests/market-order-constraints.test.ts",
+  "tests/negative-risk-conversion.test.ts",
   "tests/observe-runner.test.ts",
   "tests/operational-validation.test.ts",
   "tests/operator-paper-campaign-shell.test.ts",

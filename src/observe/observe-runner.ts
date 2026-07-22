@@ -18,6 +18,10 @@ import { buildSignalExecutionContext, type SignalContextBundle, type SignalMarke
 import type { SourceVersion } from "../infra/source-version.js";
 import { observeSchedulingGapThresholdMs } from "./scheduling.js";
 import { marketClockOffsetIsValid } from "../execution/market-data.js";
+import {
+  verifyNegativeRiskConversion,
+  type NegativeRiskConversionReceiptProvider,
+} from "./negative-risk-conversion.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
@@ -50,6 +54,7 @@ export interface ObserveRunnerOptions {
   wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   marketClockOffsetMs?: number;
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
+  negativeRiskConversionReceiptProvider?: NegativeRiskConversionReceiptProvider;
   sourceVersion?: SourceVersion;
 }
 
@@ -346,7 +351,35 @@ export class ObserveOnlyRunner {
       stored.isGap = stored.isGap || confirmation.isGap;
     }
     const allEvents = [...storedEvents, ...newEvents];
-    const projection = projectObserveEvents(started.baseline, allEvents);
+    const conversionEvidence: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["conversionEvidence"] = [];
+    let projection: ReturnType<typeof projectObserveEvents>;
+    try {
+      for (const event of allEvents) {
+        if (event.activity?.type !== "CONVERSION" || event.conversion) continue;
+        const provider = this.options.negativeRiskConversionReceiptProvider;
+        if (!provider) throw new Error("NEGATIVE_RISK_CONVERSION_RECEIPT_PROVIDER_UNAVAILABLE");
+        const receipt = await provider.transactionReceipt(event.activity.transactionHash, signal);
+        const conversion = verifyNegativeRiskConversion({
+          activity: event.activity,
+          walletAddress: this.options.walletAddress,
+          positions: snapshot.positions.data,
+          receipt,
+        });
+        event.conversion = conversion;
+        conversionEvidence.push({ sourceEventKey: event.sourceEventKey, conversion, receipt });
+      }
+      projection = projectObserveEvents(
+        started.baseline,
+        allEvents,
+        { requireVerifiedConversions: true },
+      );
+    } catch (error) {
+      this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
+      this.lastPollCompletedAt = completedAt;
+      this.gapActive = true;
+      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
+      return false;
+    }
     const signalCandidateKeys = new Set([
       ...newEvents.filter((event) => event.activityConfirmed).map((event) => event.sourceEventKey),
       ...eventConfirmations.map((event) => event.sourceEventKey),
@@ -450,6 +483,7 @@ export class ObserveOnlyRunner {
       snapshot,
       newEvents,
       eventConfirmations,
+      conversionEvidence,
       duplicateEvents,
       projection,
       signalsToEmit,

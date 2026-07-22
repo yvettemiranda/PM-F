@@ -3,8 +3,8 @@ import { stableJson } from "./canonical-json.js";
 export { stableJson } from "./canonical-json.js";
 
 export const VERSIONS = Object.freeze({
-  schemaVersion: "2.26.0",
-  signalVersion: "1.5.0",
+  schemaVersion: "2.27.0",
+  signalVersion: "1.6.0",
   strategyVersion: "2.2.0",
   riskVersion: "1.6.0",
   replayVersion: "1.8.0",

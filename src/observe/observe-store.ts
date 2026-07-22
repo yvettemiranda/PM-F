@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ApiCapture } from "../adapters/polymarket-public.js";
+import type { PolygonTransactionReceiptResponse } from "../adapters/polygon-receipt.js";
 import { ACTIVITY_IDENTITY_VERSION, SOURCE_IDENTITY_VERSION } from "../domain/idempotency.js";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS, stableJson } from "../domain/versioning.js";
@@ -9,6 +10,10 @@ import { captureIdentityFromResponseJson } from "../services/capture-manifest.js
 import type { CapitalEstimate } from "../services/capital-estimator.js";
 import type { SignalContextBundle } from "../signal-context/execution-context.js";
 import { OBSERVE_SIGNAL_VERSION } from "./position-projector.js";
+import {
+  negativeRiskConversionEvidenceHash,
+  type VerifiedNegativeRiskConversion,
+} from "./negative-risk-conversion.js";
 import { deriveObserveSchedulingMetrics } from "./scheduling.js";
 import { storeCompressedCapturePayload } from "../infra/sqlite/capture-payload.js";
 import type {
@@ -48,6 +53,11 @@ export interface CommitPollInput {
   snapshot: ObservePollSnapshot;
   newEvents: ObserveEvent[];
   eventConfirmations: Array<{ sourceEventKey: string; isCombo: boolean; isGap: boolean }>;
+  conversionEvidence: Array<{
+    sourceEventKey: string;
+    conversion: VerifiedNegativeRiskConversion;
+    receipt: ApiCapture<PolygonTransactionReceiptResponse>;
+  }>;
   duplicateEvents: number;
   projection: ObserveProjectionResult;
   signalsToEmit: ObserveSignal[];
@@ -220,8 +230,18 @@ export class ObserveStore {
     const rows = this.database
       .prepare(
         `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,
-                o.activity_confirmed,r.is_combo,r.raw_json
+                o.activity_confirmed,r.is_combo,r.raw_json,
+                c.transaction_hash conversion_transaction_hash,
+                c.group_condition_id conversion_group_condition_id,
+                c.event_slug conversion_event_slug,
+                c.source_asset_id conversion_source_asset_id,
+                c.destination_legs_json conversion_destination_legs_json,
+                c.amount_micros conversion_amount_micros,
+                c.receipt_block_number conversion_receipt_block_number,
+                c.receipt_payload_hash conversion_receipt_payload_hash,
+                c.evidence_hash conversion_evidence_hash
          FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
+         LEFT JOIN negative_risk_conversion_evidence c ON c.source_event_key=o.source_event_key
          WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,
       )
       .all(baselineRunId) as Array<{
@@ -232,16 +252,54 @@ export class ObserveStore {
         activity_confirmed: number;
         is_combo: number;
         raw_json: string;
+        conversion_transaction_hash: string | null;
+        conversion_group_condition_id: string | null;
+        conversion_event_slug: string | null;
+        conversion_source_asset_id: string | null;
+        conversion_destination_legs_json: string | null;
+        conversion_amount_micros: string | null;
+        conversion_receipt_block_number: string | null;
+        conversion_receipt_payload_hash: string | null;
+        conversion_evidence_hash: string | null;
       }>;
-    return rows.map((row) => ({
-      sourceEventKey: row.source_event_key,
-      sourceType: row.source_type,
-      sourceTimestamp: row.source_timestamp,
-      isGap: row.is_gap !== 0,
-      isCombo: row.is_combo !== 0,
-      activityConfirmed: row.activity_confirmed !== 0,
-      ...(row.source_type === "DATA_API_TRADE" ? { trade: JSON.parse(row.raw_json) } : { activity: JSON.parse(row.raw_json) }),
-    }));
+    return rows.map((row) => {
+      let conversion: VerifiedNegativeRiskConversion | undefined;
+      if (row.conversion_evidence_hash !== null) {
+        if (
+          row.conversion_transaction_hash === null
+          || row.conversion_group_condition_id === null
+          || row.conversion_event_slug === null
+          || row.conversion_source_asset_id === null
+          || row.conversion_destination_legs_json === null
+          || row.conversion_amount_micros === null
+          || row.conversion_receipt_payload_hash === null
+        ) throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_INCOMPLETE:${row.source_event_key}`);
+        const withoutHash = {
+          transactionHash: row.conversion_transaction_hash,
+          groupConditionId: row.conversion_group_condition_id,
+          eventSlug: row.conversion_event_slug,
+          sourceAsset: row.conversion_source_asset_id,
+          destinationAssets: JSON.parse(row.conversion_destination_legs_json) as VerifiedNegativeRiskConversion["destinationAssets"],
+          amountMicros: row.conversion_amount_micros,
+          receiptBlockNumber: row.conversion_receipt_block_number,
+          receiptPayloadHash: row.conversion_receipt_payload_hash,
+        };
+        if (negativeRiskConversionEvidenceHash(withoutHash) !== row.conversion_evidence_hash) {
+          throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_HASH_MISMATCH:${row.source_event_key}`);
+        }
+        conversion = { ...withoutHash, evidenceHash: row.conversion_evidence_hash };
+      }
+      return {
+        sourceEventKey: row.source_event_key,
+        sourceType: row.source_type,
+        sourceTimestamp: row.source_timestamp,
+        isGap: row.is_gap !== 0,
+        isCombo: row.is_combo !== 0,
+        activityConfirmed: row.activity_confirmed !== 0,
+        ...(row.source_type === "DATA_API_TRADE" ? { trade: JSON.parse(row.raw_json) } : { activity: JSON.parse(row.raw_json) }),
+        ...(conversion ? { conversion } : {}),
+      };
+    });
   }
 
   existingEventKeys(baselineRunId: string, keys: string[]): Set<string> {
@@ -429,6 +487,9 @@ export class ObserveStore {
            SET activity_confirmed=1,is_gap=CASE WHEN is_gap=1 OR ?=1 THEN 1 ELSE 0 END
            WHERE baseline_run_id=? AND source_event_key=?`,
         ).run(confirmation.isGap ? 1 : 0, input.baseline.baselineRunId, confirmation.sourceEventKey);
+      }
+      for (const evidence of input.conversionEvidence) {
+        this.insertNegativeRiskConversionEvidence(input, pollId, evidence);
       }
       this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
       for (const bundle of input.signalContexts) {
@@ -721,6 +782,91 @@ export class ObserveStore {
         VERSIONS.schemaVersion,
       );
       link.run(pollId, endpoint, identity.captureId);
+    }
+  }
+
+  private insertNegativeRiskConversionEvidence(
+    input: CommitPollInput,
+    pollId: string,
+    evidence: CommitPollInput["conversionEvidence"][number],
+  ): void {
+    const responseJson = JSON.stringify(evidence.receipt.data);
+    const identity = captureIdentityFromResponseJson(
+      evidence.receipt.url,
+      evidence.receipt.fetchedAt,
+      responseJson,
+    );
+    if (identity.payloadSha256 !== evidence.conversion.receiptPayloadHash) {
+      throw new Error(`NEGATIVE_RISK_CONVERSION_RECEIPT_HASH_MISMATCH:${evidence.sourceEventKey}`);
+    }
+    storeCompressedCapturePayload(
+      this.database,
+      identity.payloadSha256,
+      responseJson,
+      evidence.receipt.fetchedAt,
+    );
+    this.database.prepare(
+      `INSERT OR IGNORE INTO api_captures(
+        capture_id,endpoint,request_url,fetched_at,latency_ms,http_status,
+        payload_sha256,response_json,schema_version,response_encoding
+      ) VALUES (?, 'polygon-transaction-receipt', ?, ?, ?, ?, ?, '', ?, 'GZIP_SHA256')`,
+    ).run(
+      identity.captureId,
+      evidence.receipt.url,
+      evidence.receipt.fetchedAt,
+      evidence.receipt.latencyMs,
+      evidence.receipt.status,
+      identity.payloadSha256,
+      VERSIONS.schemaVersion,
+    );
+    const conversion = evidence.conversion;
+    this.database.prepare(
+      `INSERT OR IGNORE INTO negative_risk_conversion_evidence(
+        source_event_key,observe_run_id,poll_id,transaction_hash,group_condition_id,
+        event_slug,source_asset_id,destination_legs_json,amount_micros,
+        receipt_block_number,receipt_capture_id,receipt_payload_hash,evidence_hash,
+        schema_version,signal_version,source_code_commit,source_code_dirty,verified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      evidence.sourceEventKey,
+      input.observeRunId,
+      pollId,
+      conversion.transactionHash,
+      conversion.groupConditionId,
+      conversion.eventSlug,
+      conversion.sourceAsset,
+      stableJson(conversion.destinationAssets),
+      conversion.amountMicros,
+      conversion.receiptBlockNumber,
+      identity.captureId,
+      conversion.receiptPayloadHash,
+      conversion.evidenceHash,
+      VERSIONS.schemaVersion,
+      OBSERVE_SIGNAL_VERSION,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      input.completedAt,
+    );
+    const stored = this.database.prepare(
+      `SELECT transaction_hash,group_condition_id,event_slug,source_asset_id,
+              destination_legs_json,amount_micros,receipt_block_number,
+              receipt_capture_id,receipt_payload_hash,evidence_hash
+       FROM negative_risk_conversion_evidence WHERE source_event_key=?`,
+    ).get(evidence.sourceEventKey) as Record<string, unknown> | undefined;
+    const expected = {
+      transaction_hash: conversion.transactionHash,
+      group_condition_id: conversion.groupConditionId,
+      event_slug: conversion.eventSlug,
+      source_asset_id: conversion.sourceAsset,
+      destination_legs_json: stableJson(conversion.destinationAssets),
+      amount_micros: conversion.amountMicros,
+      receipt_block_number: conversion.receiptBlockNumber,
+      receipt_capture_id: identity.captureId,
+      receipt_payload_hash: conversion.receiptPayloadHash,
+      evidence_hash: conversion.evidenceHash,
+    };
+    if (!stored || stableJson(stored) !== stableJson(expected)) {
+      throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_CONFLICT:${evidence.sourceEventKey}`);
     }
   }
 

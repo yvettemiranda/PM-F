@@ -4,7 +4,7 @@ import { sourceEventKey } from "../domain/idempotency.js";
 import { stableJson } from "../domain/versioning.js";
 import type { ObserveBaseline, ObserveEvent, ObserveProjectionEntry, ObserveProjectionResult, ObserveSignal } from "./types.js";
 
-export const OBSERVE_SIGNAL_VERSION = "observe-v1.0.0";
+export const OBSERVE_SIGNAL_VERSION = "observe-v1.1.0";
 
 function signalKey(baselineRunId: string, sourceEventKey: string, type: string): string {
   return createHash("sha256")
@@ -12,7 +12,11 @@ function signalKey(baselineRunId: string, sourceEventKey: string, type: string):
     .digest("hex");
 }
 
-export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveEvent[]): ObserveProjectionResult {
+export function projectObserveEvents(
+  baseline: ObserveBaseline,
+  events: ObserveEvent[],
+  options: { requireVerifiedConversions?: boolean } = {},
+): ObserveProjectionResult {
   const historical = new Map(baseline.items.map((item) => [item.asset, BigInt(item.sizeMicros)]));
   const tracked = new Map<string, bigint>();
   const conditionByAsset = new Map(baseline.items.map((item) => [item.asset, item.conditionId.toLowerCase()]));
@@ -26,6 +30,64 @@ export function projectObserveEvents(baseline: ObserveBaseline, events: ObserveE
   for (const event of allOrdered) {
     if (event.activity) {
       const conditionId = event.activity.conditionId?.toLowerCase();
+      if (event.activity.type === "CONVERSION") {
+        if (!event.conversion) {
+          if (options.requireVerifiedConversions) {
+            throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_MISSING:${event.sourceEventKey}`);
+          }
+          continue;
+        }
+        const conversion = event.conversion;
+        const sourceAsset = conversion.sourceAsset;
+        const amount = BigInt(conversion.amountMicros);
+        const beforeHistorical = historical.get(sourceAsset) ?? 0n;
+        const beforeTracked = tracked.get(sourceAsset) ?? 0n;
+        if (amount > beforeHistorical + beforeTracked) {
+          throw new Error(`NEGATIVE_RISK_CONVERSION_SOURCE_BALANCE_INSUFFICIENT:${event.sourceEventKey}`);
+        }
+        const trackedConverted = amount < beforeTracked ? amount : beforeTracked;
+        const historicalConverted = amount - trackedConverted;
+        tracked.set(sourceAsset, beforeTracked - trackedConverted);
+        historical.set(sourceAsset, beforeHistorical - historicalConverted);
+        lastEventByAsset.set(sourceAsset, event.sourceEventKey);
+        for (const destination of conversion.destinationAssets) {
+          conditionByAsset.set(destination.asset, destination.conditionId);
+          historical.set(
+            destination.asset,
+            (historical.get(destination.asset) ?? 0n) + historicalConverted,
+          );
+          tracked.set(
+            destination.asset,
+            (tracked.get(destination.asset) ?? 0n) + trackedConverted,
+          );
+          lastEventByAsset.set(destination.asset, event.sourceEventKey);
+        }
+        if (trackedConverted > 0n) {
+          const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_CONVERSION");
+          signals.push({
+            signalId: id,
+            targetId: baseline.targetId,
+            signalIdempotencyKey: id,
+            sourceEventKey: event.sourceEventKey,
+            signalType: "TARGET_CONVERSION",
+            asset: sourceAsset,
+            conditionId: conversion.groupConditionId,
+            targetPriceUnits: "0",
+            targetSizeMicros: amount.toString(),
+            sellRatioNumerator: trackedConverted.toString(),
+            sellRatioDenominator: beforeTracked.toString(),
+            reason: event.isGap
+              ? "GAP_NEGATIVE_RISK_CONVERSION_RECORDED"
+              : "TRACKED_NEGATIVE_RISK_CONVERSION_RECORDED",
+            eventClassification: "NEGATIVE_RISK_CONVERSION",
+            executionEligible: false,
+            executionBlockReason: event.isGap
+              ? "GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED"
+              : "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+          });
+        }
+        continue;
+      }
       if (event.activity.type === "REDEEM" && conditionId) {
         for (const [asset, knownConditionId] of conditionByAsset) {
           if (knownConditionId !== conditionId) continue;

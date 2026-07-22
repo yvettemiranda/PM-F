@@ -1,42 +1,32 @@
 # Bugs And Risks
 
 ## Active blockers
-- 新核心已通过 40 分钟资格及连续 4 小时门槛，但累计仅约 4/24 小时，最终 8 小时 Observe 尚未执行。
-- 新 Campaign 尚未出现自然 BUY，因此自然 Signal/Order/Fill/Position/Fee/PnL 为 0；当前缺 `ORDER/FILL/POSITION_UPDATE/FEE/REALIZED_PNL/UNREALIZED_PNL`。同核心隔离证据已覆盖多数稀有逻辑，但不能伪装成自然成交。
-- 旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已冻结；约 44.12 小时只保留为历史证据，不得混入新 Campaign。
-- Live 所需长期稳定、geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
+- 真实业务库仍为 Schema `2.26.0`，代码为 `2.27.0`；提交后必须 backup-first 迁移并核验，迁移前不能启动新验证。
+- 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
+- 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
+- tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
+- Live 所需 geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
 ## Active risks
-- 当前 Live 严格禁用。BUY 策略的 Paper/隔离 Live 代码与回归已对齐，但这不替代自然 24 小时 Paper、场景覆盖、最终 8 小时 Observe、geoblock/compliance、隔离钱包和真实 signer 的后续验证与再次授权。
-- Data API 历史 offset 限制和相邻页边界重复仍可能发生；只有另一独立公开接口精确确认 multiplicity 才能核销，否则继续阻断。
+- Data API `CONVERSION` Activity 可能省略 `eventSlug`、asset、title 等字段；只能在 Polygon 成功回执、NegRiskAdapter 事件和目标 Positions 元数据完全一致时接受。
+- 目标若在长 Gap 内连续发生 conversion 与后续卖出，当前 Positions 可能已不再包含全部目标资产元数据；系统会失败关闭，不能猜测或追补。
 - Positions 与 Trades/Activity 可能短暂不同步；同一差异连续达到阈值且持续满 120 秒仍升级 `MAJOR_DESYNC`。
-- CLOB `/time` 偏移在 Session 内固定；运行中系统时钟继续漂移时，订单簿安全检查必须 fail closed。
-- Settlement resolution 是公开网络依赖；持久化退避减少请求风暴，但不能保证外部接口及时恢复。
-- `node:sqlite` 在 Node 24 仍有 experimental warning，长期稳定性仍需由 4/24 小时自然 Campaign 证明。
-- 真实数据库约 1.3GB；当前去重/压缩可控，但历史证据不可破坏性压缩，长跑后仍需观察增长率。
-- 公开 HTTP 响应没有服务器数字签名；当前只能证明官方 URL、内容寻址、本地 append-only capture 与解析一致。
+- Data API 历史 offset 限制和相邻页边界重复仍可能发生；没有独立公开证据精确确认时继续阻断。
+- CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
+- `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性仍需新核心自然 Campaign 验证。
+- 真实数据库较大；转换回执使用压缩、内容寻址和 append-only 保存，但仍需观察长跑增长率。
+- 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
 
 ## Resolved in current implementation
-- Live 市场最低额抬升曾只完成首开 1 pUSD，未对最终市场金额重新绑定 Risk、钱包/授权、Reservation、Live Gate、Consumption 和签名预算；现已补齐并以 Fake/Disabled 隔离测试覆盖，不启用任何真实交易能力。
-- Live 重启重试曾恢复不完整的 Signal/Execution Context（缺失精确资本比例和 Capital Decision），导致完整性校验提前拦截且 Execution 表面停留在等待；现从不可变数据库证据完整恢复，抬升后的 Risk/Reservation 跨重启幂等且只签名一次。
-- Live Consumer 曾可能在 Execution 已落库、Consumption 未落库的崩溃窗口重新计算 Risk；现优先恢复已有 Execution 的最终 Risk/状态。动态抬升的最终 Risk/金额重绑、REJECTED 状态和 Reservation 释放也已合并为单一事务，中断时整体回滚。
-- 高价 BUY 的 `target * 1.02` 曾可能达到/超过 `1.0` 并被错误归类为 `BUY_ORDER_CONSTRAINT_INPUT_INVALID`；现 upper 在 tick 计算前按 ruleset `0.95` 封顶，目标价和实际最佳 ask 均有明确拒绝路径，内部 invalid 也会成为验证 blocker。
-- 极小比例 BUY 曾只因 pUSD/SDK/min_order_size 精度被拒绝；现保留原始比例证据，仅首开按 1 pUSD 及实际市场最低额（最多 5 pUSD）抬升，最终值重新过风控并完整补记账本。已有仓位/待处理首开不放大，完全平仓后重置。
-- 预检曾在成功冻结旧核心 Campaign 后仍无条件抛出 `PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION`，导致第一次点击生成 `UNKNOWN_UNKNOWN` 并退出、必须第二次点击才能继续；现冻结后立即只读重查并在同一次启动中返回 replacement-ready，同时保持旧证据不可变。
-- Observe 未使用应用内时钟偏移，曾在本机慢约 1.7 秒时制造错误事件边界；现 Observe/Paper/Settlement 共用 MarketClock 并校验报告绑定。
-- wall-clock 计算可能因系统拨时延长、缩短 12/72 小时或突发补 checkpoint；现运行时长和调度使用单调时钟。
-- 停止时在途公开请求不能取消；现 AbortSignal 贯穿请求、分页和退避，取消轮询不会记失败证据。
-- Crash recovery 每次抓完整历史；现按已持久化 cursor 增量恢复，并保留首页漂移安全检查。
-- Settlement 在 market end 后每秒查询并重复写相同错误；现使用持久化指数退避、错误去重和恢复审计。
-- 核心哈希曾漏掉 CLI 运行语义且会被注释/Live-only 变化误伤；现按去注释 AST 和明确行为边界计算。
-- 隔离 proof 曾只绑定部分测试文件，无法证明精确测试套件/工具链；现绑定 48 个文件、配置、lockfile 和版本。
-- 验收策略变化要么错误重置时长、要么默默沿用旧判定；现以四类身份和 append-only adjudication 精确重判。
-- scoped invariant 曾重复扫描实体并对每条 transition 单独查 audit；现复用扫描并分批比对。
-- Session 兼容身份数据库触发器曾允许 SQL NULL 绕过；现显式拒绝 NULL、错误长度和非小写十六进制。
-- 诊断包旧 proof 校验在全量并发下接近测试超时；现先拒绝明显 source/core 不匹配，再做昂贵完整校验。
-- 新增 `.test.ts` 曾可能进入 suite hash 但漏出静态隔离执行清单；现两者不完全一致时 proof 身份计算直接 fail closed。
-- Observe 等待的 `Promise.race` 曾在 abort 后留下 15 秒定时器；现默认 cadence wait 会移除监听并清除 timer，安全停止不会被残留事件循环拖延。
-- 同核心 `PASSED` Campaign 在 policy/suite 变化后曾既不能 replacement、也不能追加重验 Session；现只允许该精确条件以 append-only `PASSED→RUNNING` 重验，原始时长保留，旧覆盖/资格按新身份重判；同核心 `BLOCKED/FROZEN` 仍拒绝。
+- Observe 曾把 `CONVERSION` 只作为 combo Activity 记录并直接跳过 projection，导致源资产残留、目标资产缺失和 `MAJOR_DESYNC`；现用链上 ERC-1155 净额、Adapter 事件与 Positions 三方验证后重分 bucket。
+- 简单匹配单条 TransferBatch 会被 NegRiskAdapter 的内部中转腿误导；现按目标钱包汇总整笔回执的所有 CTF TransferBatch 净变化。
+- Data API 真实 `CONVERSION.eventSlug` 为空；现只在 Activity 有值时核对，否则由全部目标 Positions 的一致事件归属推导。
+- 转换证据曾无持久化与重启语义；现 capture/legs/hash append-only 保存并进入 checkpoint replay，重启不重复 RPC。
+- historical-only 转换不会误发交易；mixed/tracked 转换不会静默标记成功，而会生成明确不可执行义务并在 Gate/Integrity 硬阻断。
+- 回执或 provider 异常曾可能只能表现为后续通用对账差异；现 Poll 在写入前以具体错误失败关闭，不留下半成品。
+- 首开最低 1 pUSD、市场最低额最多 5 pUSD、BUY 最高价 0.95、最终 Risk/Reservation/Gate 绑定和 Live Fake 恢复语义已完成，旧核心证据只读保留。
+- Observe/Paper/Settlement 共用应用内 MarketClock；运行时长和调度使用单调时钟；AbortSignal 贯穿公开请求、分页和退避。
+- 核心哈希覆盖实际 Paper/Observe/恢复/Schema 语义，测试文件清单与 suite hash 不一致时直接失败关闭。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

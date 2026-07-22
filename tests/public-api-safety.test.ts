@@ -22,6 +22,39 @@ describe("Polymarket public API safety", () => {
     await expect(api.recentTrades("0x0000000000000000000000000000000000000001", 1_001)).rejects.toThrow(
       "INVALID_TRADES_LIMIT",
     );
+    await expect(api.transactionReceipt("not-a-transaction")).rejects.toThrow("INVALID_TRANSACTION_HASH");
+  });
+
+  it("uses only eth_getTransactionReceipt and validates the public Polygon response", async () => {
+    const transactionHash = `0x${"3".repeat(64)}`;
+    const requests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        result: {
+          transactionHash,
+          status: "0x1",
+          blockNumber: "0x123",
+          logs: [{
+            address: "0x0000000000000000000000000000000000000001",
+            topics: [`0x${"4".repeat(64)}`],
+            data: "0x",
+            logIndex: "0x0",
+          }],
+        },
+      }), { status: 200 });
+    }));
+
+    const capture = await new PolymarketPublicApi({ maxRetries: 0 }).transactionReceipt(transactionHash);
+    expect(capture.data.result).toMatchObject({ transactionHash, status: "0x1" });
+    expect(requests).toEqual([{
+      jsonrpc: "2.0",
+      id: 3,
+      method: "eth_getTransactionReceipt",
+      params: [transactionHash],
+    }]);
   });
 
   it("rejects ambiguous or stringly-typed market resolution evidence", () => {
@@ -74,7 +107,15 @@ describe("Polymarket public API safety", () => {
       size: 4.3488,
       usdcSize: 4.3488,
       price: 0,
+      eventSlug: "",
     }])[0]).toMatchObject({ type: "MAKER_REBATE", size: 4.3488 });
+    expect(parsePublicActivity([{
+      ...base,
+      type: "CONVERSION",
+      conditionId: `0x${"2".repeat(64)}`,
+      size: 1,
+      eventSlug: "",
+    }])[0]).not.toHaveProperty("eventSlug");
     expect(() => parsePublicActivity([{
       ...base,
       type: "TRADE",

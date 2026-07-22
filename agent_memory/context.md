@@ -6,7 +6,7 @@
 - 当前唯一目标钱包：`0x0c0e270cf879583d6a0142fc817e05b768d0434e`，只访问公开数据。
 
 ## Architecture
-- Observe：公开 Trades/Activity/Positions 增量抓取、Gap/Cursor、Activity confirmation、Position projection、对账与 checkpoint。
+- Observe：公开 Trades/Activity/Positions 增量抓取、Gap/Cursor、Activity confirmation、Polygon 回执验证、负风险 conversion、Position projection、对账与 checkpoint。
 - Paper：不可变 Signal/Execution Context、精确比例金额、Risk、完整深度 VWAP/FAK、Reservation、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
 - Validation：固定账户/目标/基线/核心的 Campaign，累计 24 小时、至少一次连续 4 小时、40 分钟资格里程碑、场景覆盖、不可变 checkpoint/report/transition；最终同版本 Observe 为 8 小时。
 - Live：只有显式 fail-closed 架构和 Fake 测试；没有真实 signer、认证交易客户端或资金操作。
@@ -18,8 +18,9 @@
 - Gap Signal 固定不可执行；数据、版本、恢复或账本状态不确定时必须 fail closed。
 
 ## Current implementation baseline
-- 当前代码 Schema 为 `2.26.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
-- 真实业务库已完成 backup-first 迁移并处于 Schema `2.26.0`；旧 Campaign/Session 证据逐列保留。
+- 当前代码 Schema 为 `2.27.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
+- 负风险 `CONVERSION` 必须由 Activity、Polygon 成功回执/NegRiskAdapter 日志和 Positions 元数据三方证明；证据 append-only 保存并进入 projection/checkpoint 恢复。
+- historical-only conversion 只重分 bucket；tracked conversion 当前生成不可执行审计义务并硬阻断，绝不静默跳过或误当 SELL。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
 - Session 时长、4/24 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
 - Observe 使用固定频率调度，AbortSignal 贯穿公开请求、分页和退避；恢复只抓 cursor 之后的增量历史。
@@ -31,12 +32,10 @@
 - scoped invariants 复用实体扫描并批量核对 transition audit；历史数据库不做破坏性压缩或覆盖。
 
 ## Current runtime and Campaign
-- 2026-07-21 新核心 Campaign：`PC-0969675B1A77CA978A5B`；首个 Session `PS-AFA27860811094DDA3C8` 按计划运行满 4 小时并自动安全结束。
-- 当前 Campaign 为 `PAUSED`，已资格通过，累计/最长连续均为 `14,400,006ms`，完成 Session 数为 1，无 blocker，可继续；累计目标为 24 小时，尚余约 20 小时。
-- 本次 Observe 成功轮询 942 次、失败 18 次，处理 42 个目标 SELL、没有 BUY；这些 SELL 之前没有本 Campaign 跟随产生的 tracked BUY 仓位，因此按“不补停机历史、不卖旧仓”规则不生成 Signal。最终 `SYNCED`，Gap/MAJOR_DESYNC/调度缺口均为 0。
-- 自然执行漏斗仍为 Signal 0、Order 0、Fill 0；Campaign 尚缺 `ORDER/FILL/POSITION_UPDATE/FEE/REALIZED_PNL/UNREALIZED_PNL`，需后续自然 BUY 才可能补齐。
-- 旧核心 Campaign `PC-94D81ECAD5EF89852D2A` 已 `FROZEN` 并只读保留约 44.12 小时历史证据，不与新核心混算。
-- 真实业务库为 Schema `2.26.0`；`PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
+- Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。
+- 旧 Campaign `PC-94D81ECAD5EF89852D2A` 仍为 `FROZEN`；所有旧核心运行时间均不得计入本轮 `2.27.0` replacement Campaign。
+- 真实业务库仍为 Schema `2.26.0`，待代码提交后经 backup-first 入口迁移到 `2.27.0`。
+- `PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
 
 ## Confirmed BUY policy for next core
 - 规则值进入不可变 ruleset snapshot，不写成分散魔法数；当前默认：首开最低 `1 pUSD`、市场最低额自动抬升上限 `5 pUSD`、BUY 最高价格 `0.95`。
@@ -49,6 +48,6 @@
 ## Operator workflow
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
-- 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；新核心累计验证已经开始。
-- 首个 4 小时 Session 已同时完成 40 分钟资格和连续 4 小时门槛；下一次启动会继续同一 Campaign 累计，不会重建或清零。
+- 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；conversion 投影修复形成新核心，旧 Campaign 不能继续。
+- 下一次安全启动必须先迁移数据库，再创建 replacement Campaign 并从 0 验证；旧核心时长不混算。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

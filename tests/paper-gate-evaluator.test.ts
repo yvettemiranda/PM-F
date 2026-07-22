@@ -21,7 +21,7 @@ function acceptance(stage: PaperAcceptanceSummary["funnel"]["stage"]["BUY"]): Pa
     },
     coverage: { BUY: "NOT_OBSERVED", SELL: "NOT_OBSERVED", STOP_LOSS: "NOT_OBSERVED", SETTLEMENT: "NOT_OBSERVED", REALIZED_PNL: "NOT_OBSERVED" },
     funnel: {
-      signals: { buy: 1, sell: 0, published: 1, executionEligible: 1, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
+      signals: { buy: 1, sell: 0, conversion: 0, published: 1, executionEligible: 1, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
       capital: { high: 1, medium: 0, low: 0, unknown: 0, sizingDecisionCount: 0, sizingRejectReasons: {}, sizingEvidence: [] },
       risk: { allow: 1, reject: 0, rejectReasons: {} },
       execution: { total: 1, waiting: 0, rejectedBeforeOrder: 0, rejectedBeforeOrderReasons: {}, marketConstraintRejects: 0, marketConstraintRejectReasons: {}, expired: 0, cancelled: 0, exitPending: 0, stopExitPending: 0, orders: 1, zeroFillOrders: 0, partialFillOrders: 0, fullFillOrders: stage === "FULL_FILL" ? 1 : 0, fills: stage === "FULL_FILL" ? 1 : 0 },
@@ -72,6 +72,26 @@ describe("evaluatePaperShortGate", () => {
     });
     expect(decision.status).toBe("SHORT_RUNTIME_FAILED");
     expect(decision.blockingReasons).toContain("ACTIVE_RESERVATION_REMAINS");
+  });
+
+  it("blocks a tracked negative-risk conversion that has no safe executor", () => {
+    const report = acceptance("FULL_FILL");
+    report.funnel.signals.conversion = 1;
+    report.funnel.signals.ineligible = 1;
+    report.funnel.signals.ineligibleReasons = {
+      NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE: 1,
+    };
+    const decision = evaluatePaperShortGate({
+      durationMs: 7_200_000,
+      minimumDurationMs: 7_170_000,
+      finalValuationComplete: true,
+      runnerErrorCount: 0,
+      versionsMatch: true,
+      safety: safe,
+      acceptance: report,
+    });
+    expect(decision).toMatchObject({ status: "SHORT_RUNTIME_FAILED", longRunAllowed: false });
+    expect(decision.blockingReasons).toContain("UNFOLLOWED_NEGATIVE_RISK_CONVERSION:1");
   });
 
   it("allows compatible controlled evidence but labels it supplemental", () => {

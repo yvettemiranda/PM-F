@@ -9,6 +9,7 @@ export type EventClassification =
   | "GAP_TRADE"
   | "HISTORICAL_POSITION_SELL"
   | "COMBO_ACTIVITY"
+  | "NEGATIVE_RISK_CONVERSION"
   | "NON_TRADE_ACTIVITY"
   | "UNRECOGNIZED";
 
@@ -46,6 +47,7 @@ export interface PublicActivity {
   usdcSize?: number | string;
   outcome?: string;
   title?: string;
+  eventSlug?: string;
 }
 
 export interface PublicPosition {
@@ -57,6 +59,7 @@ export interface PublicPosition {
   currentValue: number | string;
   title?: string;
   slug?: string;
+  eventSlug?: string;
   outcome?: string;
   negativeRisk?: boolean;
   redeemable?: boolean;

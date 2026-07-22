@@ -14,6 +14,7 @@ export interface PaperExecutionFunnel {
   signals: {
     buy: number;
     sell: number;
+    conversion: number;
     published: number;
     executionEligible: number;
     ineligible: number;
@@ -182,6 +183,7 @@ export function buildPaperExecutionFunnel(
   ).all(paperAccountId, targetId, startAt, windowEndAt) as unknown as SignalRow[];
   const buySignals = signals.filter((row) => row.signal_type === "TARGET_BUY");
   const sellSignals = signals.filter((row) => row.signal_type === "TARGET_SELL");
+  const conversionSignals = signals.filter((row) => row.signal_type === "TARGET_CONVERSION");
   const eligibleSignals = signals.filter((row) => row.status === "PUBLISHED" && row.execution_eligible === 1);
   const ineligibleSignals = signals.filter((row) => row.execution_eligible !== 1);
   const gapSignals = ineligibleSignals.filter((row) => row.execution_block_reason === "GAP_EVENT");
@@ -324,6 +326,7 @@ export function buildPaperExecutionFunnel(
     signals: {
       buy: buySignals.length,
       sell: sellSignals.length,
+      conversion: conversionSignals.length,
       published: signals.filter((row) => row.status === "PUBLISHED").length,
       executionEligible: eligibleSignals.length,
       ineligible: ineligibleSignals.length,

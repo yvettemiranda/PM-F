@@ -14,6 +14,10 @@ import {
   parseRelayerDeployment,
   parseRpcResponse,
 } from "./public-api-schema.js";
+import {
+  parsePolygonTransactionReceiptResponse,
+  type PolygonTransactionReceiptResponse,
+} from "./polygon-receipt.js";
 
 export interface ApiCapture<T> {
   url: string;
@@ -396,6 +400,24 @@ export class PolymarketPublicApi {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [wallet, "latest"] }),
     }, parseRpcResponse);
+  }
+
+  async transactionReceipt(
+    transactionHash: string,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<PolygonTransactionReceiptResponse>> {
+    const normalized = transactionHash.toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(normalized)) throw new Error("INVALID_TRANSACTION_HASH");
+    return this.request(this.polygonRpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "eth_getTransactionReceipt",
+        params: [normalized],
+      }),
+    }, parsePolygonTransactionReceiptResponse, signal);
   }
 
   async pUsdBalance(

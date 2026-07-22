@@ -249,6 +249,87 @@ describe("Paper Campaign operator evidence", () => {
     });
   });
 
+  it("blocks Campaign completion when a tracked negative-risk conversion cannot be executed", () => {
+    const env = fixture();
+    const database = new DatabaseSync(env.databasePath);
+    database.prepare(
+      `INSERT INTO observe_runs(
+        observe_run_id,target_id,baseline_run_id,state,recovered_from_checkpoint,
+        poll_interval_ms,started_at,last_heartbeat_at,stopped_at,stop_reason,
+        schema_version,signal_version,strategy_version,risk_version,ruleset_hash,
+        source_code_commit,source_code_dirty,created_at,campaign_id,campaign_session_id
+      ) VALUES ('observe-conversion',?,?, 'COMPLETED',0,15000,?,?,?,'TEST_COMPLETE',
+        ?,?,?,?,?,?,0,?,?,?)`,
+    ).run(
+      env.targetId,
+      env.scope.baselineRunId,
+      "2026-07-16T00:01:00.000Z",
+      "2026-07-16T00:01:00.000Z",
+      "2026-07-16T00:02:00.000Z",
+      VERSIONS.schemaVersion,
+      "observe-v1.1.0",
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      RULESET_HASH,
+      sourceVersion.commit,
+      "2026-07-16T00:01:00.000Z",
+      env.scope.campaignId,
+      env.scope.sessionId,
+    );
+    database.prepare(
+      `INSERT INTO raw_events(
+        source_event_key,target_id,identity_version,source_type,source_transaction_hash,
+        source_timestamp,asset_id,condition_id,side,price_units,size_micros,
+        gap_event,is_combo,raw_json,created_at,event_classification
+      ) VALUES ('conversion-event',?,'activity-v1','DATA_API_ACTIVITY',?,1,'100',?,
+        'NONE','0','0',0,1,'{}',?,'COMBO_ACTIVITY')`,
+    ).run(
+      env.targetId,
+      `0x${"3".repeat(64)}`,
+      `0x${"4".repeat(64)}`,
+      "2026-07-16T00:01:00.000Z",
+    );
+    database.prepare(
+      `INSERT INTO signals(
+        signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,
+        asset_id,condition_id,target_price_units,target_size_micros,
+        sell_ratio_numerator,sell_ratio_denominator,reason,schema_version,
+        signal_version,strategy_version,risk_version,replay_version,
+        ruleset_snapshot_json,ruleset_hash,source_code_commit,created_at,
+        execution_eligible,execution_block_reason,event_classification,
+        source_code_dirty,producer_mode,baseline_run_id,observe_run_id
+      ) VALUES ('signal-conversion',?,'signal-conversion','conversion-event',
+        'TARGET_CONVERSION','PUBLISHED','100',?,'0','10000000','6000000','6000000',
+        'TRACKED_NEGATIVE_RISK_CONVERSION_RECORDED',?,?,?,?,?,'{}',?,?,?,0,
+        'NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE','NEGATIVE_RISK_CONVERSION',
+        0,'OBSERVE_ONLY',?,'observe-conversion')`,
+    ).run(
+      env.targetId,
+      `0x${"4".repeat(64)}`,
+      VERSIONS.schemaVersion,
+      VERSIONS.signalVersion,
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      VERSIONS.replayVersion,
+      RULESET_HASH,
+      sourceVersion.commit,
+      "2026-07-16T00:01:00.000Z",
+      env.scope.baselineRunId,
+    );
+    database.close();
+
+    const integrity = validateFinalCampaignIntegrity({
+      databasePath: env.databasePath,
+      scope: env.scope,
+      acceptance: env.acceptance,
+    });
+    expect(integrity).toMatchObject({
+      passed: false,
+      unfollowedNegativeRiskConversionCount: 1,
+    });
+    expect(integrity.blockers).toContain("UNFOLLOWED_NEGATIVE_RISK_CONVERSION:1");
+  });
+
   it("hashes isolated evidence and refuses tampering or a different core", () => {
     const evidence = buildIsolatedVerificationEvidence({
       status: "PASSED",

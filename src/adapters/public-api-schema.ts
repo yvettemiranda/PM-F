@@ -91,7 +91,7 @@ export function parsePublicActivity(value: unknown): PublicActivity[] {
     // Data API uses empty-string placeholders for fields that do not apply to
     // REWARD/YIELD/MAKER_REBATE rows. Normalize those placeholders to absence;
     // TRADE rows remain strict below and can never pass without full identity.
-    for (const field of ["conditionId", "asset", "side"] as const) {
+    for (const field of ["conditionId", "asset", "side", "eventSlug"] as const) {
       if (row[field] === "" || row[field] === null) delete row[field];
     }
     for (const field of ["price", "size", "usdcSize", "isCombo"] as const) {
@@ -108,6 +108,7 @@ export function parsePublicActivity(value: unknown): PublicActivity[] {
     if (row.isCombo !== undefined && typeof row.isCombo !== "boolean") {
       throw new Error(`API_SCHEMA_INVALID:activity[${index}].isCombo:boolean`);
     }
+    if (row.eventSlug !== undefined) text(row.eventSlug, `activity[${index}].eventSlug`);
     if (row.type === "TRADE" && (
       row.conditionId === undefined || row.asset === undefined || row.side === undefined
       || row.price === undefined || row.size === undefined
@@ -125,6 +126,10 @@ export function parsePublicPositions(value: unknown): PublicPosition[] {
     decimal(row.size, `positions[${index}].size`, 0);
     decimal(row.avgPrice, `positions[${index}].avgPrice`, 0, 1);
     decimal(row.currentValue, `positions[${index}].currentValue`, 0);
+    if (row.eventSlug !== undefined) text(row.eventSlug, `positions[${index}].eventSlug`);
+    if (row.negativeRisk !== undefined && typeof row.negativeRisk !== "boolean") {
+      throw new Error(`API_SCHEMA_INVALID:positions[${index}].negativeRisk:boolean`);
+    }
     return row as unknown as PublicPosition;
   });
 }

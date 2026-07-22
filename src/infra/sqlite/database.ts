@@ -589,6 +589,26 @@ export class Phase0Database {
         this.database.exec("PRAGMA foreign_keys=ON");
       }
     }
+    const negativeRiskConversionApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.27.0");
+    if (!negativeRiskConversionApplied) {
+      const negativeRiskConversionSql = readFileSync(
+        new URL("./032_negative_risk_conversion.sql", import.meta.url),
+        "utf8",
+      );
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(negativeRiskConversionSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.27.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

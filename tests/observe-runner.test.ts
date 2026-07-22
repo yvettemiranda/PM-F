@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { encodeAbiParameters, encodeEventTopics, parseAbiItem, type Hex } from "viem";
 import { PolymarketPublicApi, type ApiCapture } from "../src/adapters/polymarket-public.js";
 import type { PublicActivity, PublicPosition, PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
@@ -11,6 +12,13 @@ import { ObserveOnlyRunner } from "../src/observe/observe-runner.js";
 import { PublicObserveDataSource } from "../src/observe/public-data-source.js";
 import { ObserveStore } from "../src/observe/observe-store.js";
 import type { ObserveDataSource, ObservePollSnapshot } from "../src/observe/types.js";
+import {
+  NEGATIVE_RISK_ADAPTER_ADDRESS,
+  NEGATIVE_RISK_CONVERSION_TOPIC,
+  POLYMARKET_CTF_ADDRESS,
+  type NegativeRiskConversionReceiptProvider,
+  type PolygonTransactionReceiptResponse,
+} from "../src/observe/negative-risk-conversion.js";
 import { buildCaptureManifest, captureIdentity } from "../src/services/capture-manifest.js";
 import { buildPositionBaseline } from "../src/services/position-baseline.js";
 
@@ -19,6 +27,9 @@ const sourceVersion: SourceVersion = { commit: "test-commit", dirty: false };
 const baselineTime = "2026-07-08T00:00:00.000Z";
 const baselineSecond = Date.parse(baselineTime) / 1_000;
 const directories: string[] = [];
+const transferBatchEvent = parseAbiItem(
+  "event TransferBatch(address indexed operator,address indexed from,address indexed to,uint256[] ids,uint256[] values)",
+);
 
 function capture<T>(endpoint: string, data: T, fetchedAt: string): ApiCapture<T> {
   return { url: `https://example.test/${endpoint}`, fetchedAt, latencyMs: 10, status: 200, data };
@@ -85,6 +96,71 @@ function snapshotWithActivity(
   const result = snapshot([], positions, fetchedAt);
   result.activity = capture("activity", activities, fetchedAt);
   return result;
+}
+
+function conversionReceipt(
+  transactionHash: string,
+  groupConditionId: string,
+  sourceAsset: string,
+  destinationAssets: string[],
+  amountMicros: bigint,
+): ApiCapture<PolygonTransactionReceiptResponse> {
+  const intermediary = "0x00000000000000000000000000000000000000bb";
+  const batch = (from: string, to: string, ids: string[]) => ({
+    address: POLYMARKET_CTF_ADDRESS,
+    topics: encodeEventTopics({
+      abi: [transferBatchEvent],
+      eventName: "TransferBatch",
+      args: {
+        operator: NEGATIVE_RISK_ADAPTER_ADDRESS,
+        from: from as `0x${string}`,
+        to: to as `0x${string}`,
+      },
+    }) as unknown as Hex[],
+    data: encodeAbiParameters(
+      [{ type: "uint256[]" }, { type: "uint256[]" }],
+      [ids.map(BigInt), ids.map(() => amountMicros)],
+    ),
+  });
+  return capture("polygon-receipt", {
+    jsonrpc: "2.0",
+    id: 3,
+    result: {
+      transactionHash,
+      status: "0x1",
+      blockNumber: "0x123",
+      logs: [
+        batch(wallet, intermediary, [sourceAsset]),
+        batch(NEGATIVE_RISK_ADAPTER_ADDRESS, wallet, destinationAssets),
+        {
+          address: NEGATIVE_RISK_ADAPTER_ADDRESS,
+          topics: [
+            NEGATIVE_RISK_CONVERSION_TOPIC,
+            `0x${"0".repeat(24)}${wallet.slice(2)}`,
+            groupConditionId,
+            `0x${"0".repeat(63)}8`,
+          ],
+          data: encodeAbiParameters([{ type: "uint256" }], [amountMicros]),
+        },
+      ],
+    },
+  }, "2026-07-08T00:01:00.000Z");
+}
+
+function negativeRiskPosition(asset: string, conditionDigit: string, size = "10"): PublicPosition {
+  return {
+    proxyWallet: wallet,
+    asset,
+    conditionId: `0x${conditionDigit.repeat(64)}`,
+    size,
+    avgPrice: "0.25",
+    currentValue: "2.5",
+    title: "Fed Decision in July?",
+    slug: `fed-market-${conditionDigit}`,
+    eventSlug: "fed-decision-in-july-test",
+    outcome: "Yes",
+    negativeRisk: true,
+  };
 }
 
 class QueueSource implements ObserveDataSource {
@@ -1401,6 +1477,154 @@ describe("ObserveOnlyRunner", () => {
       "SELECT is_combo,event_classification FROM raw_events WHERE source_transaction_hash='0xcombo-trade'",
     ).get()).toEqual({ is_combo: 1, event_classification: "COMBO_ACTIVITY" });
     expect((check.prepare("SELECT count(*) count FROM observe_signal_emissions").get() as { count: number }).count).toBe(0);
+    check.close();
+  });
+
+  it("persists verified negative-risk conversion evidence and restores it without another RPC call", async () => {
+    const sourceAsset = "100";
+    const destinationAssets = ["201", "202", "203", "204"];
+    const groupConditionId = `0x${"4".repeat(64)}`;
+    const transactionHash = `0x${"3".repeat(64)}`;
+    const baselinePosition = negativeRiskPosition(sourceAsset, "9");
+    const currentPositions = destinationAssets.map((asset, index) => (
+      negativeRiskPosition(asset, String(index + 1))
+    ));
+    const conversion = activity({
+      type: "CONVERSION",
+      transactionHash,
+      conditionId: groupConditionId,
+      size: "10",
+      eventSlug: "fed-decision-in-july-test",
+      timestamp: baselineSecond + 30,
+    });
+    const { databasePath, baselineRunId } = setup([baselinePosition]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    let receiptCalls = 0;
+    const receiptProvider: NegativeRiskConversionReceiptProvider = {
+      async transactionReceipt() {
+        receiptCalls += 1;
+        return conversionReceipt(
+          transactionHash,
+          groupConditionId,
+          sourceAsset,
+          destinationAssets,
+          10_000_000n,
+        );
+      },
+    };
+    const firstStore = new ObserveStore(databasePath, sourceVersion);
+    const firstRunner = new ObserveOnlyRunner(firstStore, new QueueSource([
+      snapshotWithActivity([conversion], currentPositions, now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      negativeRiskConversionReceiptProvider: receiptProvider,
+    });
+
+    expect(await firstRunner.pollOnce()).toBe(true);
+    firstStore.stopRun(firstRunner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(firstStore.runMetrics(firstRunner.start().observeRunId)).toMatchObject({
+      successfulPolls: 1,
+      failedPolls: 0,
+      processedEvents: 1,
+      emittedSignals: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    firstStore.close();
+    expect(receiptCalls).toBe(1);
+
+    let check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM negative_risk_conversion_evidence",
+    ).get() as { count: number }).count).toBe(1);
+    expect((check.prepare(
+      "SELECT count(*) count FROM api_captures WHERE endpoint='polygon-transaction-receipt'",
+    ).get() as { count: number }).count).toBe(1);
+    expect(check.prepare(
+      `SELECT asset_id,historical_micros,tracked_micros
+       FROM observe_position_projection ORDER BY asset_id`,
+    ).all()).toEqual(destinationAssets.map((asset) => ({
+      asset_id: asset,
+      historical_micros: "10000000",
+      tracked_micros: "0",
+    })));
+    check.close();
+
+    now = new Date("2026-07-08T00:01:10.000Z");
+    const secondStore = new ObserveStore(databasePath, sourceVersion);
+    const secondRunner = new ObserveOnlyRunner(secondStore, new QueueSource([
+      snapshotWithActivity([conversion], currentPositions, now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      negativeRiskConversionReceiptProvider: {
+        async transactionReceipt() {
+          throw new Error("RECEIPT_MUST_BE_RESTORED_FROM_DATABASE");
+        },
+      },
+    });
+    expect(await secondRunner.pollOnce()).toBe(true);
+    secondStore.stopRun(secondRunner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(secondStore.runMetrics(secondRunner.start().observeRunId)).toMatchObject({
+      successfulPolls: 1,
+      failedPolls: 0,
+      processedEvents: 0,
+      finalSyncStatus: "SYNCED",
+      checkpointRecovered: true,
+      checkpointProjectionHashMismatch: false,
+    });
+    secondStore.close();
+
+    check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM negative_risk_conversion_evidence",
+    ).get() as { count: number }).count).toBe(1);
+    check.close();
+  });
+
+  it("fails the poll closed when a conversion has no receipt provider", async () => {
+    const sourceAsset = "100";
+    const currentPositions = [negativeRiskPosition("201", "1")];
+    const conversion = activity({
+      type: "CONVERSION",
+      transactionHash: `0x${"3".repeat(64)}`,
+      conditionId: `0x${"4".repeat(64)}`,
+      size: "10",
+      eventSlug: "fed-decision-in-july-test",
+      timestamp: baselineSecond + 30,
+    });
+    const { databasePath, baselineRunId } = setup([negativeRiskPosition(sourceAsset, "9")]);
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshotWithActivity([conversion], currentPositions, now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    expect(await runner.pollOnce()).toBe(false);
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 0,
+      failedPolls: 1,
+      processedEvents: 0,
+      lastCheckpointId: null,
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT status,error_detail FROM observe_polls").get()).toEqual({
+      status: "PROCESSING_FAILED",
+      error_detail: "NEGATIVE_RISK_CONVERSION_RECEIPT_PROVIDER_UNAVAILABLE",
+    });
+    expect((check.prepare("SELECT count(*) count FROM raw_events").get() as { count: number }).count).toBe(0);
     check.close();
   });
 

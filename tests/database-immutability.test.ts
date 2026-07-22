@@ -15,6 +15,7 @@ const protectedTables = [
   "state_transitions",
   "api_captures",
   "api_capture_payloads",
+  "negative_risk_conversion_evidence",
   "capture_manifest_items",
   "replay_event_classifications",
   "golden_expectations",

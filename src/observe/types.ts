@@ -1,5 +1,6 @@
 import type { ApiCapture } from "../adapters/polymarket-public.js";
 import type { EventClassification, PublicActivity, PublicPosition, PublicTrade, SyncStatus } from "../domain/models.js";
+import type { VerifiedNegativeRiskConversion } from "./negative-risk-conversion.js";
 
 export interface ObserveBaselineItem {
   asset: string;
@@ -24,6 +25,7 @@ export interface ObserveEvent {
   activityConfirmed: boolean;
   trade?: PublicTrade;
   activity?: PublicActivity;
+  conversion?: VerifiedNegativeRiskConversion;
 }
 
 export interface ObserveSignal {
@@ -31,7 +33,7 @@ export interface ObserveSignal {
   targetId: string;
   signalIdempotencyKey: string;
   sourceEventKey: string;
-  signalType: "TARGET_BUY" | "TARGET_SELL";
+  signalType: "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION";
   asset: string;
   conditionId: string;
   targetPriceUnits: string;

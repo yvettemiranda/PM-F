@@ -89,6 +89,16 @@ export function evaluatePaperShortGate(input: PaperShortGateInput): PaperShortGa
   }
   if (input.acceptance.marketData.blockerCount > 0) blockers.add("UNRECOVERED_MARKET_DATA_BLOCKER");
   if (input.acceptance.funnel.signals.unconsumedEligible > 0) blockers.add("ELIGIBLE_SIGNAL_UNCONSUMED");
+  const unfollowedConversions = [
+    "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+    "GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED",
+  ].reduce(
+    (total, reason) => total + (input.acceptance.funnel.signals.ineligibleReasons[reason] ?? 0),
+    0,
+  );
+  if (unfollowedConversions > 0) {
+    blockers.add(`UNFOLLOWED_NEGATIVE_RISK_CONVERSION:${unfollowedConversions}`);
+  }
   for (const reason of Object.keys(input.acceptance.funnel.risk.rejectReasons)) {
     if (GENERIC_REJECT_REASONS.has(reason)) blockers.add(`UNEXPLAINED_RISK_REJECT:${reason}`);
     if (isSizingOrIntegrityFailure(reason)) blockers.add(`SIZING_OR_INTEGRITY_FAILURE:${reason}`);

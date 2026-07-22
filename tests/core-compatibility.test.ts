@@ -261,8 +261,9 @@ describe("Paper Campaign core compatibility", () => {
       };
       runtimePackage.dependencies.viem = "999.0.0";
       writeFileSync(packagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
-      // viem is currently Live-only, so its version must not reset Paper.
-      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+      // Observe now decodes public Polygon receipt logs with viem, so its
+      // runtime version is part of the Paper Campaign behavior identity.
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).not.toBe(baselineCore);
       writeFileSync(packagePath, originalPackage);
 
       appendFileSync(join(fixture, "src/execution/clob-fee.ts"), "\nvoid \"live-only-fee-mutation\";\n");

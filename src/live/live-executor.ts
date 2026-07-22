@@ -278,6 +278,10 @@ export class LiveExecutor implements ExecutorInterface {
     signal: PaperSignalEnvelope;
     riskDecisionId: string;
   }): Promise<ExecutorExecutionResult> {
+    if (input.signal.signalType === "TARGET_CONVERSION") {
+      throw new Error("NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE");
+    }
+    const executionType = input.signal.signalType;
     return this.serializeAccount(input.accountId, async () => {
       const risk = this.database.prepare(
         `SELECT risk_decision_id,account_id,signal_id,context_id,decision,risk_reason,
@@ -313,7 +317,7 @@ export class LiveExecutor implements ExecutorInterface {
         riskDecisionId: input.riskDecisionId,
         liveGateRunId: null,
         executionIdempotencyKey,
-        executionType: input.signal.signalType,
+        executionType,
         state: "REJECTED",
         assetId: input.signal.assetId,
         conditionId: input.signal.conditionId,

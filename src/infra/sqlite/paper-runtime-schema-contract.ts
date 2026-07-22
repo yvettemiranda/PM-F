@@ -25,9 +25,11 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.24.0",
   "2.25.0",
   "2.26.0",
+  "2.27.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
+  "negative_risk_conversion_evidence",
   "observe_projection_snapshots",
   "paper_market_constraint_evidence",
   "paper_settlement_retry_state",
@@ -73,6 +75,8 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
   "observe_runs_campaign_binding_consistency",
   "observe_runs_campaign_binding_immutable",
   "observe_runs_campaign_binding_pair",
+  "negative_risk_conversion_evidence_no_delete",
+  "negative_risk_conversion_evidence_no_update",
   "paper_accounts_target_id_immutable",
   "paper_cash_ledger_no_delete",
   "paper_cash_ledger_no_update",
@@ -130,6 +134,7 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_INDEXES = [
+  "negative_risk_conversion_evidence_run_idx",
   "paper_settlement_retry_due_idx",
   "paper_validation_evidence_adjudications_campaign_idx",
   "paper_validation_campaign_transition_sequence_idx",
