@@ -4,7 +4,7 @@
 - 2026-07-22 用户要求停止当前测试，全面排查“目标开单但始终跟不上”并修复；必须保持 `PAPER + LIVE_DISABLED`，修复完成后不自动重启。
 - Campaign `PC-D6C6BDF51D42647D8EA6` 已正式安全暂停并生成报告；最终确认 4 BUY + 2 SELL 全部为 `GAP_EVENT`，无 Order/Fill、无 Reservation、无 Live 写入。
 - 已复现首个确定根因：CLOB 市场 `end_date_iso=null` 时，Signal Context 构造抛出 `MARKET_END_TIME_UNAVAILABLE`；Observe 将元数据处理失败误当成数据源断档并扩大 gap cutoff，下一轮把已实时看到的交易永久降级为不可执行 Gap。
-- 直接根因、同轮其它市场被连带丢弃、多腿 MERGE emission/ledger/classification 冲突、非交易 Activity 重复执行和 Replay/Observe 不一致均已修复；正在提交及业务库 backup-first 迁移。
+- 直接根因、同轮其它市场被连带丢弃、多腿 MERGE emission/ledger/classification 冲突、非交易 Activity 重复执行和 Replay/Observe 不一致均已修复并提交；业务库 backup-first 迁移完成，准备生成新核心 Phase 0 并启动测试。
 
 ## Completed implementation
 - 新增 migration 034：记录 Signal 富化 warning、显式市场结束时间状态和执行 deadline，并允许同一个 MERGE source event 保存多条 Signal emission。
@@ -20,14 +20,14 @@
 - Standards/Spec 两轴审查先后发现多腿 emission、ledger/classification 唯一约束、零/单腿 MERGE、官方 outcome set、非交易 Activity 去重、Replay/Observe 投影一致及版本绑定问题；均已修复并有持久化回归覆盖。
 
 ## Runtime state before final verification
-- Campaign 仍安全暂停，无 Observe/Paper/Supervisor 子进程；本批未创建真实订单、未使用 signer、未链上写入。
-- 业务库 Schema 仍为 `2.28.0`，等待干净提交后 backup-first 迁移到 `2.29.0`；历史记录不删除。
+- 旧 Campaign `PC-D6C6BDF51D42647D8EA6` 仍为 `PAUSED`，Session 已 `COMPLETED`，无 Observe/Paper/Supervisor 子进程；本批未创建真实订单、未使用 signer、未链上写入。
+- 业务库已从 `2.28.0` backup-first 迁移到 `2.29.0`；迁移前后 Campaign `9`、Session `18`、checkpoint `5543`、raw event `23129`、Signal `20559`、Paper execution `608`、Paper order `1499` 等关键表逐项同数，Live execution/order/fill 仍全为 `0`，Active Reservation 为 `0`。
 - 下次启动必须使用本批最终干净 commit 重新生成 Phase 0/Replay/core 绑定，不得续算旧核心 Campaign 时长。
 
 ## Current identity
 - 当前工作树尚未提交，旧 hash 不得继续作为新核心身份；提交并迁移后从 Operator 输出重新记录。
 
 ## Next steps
-1. 提交源码，以干净 commit backup-first 迁移业务库到 `2.29.0`，复核完整性与安全 Gate。
+1. 提交迁移后记忆更新，使用最终干净 HEAD 重新生成 Phase 0/Replay/core 绑定。
 2. 按用户最新明确要求，以新核心自动启动全新的 Paper Campaign；不得续用旧时长。
 3. 每 30 分钟核对信号漏斗、warning/gap/desync、进程和 Gate；必要时安全暂停、修复、重新从新核心测试，持续到 2026-07-23 08:00（Asia/Shanghai）。

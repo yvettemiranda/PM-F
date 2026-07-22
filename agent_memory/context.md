@@ -31,7 +31,7 @@
 - Paper 与隔离 Live fake 路径共享同一价格结果；Live 若因市场最低额改变最终金额，仍须在签名/提交前重新完成 Risk、钱包余额/授权、Reservation 和 Gate 绑定。
 
 ## Current runtime and Campaign
-- 真实业务库当前仍为 Schema `2.28.0`；源码提交并再次确认无运行进程后，必须 backup-first 升到 `2.29.0`，迁移前备份保留在 `data/operator/backups/`。
+- 真实业务库已 backup-first 升到 Schema `2.29.0`；迁移前备份为 `data/operator/backups/phase0-before-2.29.0-2026-07-22T10-11-59-892Z.sqlite`。迁移前后关键业务表逐项同数，`integrity_check=ok`、外键失败 `0`，旧备份与历史记录均保留。
 - 2026-07-22 新核心 Campaign `PC-D6C6BDF51D42647D8EA6` 已按用户要求安全暂停；Session `PS-E950DE127004911B0EC3` 累计有效运行 `0.75 h`，当前无 Observe/Paper/Supervisor 子进程，Reservation 为 `0`。
 - 本次捕获 4 个 BUY、2 个 SELL Signal，但 6 个均被错误标记为 `GAP_EVENT`，Order/Fill 均为 `0`；该时长属于缺陷核心证据，修复后不能续算。
 - 旧目标 replacement Campaign `PC-C268FD8331F1F503DFF6` 为 `PAUSED`；其他旧 Campaign/Session 终态均只读保留。
