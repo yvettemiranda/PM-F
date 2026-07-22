@@ -4,7 +4,6 @@
 - 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
 - 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
 - 新目标高频使用 `MERGE`，普通 Trades 未覆盖最近抽样 MERGE。Observe 现已对 MERGE/SPLIT 明确立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，不会假装同步；但真实投影/复制语义仍未实现，因此它仍是小额 Live 的硬 blocker。
-- UI 参数调节尚不可用：当前 17 个运行模块仍直接读取编译期 `RULESET`。若只增加配置写入而不做完整依赖注入、ruleset hash/registry 与 Campaign core 绑定，会造成界面值和实际执行值不一致，必须保持禁用。
 - tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
 - Live 所需 geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
@@ -16,10 +15,11 @@
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性仍需新核心自然 Campaign 验证。
 - 真实数据库较大；转换回执使用压缩、内容寻址和 append-only 保存，但仍需观察长跑增长率。
-- `data` 当前约 6.9 GB，其中 `data/operator/backups` 约 3.6 GB（3 份数据库备份）。数据库 Campaign/Session/capture 记录有外键和审计价值，不应删除；如需腾空间，应另行确认保留最新 `2.27.0` 前备份后，把更旧备份做可恢复归档，而不是直接清库。
+- `data` 当前约 8.5 GB，其中 `data/operator/backups` 约 5.1 GB（4 份数据库备份）。数据库 Campaign/Session/capture 记录有外键和审计价值，不应删除；如需腾空间，应另行确认保留最新 `2.28.0` 前备份后，把更旧备份做可恢复归档，而不是直接清库。
 - 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
 
 ## Resolved in current implementation
+- UI 参数曾只能展示编译期 `RULESET`；现由不可变 operator profile 复用同一 `RULESET` 深接口，完整校验、原子保存、运行锁和数据库安全 Gate 双重保护，并绑定 ruleset/Paper core。只开放已验证的 Paper 策略/风险 key，基础设施安全项、模式和 Live-only 参数继续冻结。
 - 目标钱包曾是 `操作入口/lib/common.sh` 的代码常量，切换会改变源码版本且不适合 UI；现由原子运行时选择文件和统一 TypeScript 模块管理，operator lock 存在时 fail closed。
 - Live Gate 曾把最终 Observe 前置项错误命名为 24 小时，与实际 8 小时政策冲突；`2.28.0` migration 保留 evidence 地改名，不降低 Paper 24 小时、Crash Recovery、一致性、geoblock 或用户授权门禁。
 - MERGE/SPLIT 曾只记录并依赖持仓差异在宽限期后升级；现当次轮询即写明确不支持原因并置 `MAJOR_DESYNC`。

@@ -55,5 +55,6 @@
 - 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；conversion 投影修复形成新核心，旧 Campaign 不能继续。
 - 旧目标的 `2.27.0` replacement 已安全暂停；新目标只读验证和入口隔离已完成，首次启动仍必须建立独立 baseline/target/account/Campaign，旧目标 Campaign 的时间不得转移。
 - 目标选择通过 `src/operator/target-wallet.ts` 深模块统一管理：项目默认在 `config/default-target-wallet.txt`，运行时选择在忽略的 `data/operator/target-wallet.txt`，活跃/残留 operator lock 存在时拒绝切换；所有运行入口仍显式传递 `--target-wallet`，旧目标证明和 Replay evidence 不能跨钱包复用。
-- `operator-control` 提供只读 UI 状态投影和原子换地址接口；当前明确暴露 `Live=LIVE_RUNTIME_NOT_WIRED`、`parameters=COMPILE_TIME_RULESET`，避免未来 UI 产生无效控制。模式切换仍以数据库 Live Gate 为唯一权威，不能作为普通配置字段写入。
+- `operator-control` 是未来 localhost UI 的统一控制面：提供只读状态投影、原子换地址以及不可变 Paper ruleset profile 的读取/设置/重置。profile 完整校验后写入忽略文件，运行锁存在或数据库不是精确 `PAPER + LIVE_DISABLED` 时禁止修改，进程启动时冻结；参数变化改变 Paper ruleset/core identity，只能用于下一 Campaign，不能混算旧时长。
+- 仅开放已验证的 Paper 策略/风险参数；基础设施安全项、模式和 Live-only 参数保持冻结。模式切换仍以数据库 Live Gate 为唯一权威，当前 Live 明确为 `LIVE_RUNTIME_NOT_WIRED`。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

@@ -20,6 +20,7 @@ describe("safe Paper/Observe child environment", () => {
       https_proxy: "https://lowercase:password@example.invalid",
       NODE_PATH: "/tmp/untrusted-node-path",
       SOURCE_CODE_COMMIT: "untrusted-environment-commit",
+      NI_K_RULESET_PROFILE_FILE: "/safe/project/data/operator/ruleset-profile.json",
     });
 
     expect(child).toEqual({
@@ -27,6 +28,7 @@ describe("safe Paper/Observe child environment", () => {
       HOME: "/safe/home",
       LANG: "zh_CN.UTF-8",
       TZ: "Asia/Shanghai",
+      NI_K_RULESET_PROFILE_FILE: "/safe/project/data/operator/ruleset-profile.json",
     });
     expect(JSON.stringify(child)).not.toContain("secret");
     expect(child).not.toHaveProperty("NODE_OPTIONS");

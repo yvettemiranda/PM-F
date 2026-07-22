@@ -824,7 +824,10 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(executionId)).toBe("REJECTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare("SELECT price_limit_upper_units,reason FROM paper_executions WHERE paper_execution_id=?").get(executionId))
-      .toEqual({ price_limit_upper_units: "950000000000000000", reason: "BUY_EXECUTION_PRICE_ABOVE_MAX" });
+      .toEqual({
+        price_limit_upper_units: ((BigInt(RULESET.buyMaximumPricePpm) * 10n ** 18n) / 1_000_000n).toString(),
+        reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
+      });
     expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 0 });
     db.close();
     env.executor.close();

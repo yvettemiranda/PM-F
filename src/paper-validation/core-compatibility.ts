@@ -127,6 +127,7 @@ export const VALIDATION_POLICY_FILES = [
 
 export const OPERATOR_BUILD_FILES = [
   "src/cli/observe-only.ts",
+  "src/cli/operator-control.ts",
   "src/cli/paper-campaign-evidence.ts",
   "src/cli/paper-campaign-preflight.ts",
   "src/cli/paper-campaign-run.ts",
@@ -135,6 +136,9 @@ export const OPERATOR_BUILD_FILES = [
   "src/cli/paper-replay-evidence.ts",
   "src/cli/redact-diagnostic.ts",
   "src/operator/diagnostic-redaction.ts",
+  "src/operator/operator-control.ts",
+  "src/operator/operator-mutation-guard.ts",
+  "src/operator/ruleset-profile.ts",
   "src/operator/safe-child-environment.ts",
   "src/operator/target-wallet.ts",
   "src/paper-validation/preflight.ts",
@@ -203,6 +207,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/replay-engine.test.ts",
   "tests/run-snapshot-retention.test.ts",
   "tests/runtime-database-preparation.test.ts",
+  "tests/ruleset-profile.test.ts",
   "tests/safe-child-environment.test.ts",
   "tests/settlement-service.test.ts",
   "tests/signal-target-binding.test.ts",

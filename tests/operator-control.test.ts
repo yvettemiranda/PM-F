@@ -1,9 +1,12 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { operatorControlSnapshot } from "../src/operator/operator-control.js";
+import { OPERATOR_RULESET_PROFILE_CONTEXT } from "../src/domain/versioning.js";
+import { saveSelectedRulesetProfile } from "../src/operator/ruleset-profile.js";
 import {
   DEFAULT_TARGET_WALLET_FILE,
   OPERATOR_ACTIVE_LOCK,
@@ -68,11 +71,48 @@ describe("operator control", () => {
       runtime: { operatorLocked: false, databaseAvailable: false },
       safety: { executionMode: null, liveGateState: null, liveAllowed: false },
       campaign: { latestCampaignId: null },
+      ruleset: {
+        source: "PROJECT_DEFAULT",
+        name: "Project Default",
+        configVersion: "v1.3.0",
+      },
       controls: {
         targetWallet: { available: true, blockedReason: null },
         paper: { available: true, blockedReason: null },
         live: { available: false, blockedReason: "LIVE_RUNTIME_NOT_WIRED" },
-        parameters: { available: false, blockedReason: "COMPILE_TIME_RULESET" },
+        parameters: { available: true, blockedReason: null, appliesOnNextCampaign: true },
+      },
+    });
+  });
+
+  it("blocks target and parameter mutations when the database Gate is not safely disabled", () => {
+    const root = project();
+    const databasePath = join(root, "data/phase0/phase0.sqlite");
+    mkdirSync(join(root, "data/phase0"), { recursive: true });
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      CREATE TABLE live_gate_state (
+        state_id TEXT PRIMARY KEY,
+        execution_mode TEXT NOT NULL,
+        live_gate_state TEXT NOT NULL
+      );
+      INSERT INTO live_gate_state VALUES ('default','LIVE','LIVE_ACTIVE');
+    `);
+    database.close();
+
+    expect(() => saveSelectedTargetWallet(root, selectedWallet))
+      .toThrow("TARGET_WALLET_CHANGE_BLOCKED:DATABASE_NOT_PAPER_LIVE_DISABLED");
+    expect(() => saveSelectedRulesetProfile(root, OPERATOR_RULESET_PROFILE_CONTEXT, {
+      name: "Unsafe Gate",
+      overrides: { buyMaximumPricePpm: 940_000 },
+    })).toThrow("RULESET_PROFILE_CHANGE_BLOCKED:DATABASE_NOT_PAPER_LIVE_DISABLED");
+    expect(operatorControlSnapshot(root)).toMatchObject({
+      safety: { executionMode: "LIVE", liveGateState: "LIVE_ACTIVE", liveAllowed: false },
+      controls: {
+        targetWallet: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
+        paper: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
+        live: { available: false, blockedReason: "LIVE_RUNTIME_NOT_WIRED" },
+        parameters: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
       },
     });
   });

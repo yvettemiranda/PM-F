@@ -23,6 +23,13 @@ if [[ ! "$TARGET_WALLET" =~ ^0x[0-9a-f]{40}$ ]]; then
   return 64 2>/dev/null || exit 64
 fi
 
+RULESET_PROFILE_FILE="$DATA_DIR/operator/ruleset-profile.json"
+if [[ -f "$RULESET_PROFILE_FILE" ]]; then
+  export NI_K_RULESET_PROFILE_FILE="$RULESET_PROFILE_FILE"
+else
+  unset NI_K_RULESET_PROFILE_FILE 2>/dev/null || true
+fi
+
 typeset -ga OPERATOR_CHILD_PIDS=()
 OPERATOR_SESSION_FILE=""
 OPERATOR_SESSION_LOCK_DIR=""

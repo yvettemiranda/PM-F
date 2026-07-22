@@ -39,7 +39,9 @@
 
 `操作入口/` 中没有 Live 入口，不会读取私钥，不会创建真实订单。
 
-目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。未来 localhost UI 复用同一个只读控制面；当前控制面会如实报告 Live 未接线、参数仍是编译期 ruleset，不能显示成可用按钮。
+目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。
+
+未来 localhost UI 可以直接复用 `operator-control` 控制面：它统一投影目标钱包、数据库安全状态、当前目标 Campaign、有效 ruleset 和可用控件。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标和参数修改都会失败关闭；这两条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换仍以数据库 Live Gate 为唯一权威。当前 Live 控件固定报告 `LIVE_RUNTIME_NOT_WIRED`，不能显示成可用按钮。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -47,12 +49,27 @@ pnpm typecheck
 pnpm test
 pnpm operator:control -- status
 pnpm operator:control -- set-target --target-wallet=0x目标地址
+pnpm operator:control -- get-ruleset
+pnpm operator:control -- set-ruleset --file=/绝对路径/profile-overrides.json
+pnpm operator:control -- reset-ruleset
 pnpm phase0:validate -- 0x目标地址
 pnpm phase05:replay-capture -- capture_run_id
 pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=15
 pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
 pnpm validate:final -- --type=all --campaign-id=PC-... --session-id=PS-...
 pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
+```
+
+`profile-overrides.json` 只提交名称和需要改变的 Paper 参数；`status` 返回当前值、hash 和允许编辑的 key，非法类型、越界关系、未知 key、Live-only key 或无实际变化都会失败关闭。例如：
+
+```json
+{
+  "name": "Lower buy ceiling",
+  "overrides": {
+    "buyMaximumPricePpm": 940000,
+    "stopTriggerRatioPpm": 450000
+  }
+}
 ```
 
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。

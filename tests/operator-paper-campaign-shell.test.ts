@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,14 @@ import { resolveSourceVersion } from "../src/infra/source-version.js";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const targetWallet = "0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a";
 const temporaryDirectories: string[] = [];
+
+function copyActiveRulesetProfile(directory: string): void {
+  const source = process.env.NI_K_RULESET_PROFILE_FILE;
+  if (!source || !existsSync(source)) return;
+  const destination = join(directory, "data/operator/ruleset-profile.json");
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+}
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -83,6 +91,7 @@ function campaignBundleFixture(input: {
   symlinkSync(resolve(projectRoot, "package.json"), join(directory, "package.json"), "file");
   symlinkSync(resolve(projectRoot, "pnpm-lock.yaml"), join(directory, "pnpm-lock.yaml"), "file");
   symlinkSync(resolve(projectRoot, "config"), join(directory, "config"), "dir");
+  copyActiveRulesetProfile(directory);
   const evidenceDirectory = join(directory, "evidence");
   mkdirSync(evidenceDirectory, { recursive: true });
   const isolated = join(evidenceDirectory, "isolated.json");
@@ -369,6 +378,7 @@ describe("Paper Campaign operator shell", () => {
     symlinkSync(resolve(projectRoot, "src"), join(directory, "src"), "dir");
     symlinkSync(resolve(projectRoot, "node_modules"), join(directory, "node_modules"), "dir");
     symlinkSync(resolve(projectRoot, "config"), join(directory, "config"), "dir");
+    copyActiveRulesetProfile(directory);
     const evidenceDirectory = join(directory, "evidence");
     mkdirSync(evidenceDirectory, { recursive: true });
     const internalUuid = "c5b7cdec-465a-4b3e-9c17-0ff4cce1327f";
@@ -586,6 +596,7 @@ describe("Paper Campaign operator shell", () => {
     ] as const) {
       symlinkSync(resolve(projectRoot, name), join(directory, name), type);
     }
+    copyActiveRulesetProfile(directory);
     const evidenceDirectory = join(directory, "evidence");
     mkdirSync(evidenceDirectory, { recursive: true });
     const log = join(evidenceDirectory, "unsafe.log");

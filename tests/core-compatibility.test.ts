@@ -210,6 +210,14 @@ describe("Paper Campaign core compatibility", () => {
       expect(computeOperatorBuildHash(fixture)).not.toBe(operatorBeforeCliMutation);
       writeFileSync(campaignCliPath, campaignCliSource);
 
+      const operatorBeforeControlMutation = computeOperatorBuildHash(fixture);
+      appendFileSync(
+        join(fixture, "src/operator/operator-control.ts"),
+        "\nvoid \"operator-control-mutation\";\n",
+      );
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+      expect(computeOperatorBuildHash(fixture)).not.toBe(operatorBeforeControlMutation);
+
       appendFileSync(join(fixture, "src/infra/sqlite/database.ts"), "\n// non-paper-migration-registration\n");
       appendFileSync(
         join(fixture, "src/infra/sqlite/runtime-database-preparation.ts"),

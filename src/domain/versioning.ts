@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { stableJson } from "./canonical-json.js";
+import {
+  rulesetProfileFromEnvironment,
+  type RulesetProfileContext,
+} from "../operator/ruleset-profile.js";
 export { stableJson } from "./canonical-json.js";
 
-export const VERSIONS = Object.freeze({
+export const DEFAULT_VERSIONS = Object.freeze({
   schemaVersion: "2.28.0",
   signalVersion: "1.6.0",
   strategyVersion: "2.2.0",
@@ -17,7 +21,7 @@ export const VERSIONS = Object.freeze({
   configVersion: "v1.3.0",
 });
 
-export const RULESET = Object.freeze({
+export const DEFAULT_RULESET = Object.freeze({
   buyExecutionMode: "FAK",
   buyPriceMinRatioPpm: 980_000,
   buyPriceMaxRatioPpm: 1_020_000,
@@ -67,29 +71,9 @@ export const RULESET = Object.freeze({
 });
 
 /**
- * Versions which can change the meaning of a Signal, RiskDecision or
- * Paper/Live execution result. Infrastructure and acceptance-tool versions are
- * deliberately not part of the ruleset identity: changing a report renderer or
- * a replay validator must not reinterpret an already-created trade decision.
- *
- * `configVersion` is retained because it identifies the executable strategy
- * configuration stored in `ruleset_registry`; presentation-only configuration
- * belongs in artifact provenance instead.
- */
-export const RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
-  "signalVersion",
-  "strategyVersion",
-  "riskVersion",
-  "paperVersion",
-  "rulesetVersion",
-  "feeModelVersion",
-  "configVersion",
-] as const);
-
-/**
- * Rules that can change Observe, Signal, Risk or Paper execution semantics.
- * Live-only limits remain in the full ruleset provenance, but must not reset
- * an otherwise compatible Paper validation Campaign.
+ * Rules whose current Paper/Observe/Risk implementation is validated for
+ * operator profiles. Live-only settings stay frozen until the real Live
+ * runtime, signer boundary, and dedicated profile tests exist.
  */
 export const PAPER_RULESET_KEYS = Object.freeze([
   "buyExecutionMode",
@@ -123,15 +107,25 @@ export const PAPER_RULESET_KEYS = Object.freeze([
   "capitalMode",
 ] as const);
 
-export const PAPER_RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
-  "signalVersion",
-  "strategyVersion",
-  "riskVersion",
-  "paperVersion",
-  "feeModelVersion",
+/** User-facing Paper strategy/risk knobs; infrastructure safety gates stay frozen. */
+export const OPERATOR_EDITABLE_RULESET_KEYS = Object.freeze([
+  "buyPriceMinRatioPpm",
+  "buyPriceMaxRatioPpm",
+  "buyMaximumPricePpm",
+  "buyFirstEntryMinimumAmountMicros",
+  "buyMarketMinimumAutoLiftCapMicros",
+  "waitRatioPpm",
+  "maxWaitMs",
+  "followSellMaxSlippagePpm",
+  "stopSellMaxSlippagePpm",
+  "stopTriggerRatioPpm",
+  "fallbackAmountMicros",
+  "paperInitialBalanceMicros",
+  "paperMaxSingleTradePpm",
+  "paperMaxMarketExposurePpm",
+  "paperMaxPositionExposurePpm",
 ] as const);
 
-export type VersionCatalog = { [Key in keyof typeof VERSIONS]: string };
 type WidenRuleValue<Value> = Value extends string
   ? string
   : Value extends number
@@ -139,9 +133,57 @@ type WidenRuleValue<Value> = Value extends string
     : Value extends boolean
       ? boolean
       : Value;
+export type VersionCatalog = { [Key in keyof typeof DEFAULT_VERSIONS]: string };
 export type RulesetCatalog = {
-  [Key in keyof typeof RULESET]: WidenRuleValue<(typeof RULESET)[Key]>;
+  [Key in keyof typeof DEFAULT_RULESET]: WidenRuleValue<(typeof DEFAULT_RULESET)[Key]>;
 };
+
+export const OPERATOR_RULESET_PROFILE_CONTEXT: RulesetProfileContext<RulesetCatalog> = Object.freeze({
+  defaultRules: DEFAULT_RULESET,
+  defaultConfigVersion: DEFAULT_VERSIONS.configVersion,
+  rulesetVersion: DEFAULT_VERSIONS.rulesetVersion,
+  editableKeys: OPERATOR_EDITABLE_RULESET_KEYS,
+});
+
+export const RULESET_PROFILE = rulesetProfileFromEnvironment(OPERATOR_RULESET_PROFILE_CONTEXT);
+export const VERSIONS: Readonly<VersionCatalog> = Object.freeze({
+  ...DEFAULT_VERSIONS,
+  configVersion: RULESET_PROFILE.configVersion,
+});
+export const RULESET: Readonly<RulesetCatalog> = Object.freeze({ ...RULESET_PROFILE.rules });
+
+/**
+ * Versions which can change the meaning of a Signal, RiskDecision or
+ * Paper/Live execution result. Infrastructure and acceptance-tool versions are
+ * deliberately not part of the ruleset identity: changing a report renderer or
+ * a replay validator must not reinterpret an already-created trade decision.
+ *
+ * `configVersion` is retained because it identifies the executable strategy
+ * configuration stored in `ruleset_registry`; presentation-only configuration
+ * belongs in artifact provenance instead.
+ */
+export const RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
+  "signalVersion",
+  "strategyVersion",
+  "riskVersion",
+  "paperVersion",
+  "rulesetVersion",
+  "feeModelVersion",
+  "configVersion",
+] as const);
+
+/**
+ * Rules that can change Observe, Signal, Risk or Paper execution semantics.
+ * Live-only limits remain in the full ruleset provenance, but must not reset
+ * an otherwise compatible Paper validation Campaign.
+ */
+export const PAPER_RULESET_BEHAVIOR_VERSION_KEYS = Object.freeze([
+  "signalVersion",
+  "strategyVersion",
+  "riskVersion",
+  "paperVersion",
+  "feeModelVersion",
+] as const);
 
 export function rulesetBehaviorVersions(
   versions: Readonly<VersionCatalog> = VERSIONS,

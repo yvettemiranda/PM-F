@@ -11,12 +11,15 @@ const SAFE_CHILD_ENVIRONMENT_KEYS = [
   "COLORTERM",
   "FORCE_COLOR",
   "NO_COLOR",
+  "NI_K_RULESET_PROFILE_FILE",
 ] as const;
 
 /**
  * Paper/Observe subprocesses receive only process/runtime settings required for
  * local execution. Trading credentials, proxy credentials, NODE_OPTIONS and
- * unrelated parent-shell configuration are deliberately not inherited.
+ * unrelated parent-shell configuration are deliberately not inherited. The
+ * one application setting is only a path to the strictly validated, public
+ * ruleset JSON under data/operator; it cannot contain signer credentials.
  */
 export function buildSafeChildEnvironment(
   environment: NodeJS.ProcessEnv = process.env,

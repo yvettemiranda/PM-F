@@ -1331,7 +1331,11 @@ describe("LiveExecutor", () => {
     expect(result.state).toBe("REJECTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare("SELECT outcome,reason,upper_price_units FROM live_market_checks WHERE live_execution_id=?").get(result.executionId))
-      .toEqual({ outcome: "REJECT", reason: "BUY_EXECUTION_PRICE_ABOVE_MAX", upper_price_units: "950000000000000000" });
+      .toEqual({
+        outcome: "REJECT",
+        reason: "BUY_EXECUTION_PRICE_ABOVE_MAX",
+        upper_price_units: ((BigInt(RULESET.buyMaximumPricePpm) * 10n ** 18n) / 1_000_000n).toString(),
+      });
     expect(db.prepare("SELECT count(*) count FROM live_orders WHERE live_execution_id=?").get(result.executionId))
       .toEqual({ count: 0 });
     db.close();

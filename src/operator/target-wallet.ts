@@ -8,12 +8,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import {
+  assertOperatorMutationAllowed,
+} from "./operator-mutation-guard.js";
+
+export { OPERATOR_ACTIVE_LOCK } from "./operator-mutation-guard.js";
 
 const TARGET_WALLET_PATTERN = /^0x[0-9a-f]{40}$/;
 
 export const DEFAULT_TARGET_WALLET_FILE = "config/default-target-wallet.txt";
 export const SELECTED_TARGET_WALLET_FILE = "data/operator/target-wallet.txt";
-export const OPERATOR_ACTIVE_LOCK = "data/operator/run/active.lock";
 
 export interface TargetWalletSelection {
   walletAddress: string;
@@ -72,19 +76,16 @@ export function selectedTargetWallet(projectRoot: string): TargetWalletSelection
 }
 
 /**
- * Atomically changes only the next operator target. An existing operator lock
- * blocks the change, including a stale lock, so the stop/cleanup workflow gets
- * a chance to prove that no previous worker can keep writing for another target.
+ * Atomically changes only the next operator target. A running/stale operator
+ * lock or any database state other than PAPER + LIVE_DISABLED blocks the
+ * change, so a missing process lock cannot weaken the authoritative safety Gate.
  */
 export function saveSelectedTargetWallet(
   projectRoot: string,
   walletAddress: string,
 ): TargetWalletSelection {
   const normalized = normalizeTargetWallet(walletAddress);
-  const activeLock = resolve(projectRoot, OPERATOR_ACTIVE_LOCK);
-  if (existsSync(activeLock)) {
-    throw new Error(`TARGET_WALLET_CHANGE_BLOCKED_BY_OPERATOR_LOCK:${OPERATOR_ACTIVE_LOCK}`);
-  }
+  assertOperatorMutationAllowed(projectRoot, "TARGET_WALLET_CHANGE");
   const selectedFile = resolve(projectRoot, SELECTED_TARGET_WALLET_FILE);
   mkdirSync(dirname(selectedFile), { recursive: true });
   const temporaryFile = `${selectedFile}.${process.pid}.${Date.now()}.tmp`;
