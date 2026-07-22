@@ -80,6 +80,10 @@ import type {
 export const PAPER_CONSUMER_CUTOFF_SIGNAL_SENTINEL = "\u{10FFFF}";
 
 const PPM = 1_000_000n;
+const TERMINAL_TARGET_SELL_CONSTRAINT_REASONS = new Set([
+  "ORDER_SIZE_BELOW_EXECUTOR_PRECISION",
+  "BELOW_MARKET_MIN_ORDER_SIZE",
+]);
 
 export type PaperTransactionBarrier =
   | "RESERVATION_BEFORE_COMMIT"
@@ -115,6 +119,7 @@ interface ExecutionRow {
   target_price_units: string | null;
   deadline_at: string | null;
   attempt_count: number;
+  reason: string;
   risk_decision_id: string | null;
   risk_reject_reason: string | null;
   ruleset_hash: string;
@@ -2012,8 +2017,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       minimumPriceUnits: minimum,
     });
     if (constraint.result !== "PASS") {
-      this.keepSellPendingForMarketConstraint(execution, book, fee, age, constraint);
-      return execution.state;
+      return this.handleSellMarketConstraint(execution, book, fee, age, constraint);
     }
     const matched = matchPaperSell({
       bids: book.bids,
@@ -2455,13 +2459,33 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  private keepSellPendingForMarketConstraint(
+  private handleSellMarketConstraint(
     execution: ExecutionRow,
     book: PaperOrderbookSnapshot,
     fee: PaperFeeSnapshot,
     age: number,
     evidence: MarketOrderConstraintEvidence,
-  ): void {
+  ): PaperExecutionState {
+    if (
+      execution.execution_type === "TARGET_SELL"
+      && evidence.result === "REJECT"
+      && TERMINAL_TARGET_SELL_CONSTRAINT_REASONS.has(evidence.reason)
+    ) {
+      return this.cancelUntradeableTargetSell(execution, book, fee, age, evidence);
+    }
+    const matchingEvidence = this.database.prepare(
+      `SELECT 1 matching
+       FROM paper_market_constraint_evidence
+       WHERE paper_execution_id=? AND side='SELL' AND evidence_hash=? AND reason=?
+       LIMIT 1`,
+    ).get(
+      execution.paper_execution_id,
+      evidence.evidenceHash,
+      evidence.reason,
+    ) as { matching: number } | undefined;
+    if (execution.reason === evidence.reason && matchingEvidence) {
+      return execution.state;
+    }
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -2476,6 +2500,61 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         minOrderSizeMicros: evidence.minOrderSizeMicros,
       });
       this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return execution.state;
+  }
+
+  private cancelUntradeableTargetSell(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+    age: number,
+    evidence: MarketOrderConstraintEvidence,
+  ): PaperExecutionState {
+    const originalRequested = BigInt(execution.requested_size_micros ?? "0");
+    const filled = BigInt(execution.filled_size_micros);
+    const untradeableRemainder = originalRequested - filled;
+    if (untradeableRemainder <= 0n) throw new Error("TARGET_SELL_REMAINDER_INVARIANT");
+    const reason = filled > 0n
+      ? "TARGET_SELL_UNTRADABLE_REMAINDER"
+      : "TARGET_SELL_BELOW_EXECUTABLE_MINIMUM";
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveMarketSnapshots(book, fee, age);
+      this.insertMarketConstraintEvidence(execution, book, evidence, now);
+      this.database.prepare(
+        `UPDATE paper_execution_positions
+         SET requested_size_micros=filled_size_micros
+         WHERE paper_execution_id=?`,
+      ).run(execution.paper_execution_id);
+      this.database.prepare(
+        `UPDATE paper_executions
+         SET requested_size_micros=filled_size_micros,state='CANCELLED',reason=?,updated_at=?
+         WHERE paper_execution_id=?`,
+      ).run(reason, now, execution.paper_execution_id);
+      this.transition(
+        "PAPER_EXECUTION",
+        execution.paper_execution_id,
+        execution.state,
+        "CANCELLED",
+        reason,
+        now,
+      );
+      this.audit("PAPER_EXECUTION", execution.paper_execution_id, "UNTRADABLE_REMAINDER_REMOVED", reason, now, {
+        originalRequestedSizeMicros: originalRequested.toString(),
+        filledSizeMicros: filled.toString(),
+        untradeableRemainderMicros: untradeableRemainder.toString(),
+        marketConstraintReason: evidence.reason,
+        marketConstraintEvidenceHash: evidence.evidenceHash,
+        minOrderSizeMicros: evidence.minOrderSizeMicros,
+        normalizedOrderSizeMicros: evidence.normalizedOrderSizeMicros,
+      });
+      this.database.exec("COMMIT");
+      return "CANCELLED";
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;

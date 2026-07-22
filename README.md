@@ -89,6 +89,8 @@ Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行
 
 BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。首开最低仍为 1 pUSD；若真实市场最小单更高，只在首开时精确抬升且不超过 5 pUSD。SELL、止损和结算不受这条 BUY 上限影响。
 
+`TARGET_SELL` 若小于 CLOB 最小下单量，或成交后只剩不足执行器 `0.01` 股精度的尾差，不能通过放大卖单来“凑单”，否则会超过目标退出比例。Paper 会保存市场约束证据，把无法提交的剩余量从该 Execution 的待执行分配中移除并明确标记为 `CANCELLED`；已发生的部分成交、真实剩余 Position 和原始 Signal 都继续保留。`STOP_LOSS` 不采用这条终止规则，仍保持 `STOP_EXIT_PENDING`，但相同约束状态只记录一次，避免每秒重复写库。
+
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
 
 `validate:final` 必须显式指定同一个 `campaign-id` 和 `session-id`，并通过 SQLite Online Backup 把 `data/phase0/phase0.sqlite` 的一致性快照写入 `data/validation/<validation-session-id>/` 后运行；它不会把旧 Campaign、其他账户或其他目标钱包的数据混进本次结论。源库即使处于 WAL 模式也不会漏掉已提交数据，验证过程不会污染业务库。可选 `--type=paper_consistency|live_gate|paper_replay|crash_recovery|reconciliation|observe_only|all`。报告输出为 JSON 和 Markdown，最终状态最多到 `VALIDATION_FRAMEWORK_READY`；存在未运行项、警告或历史数据不足时，顶层结果明确为 `INCOMPLETE`，不会用 framework session 的 `PASSED` 冒充最终验收通过。无论结果如何，`liveAllowed` 均固定为 `false`。真实资金前仍必须实际执行累计 24 小时 Paper Validation、8 小时 Observe Only soak、Crash Recovery 长测、状态一致性验证、geoblock/compliance、小额实盘前检查，并由用户再次明确授权。

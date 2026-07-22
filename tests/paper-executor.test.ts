@@ -1070,7 +1070,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("keeps an undersized SELL in EXIT_PENDING without an order or position mutation", async () => {
+  it("cancels an undersized TARGET_SELL once without an order or position mutation", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({
       databasePath: env.databasePath,
@@ -1090,7 +1090,7 @@ describe("PaperExecutor", () => {
       createdAt: "2026-07-08T00:00:02.000Z",
     });
     const executionId = await env.executor.consumeSignal(env.accountId, "sell-below-market-min");
-    expect(env.executor.executionState(executionId)).toBe("EXIT_PENDING");
+    expect(env.executor.executionState(executionId)).toBe("CANCELLED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
     expect(db.prepare(
@@ -1102,7 +1102,88 @@ describe("PaperExecutor", () => {
     });
     expect(db.prepare("SELECT current_size_micros,status FROM paper_positions").get())
       .toEqual({ current_size_micros: "200000000", status: "OPEN" });
+    expect(db.prepare(
+      "SELECT requested_size_micros,filled_size_micros,reason FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({
+      requested_size_micros: "0",
+      filled_size_micros: "0",
+      reason: "TARGET_SELL_BELOW_EXECUTABLE_MINIMUM",
+    });
+    expect(db.prepare(
+      "SELECT requested_size_micros,filled_size_micros FROM paper_execution_positions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({ requested_size_micros: "0", filled_size_micros: "0" });
+    const transitionsBeforeRetry = (db.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count;
     db.close();
+    await env.executor.retryPending(env.accountId);
+    const finalDb = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((finalDb.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count).toBe(transitionsBeforeRetry);
+    finalDb.close();
+    expect(env.executor.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    env.executor.close();
+  });
+
+  it("cancels an untradeable TARGET_SELL precision remainder after preserving its partial fill", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.feeSnapshot = {
+      ...env.market.feeSnapshot,
+      baseFee: 30,
+      feeRatePpm: "30000",
+      exponent: 1,
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-before-sell-dust",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "buy-before-sell-dust");
+    env.market.book = env.market.makeBook([], [{ price: "0.5", size: "10000" }]);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "sell-with-precision-dust",
+      signalType: "TARGET_SELL",
+      sellNumerator: "1",
+      sellDenominator: "1",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "sell-with-precision-dust");
+
+    expect(env.executor.executionState(executionId)).toBe("EXIT_PENDING");
+    expect(await env.executor.attemptExecution(executionId)).toBe("CANCELLED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const execution = db.prepare(
+      `SELECT requested_size_micros,filled_size_micros,reason
+       FROM paper_executions WHERE paper_execution_id=?`,
+    ).get(executionId) as {
+      requested_size_micros: string;
+      filled_size_micros: string;
+      reason: string;
+    };
+    expect(execution.requested_size_micros).toBe(execution.filled_size_micros);
+    expect(execution.reason).toBe("TARGET_SELL_UNTRADABLE_REMAINDER");
+    const position = db.prepare(
+      "SELECT current_size_micros,status FROM paper_positions",
+    ).get() as { current_size_micros: string; status: string };
+    expect(BigInt(position.current_size_micros)).toBeGreaterThan(0n);
+    expect(BigInt(position.current_size_micros)).toBeLessThan(10_000n);
+    expect(position.status).toBe("PARTIALLY_CLOSED");
+    const transitionsBeforeRetry = (db.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count;
+    db.close();
+    await env.executor.retryPending(env.accountId);
+    const finalDb = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((finalDb.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count).toBe(transitionsBeforeRetry);
+    finalDb.close();
+    expect(env.executor.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
     env.executor.close();
   });
 
@@ -1799,6 +1880,48 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(executionId!)).toBe("STOP_EXIT_PENDING");
     env.market.book = env.market.makeBook([], [{ price: "0.24", size: "1000" }]);
     expect(await env.executor.attemptExecution(executionId!)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("keeps an undersized STOP_LOSS pending without repeating identical constraint records", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "stop-below-market-min-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "stop-below-market-min-buy");
+    env.market.book = {
+      ...env.market.makeBook([], [{ price: "0.2", size: "1000" }]),
+      minOrderSize: "500",
+    };
+
+    const [executionId] = await env.executor.checkStopLosses(env.accountId);
+
+    expect(executionId).toBeTruthy();
+    if (!executionId) throw new Error("Expected stop-loss execution");
+    expect(env.executor.executionState(executionId)).toBe("STOP_EXIT_PENDING");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const transitionsBeforeRetry = (db.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count;
+    const evidenceBeforeRetry = (db.prepare(
+      "SELECT count(*) count FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
+    ).get(executionId) as { count: number }).count;
+    db.close();
+
+    await env.executor.attemptExecution(executionId);
+    await env.executor.attemptExecution(executionId);
+
+    const finalDb = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((finalDb.prepare(
+      "SELECT count(*) count FROM paper_state_transitions WHERE entity_type='PAPER_EXECUTION' AND entity_id=?",
+    ).get(executionId) as { count: number }).count).toBe(transitionsBeforeRetry);
+    expect((finalDb.prepare(
+      "SELECT count(*) count FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
+    ).get(executionId) as { count: number }).count).toBe(evidenceBeforeRetry);
+    finalDb.close();
     env.executor.close();
   });
 

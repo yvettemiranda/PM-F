@@ -18,9 +18,11 @@
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性需新核心 Campaign 验证。
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - Data API offset、分页边界和短暂 Positions/Trades/Activity 不同步仍可能触发 gap recovery 或 reconciliation；不得以“尽量成交”为由降低这些数据完整性 Gate。
+- Live 当前对低于市场最小量的 TARGET_SELL 仍保持 `EXIT_PENDING`；Live 运行尚未启用，真实资金前必须把该路径与 Paper `1.10.0` 的“不超卖、明确终止或聚合策略”对齐并完成隔离测试，不能直接照搬 Paper 的账本写法。
 - 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
+- Paper TARGET_SELL 低于市场最小单量，或成交后只剩不足 `0.01` 股的尾差时，旧实现会永久保持 `EXIT_PENDING`，每秒重复写同一约束、状态和审计；当前保存一次证据后将不可提交部分从 Execution allocation 移除并 `CANCELLED`，已成交部分和真实 Position 不变。STOP_LOSS 继续等待，但相同 constraint hash/reason 不再重复写。
 - 目标完整 SELL/MERGE 已到达时，旧 Paper cycle 会先重试 WAITING BUY，再消费退出，可能买入目标已经退出的陈旧仓位；当前先固化新 Signal，再重试 pending，并按 sell ratio 对同 asset/condition 的待买执行完整取消或部分缩量。Risk 拒绝不会改账，只抵消待买时也不会伪造 SELL 成交。
 - 部分目标退出缩减 Reservation 后，首开市场最低额 auto-lift 可能把金额重新放大；当前以不可变 Audit 标记该 Execution，后续只能按缩减金额执行或失败关闭。
 - Data API Trades/Activity 可能晚于链上成交约 30 秒发布，单纯缩短 HTTP 轮询仍会晚发现；当前用 Polygon 已确认 `OrderFilled` 每秒扫描作为快速源，Data API 改为交叉确认和兜底。

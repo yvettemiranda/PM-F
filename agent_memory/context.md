@@ -19,7 +19,8 @@
 - 待成交 BUY 使用公开无认证 CLOB Market WebSocket 作为盘口变化唤醒；执行前仍读取完整 REST 盘口，断线或无事件时每 `15 s` 兜底。STOP/SELL 安全退出仍按每个 Paper cycle 处理。
 - 完全相同的待成交盘口和 fee 不重复写完整订单尝试；盘口变化后才产生新尝试。等待原因拆分为 `BUY_NO_ASK`、`BUY_BEST_ASK_ABOVE_LIMIT`、`BUY_ZERO_EXECUTABLE_LIQUIDITY` 等。
 - Paper 每轮先消费并固化已到达的新 Signal，再重试旧执行；后续 `TARGET_SELL` 会按同一比例同时减少现有 Position 和同 asset/condition 的 WAITING BUY，完整退出取消待买，部分退出缩减 Reservation，且只有 Risk 通过后才改账。被缩减的待买禁止被首开最低额重新放大。
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.9.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
+- `TARGET_SELL` 小于市场最小下单量，或合法成交后只剩不足 `0.01` 股的执行器尾差时，Paper 不允许放大卖单超卖：保存约束证据、保留真实成交/Position，把不可提交部分从该 Execution 分配中移除并终止为 `CANCELLED`。`STOP_LOSS` 继续保持 pending，但相同约束只记录一次。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.10.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
 - Signal Context 将官方市场结束时间分为 `VERIFIED` / `UNAVAILABLE`；Paper 对后者只使用不可变、有限时长的 `execution_deadline_at`，Live 继续拒绝该状态。
 - Observe 先提交事件/projection/checkpoint，再逐个富化 Signal；单市场元数据失败只记 warning 并在后续轮询重试，不能再制造连接 gap 或污染其它市场 Signal。
 - 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成两个独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。无法证明完整 outcome set、余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
@@ -35,16 +36,15 @@
 
 ## Current runtime and Campaign
 - 真实业务库已 backup-first 升到 Schema `2.29.0`；迁移前备份为 `data/operator/backups/phase0-before-2.29.0-2026-07-22T10-11-59-892Z.sqlite`。迁移前后关键业务表逐项同数，`integrity_check=ok`、外键失败 `0`，旧备份与历史记录均保留。
-- 最近一轮 Campaign `PC-FDE74DCF0572D08802EE`、Session `PS-E4B568E00791EA9C2F83` 已于 2026-07-22 20:42 安全暂停：累计 `1.39 h`，Observe 成功 `4273`、失败 `0`、新事件 `18`、Signal `6`、Paper Order `96`、Fill `2`、Active Reservation `0`，Gate 始终为 `PAPER + LIVE_DISABLED`。
-- 本轮取得首个自然完整生命周期：目标 BUY 被约 3 秒发现，Paper 以 `4.10 pUSD` 买入 `5` 份；目标随后 SELL，Paper 卖出 `5` 份并实现 `-0.10 pUSD`。这证明 Polygon 快速发现、Signal、Risk、BUY/SELL FAK、Position/PnL 全链可运行。
-- 同轮第二个目标 BUY 因 ask 超过上限等待；目标随后以标准二元 MERGE 完整退出，但旧 Paper 核心只生成 `SELL_SIZE_UNAVAILABLE`，没有立即取消 WAITING BUY。安全暂停释放了该 Reservation；Paper `1.9.0` 已新增退出优先、待买取消/缩量和账本回归测试。
-- 当前无 Observe/Paper/Campaign supervisor；10 分钟维护自动化临时 `PAUSED`，防止未提交核心被自动启动。最终干净提交和安全预检通过后创建 replacement Campaign，并持续到 2026-07-23 08:00（Asia/Shanghai）。
+- Paper `1.9.0` 核心 Campaign `PC-F55FC40E15CACF6204FD` 已完成一个连续 `4 h` Session：Observe 成功 `11103`、失败 `0`、43 个事件、4 个自然 BUY Signal、3 个 BUY Fill，最终 `SYNCED`，并验证低价 `2 tick` 追价规则。第二 Session 又取得自然 TARGET_SELL、部分成交、Realized PnL 和 API recovery 证据，使 Campaign coverage 为 `COMPLETE`。
+- 第二 Session 暴露 SELL 终止缺陷：一个完整目标退出留下 `0.009722` 股尾差，另一个比例退出只有约 `0.129898` 股；旧核心分别以执行器精度和市场最小量原因每秒重复约束记录。Session 已安全暂停，历史 Campaign 累计约 `4.96 h`、无真实动作，证据完整保留。
+- 当前无 Observe/Paper/Campaign supervisor；30 分钟维护自动化临时 `PAUSED`。Paper `1.10.0` 已通过全量与类型验证；形成干净提交并完成新核心隔离预检后创建 replacement Campaign，恢复运行到 2026-07-23 08:00（Asia/Shanghai）。
 
 ## Known blockers before small Live
 - 新目标最近抽样中频繁出现标准二元 `MERGE`；Paper 已有等价双腿退出语义，但仍须用新核心短测取得自然 MERGE/成交证据。无法证明完整集合的 MERGE 继续硬阻断。
 - 官方结束时间缺失的市场只允许 bounded Paper；Live 继续失败关闭，后续须决定是否接受独立的 Live deadline 风险策略。
 - tracked negative-risk conversion 仍只形成不可执行义务并硬阻断；没有受控 Paper 语义和未来明确授权的链上适配器。
-- 仍需从新干净核心重新累计 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 覆盖及最终 8 小时 Observe；旧核心或旧 Campaign 时长不能混算。
+- Paper `1.10.0` 改变核心兼容性，仍需从新干净核心重新累计 40 分钟资格、连续 4 小时、累计 24 小时及最终 8 小时 Observe；旧核心的自然 BUY/SELL/Fill/PnL 证据保留，但时长不能混算。
 - geoblock/compliance、隔离钱包、真实 signer 和小额 Live 的再次明确授权均未完成。
 
 ## Operator workflow
