@@ -38,7 +38,7 @@
 - `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6` 已为旧目标创建后按用户要求安全暂停；Session `PS-D50FE31F7FF33A1DCEA4` 最终对账 `SYNCED`，Campaign 为 `PAUSED`、未取得资格、累计有效时长 `26061 ms`、无 blocker。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。
 - 旧 Campaign `PC-94D81ECAD5EF89852D2A` 仍为 `FROZEN`；所有旧核心运行时间均不得计入本轮 `2.27.0` replacement Campaign。
-- 真实业务库已通过 backup-first 入口迁移到 Schema `2.27.0`；迁移前备份为 `data/operator/backups/phase0-before-2.27.0-2026-07-22T01-24-19-628Z.sqlite`。
+- 真实业务库已通过 backup-first 入口迁移到 Schema `2.28.0`；本轮迁移前备份为 `data/operator/backups/phase0-before-2.28.0-2026-07-22T02-38-41-085Z.sqlite`。
 - `PAPER + LIVE_DISABLED`，active Reservation 为 0，当前无 Paper、Observe 或 Campaign supervisor 进程。
 
 ## Confirmed BUY policy for next core

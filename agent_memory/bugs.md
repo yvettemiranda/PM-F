@@ -33,7 +33,7 @@
 - Adapter 转换证明现精确绑定目标钱包 stakeholder 且必须唯一；0 条、重复或歧义证明均失败关闭。
 - 普通 reconciliation 的数量容差不再用于签发 conversion verified evidence；转换涉及资产按 micros 零容差对账。
 - tracked conversion 不再只等到验收时阻断；Paper/Live 在候选选择前和逐笔执行前复核，Paper 立即暂停/冻结，Live 立即 emergency stop，竞态窗口已有注入测试。
-- 真实业务库已 backup-first 升到 `2.27.0`，历史终态、`PAPER + LIVE_DISABLED`、0 active Reservation 和 0 running Observe 均只读复核通过。
+- 真实业务库已 backup-first 升到 `2.28.0`，历史终态、`PAPER + LIVE_DISABLED`、0 active Reservation 和 0 running Observe 均只读复核通过；迁移前 `2.27.0` 备份保留。
 - 回执或 provider 异常曾可能只能表现为后续通用对账差异；现 Poll 在写入前以具体错误失败关闭，不留下半成品。
 - 首开最低 1 pUSD、市场最低额最多 5 pUSD、BUY 最高价 0.95、最终 Risk/Reservation/Gate 绑定和 Live Fake 恢复语义已完成，旧核心证据只读保留。
 - Observe/Paper/Settlement 共用应用内 MarketClock；运行时长和调度使用单调时钟；AbortSignal 贯穿公开请求、分页和退避。
