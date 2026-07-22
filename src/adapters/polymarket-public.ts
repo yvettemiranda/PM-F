@@ -139,7 +139,7 @@ export class PolymarketPublicApi {
     this.maxRetries = options.maxRetries ?? 3;
     this.backoffFactor = options.backoffFactor ?? 2;
     this.maxBackoffMs = options.maxBackoffMs ?? 30_000;
-    this.polygonRpcUrl = options.polygonRpcUrl ?? "https://polygon-bor-rpc.publicnode.com";
+    this.polygonRpcUrl = options.polygonRpcUrl ?? "https://polygon.drpc.org";
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) throw new Error("INVALID_REQUEST_TIMEOUT");
     if (!Number.isSafeInteger(this.maxRetries) || this.maxRetries < 0) throw new Error("INVALID_MAX_RETRIES");
     if (!Number.isFinite(this.backoffFactor) || this.backoffFactor < 1) throw new Error("INVALID_BACKOFF_FACTOR");

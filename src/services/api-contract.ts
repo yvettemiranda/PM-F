@@ -10,6 +10,7 @@ export interface ApiContractInput {
   activityHistoryComplete: boolean;
   tradePaginationBoundaryOverlaps?: PublicTrade[];
   activityPaginationBoundaryOverlaps?: PublicTrade[];
+  confirmedTradeOccurrenceCounts?: Readonly<Record<string, number>>;
   clobTime: ApiCapture<number>;
   captures: ApiCapture<unknown>[];
 }
@@ -121,6 +122,9 @@ export function validateApiContract(input: ApiContractInput): ApiContractReport 
     ...(input.activityPaginationBoundaryOverlaps === undefined
       ? {}
       : { activityPaginationBoundaryOverlaps: input.activityPaginationBoundaryOverlaps }),
+    ...(input.confirmedTradeOccurrenceCounts === undefined
+      ? {}
+      : { confirmedOccurrenceCounts: input.confirmedTradeOccurrenceCounts }),
   });
 
   const requestLatencies = input.captures.map((capture) => capture.latencyMs);

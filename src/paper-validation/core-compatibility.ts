@@ -111,6 +111,8 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
+  "src/cli/phase0-validate.ts",
+  "src/cli/replay-capture.ts",
   "src/infra/sqlite/010_validation_framework.sql",
   "src/infra/sqlite/011_operational_validation.sql",
   "src/infra/sqlite/phase0-validation-database.ts",
@@ -123,6 +125,8 @@ export const VALIDATION_POLICY_FILES = [
   "src/paper-validation/replay-evidence.ts",
   "src/paper-validation/report.ts",
   "src/paper-validation/types.ts",
+  "src/services/api-contract.ts",
+  "src/services/trade-multiplicity-evidence.ts",
 ] as const;
 
 export const OPERATOR_BUILD_FILES = [
@@ -213,6 +217,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/signal-target-binding.test.ts",
   "tests/source-version.test.ts",
   "tests/state-machine.test.ts",
+  "tests/trade-multiplicity-evidence.test.ts",
   "tests/validation-framework.test.ts",
   "tests/wallet-identity.test.ts",
 ] as const;

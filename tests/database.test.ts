@@ -161,6 +161,38 @@ describe("Phase0Database", () => {
     check.close();
   });
 
+  it("persists chain-confirmed identical Trades occurrences without Activity corroboration", () => {
+    const { databasePath } = workspace();
+    const first = trade({ transactionHash: "0xchain-confirmed" });
+    const trades = [first, { ...first }];
+    const confirmedOccurrenceCounts = { [sourceEventKey(first)]: 2 };
+    const report = new ReplayEngine().run({
+      targetId: replayTargetId,
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades,
+      activity: [],
+      confirmedTradeOccurrenceCounts: confirmedOccurrenceCounts,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+    const database = new Phase0Database(databasePath);
+    database.initialize();
+    const targetId = database.ensureTarget(wallet, "IDENTITY_CONFIRMED");
+    database.saveReplay(targetId, trades, [], report, {
+      sourceEventMultiplicityEvidence: { confirmedOccurrenceCounts },
+    });
+    database.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare("SELECT count(*) count FROM raw_events").get() as { count: number }).count).toBe(2);
+    expect((check.prepare("SELECT count(*) count FROM signals").get() as { count: number }).count).toBe(2);
+    expect((check.prepare(
+      "SELECT count(DISTINCT source_event_key) count FROM raw_events",
+    ).get() as { count: number }).count).toBe(2);
+    check.close();
+  });
+
   it("rolls back the complete critical transaction when one raw event is invalid", () => {
     const { databasePath } = workspace();
     const valid = trade();

@@ -23,6 +23,7 @@
 - Phase 4：Final Validation Framework。统一验证入口会在 isolated snapshot database 上运行 Paper Replay、Consistency、Crash Recovery、Reconciliation、Live Gate fake path 和 Observe Only 检查，并生成可追溯 Validation Report
 - Phase 5：Operational Validation Framework。新增 Operational Runner、单实例锁、心跳、健康快照、运行 checkpoint、shadow risk observation、一致性/崩溃恢复检查和 Operational Report，用于证明系统可以被长期验证，而不是打开真实交易
 - Production hardening：公开 API 分页/运行时契约校验、Activity 时间游标增量采集、WAL-safe SQLite Online Backup、内容寻址压缩 capture、不可变证据表、历史 ruleset 执行、Live 信号序列游标与坏消息隔离、完整订单簿执行计划、真实/恢复共用 fill 校验、Live 账户资金口径绑定和外部现金/仓位对账
+- 完全相同成交的链上次数证明：只对官方 Polygon V2 Exchange 的成功回执解码 `OrderFilled`，并要求目标 maker、side、token、抵押金额、成交次数和不同 `orderHash` 全部精确一致；原始回执与派生 proof 随 Capture Manifest 内容寻址、不可变保存，任何缺失或不一致继续阻断 Replay
 - Live 下单边界加固：不可变 Signal/Execution Context 逐字段校验、钱包与 authorized signer 绑定、signed order 的 maker/signer/数量/限价/fee 复核、完整 Order Intent 快照及恢复 hash、账户级串行化、取消 CAS、启动恢复门槛和紧急停止竞态保护
 
 `Live Executor` 已有完整架构、官方 CLOB SDK adapter 和 fake/disabled 测试路径，但默认不会构造真实 signer，也没有用户可操作的 Live 启动入口。当前数据库状态固定为 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。私钥接入、真实订单、approve、真实 redeem 和链上写操作均不属于当前默认运行状态。Phase 4/5 和自动化 hardening 只代表技术候选与验证框架可用，不代表最终验证通过，也不代表 Live 已获授权。
@@ -73,6 +74,8 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 ```
 
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。
+
+Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行成交时，Phase 0 不会直接合并或接受，而是只读查询 Polygon `eth_getTransactionReceipt`。只有官方 V2 Exchange 回执能以不同 `orderHash` 精确证明相同经济成交次数时，才生成稳定的多 occurrence `source_event_key`；RPC 不可用、旧版/未知合约、金额或 maker 不符、重复 `orderHash`、proof 重放不一致时都保持 `AMBIGUOUS_DUPLICATE_EVENTS`。
 
 `observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
 

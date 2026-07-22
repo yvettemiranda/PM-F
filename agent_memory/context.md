@@ -7,6 +7,7 @@
 
 ## Architecture
 - Observe：公开 Trades/Activity/Positions 增量抓取、Gap/Cursor、Activity confirmation、Polygon 回执验证、负风险 conversion、Position projection、对账与 checkpoint。
+- Phase 0/Replay：Data API 完全相同成交只有在全部 Trades/Activity 行均属于当前目标钱包，且官方 Polygon V2 Exchange 成功回执中的目标 maker、side、token、精确抵押金额、成交次数和不同 `orderHash` 全部一致证明后才保留多 occurrence；回执与派生 proof 随 Capture Manifest append-only 保存并在 capture replay 中重新验证。
 - Paper：不可变 Signal/Execution Context、精确比例金额、Risk、完整深度 VWAP/FAK、Reservation、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
 - Validation：固定账户/目标/基线/核心的 Campaign，累计 24 小时、至少一次连续 4 小时、40 分钟资格里程碑、场景覆盖、不可变 checkpoint/report/transition；最终同版本 Observe 为 8 小时。
 - Live：只有显式 fail-closed 架构和 Fake 测试；没有真实 signer、认证交易客户端或资金操作。
@@ -18,7 +19,7 @@
 - Gap Signal 固定不可执行；数据、版本、恢复或账本状态不确定时必须 fail closed。
 
 ## Current implementation baseline
-- 当前代码 Schema 为 `2.28.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
+- 当前代码 Schema 为 `2.28.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Replay `1.9.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.4.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
 - 负风险 `CONVERSION` 必须由 Activity、Polygon 成功回执/目标钱包唯一 NegRiskAdapter 日志和 Positions 三方证明；转换涉及资产必须与完整 projection 做 micros 零容差数量核对，证据才可 append-only 保存并进入 checkpoint 恢复。
 - historical-only conversion 只重分 bucket；tracked conversion 当前生成不可执行审计义务并立即闭锁：Paper 账户 `PAUSED`/仓位冻结，Live 紧急停机并强制 `PAPER + LIVE_DISABLED`，绝不静默跳过、越过后续信号或误当 SELL。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
@@ -33,7 +34,7 @@
 
 ## Current runtime and Campaign
 - 操作入口已切换为新目标 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；预检、Campaign 选择、状态和隔离/Replay 证据均按目标绑定，不能复用旧地址 Campaign、时长、账户、基线或 proof。
-- 新目标已只读确认是活跃 `PROXY_WALLET`（profile `JustAnAussie`），但尚未写入业务库、尚无 Campaign；第一次由用户启动时必须刷新该地址的 Phase 0/Replay proof，并创建独立 target/baseline/account/Campaign。
+- 新目标已确认是活跃 `PROXY_WALLET`（profile `JustAnAussie`）；失败启动留下 3 份完整 Capture、3 份 READY baseline 和 3 份稳定 INCOMPLETE Replay，但仍为 0 Campaign。修复提交后用户重新启动时必须刷新并生成绑定新 commit 的 Phase 0/Replay proof，再创建独立 account/Campaign。
 - 新目标最近 500 条 Activity 中有 10 次 `MERGE`，均未在最近 1000 条普通 Trades 中发现同交易哈希。系统仍不伪造 MERGE/SPLIT 的投影或复制能力，但现在会在发现当次明确写入 `UNSUPPORTED_TARGET_ACTIVITY` 并立即 `MAJOR_DESYNC`，不再等待普通持仓差异宽限期。
 - `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6` 已为旧目标创建后按用户要求安全暂停；Session `PS-D50FE31F7FF33A1DCEA4` 最终对账 `SYNCED`，Campaign 为 `PAUSED`、未取得资格、累计有效时长 `26061 ms`、无 blocker。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。

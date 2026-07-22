@@ -17,6 +17,7 @@ import {
 } from "../services/golden-expectations.js";
 import { resolvedSourceEventTradeMap } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
+import { collectTradeMultiplicityEvidence } from "../services/trade-multiplicity-evidence.js";
 
 const address = process.argv.slice(2).find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
 if (!address || !/^0x[a-f0-9]{40}$/.test(address)) {
@@ -44,6 +45,19 @@ const activityPaginationBoundaryOverlaps = activity.boundaryOverlapRows.flatMap(
   const trade = activityAsTrade(item);
   return trade ? [trade] : [];
 });
+const tradeMultiplicityEvidence = await collectTradeMultiplicityEvidence({
+  walletAddress: address,
+  trades: trades.rows,
+  activity: activity.rows,
+  tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
+  activityPaginationBoundaryOverlaps,
+  receiptProvider: api,
+});
+const sourceEventMultiplicityEvidence = {
+  tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
+  activityPaginationBoundaryOverlaps,
+  confirmedOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
+};
 
 const identity = buildWalletIdentityReport({
   address,
@@ -64,6 +78,7 @@ const contractCaptures: ApiCapture<unknown>[] = [
   clobTime,
   ...trades.captures,
   ...activity.captures,
+  ...tradeMultiplicityEvidence.receiptCaptures,
   ...(safe ? [safe] : []),
   ...(wallet ? [wallet] : []),
 ];
@@ -75,6 +90,7 @@ const apiContractReport = validateApiContract({
   activityHistoryComplete: activity.historyComplete,
   tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
   activityPaginationBoundaryOverlaps,
+  confirmedTradeOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
   clobTime,
   captures: contractCaptures,
 });
@@ -114,6 +130,18 @@ const manifestSources: CaptureManifestSource[] = [
       ? finalPaginationStatus(activity.historyComplete, activity.stopReason)
       : "PAGE_FULL",
   })),
+  ...tradeMultiplicityEvidence.receiptCaptures.map((capture): CaptureManifestSource => ({
+    endpoint: "polygon-transaction-receipt",
+    capture,
+    paginationStatus: "NOT_PAGED",
+  })),
+  ...(tradeMultiplicityEvidence.proofCapture
+    ? [{
+      endpoint: "derived-trade-multiplicity-evidence",
+      capture: tradeMultiplicityEvidence.proofCapture,
+      paginationStatus: "DERIVED_VERIFIED",
+    }]
+    : []),
   ...(safe ? [{ endpoint: "relayer-safe", capture: safe, paginationStatus: "NOT_PAGED" }] : []),
   ...(wallet ? [{ endpoint: "relayer-wallet", capture: wallet, paginationStatus: "NOT_PAGED" }] : []),
 ];
@@ -140,8 +168,14 @@ const captures: Array<[string, ApiCapture<unknown>]> = [
   ["clob-time", clobTime],
   ...trades.captures.map((capture): [string, ApiCapture<unknown>] => ["data-trades", capture]),
   ...activity.captures.map((capture): [string, ApiCapture<unknown>] => ["data-activity", capture]),
+  ...tradeMultiplicityEvidence.receiptCaptures.map(
+    (capture): [string, ApiCapture<unknown>] => ["polygon-transaction-receipt", capture],
+  ),
   ...positionHistory.captures.map((capture): [string, ApiCapture<unknown>] => ["data-positions", capture]),
 ];
+if (tradeMultiplicityEvidence.proofCapture) {
+  captures.push(["derived-trade-multiplicity-evidence", tradeMultiplicityEvidence.proofCapture]);
+}
 if (safe) captures.push(["relayer-safe", safe]);
 if (wallet) captures.push(["relayer-wallet", wallet]);
 for (const [endpoint, capture] of captures) database.saveCapture(endpoint, capture);
@@ -191,6 +225,7 @@ try {
     activityHistoryComplete: activity.historyComplete,
     tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
     activityPaginationBoundaryOverlaps,
+    confirmedTradeOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
@@ -205,7 +240,11 @@ try {
     const trade = activityAsTrade(item);
     return trade ? [trade] : [];
   });
-  const tradeByEventKey = resolvedSourceEventTradeMap(trades.rows, activityTrades);
+  const tradeByEventKey = resolvedSourceEventTradeMap(
+    trades.rows,
+    activityTrades,
+    sourceEventMultiplicityEvidence,
+  );
   const capitalEstimatesBySourceEventKey = Object.fromEntries(
     replay.signals
       .filter((signal) => signal.signalType === "TARGET_BUY" && signal.executionEligible)
@@ -230,6 +269,7 @@ try {
     captureRunId: manifest.captureRunId,
     goldenEvaluationStatus: "NOT_EVALUATED",
     capitalEstimatesBySourceEventKey,
+    sourceEventMultiplicityEvidence,
   });
   database.saveGoldenCandidates(goldenCandidates);
   goldenResults = evaluateGoldenExpectations(goldenCandidates, replay);
@@ -259,6 +299,10 @@ const envelope = {
   },
   walletIdentityReport: identity,
   apiContractReport,
+  tradeMultiplicityEvidence: {
+    confirmedOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
+    proofs: tradeMultiplicityEvidence.proofs,
+  },
   captureManifest: manifest,
   positionBaseline: {
     baselineRunId: baseline.baselineRunId,
@@ -312,6 +356,7 @@ console.log(
       replayHash: replay.reportHash,
       duplicateRows: replay.metrics.duplicateRows,
       reconciledPaginationOverlapRows: replay.metrics.reconciledPaginationOverlapRows,
+      onChainMultiplicityProofs: tradeMultiplicityEvidence.proofs.length,
       buySignals: replay.metrics.buySignals,
       sellSignals: replay.metrics.sellSignals,
       historicalSells: replay.metrics.historicalSells,

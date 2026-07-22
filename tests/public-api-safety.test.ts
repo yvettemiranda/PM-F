@@ -28,7 +28,9 @@ describe("Polymarket public API safety", () => {
   it("uses only eth_getTransactionReceipt and validates the public Polygon response", async () => {
     const transactionHash = `0x${"3".repeat(64)}`;
     const requests: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    const requestUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requestUrls.push(String(input));
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(JSON.stringify({
         jsonrpc: "2.0",
@@ -49,6 +51,7 @@ describe("Polymarket public API safety", () => {
 
     const capture = await new PolymarketPublicApi({ maxRetries: 0 }).transactionReceipt(transactionHash);
     expect(capture.data.result).toMatchObject({ transactionHash, status: "0x1" });
+    expect(requestUrls).toEqual(["https://polygon.drpc.org"]);
     expect(requests).toEqual([{
       jsonrpc: "2.0",
       id: 3,

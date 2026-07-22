@@ -6,6 +6,7 @@ import {
   ACTIVITY_IDENTITY_VERSION,
   activityEventKey,
   resolveSourceEventMultiplicity,
+  type SourceEventMultiplicityEvidence,
   SOURCE_IDENTITY_VERSION,
 } from "../../domain/idempotency.js";
 import type { PublicActivity, PublicTrade, WalletIdentityReport } from "../../domain/models.js";
@@ -1342,6 +1343,7 @@ export class Phase0Database {
       captureRunId?: string | null;
       goldenEvaluationStatus?: string;
       capitalEstimatesBySourceEventKey?: Record<string, CapitalEstimate>;
+      sourceEventMultiplicityEvidence?: SourceEventMultiplicityEvidence;
     } = {},
   ): string {
     const now = new Date().toISOString();
@@ -1353,6 +1355,7 @@ export class Phase0Database {
     const multiplicity = resolveSourceEventMultiplicity(
       trades,
       activityTradeRows.map((item) => item.trade),
+      options.sourceEventMultiplicityEvidence,
     );
     const tradeOccurrenceKeys = new Set(multiplicity.trades.map((item) => item.sourceEventKey));
     this.database.exec("BEGIN IMMEDIATE");

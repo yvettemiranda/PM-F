@@ -11,7 +11,7 @@
 - Data API `CONVERSION` Activity 可能省略 `eventSlug`、asset、title 等字段；只能在 Polygon 成功回执、NegRiskAdapter 事件和目标 Positions 元数据完全一致时接受。
 - 目标若在长 Gap 内连续发生 conversion 与后续卖出，当前 Positions 可能已不再包含全部目标资产元数据；系统会失败关闭，不能猜测或追补。
 - Positions 与 Trades/Activity 可能短暂不同步；同一差异连续达到阈值且持续满 120 秒仍升级 `MAJOR_DESYNC`。
-- Data API 历史 offset 限制和相邻页边界重复仍可能发生；没有独立公开证据精确确认时继续阻断。
+- Data API 历史 offset 限制和相邻页边界重复仍可能发生；官方 V2 Exchange 的完全相同成交可用 append-only 链上 multiplicity proof 精确确认，旧版/未知合约、provider 不可用或任一字段不一致时继续阻断。
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性仍需新核心自然 Campaign 验证。
 - 真实数据库较大；转换回执使用压缩、内容寻址和 append-only 保存，但仍需观察长跑增长率。
@@ -19,6 +19,7 @@
 - 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
 
 ## Resolved in current implementation
+- Data API 不暴露逐 fill ID，导致新目标两组真实双成交被标为 ambiguous；现先要求本次 Trades/Activity 全部属于当前目标，再只对 ambiguous 交易读取 Polygon 成功回执，限定官方 V2 Exchange `OrderFilled`，用不同 `orderHash` 和 BUY/SELL 精确抵押金额确认 occurrence 次数。回执与派生 proof 内容寻址保存并在 Replay 中重验，不通过时不删除 warning、不放行 Campaign。
 - UI 参数曾只能展示编译期 `RULESET`；现由不可变 operator profile 复用同一 `RULESET` 深接口，完整校验、原子保存、运行锁和数据库安全 Gate 双重保护，并绑定 ruleset/Paper core。只开放已验证的 Paper 策略/风险 key，基础设施安全项、模式和 Live-only 参数继续冻结。
 - 目标钱包曾是 `操作入口/lib/common.sh` 的代码常量，切换会改变源码版本且不适合 UI；现由原子运行时选择文件和统一 TypeScript 模块管理，operator lock 存在时 fail closed。
 - Live Gate 曾把最终 Observe 前置项错误命名为 24 小时，与实际 8 小时政策冲突；`2.28.0` migration 保留 evidence 地改名，不降低 Paper 24 小时、Crash Recovery、一致性、geoblock 或用户授权门禁。

@@ -31,6 +31,7 @@ export interface ReplayInput {
   positionBaseline?: Array<{ asset: string; size: number | string }>;
   tradePaginationBoundaryOverlaps?: PublicTrade[];
   activityPaginationBoundaryOverlaps?: PublicTrade[];
+  confirmedTradeOccurrenceCounts?: Readonly<Record<string, number>>;
 }
 
 export interface ReplayReport {
@@ -133,6 +134,9 @@ export class ReplayEngine {
         ...(input.activityPaginationBoundaryOverlaps === undefined
           ? {}
           : { activityPaginationBoundaryOverlaps: input.activityPaginationBoundaryOverlaps }),
+        ...(input.confirmedTradeOccurrenceCounts === undefined
+          ? {}
+          : { confirmedOccurrenceCounts: input.confirmedTradeOccurrenceCounts }),
       },
     );
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);

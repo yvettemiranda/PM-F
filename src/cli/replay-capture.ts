@@ -6,6 +6,11 @@ import { preparePhase0ValidationDatabase } from "../infra/sqlite/phase0-validati
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { ReplayEngine } from "../replay/replay-engine.js";
 import { buildWalletIdentityReport } from "../services/wallet-identity.js";
+import type { PolygonTransactionReceiptResponse } from "../adapters/polygon-receipt.js";
+import {
+  assertStoredTradeMultiplicityProofDocument,
+  verifyTradeMultiplicityEvidence,
+} from "../services/trade-multiplicity-evidence.js";
 
 const captureRunId = process.argv.slice(2).find((argument) => /^[a-f0-9]{64}$/.test(argument));
 if (!captureRunId) throw new Error("Usage: pnpm phase05:replay-capture -- <capture-run-id>");
@@ -45,6 +50,28 @@ try {
   const code = single<{ result?: string }>("polygon-eth-get-code");
   const safePayloads = database.loadCapturePayloads(captureRunId, "relayer-safe");
   const walletPayloads = database.loadCapturePayloads(captureRunId, "relayer-wallet");
+  const receiptCaptures = database
+    .loadCapturePayloads(captureRunId, "polygon-transaction-receipt")
+    .map((data, index) => ({
+      url: `captured://polygon-transaction-receipt/${index}`,
+      fetchedAt: "1970-01-01T00:00:00.000Z",
+      latencyMs: 0,
+      status: 200,
+      data: data as PolygonTransactionReceiptResponse,
+    }));
+  const tradeMultiplicityEvidence = verifyTradeMultiplicityEvidence({
+    walletAddress: captureRun.walletAddress,
+    trades,
+    activity,
+    receipts: receiptCaptures,
+    tradePaginationBoundaryOverlaps,
+    activityPaginationBoundaryOverlaps,
+  });
+  assertStoredTradeMultiplicityProofDocument(
+    captureRun.walletAddress,
+    tradeMultiplicityEvidence,
+    database.loadCapturePayloads(captureRunId, "derived-trade-multiplicity-evidence"),
+  );
   const identity = buildWalletIdentityReport({
     address: captureRun.walletAddress,
     profile,
@@ -71,6 +98,7 @@ try {
     activityHistoryComplete,
     tradePaginationBoundaryOverlaps,
     activityPaginationBoundaryOverlaps,
+    confirmedTradeOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
@@ -88,6 +116,7 @@ try {
     replayStatus: replay.status,
     replayIncompleteReasons: replay.incompleteReasons,
     reconciledPaginationOverlapRows: replay.metrics.reconciledPaginationOverlapRows,
+    onChainMultiplicityProofs: tradeMultiplicityEvidence.proofs.length,
     replayHash: replay.reportHash,
     storedReplayHashes: storedHashes,
     stable,

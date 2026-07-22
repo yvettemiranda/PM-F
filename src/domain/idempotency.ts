@@ -81,6 +81,7 @@ export interface SourceEventMultiplicityResolution<
 export interface SourceEventMultiplicityEvidence {
   tradePaginationBoundaryOverlaps?: readonly PublicTrade[];
   activityPaginationBoundaryOverlaps?: readonly PublicTrade[];
+  confirmedOccurrenceCounts?: Readonly<Record<string, number>>;
 }
 
 /** Resolve repeated identical fills by matching source-local occurrence rank. */
@@ -180,18 +181,32 @@ export function resolveSourceEventMultiplicity<
     if (!sample) continue;
     const tradeCount = effectiveTradeCounts.get(key) ?? 0;
     const activityCount = effectiveActivityCounts.get(key) ?? 0;
+    const confirmedOccurrenceCount = evidence.confirmedOccurrenceCounts?.[key];
+    if (confirmedOccurrenceCount !== undefined && (
+      !Number.isSafeInteger(confirmedOccurrenceCount)
+      || confirmedOccurrenceCount < 2
+      || confirmedOccurrenceCount !== Math.max(tradeCount, activityCount)
+    )) {
+      throw new Error(`INVALID_CONFIRMED_OCCURRENCE_EVIDENCE:${key}`);
+    }
     for (let occurrenceIndex = 1; occurrenceIndex < Math.max(tradeCount, activityCount); occurrenceIndex += 1) {
       const repeatedKey = sourceEventKey(sample, occurrenceIndex);
       if (
-        !forcedAmbiguousBaseKeys.has(key)
-        && occurrenceIndex < tradeCount
-        && occurrenceIndex < activityCount
+        confirmedOccurrenceCount !== undefined
+        || (
+          !forcedAmbiguousBaseKeys.has(key)
+          && occurrenceIndex < tradeCount
+          && occurrenceIndex < activityCount
+        )
       ) {
         confirmedRepeatedKeys.push(repeatedKey);
       } else {
         ambiguousRepeatedKeys.push(repeatedKey);
       }
     }
+  }
+  for (const key of Object.keys(evidence.confirmedOccurrenceCounts ?? {})) {
+    if (!baseKeys.has(key)) throw new Error(`INVALID_CONFIRMED_OCCURRENCE_EVIDENCE:${key}`);
   }
   confirmedRepeatedKeys.sort();
   ambiguousRepeatedKeys.sort();
@@ -210,8 +225,9 @@ export function resolvedSourceEventTradeMap<
 >(
   trades: readonly TTrade[],
   activityTrades: readonly TActivityTrade[],
+  evidence: SourceEventMultiplicityEvidence = {},
 ): Map<string, TTrade | TActivityTrade> {
-  const resolution = resolveSourceEventMultiplicity(trades, activityTrades);
+  const resolution = resolveSourceEventMultiplicity(trades, activityTrades, evidence);
   const confirmedRepeatedKeys = new Set(resolution.confirmedRepeatedKeys);
   const result = new Map<string, TTrade | TActivityTrade>();
   for (const item of resolution.trades) {
