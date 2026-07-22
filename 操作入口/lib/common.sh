@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-TARGET_WALLET="0x0c0e270cf879583d6a0142fc817e05b768d0434e"
+TARGET_WALLET="0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a"
 export PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:$HOME/Library/pnpm:$HOME/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 DATA_DIR="$PROJECT_ROOT/data"
@@ -535,6 +535,7 @@ operator_is_bundle_compatible_isolated_evidence() {
     node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-evidence.ts" \
       verify-for-bundle \
       "--file=$evidence_file" \
+      "--target-wallet=$TARGET_WALLET" \
       "--source-commit=$expected_source_commit" \
       "--core-compatibility-hash=$expected_core_compatibility_hash"
   ) >/dev/null 2>&1

@@ -15,6 +15,7 @@ import {
 } from "../paper-validation/operator-evidence.js";
 import type { PaperValidationScenario } from "../paper-validation/types.js";
 import { verifyIsolatedProofArtifacts } from "../paper-validation/isolated-proof.js";
+import { normalizeTargetWallet } from "../operator/target-wallet.js";
 
 const projectRoot = resolve(new URL("../..", import.meta.url).pathname);
 const args = process.argv.slice(2);
@@ -52,6 +53,7 @@ if (command === "list-tests") {
   console.log(PAPER_CAMPAIGN_ISOLATED_TEST_FILES.join("\n"));
   process.exit(0);
 }
+const targetWallet = normalizeTargetWallet(valueArg("target-wallet"));
 
 function currentCompatibilityHashes(): {
   coreCompatibilityHash: string;
@@ -77,6 +79,7 @@ if (command === "write-passed") {
   const proofs = verifyIsolatedProofArtifacts({
     projectRoot,
     sourceCodeCommit: sourceVersion.commit,
+    targetWallet,
     expectedTestFiles: PAPER_CAMPAIGN_ISOLATED_TEST_FILES,
     vitestResultContent: await readFile(resolve(testResultsPath), "utf8"),
     phase0ResultContent: await readFile(resolve(phase0ResultsPath), "utf8"),
@@ -84,6 +87,7 @@ if (command === "write-passed") {
   });
   const evidence = buildIsolatedVerificationEvidence({
     status: "PASSED",
+    targetWallet,
     coreCompatibilityHash,
     verificationSuiteHash,
     sourceCodeCommit: sourceVersion.commit,
@@ -112,12 +116,18 @@ if (command === "write-passed") {
 } else if (command === "verify") {
   const { coreCompatibilityHash, verificationSuiteHash } = currentCompatibilityHashes();
   const evidence = JSON.parse(await readFile(output, "utf8")) as IsolatedVerificationEvidence;
-  if (!verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash, verificationSuiteHash)) {
+  if (!verifyIsolatedVerificationEvidence(
+    evidence,
+    coreCompatibilityHash,
+    verificationSuiteHash,
+    targetWallet,
+  )) {
     throw new Error("ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
   }
   console.log(JSON.stringify({
     status: "PASSED",
     output,
+    targetWallet: evidence.targetWallet,
     artifactHash: evidence.artifactHash,
     phase0ReplayStatus: evidence.proofs.phase0ReplayStatus,
     acceptedIncompleteReasons: evidence.proofs.acceptedIncompleteReasons,
@@ -140,13 +150,19 @@ if (command === "write-passed") {
   }
   const { coreCompatibilityHash, verificationSuiteHash } = currentCompatibilityHashes();
   if (
-    !verifyIsolatedVerificationEvidence(evidence, coreCompatibilityHash, verificationSuiteHash)
+    !verifyIsolatedVerificationEvidence(
+      evidence,
+      coreCompatibilityHash,
+      verificationSuiteHash,
+      targetWallet,
+    )
   ) {
     throw new Error("ISOLATED_EVIDENCE_NOT_COMPATIBLE_WITH_BUNDLE");
   }
   console.log(JSON.stringify({
     status: "PASSED",
     output,
+    targetWallet: evidence.targetWallet,
     sourceCodeCommit: evidence.sourceCodeCommit,
     coreCompatibilityHash: evidence.coreCompatibilityHash,
     artifactHash: evidence.artifactHash,

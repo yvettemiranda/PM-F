@@ -13,6 +13,7 @@ interface VitestJsonResult {
 }
 
 interface Phase0ValidationResult {
+  target?: string;
   captureRunId?: string;
   sourceCodeCommit?: string;
   sourceCodeDirty?: boolean;
@@ -54,6 +55,7 @@ export interface IsolatedVerificationProofs {
   replayResultSha256: string;
   captureRunId: string;
   replayHash: string;
+  targetWallet: string;
   phase0ReplayStatus: "PASSED" | "INCOMPLETE_KNOWN_LIMITATIONS";
   acceptedIncompleteReasons: string[];
   passedTestFileCount: number;
@@ -166,6 +168,7 @@ function relativeTestName(projectRoot: string, name: string): string {
 export function verifyIsolatedProofArtifacts(input: {
   projectRoot: string;
   sourceCodeCommit: string;
+  targetWallet: string;
   expectedTestFiles: readonly string[];
   vitestResultContent: string;
   phase0ResultContent: string;
@@ -196,9 +199,12 @@ export function verifyIsolatedProofArtifacts(input: {
   }
 
   const phase0 = parseJsonOutput<Phase0ValidationResult>(input.phase0ResultContent, "PHASE0_RESULT");
+  const targetWallet = input.targetWallet.toLowerCase();
   const phase0ReplayStatus = acceptedPhase0ReplayStatus(phase0);
   if (
-    !phase0.captureRunId?.match(SHA256_PATTERN)
+    !/^0x[0-9a-f]{40}$/.test(targetWallet)
+    || phase0.target?.toLowerCase() !== targetWallet
+    || !phase0.captureRunId?.match(SHA256_PATTERN)
     || phase0.sourceCodeCommit !== input.sourceCodeCommit
     || phase0.sourceCodeDirty !== false
     || phase0ReplayStatus === null
@@ -233,6 +239,7 @@ export function verifyIsolatedProofArtifacts(input: {
     replayResultSha256: sha256(input.replayResultContent),
     captureRunId: phase0.captureRunId,
     replayHash: phase0.replayHash,
+    targetWallet,
     phase0ReplayStatus,
     acceptedIncompleteReasons: phase0.replayIncompleteReasons ?? [],
     passedTestFileCount: actualFiles.length,
@@ -250,6 +257,7 @@ export function isolatedVerificationProofsAreWellFormed(
     && SHA256_PATTERN.test(proofs.replayResultSha256)
     && SHA256_PATTERN.test(proofs.captureRunId)
     && SHA256_PATTERN.test(proofs.replayHash)
+    && /^0x[0-9a-f]{40}$/.test(proofs.targetWallet)
     && (proofs.phase0ReplayStatus === "PASSED" || proofs.phase0ReplayStatus === "INCOMPLETE_KNOWN_LIMITATIONS")
     && Array.isArray(proofs.acceptedIncompleteReasons)
     && proofs.acceptedIncompleteReasons.every((reason) => typeof reason === "string")

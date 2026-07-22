@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
+import { normalizeTargetWallet } from "../operator/target-wallet.js";
 import { computeCoreCompatibilityHash } from "./core-compatibility.js";
 import type { CompatibilityIdentity, CoreCompatibilityManifest } from "./types.js";
 
@@ -40,7 +41,7 @@ function assertSafeDatabase(database: DatabaseSync): void {
   }
 }
 
-function campaignRows(database: DatabaseSync): PreMigrationCampaignRow[] {
+function campaignRows(database: DatabaseSync, targetWallet: string): PreMigrationCampaignRow[] {
   return database.prepare(
     `SELECT c.campaign_id,c.core_compatibility_hash,c.config_version,c.created_at,
             (SELECT t.to_state FROM paper_validation_transitions t
@@ -53,12 +54,14 @@ function campaignRows(database: DatabaseSync): PreMigrationCampaignRow[] {
              WHERE r.campaign_id=c.campaign_id AND r.report_scope='SESSION'
              ORDER BY r.created_at DESC,r.report_id DESC LIMIT 1) latest_session_report_json
      FROM paper_validation_campaigns c
+     JOIN monitor_targets m ON m.target_id=c.target_id
+     WHERE lower(m.wallet_address)=?
      ORDER BY c.created_at DESC,c.campaign_id DESC`,
-  ).all() as unknown as PreMigrationCampaignRow[];
+  ).all(targetWallet) as unknown as PreMigrationCampaignRow[];
 }
 
-function selectedCampaign(database: DatabaseSync): PreMigrationCampaignRow | null {
-  const rows = campaignRows(database);
+function selectedCampaign(database: DatabaseSync, targetWallet: string): PreMigrationCampaignRow | null {
+  const rows = campaignRows(database, targetWallet);
   const active = rows.filter((candidate) => candidate.state && ACTIVE_CAMPAIGN_STATES.has(candidate.state));
   if (active.length > 1) throw new Error("MULTIPLE_ACTIVE_PAPER_CAMPAIGNS_BEFORE_MIGRATION");
   return active[0] ?? rows[0] ?? null;
@@ -175,6 +178,7 @@ function insertFreezeTransition(database: DatabaseSync, input: {
 export function assertPaperCampaignPreMigrationCompatible(input: {
   databasePath: string;
   manifest: CoreCompatibilityManifest;
+  targetWallet: string;
 }): {
   campaignId: string | null;
   campaignState: string | null;
@@ -182,6 +186,7 @@ export function assertPaperCampaignPreMigrationCompatible(input: {
   campaignBlockers: string[];
   latestCompatibilityIdentity: CompatibilityIdentity | null;
 } {
+  const targetWallet = normalizeTargetWallet(input.targetWallet);
   if (!existsSync(input.databasePath)) {
     return {
       campaignId: null,
@@ -206,7 +211,10 @@ export function assertPaperCampaignPreMigrationCompatible(input: {
       };
     }
     if (!safetyTableExists) throw new Error("PAPER_CAMPAIGN_UNSAFE_DATABASE:MISSING:MISSING");
-    const row = selectedCampaign(database);
+    if (!tableExists(database, "monitor_targets")) {
+      throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_SCHEMA_INCOMPLETE:monitor_targets");
+    }
+    const row = selectedCampaign(database, targetWallet);
     if (!row) {
       return {
         campaignId: null,
@@ -270,7 +278,9 @@ export function freezePaperCampaignPreMigrationMismatch(input: {
   manifest: CoreCompatibilityManifest;
   sourceVersion: SourceVersion;
   now: string;
+  targetWallet: string;
 }): { campaignId: string | null; campaignState: string | null; frozen: boolean } {
+  const targetWallet = normalizeTargetWallet(input.targetWallet);
   if (!existsSync(input.databasePath)) return { campaignId: null, campaignState: null, frozen: false };
   if (input.sourceVersion.dirty || !input.sourceVersion.commit.trim() || input.sourceVersion.commit === "UNCOMMITTED") {
     throw new Error("PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_REQUIRES_CLEAN_SOURCE");
@@ -286,6 +296,7 @@ export function freezePaperCampaignPreMigrationMismatch(input: {
       "live_gate_state",
       "paper_validation_sessions",
       "paper_validation_transitions",
+      "monitor_targets",
     ]) {
       if (!tableExists(database, requiredTable)) {
         throw new Error(`PAPER_CAMPAIGN_PRE_MIGRATION_FREEZE_SCHEMA_INCOMPLETE:${requiredTable}`);
@@ -295,7 +306,7 @@ export function freezePaperCampaignPreMigrationMismatch(input: {
     database.exec("BEGIN IMMEDIATE");
     try {
       assertSafeDatabase(database);
-      const row = selectedCampaign(database);
+      const row = selectedCampaign(database, targetWallet);
       if (!row) {
         database.exec("COMMIT");
         return { campaignId: null, campaignState: null, frozen: false };
@@ -309,6 +320,7 @@ export function freezePaperCampaignPreMigrationMismatch(input: {
         expected: row.core_compatibility_hash,
         actual: currentHash,
         preMigration: true,
+        targetWallet,
       };
       if (row.state === "RUNNING") {
         const runningSessions = database.prepare(
@@ -367,6 +379,7 @@ export function preparePaperCampaignPreMigration(input: {
   manifest: CoreCompatibilityManifest;
   sourceVersion: SourceVersion;
   now: string;
+  targetWallet: string;
 }): ReturnType<typeof assertPaperCampaignPreMigrationCompatible> & {
   mismatchFrozen: boolean;
 } {

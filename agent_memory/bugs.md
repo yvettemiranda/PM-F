@@ -3,6 +3,7 @@
 ## Active blockers
 - 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
 - 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
+- 新目标高频使用 `MERGE`，而现有 Observe 只记录 MERGE、不更新 projection、不生成跟单义务；普通 Trades 也未覆盖最近抽样 MERGE。Paper 长测可能因 Position diff 进入 `MAJOR_DESYNC`，小额 Live 前必须补齐语义或明确立即 fail-closed。
 - tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
 - Live 所需 geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
 
@@ -14,9 +15,12 @@
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性仍需新核心自然 Campaign 验证。
 - 真实数据库较大；转换回执使用压缩、内容寻址和 append-only 保存，但仍需观察长跑增长率。
+- `data` 当前约 6.9 GB，其中 `data/operator/backups` 约 3.6 GB（3 份数据库备份）。数据库 Campaign/Session/capture 记录有外键和审计价值，不应删除；如需腾空间，应另行确认保留最新 `2.27.0` 前备份后，把更旧备份做可恢复归档，而不是直接清库。
 - 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
 
 ## Resolved in current implementation
+- 目标切换曾只替换固定地址但 preflight/runner/status 仍选择全库 Campaign，可能误续跑或冻结旧钱包；现所有入口按目标钱包/target 隔离。
+- 隔离 proof 和 supplemental Replay evidence 曾可能跨钱包复用；现 Phase 0 proof 绑定 `targetWallet`，Replay evidence 只计入当前目标 signal binding。
 - Observe 曾把 `CONVERSION` 只作为 combo Activity 记录并直接跳过 projection，导致源资产残留、目标资产缺失和 `MAJOR_DESYNC`；现用链上 ERC-1155 净额、Adapter 事件与 Positions 三方验证后重分 bucket。
 - 简单匹配单条 TransferBatch 会被 NegRiskAdapter 的内部中转腿误导；现按目标钱包汇总整笔回执的所有 CTF TransferBatch 净变化。
 - Data API 真实 `CONVERSION.eventSlug` 为空；现只在 Activity 有值时核对，否则由全部目标 Positions 的一致事件归属推导。

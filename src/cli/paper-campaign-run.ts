@@ -9,6 +9,7 @@ import { RULESET } from "../domain/versioning.js";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
 import { buildSafeChildEnvironment } from "../operator/safe-child-environment.js";
+import { normalizeTargetWallet } from "../operator/target-wallet.js";
 import { PaperExecutor } from "../paper/paper-executor.js";
 import { evaluatePaperShortGate } from "../paper/paper-gate-evaluator.js";
 import { PublicPaperMarketDataProvider } from "../paper/public-market-data.js";
@@ -76,7 +77,9 @@ const databasePath = resolve(projectRoot, "data/phase0/phase0.sqlite");
 const isolatedEvidencePath = resolve(projectRoot, "data/operator/paper-campaign-isolated-verification.json");
 const replayEvidenceDirectory = resolve(projectRoot, "data/operator/paper-campaign-replay-evidence");
 const latestPointerPath = resolve(projectRoot, "data/operator/paper-campaign-latest.json");
-const targetWallet = "0x0c0e270cf879583d6a0142fc817e05b768d0434e";
+const targetWallet = normalizeTargetWallet(process.argv
+  .find((argument) => argument.startsWith("--target-wallet="))
+  ?.slice("--target-wallet=".length));
 const operatorOwnerToken = process.argv
   .find((argument) => argument.startsWith("--operator-owner-token="))
   ?.slice("--operator-owner-token=".length) ?? null;
@@ -136,21 +139,36 @@ async function readJson<T>(path: string): Promise<T> {
 
 async function loadReplayEvidence(
   coreCompatibilityHash: string,
+  targetId: string,
 ): Promise<ReplayValidationEvidenceArtifact[]> {
   if (!existsSync(replayEvidenceDirectory)) return [];
   const artifacts: ReplayValidationEvidenceArtifact[] = [];
   const seen = new Set<string>();
-  for (const name of (await readdir(replayEvidenceDirectory)).filter((item) => item.endsWith(".json")).sort()) {
-    const artifact = await readJson<ReplayValidationEvidenceArtifact>(join(replayEvidenceDirectory, name));
-    assertReplayValidationEvidenceArtifactAgainstDatabase(
-      artifact,
-      databasePath,
-      coreCompatibilityHash,
-      artifact.sourceCodeCommit,
-    );
-    if (seen.has(artifact.artifactHash)) throw new Error(`PAPER_REPLAY_EVIDENCE_DUPLICATED:${artifact.artifactHash}`);
-    seen.add(artifact.artifactHash);
-    artifacts.push(artifact);
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  database.exec("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;");
+  try {
+    for (const name of (await readdir(replayEvidenceDirectory)).filter((item) => item.endsWith(".json")).sort()) {
+      const artifact = await readJson<ReplayValidationEvidenceArtifact>(join(replayEvidenceDirectory, name));
+      assertReplayValidationEvidenceArtifactAgainstDatabase(
+        artifact,
+        databasePath,
+        coreCompatibilityHash,
+        artifact.sourceCodeCommit,
+      );
+      const binding = database.prepare(
+        "SELECT target_id FROM signals WHERE signal_id=? AND source_event_key=?",
+      ).get(
+        artifact.sourceBinding.signalId,
+        artifact.sourceBinding.sourceEventKey,
+      ) as { target_id: string } | undefined;
+      if (!binding) throw new Error(`PAPER_REPLAY_EVIDENCE_TARGET_BINDING_MISSING:${artifact.artifactHash}`);
+      if (binding.target_id !== targetId) continue;
+      if (seen.has(artifact.artifactHash)) throw new Error(`PAPER_REPLAY_EVIDENCE_DUPLICATED:${artifact.artifactHash}`);
+      seen.add(artifact.artifactHash);
+      artifacts.push(artifact);
+    }
+  } finally {
+    database.close();
   }
   return artifacts;
 }
@@ -251,26 +269,15 @@ function findTargetAndBaseline(): { targetId: string; baselineRunId: string } {
   }
 }
 
-function campaignIds(): string[] {
-  const database = new DatabaseSync(databasePath, { readOnly: true });
-  database.exec("PRAGMA query_only=ON;");
-  try {
-    return (database.prepare(
-      "SELECT campaign_id FROM paper_validation_campaigns ORDER BY created_at,campaign_id",
-    ).all() as Array<{ campaign_id: string }>).map((row) => row.campaign_id);
-  } finally {
-    database.close();
-  }
-}
-
 function createCampaign(
   service: PaperValidationCampaignService,
   manifest: CoreCompatibilityManifest,
   sourceVersion: SourceVersion,
   compatibilityEvidence: CompatibilityEvidenceHashes,
+  targetBinding: { targetId: string; baselineRunId: string },
   superseded?: CampaignSnapshot,
 ): CampaignSnapshot {
-  const { targetId, baselineRunId } = findTargetAndBaseline();
+  const { targetId, baselineRunId } = targetBinding;
   const replacementReason = superseded === undefined
     ? undefined
     : paperCampaignReplacementReason(
@@ -348,6 +355,7 @@ function summarizeIsolatedEvidence(isolated: IsolatedVerificationEvidence) {
     artifactHash: isolated.artifactHash,
     sourceCodeCommit: isolated.sourceCodeCommit,
     coreCompatibilityHash: isolated.coreCompatibilityHash,
+    targetWallet: isolated.targetWallet,
   };
 }
 
@@ -557,7 +565,7 @@ async function main(): Promise<void> {
     safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
   }));
   try {
-    assertPaperCampaignPreMigrationCompatible({ databasePath, manifest });
+    assertPaperCampaignPreMigrationCompatible({ databasePath, manifest, targetWallet });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.startsWith("ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:")) throw error;
@@ -566,19 +574,22 @@ async function main(): Promise<void> {
       manifest,
       sourceVersion,
       now: new Date().toISOString(),
+      targetWallet,
     });
     throw new Error(`PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION:${frozen.campaignId ?? "UNKNOWN"}`);
   }
   await prepareRuntimeDatabase({ databasePath, sourceVersion });
+  const targetBinding = findTargetAndBaseline();
   const isolated = await readJson<IsolatedVerificationEvidence>(isolatedEvidencePath);
   if (!verifyIsolatedVerificationEvidence(
     isolated,
     coreCompatibilityHash,
     compatibilityEvidence.verificationSuiteHash,
+    targetWallet,
   )) {
     throw new Error("PAPER_CAMPAIGN_ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
   }
-  const replayEvidence = await loadReplayEvidence(coreCompatibilityHash);
+  const replayEvidence = await loadReplayEvidence(coreCompatibilityHash, targetBinding.targetId);
 
   const service = new PaperValidationCampaignService(databasePath);
   let paper: ManagedChild | null = null;
@@ -598,10 +609,13 @@ async function main(): Promise<void> {
   process.once("SIGHUP", () => requestStop("USER_SAFE_PAUSE_SIGHUP"));
 
   try {
-    const ids = campaignIds();
+    const ids = service.store.campaignIdsForTarget(targetBinding.targetId);
     let snapshot = ids.length === 0
-      ? createCampaign(service, manifest, sourceVersion, compatibilityEvidence)
+      ? createCampaign(service, manifest, sourceVersion, compatibilityEvidence, targetBinding)
       : service.campaignSnapshot(ids.at(-1)!);
+    if (snapshot.targetId !== targetBinding.targetId) {
+      throw new Error(`PAPER_CAMPAIGN_TARGET_BINDING_MISMATCH:${snapshot.campaignId}`);
+    }
     const startDisposition = paperCampaignStartDisposition(
       snapshot,
       coreCompatibilityHash,
@@ -609,7 +623,14 @@ async function main(): Promise<void> {
     );
     if (startDisposition === "CREATE_REPLACEMENT") {
       const previous = snapshot;
-      snapshot = createCampaign(service, manifest, sourceVersion, compatibilityEvidence, previous);
+      snapshot = createCampaign(
+        service,
+        manifest,
+        sourceVersion,
+        compatibilityEvidence,
+        targetBinding,
+        previous,
+      );
       console.log(JSON.stringify({
         event: "PAPER_CAMPAIGN_REPLACED_AFTER_CORE_CHANGE",
         previousCampaignId: previous.campaignId,
@@ -979,6 +1000,7 @@ async function main(): Promise<void> {
           isolated,
           coreCompatibilityHash,
           compatibilityEvidence.verificationSuiteHash,
+          targetWallet,
         )
           || replayEvidence.some((artifact) => artifact.source === "REAL_EXECUTION_REPLAY" && artifact.coverage.includes("FILL")),
       });

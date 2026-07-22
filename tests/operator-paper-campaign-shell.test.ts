@@ -16,6 +16,7 @@ import {
 import { resolveSourceVersion } from "../src/infra/source-version.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const targetWallet = "0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a";
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
@@ -38,6 +39,7 @@ function sleepingProcess(roleScript: string, campaignId: string, sessionId: stri
 function isolatedEvidence(sourceCodeCommit: string, coreCompatibilityHash: string) {
   return buildIsolatedVerificationEvidence({
     status: "PASSED",
+    targetWallet,
     coreCompatibilityHash,
     verificationSuiteHash: computeVerificationSuiteHash(projectRoot),
     sourceCodeCommit,
@@ -51,6 +53,7 @@ function isolatedEvidence(sourceCodeCommit: string, coreCompatibilityHash: strin
       replayResultSha256: "3".repeat(64),
       captureRunId: "4".repeat(64),
       replayHash: "5".repeat(64),
+      targetWallet,
       phase0ReplayStatus: "PASSED",
       acceptedIncompleteReasons: [],
       passedTestFileCount: PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length,
@@ -296,6 +299,9 @@ describe("Paper Campaign operator shell", () => {
     expect(launcher).toContain("--test-results=\"$TEST_RESULTS_FILE\"");
     expect(launcher).toContain("--phase0-results=\"$PHASE0_RESULT_FILE\"");
     expect(launcher).toContain("--replay-results=\"$REPLAY_RESULT_FILE\"");
+    expect(launcher.match(/--target-wallet/g)).toHaveLength(5);
+    expect(common).toContain(`TARGET_WALLET="${targetWallet}"`);
+    expect(common).toContain('"--target-wallet=$TARGET_WALLET"');
     expect(common).toContain('print "代码版本：$report_source_commit"');
     expect(common).toContain("OPERATOR_SOURCE_PROVENANCE");
     expect(common).toContain("sourceCodeDirty: provenance.sourceCodeDirty ?? null");

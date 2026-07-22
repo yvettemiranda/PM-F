@@ -4,10 +4,14 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PaperValidationCampaignService } from "../paper-validation/service.js";
+import { normalizeTargetWallet } from "../operator/target-wallet.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const databasePath = resolve(projectRoot, "data/phase0/phase0.sqlite");
 const latestPointerPath = resolve(projectRoot, "data/operator/paper-campaign-latest.json");
+const targetWallet = normalizeTargetWallet(process.argv.slice(2)
+  .find((argument) => argument.startsWith("--target-wallet="))
+  ?.slice("--target-wallet=".length));
 
 function formatHours(milliseconds: number): string {
   return (milliseconds / 3_600_000).toFixed(2);
@@ -29,11 +33,14 @@ if (!table) {
   process.exit(0);
 }
 const latest = lookup.prepare(
-  "SELECT campaign_id FROM paper_validation_campaigns ORDER BY created_at DESC,campaign_id DESC LIMIT 1",
-).get() as { campaign_id: string } | undefined;
+  `SELECT c.campaign_id FROM paper_validation_campaigns c
+   JOIN monitor_targets t ON t.target_id=c.target_id
+   WHERE lower(t.wallet_address)=?
+   ORDER BY c.created_at DESC,c.campaign_id DESC LIMIT 1`,
+).get(targetWallet) as { campaign_id: string } | undefined;
 lookup.close();
 if (!latest) {
-  console.log("还没有 Paper Campaign。第一次双击开始按钮时会自动创建。");
+  console.log(`目标钱包 ${targetWallet} 还没有 Paper Campaign。第一次双击开始按钮时会自动创建。`);
   process.exit(0);
 }
 
@@ -44,7 +51,9 @@ try {
   const pointer = existsSync(latestPointerPath)
     ? JSON.parse(await readFile(latestPointerPath, "utf8")) as Record<string, unknown>
     : null;
+  const currentPointer = pointer?.campaignId === snapshot.campaignId ? pointer : null;
   const output = {
+    targetWallet,
     campaignId: snapshot.campaignId,
     state: snapshot.state,
     qualified: snapshot.qualified,
@@ -61,7 +70,7 @@ try {
     canContinue: snapshot.canContinue,
     latestSessionId: snapshot.latestSessionId,
     latestReportId: snapshot.latestReportId,
-    currentRun: pointer,
+    currentRun: currentPointer,
     operationalMetrics: latestReport?.operationalMetrics ?? null,
     safety: {
       executionMode: "PAPER",

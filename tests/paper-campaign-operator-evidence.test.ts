@@ -31,6 +31,7 @@ import type { ValidationCheckpoint } from "../src/paper-validation/types.js";
 const directories: string[] = [];
 const sourceVersion: SourceVersion = { commit: "operator-evidence-test", dirty: false };
 const verificationSuiteHash = "d".repeat(64);
+const targetWallet = "0x0000000000000000000000000000000000000001";
 const compatibilityIdentity = {
   validationPolicyHash: "a".repeat(64),
   verificationSuiteHash,
@@ -43,6 +44,7 @@ const proofHashes = (passedTestFileCount: number) => ({
   replayResultSha256: "3".repeat(64),
   captureRunId: "4".repeat(64),
   replayHash: "5".repeat(64),
+  targetWallet,
   phase0ReplayStatus: "PASSED" as const,
   acceptedIncompleteReasons: [],
   passedTestFileCount,
@@ -333,6 +335,7 @@ describe("Paper Campaign operator evidence", () => {
   it("hashes isolated evidence and refuses tampering or a different core", () => {
     const evidence = buildIsolatedVerificationEvidence({
       status: "PASSED",
+      targetWallet,
       coreCompatibilityHash: "a".repeat(64),
       verificationSuiteHash,
       sourceCodeCommit: "commit",
@@ -350,17 +353,35 @@ describe("Paper Campaign operator evidence", () => {
         chainWrites: 0,
       },
     });
-    expect(verifyIsolatedVerificationEvidence(evidence, "a".repeat(64), verificationSuiteHash)).toBe(true);
+    expect(verifyIsolatedVerificationEvidence(
+      evidence,
+      "a".repeat(64),
+      verificationSuiteHash,
+      targetWallet,
+    )).toBe(true);
     expect(verifyIsolatedVerificationEvidence(
       { ...evidence, coverage: ["BUY"] },
       "a".repeat(64),
       verificationSuiteHash,
+      targetWallet,
     )).toBe(false);
-    expect(verifyIsolatedVerificationEvidence(evidence, "b".repeat(64), verificationSuiteHash)).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      evidence,
+      "b".repeat(64),
+      verificationSuiteHash,
+      targetWallet,
+    )).toBe(false);
     expect(verifyIsolatedVerificationEvidence(
       evidence,
       "a".repeat(64),
       "e".repeat(64),
+      targetWallet,
+    )).toBe(false);
+    expect(verifyIsolatedVerificationEvidence(
+      evidence,
+      "a".repeat(64),
+      verificationSuiteHash,
+      "0x0000000000000000000000000000000000000002",
     )).toBe(false);
     const incompleteTestEvidence = buildIsolatedVerificationEvidence({
       ...evidence,
@@ -370,6 +391,7 @@ describe("Paper Campaign operator evidence", () => {
       incompleteTestEvidence,
       "a".repeat(64),
       verificationSuiteHash,
+      targetWallet,
     )).toBe(false);
     const prooflessEvidence = buildIsolatedVerificationEvidence({
       ...evidence,
@@ -379,6 +401,7 @@ describe("Paper Campaign operator evidence", () => {
       prooflessEvidence,
       "a".repeat(64),
       verificationSuiteHash,
+      targetWallet,
     )).toBe(false);
     const reasonlessIncomplete = buildIsolatedVerificationEvidence({
       ...evidence,
@@ -393,6 +416,7 @@ describe("Paper Campaign operator evidence", () => {
       reasonlessIncomplete,
       "a".repeat(64),
       verificationSuiteHash,
+      targetWallet,
     )).toBe(false);
   });
 
@@ -400,6 +424,7 @@ describe("Paper Campaign operator evidence", () => {
     const env = fixture();
     const isolated = buildIsolatedVerificationEvidence({
       status: "PASSED",
+      targetWallet,
       coreCompatibilityHash: "a".repeat(64),
       verificationSuiteHash,
       sourceCodeCommit: "commit",

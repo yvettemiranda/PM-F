@@ -54,6 +54,7 @@ export const CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES = [
   "src/cli/paper-run.ts",
   "src/infra/source-version.ts",
   "src/operator/safe-child-environment.ts",
+  "src/operator/target-wallet.ts",
   "src/live/clob-clock-safety-provider.ts",
   "src/paper-validation/campaign-session-runtime.ts",
   "src/paper-validation/checkpoint-evidence.ts",
@@ -135,6 +136,7 @@ export const OPERATOR_BUILD_FILES = [
   "src/cli/redact-diagnostic.ts",
   "src/operator/diagnostic-redaction.ts",
   "src/operator/safe-child-environment.ts",
+  "src/operator/target-wallet.ts",
   "src/paper-validation/preflight.ts",
 ] as const;
 

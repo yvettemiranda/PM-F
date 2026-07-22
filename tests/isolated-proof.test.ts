@@ -9,11 +9,13 @@ const captureRunId = "b".repeat(64);
 const replayHash = "c".repeat(64);
 const projectRoot = "/tmp/ni-k";
 const expectedTestFiles = ["tests/one.test.ts", "tests/two.test.ts"];
+const targetWallet = "0x0000000000000000000000000000000000000001";
 
 function artifacts() {
   return {
     projectRoot,
     sourceCodeCommit: commit,
+    targetWallet,
     expectedTestFiles,
     vitestResultContent: JSON.stringify({
       success: true,
@@ -24,6 +26,7 @@ function artifacts() {
       testResults: expectedTestFiles.map((name) => ({ name: `${projectRoot}/${name}`, status: "passed" })),
     }),
     phase0ResultContent: `phase0 output\n${JSON.stringify({
+      target: targetWallet,
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
@@ -96,6 +99,10 @@ describe("isolated verification proof artifacts", () => {
       stable: true,
     });
     expect(() => verifyIsolatedProofArtifacts(mismatchedReplay)).toThrow("CAPTURE_REPLAY_PROOF_INVALID");
+
+    const mismatchedTarget = artifacts();
+    mismatchedTarget.targetWallet = "0x0000000000000000000000000000000000000002";
+    expect(() => verifyIsolatedProofArtifacts(mismatchedTarget)).toThrow("PHASE0_VALIDATION_PROOF_INVALID");
   });
 
   it("accepts only the exact stable Phase 0 limitations produced by source offset caps", () => {
@@ -107,6 +114,7 @@ describe("isolated verification proof artifacts", () => {
       "ACTIVITY_HISTORY_TRUNCATED",
     ];
     const phase0 = {
+      target: targetWallet,
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
@@ -166,6 +174,7 @@ describe("isolated verification proof artifacts", () => {
 
   it("rejects unknown limitations, schema failures, pagination mismatches, or replay disagreement", () => {
     const phase0 = {
+      target: targetWallet,
       captureRunId,
       sourceCodeCommit: commit,
       sourceCodeDirty: false,

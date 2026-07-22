@@ -78,6 +78,7 @@ run_fresh_phase0_attempt() {
 
   if ! node --import tsx src/cli/paper-campaign-evidence.ts write-passed \
     --file="$ISOLATED_EVIDENCE_FILE" \
+    --target-wallet="$TARGET_WALLET" \
     --test-results="$TEST_RESULTS_FILE" \
     --phase0-results="$PHASE0_RESULT_FILE" \
     --replay-results="$REPLAY_RESULT_FILE"; then
@@ -162,7 +163,7 @@ ensure_phase0_database
 abort_if_stop_requested
 
 cd "$PROJECT_ROOT"
-PREFLIGHT_OUTPUT="$(node --import tsx src/cli/paper-campaign-preflight.ts)"
+PREFLIGHT_OUTPUT="$(node --import tsx src/cli/paper-campaign-preflight.ts --target-wallet="$TARGET_WALLET")"
 print -r -- "$PREFLIGHT_OUTPUT"
 PREFLIGHT_CAMPAIGN_ID="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
   const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
@@ -184,7 +185,8 @@ PREFLIGHT_REVALIDATION_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e 
 ')"
 abort_if_stop_requested
 if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
-  --file="$ISOLATED_EVIDENCE_FILE" >/dev/null 2>&1; then
+  --file="$ISOLATED_EVIDENCE_FILE" \
+  --target-wallet="$TARGET_WALLET" >/dev/null 2>&1; then
   if [[ "$PREFLIGHT_CAMPAIGN_ID" != "__NONE__"
     && "$PREFLIGHT_REPLACEMENT_REQUIRED" != "yes"
     && "$PREFLIGHT_REVALIDATION_REQUIRED" != "yes" ]]; then
@@ -250,6 +252,7 @@ if ! operator_stop_campaign_processes_from_pointer "$POINTER_FILE"; then
 fi
 
 operator_tsx "$PROJECT_ROOT/src/cli/paper-campaign-run.ts" \
+  "--target-wallet=$TARGET_WALLET" \
   "--operator-owner-token=$STAMP" &
 CAMPAIGN_PID=$!
 operator_track_child "$CAMPAIGN_PID"
@@ -264,4 +267,5 @@ if (( CAMPAIGN_EXIT != 0 )); then
 fi
 
 title "本次已安全结束"
-node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" || true
+node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" \
+  --target-wallet="$TARGET_WALLET" || true

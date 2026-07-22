@@ -3,7 +3,7 @@
 ## Project
 - 唯一有效仓库：`/Users/d4clt/Documents/Codex/2026-07-07/ni-k`。
 - ni-k 是独立 Polymarket Copy Trading System，不复用旧版 PolymarketBot 的代码、数据库、账本或交易逻辑。
-- 当前唯一目标钱包：`0x0c0e270cf879583d6a0142fc817e05b768d0434e`，只访问公开数据。
+- 当前唯一目标钱包：`0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`，只访问公开数据；旧地址仅作为历史证据保留。
 
 ## Architecture
 - Observe：公开 Trades/Activity/Positions 增量抓取、Gap/Cursor、Activity confirmation、Polygon 回执验证、负风险 conversion、Position projection、对账与 checkpoint。
@@ -32,6 +32,10 @@
 - scoped invariants 复用实体扫描并批量核对 transition audit；历史数据库不做破坏性压缩或覆盖。
 
 ## Current runtime and Campaign
+- 操作入口已切换为新目标 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；预检、Campaign 选择、状态和隔离/Replay 证据均按目标绑定，不能复用旧地址 Campaign、时长、账户、基线或 proof。
+- 新目标已只读确认是活跃 `PROXY_WALLET`（profile `JustAnAussie`），但尚未写入业务库、尚无 Campaign；第一次由用户启动时必须刷新该地址的 Phase 0/Replay proof，并创建独立 target/baseline/account/Campaign。
+- 新目标最近 500 条 Activity 中有 10 次 `MERGE`，均未在最近 1000 条普通 Trades 中发现同交易哈希。当前系统会记录 MERGE 但不投影/复制，后续对账可能升级为 `MAJOR_DESYNC` 并阻断；这是进入小额 Live 前必须解决或形成明确 fail-closed 策略的风险。
+- `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6` 已为旧目标创建后按用户要求安全暂停；Session `PS-D50FE31F7FF33A1DCEA4` 最终对账 `SYNCED`，Campaign 为 `PAUSED`、未取得资格、累计有效时长 `26061 ms`、无 blocker。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；Session `PS-6FA97901118724B49713` 因旧 projector 无法处理 historical negative-risk conversion 而 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`，该 Session 不计时且证据只读保留。
 - 旧 Campaign `PC-94D81ECAD5EF89852D2A` 仍为 `FROZEN`；所有旧核心运行时间均不得计入本轮 `2.27.0` replacement Campaign。
 - 真实业务库已通过 backup-first 入口迁移到 Schema `2.27.0`；迁移前备份为 `data/operator/backups/phase0-before-2.27.0-2026-07-22T01-24-19-628Z.sqlite`。
@@ -49,5 +53,6 @@
 - 用户使用桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里` 三个入口：开始/继续、安全暂停、查看结果。
 - 已修复预检冻结旧核心后无条件退出的问题；现在同一次启动会冻结旧证据、只读重查并继续 replacement，不需要再靠第二次点击完成状态过渡。
 - 上述 BUY 策略的 Paper 与隔离 Live 实现、重启恢复和全量测试均已完成；conversion 投影修复形成新核心，旧 Campaign 不能继续。
-- 下一次安全启动可直接创建新核心 replacement Campaign 并从 0 验证；数据库已完成迁移，旧核心时长不混算。
+- 旧目标的 `2.27.0` replacement 已安全暂停；新目标只读验证和入口隔离已完成，首次启动仍必须建立独立 baseline/target/account/Campaign，旧目标 Campaign 的时间不得转移。
+- 目标地址只有 `操作入口/lib/common.sh` 一处权威配置；所有 TypeScript 入口要求显式 `--target-wallet`，旧目标生成的隔离证据会被拒绝，其他目标的 Replay evidence 不计入覆盖率。
 - 40 分钟资格、连续 4 小时、累计 24 小时、场景覆盖和最终 8 小时 Observe 完成前绝不进入 Live。

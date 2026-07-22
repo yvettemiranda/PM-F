@@ -1,9 +1,13 @@
 # Progress
 
 ## Current task
-- 2026-07-22 已定位 Session `PS-6FA97901118724B49713` 的 `MAJOR_DESYNC`：目标钱包在负风险事件中发生 `CONVERSION`，旧 Observe 只记录 Activity、不变更 Position projection，导致源资产残留并缺少 4 个目标资产。
-- 真实事件为 tx `0x31374b6803b62320cac0730a80292846a4e4e64e0aa5fb4a7e4b4eb0020217dd`，金额 `1667.6217`；源资产减少并净增加 4 个同事件目标资产。该事件只消耗 baseline historical bucket，未涉及本 Campaign 的 tracked 仓位。
-- 用户要求按未来 Live 的安全标准全方位修复；本轮仍严格禁止 signer、认证 CLOB、真实订单、approve/redeem 和任何链上写入。
+- 2026-07-22 已把后续测试目标切换为 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；用户将自行启动，Codex 本轮未创建新目标、未启动 Campaign、未写业务库。
+- 修复目标切换时可能误续跑“全库最新 Campaign”的缺陷：预检、freeze、runner 和状态均按 wallet/target 筛选；不同目标可以保留各自 Campaign，旧目标不会被新目标的核心变化冻结或续跑。
+- 隔离 Phase 0/Replay proof 现在显式绑定目标钱包；旧地址 proof 对新地址验证失败。全局 supplemental Replay evidence 也按目标 signal binding 过滤，不能跨钱包补足覆盖率。
+- 新地址只读尽调：身份 `IDENTITY_CONFIRMED/HIGH`、类型 `PROXY_WALLET`、当前活跃；Trades/Activity 因上游 offset 限制均不完整，Positions 完整。最近 500 条 Activity 有 10 次 MERGE，且 0 次在最近 1000 条 Trades 中发现同交易哈希，现有系统不会复制 MERGE。
+- 已为旧目标安全启动 `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6`，随后按用户新指示通过安全暂停入口收尾。Session `PS-D50FE31F7FF33A1DCEA4` 最终 `SYNCED`，累计 `26061 ms`，0 Signal、0 Order、0 Fill、0 Position、0 active Reservation，Campaign 状态 `PAUSED`、可继续但仍绑定旧目标。
+- 隔离验证在启动前重新执行：49 个测试文件、622 项全部通过；Phase 0/Replay 第一次尝试形成稳定 proof，artifact hash `29e0f71f436346fb53111f1083c61f901a67e08acb1005ca5fc731bffd93642c`。
+- 本轮仍严格禁止 signer、认证 CLOB、真实订单、approve/redeem 和任何链上写入。
 
 ## Completed implementation
 - 新增只读 Polygon `eth_getTransactionReceipt` 适配器和严格响应解析；仅允许 HTTPS RPC，交易哈希、回执状态、日志地址/topics/data 均做结构校验。
@@ -20,7 +24,9 @@
 
 ## Verification completed
 - `pnpm typecheck` 通过。
-- 全量：49 个测试文件、622 项全部通过。
+- 全量：49 个测试文件、623 项全部通过。
+- 聚焦回归：6 个测试文件、69 项通过；覆盖目标 scoped preflight、旧目标 proof 拒绝、目标 evidence binding、operator 参数传递和 Replay evidence。
+- 真实数据库 immutable 只读复核：Schema `2.27.0`、Gate `PAPER + LIVE_DISABLED`、Live Gate transition 0、`PRAGMA integrity_check=ok`、`foreign_key_check` 0 行；新目标尚无 target/Campaign，旧目标最新 Campaign 仍为 `PAUSED`。
 - 新增覆盖：真实多段内部转移的净额解析、stakeholder/唯一证明、金额/事件不一致拒绝、micros 零容差 Positions、稀疏 Activity、historical/mixed bucket、tracked blocker、Paper/Live 竞态注入闭锁、证据持久化、缺 provider 失败关闭、重启不重复 RPC、migration/append-only、public RPC 方法白名单、Campaign Gate/integrity blocker。
 - 使用失败 Session 的原始 Activity、转换后 Positions capture 和 Polygon 真实回执只读复算成功：精确识别 1 个源资产、4 个目标资产、`1667621700` micros、事件 `fed-decision-in-july-181`，证据哈希 `dd93f80f43e05e8f6736e1e5f7f6cbf4acedb526f635014913a158957c83a771`。
 - `git diff --check` 通过。
@@ -30,19 +36,22 @@
 - 代码 Schema `2.27.0`；Signal `1.6.0`；Strategy `2.2.0`；Risk `1.6.0`；Paper `1.6.0`；Live `1.6.0`；Validation `1.3.0`；Operational `1.3.0`；Ruleset `v1.5.0`；Config `v1.3.0`。
 - Ruleset：`e8b3eede381b889562d51ed39d692d9f106a37b7d220ad28c412a72cdd8daa75`。
 - Paper ruleset：`6c8547d4e526878a1d3d696ad60dd77dd7a32c08937013729018fad0cb9492b7`。
-- Core compatibility：`3fcda9398e3e9967de441d75fa8bc55de865c7dfbc5d4817515c48086cf86a1d`。
-- Validation policy：`9e959cfd98d56a7542317a7cb065ef244beaad0ca0914ae40422ca2f51224523`。
-- Verification suite：`b979fefc84fef2a1c96d3cabfd875af49eda57db2d5a55f443b47833053c666c`。
-- Operator build：`0ace5772d3c25fe0af39701121a2d16951b6e1af8ce25124b112ee78110f07a2`。
+- Core compatibility：`b4239c719f028e59d6ab64b9c6c97ae20bba7412e32cf0eccf9df2fd770e8b92`。
+- Validation policy：`d42e37a537f15f9ef4cece7f91cb3bcaffcfcc3b4b8898e2f5d5940ec9fbc9b7`。
+- Verification suite：`7b26227cd99596eace91ad7076b0b194b3c05bf5346037705edaf3d20b6ee567`。
+- Operator build：`33f3ed2abd5be301defaa3d05e45b0a39893d9b5d7c5cbc92e891e6b2b516878`。
 - Artifact provenance：`10e91d2def41ba61aee0fa5b63026de66db968b9536bd60311ddb4169f4e5c80`。
 
 ## Runtime state before handoff
+- 目标隔离修复已形成干净提交；新地址只读 preflight 为 `PASSED`，`campaignId=null`、`mismatchFrozen=false`、时钟校准通过。业务数据库文件 mtime 仍为 `2026-07-22T09:52:02+0800`，本轮未写库。
 - 真实业务库已由既有 backup-first 入口从 `2.26.0` 迁移到 `2.27.0`；备份为 `data/operator/backups/phase0-before-2.27.0-2026-07-22T01-24-19-628Z.sqlite`，入口已完成备份/新库 integrity、foreign key、migration history、Schema contract 和安全 Gate 核验。
 - Campaign `PC-0969675B1A77CA978A5B` 已 `BLOCKED`；失败 Session `PS-6FA97901118724B49713` 为 `FAILED/RUNTIME_CONSISTENCY_UNSAFE`、不计时，历史证据不得修改。
 - 上一完成 Session `PS-D7B6D9BD9AA1C3EBA971` 和安全暂停 Session `PS-75B12304DFFD12CBE912` 均保留原计时证据，但因本轮核心变化不得计入 replacement Campaign。
 - `PAPER + LIVE_DISABLED`，active Reservation 为 0；当前无 Paper、Observe 或 Campaign supervisor 进程。
+- 旧目标的 `2.27.0` replacement Campaign `PC-C268FD8331F1F503DFF6` 为 `PAUSED`；最新 Session `PS-D50FE31F7FF33A1DCEA4` 已安全完成，最终对账 `SYNCED`，未取得 40 分钟资格。
 - 新表 `negative_risk_conversion_evidence` 当前为 0 行；历史 Campaign/Session 终态未被迁移改变。
 
 ## Next steps
-1. 用户下一次启动时创建新核心 replacement Campaign，从 0 进行压缩后的 40 分钟资格、连续 4 小时、累计 24 小时和最终 8 小时 Observe；旧核心运行时间不混算。
-2. `TARGET_CONVERSION` 的真实 Paper/Live 执行仍未授权实现；若未来自然出现 tracked conversion，系统会立即闭锁。进入 Live 前必须另行完成受控 Paper/Fake 转换执行器、真实合规/钱包/signer 设计和再次明确授权。
+1. 用户随后双击“1_开始或继续Paper累计验证”；首次运行会重建新目标 Phase 0/Replay proof 并创建独立 Campaign。Codex 本轮不代用户启动。
+2. 首次新目标 Paper 应先短时观察 MERGE/负风险活动是否触发持续 Position diff；若出现 `MINOR_DIFF/MAJOR_DESYNC`，立即安全暂停并把 ZIP 交给 Codex，不能把该时长当作 Live-ready 证明。
+3. `MERGE/SPLIT` projection/copy 和 `TARGET_CONVERSION` 的真实 Paper/Live 执行仍未完成；小额 Live 前必须解决这些 blocker，并另行完成合规、隔离钱包、signer、安全 Gate 和用户再次明确授权。

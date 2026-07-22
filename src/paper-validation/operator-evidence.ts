@@ -78,6 +78,7 @@ export interface PaperCampaignReport {
 
 export interface IsolatedVerificationEvidence {
   status: "PASSED" | "FAILED";
+  targetWallet: string;
   coreCompatibilityHash: string;
   verificationSuiteHash: string;
   sourceCodeCommit: string;
@@ -113,11 +114,14 @@ export function verifyIsolatedVerificationEvidence(
   evidence: IsolatedVerificationEvidence,
   expectedCoreCompatibilityHash: string,
   expectedVerificationSuiteHash: string,
+  expectedTargetWallet: string,
 ): boolean {
   const { artifactHash, ...payload } = evidence;
   return evidence.status === "PASSED"
     && evidence.coreCompatibilityHash === expectedCoreCompatibilityHash
     && evidence.verificationSuiteHash === expectedVerificationSuiteHash
+    && evidence.targetWallet === expectedTargetWallet.toLowerCase()
+    && evidence.proofs.targetWallet === evidence.targetWallet
     && evidence.sourceCodeCommit.trim().length > 0
     && evidence.replayStatus === evidence.proofs.phase0ReplayStatus
     && evidence.testFiles.length === PAPER_CAMPAIGN_ISOLATED_TEST_FILES.length

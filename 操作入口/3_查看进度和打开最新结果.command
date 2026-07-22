@@ -5,7 +5,8 @@ source "$PROJECT_ROOT/操作入口/lib/common.sh"
 cd "$PROJECT_ROOT"
 
 title "Paper 累计验证进度"
-node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" || true
+node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" \
+  --target-wallet="$TARGET_WALLET" || true
 
 latest_result="$(operator_latest_campaign_result 2>/dev/null || true)"
 if [[ -n "$latest_result" && -e "$latest_result" ]]; then

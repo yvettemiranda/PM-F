@@ -40,7 +40,8 @@ else
   fi
 fi
 
-node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" || true
+node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-status.ts" \
+  --target-wallet="$TARGET_WALLET" || true
 latest_result="$(operator_latest_campaign_result 2>/dev/null || true)"
 if [[ -n "$latest_result" && -e "$latest_result" ]]; then
   open -R "$latest_result" 2>/dev/null || true

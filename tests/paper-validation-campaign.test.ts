@@ -49,6 +49,7 @@ const directories: string[] = [];
 const runtimeChildren = new Set<ChildProcess>();
 const sourceVersion: SourceVersion = { commit: "campaign-test-commit", dirty: false };
 const wallet = "0x0000000000000000000000000000000000000001";
+const secondWallet = "0x0000000000000000000000000000000000000002";
 const compatibilityEvidence = {
   validationPolicyHash: "a".repeat(64),
   verificationSuiteHash: "b".repeat(64),
@@ -750,6 +751,7 @@ describe("PaperValidationCampaignService", () => {
     expect(() => assertPaperCampaignPreMigrationCompatible({
       databasePath: input.databasePath,
       manifest: incompatible,
+      targetWallet: wallet,
     })).toThrow(`ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:${campaign.campaignId}`);
     expect(input.service.campaignSnapshot(campaign.campaignId).state).toBe("QUALIFYING");
     input.service.close();
@@ -759,16 +761,19 @@ describe("PaperValidationCampaignService", () => {
       manifest: incompatible,
       sourceVersion: { commit: "new-core-commit", dirty: false },
       now: at(1),
+      targetWallet: wallet,
     })).toEqual({ campaignId: campaign.campaignId, campaignState: "FROZEN", frozen: true });
     expect(freezePaperCampaignPreMigrationMismatch({
       databasePath: input.databasePath,
       manifest: incompatible,
       sourceVersion: { commit: "another-display-only-commit", dirty: false },
       now: at(2),
+      targetWallet: wallet,
     })).toEqual({ campaignId: campaign.campaignId, campaignState: "FROZEN", frozen: false });
     expect(assertPaperCampaignPreMigrationCompatible({
       databasePath: input.databasePath,
       manifest: incompatible,
+      targetWallet: wallet,
     })).toEqual({
       campaignId: campaign.campaignId,
       campaignState: "FROZEN",
@@ -801,6 +806,7 @@ describe("PaperValidationCampaignService", () => {
       manifest: incompatible,
       sourceVersion: { commit: "same-launch-new-core", dirty: false },
       now: at(1),
+      targetWallet: wallet,
     });
 
     expect(prepared).toMatchObject({
@@ -822,6 +828,39 @@ describe("PaperValidationCampaignService", () => {
     database.close();
   });
 
+  it("scopes pre-migration selection to the requested target wallet", () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const incompatible: CoreCompatibilityManifest = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        paperExecution: componentHash("different-target-incompatible"),
+      },
+    };
+    input.service.close();
+
+    expect(preparePaperCampaignPreMigration({
+      databasePath: input.databasePath,
+      manifest: incompatible,
+      sourceVersion: { commit: "different-target-core", dirty: false },
+      now: at(1),
+      targetWallet: secondWallet,
+    })).toMatchObject({
+      campaignId: null,
+      campaignState: null,
+      mismatchFrozen: false,
+    });
+
+    const database = new DatabaseSync(input.databasePath, { readOnly: true });
+    const latestState = database.prepare(
+      `SELECT to_state FROM paper_validation_transitions
+       WHERE entity_type='CAMPAIGN' AND campaign_id=? ORDER BY sequence DESC LIMIT 1`,
+    ).get(campaign.campaignId);
+    database.close();
+    expect(latestState).toEqual({ to_state: "QUALIFYING" });
+  });
+
   it("pre-migration freeze also blocks the single running Session atomically", () => {
     const input = fixture();
     const campaign = createCampaign(input);
@@ -840,6 +879,7 @@ describe("PaperValidationCampaignService", () => {
       manifest: incompatible,
       sourceVersion: { commit: "new-running-core-commit", dirty: false },
       now: at(1),
+      targetWallet: wallet,
     })).toEqual({ campaignId: campaign.campaignId, campaignState: "FROZEN", frozen: true });
     const database = new DatabaseSync(input.databasePath);
     const campaignState = database.prepare(
@@ -1467,6 +1507,7 @@ describe("PaperValidationCampaignService", () => {
     expect(assertPaperCampaignPreMigrationCompatible({
       databasePath: input.databasePath,
       manifest: input.manifest,
+      targetWallet: wallet,
     })).toMatchObject({
       campaignId: campaign.campaignId,
       campaignState: "PASSED",
