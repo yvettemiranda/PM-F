@@ -5,6 +5,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { exitAfterFlushingStandardStreams } from "./process-exit.js";
 import { RULESET } from "../domain/versioning.js";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
@@ -1186,4 +1187,10 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+try {
+  await main();
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
+}
+await exitAfterFlushingStandardStreams();

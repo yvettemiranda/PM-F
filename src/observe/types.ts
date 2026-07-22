@@ -1,6 +1,10 @@
 import type { ApiCapture } from "../adapters/polymarket-public.js";
 import type { EventClassification, PublicActivity, PublicPosition, PublicTrade, SyncStatus } from "../domain/models.js";
 import type { VerifiedNegativeRiskConversion } from "./negative-risk-conversion.js";
+import type {
+  PolygonOrderFilledTradeBatch,
+  PolygonOrderFilledEvidence,
+} from "./polygon-order-filled-trade-feed.js";
 
 export interface ObserveBaselineItem {
   asset: string;
@@ -18,7 +22,7 @@ export interface ObserveBaseline {
 
 export interface ObserveEvent {
   sourceEventKey: string;
-  sourceType: "DATA_API_TRADE" | "DATA_API_ACTIVITY";
+  sourceType: "DATA_API_TRADE" | "DATA_API_ACTIVITY" | "POLYGON_ORDER_FILLED";
   sourceTimestamp: number;
   isGap: boolean;
   isCombo: boolean;
@@ -70,6 +74,15 @@ export interface ObservePollSnapshot {
   activity: ApiCapture<PublicActivity[]>;
   positions: ApiCapture<PublicPosition[]>;
   pUsdBalance: ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>;
+  polygonOrderFilled?: PolygonOrderFilledTradeBatch | {
+    status: "DEGRADED";
+    confirmedHead: null;
+    fromBlock: null;
+    toBlock: null;
+    trades: [];
+    capture: ApiCapture<PolygonOrderFilledEvidence> | null;
+    errorDetail: string;
+  };
 }
 
 export interface ObserveDataSource {
@@ -149,4 +162,6 @@ export interface ObserveRunMetrics {
   checkpointProjectionHashMismatch: boolean;
   lastCheckpointId: string | null;
   finalSyncStatus: SyncStatus | null;
+  polygonTradeFeedDegradedPolls: number;
+  polygonOrderFilledEvents: number;
 }

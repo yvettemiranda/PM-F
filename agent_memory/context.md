@@ -12,15 +12,17 @@
 - Gap、unsupported conversion/SPLIT、无法证明完整 outcome set 的 MERGE，以及数据/版本/恢复/账本不确定时继续 fail closed。
 
 ## Architecture and current core
-- Observe：公开 Trades/Activity 默认每 `3 s` 发现一次；Positions/pUSD 默认每 `15 s` 全量核对，发现新目标事件时立即强制核对。Gap/Cursor、Activity confirmation、Polygon 回执、Position projection、reconciliation 与 checkpoint 仍保留。
+- Observe：每 `1 s` 读取 Polygon 两个官方 CTF Exchange 的已确认 `OrderFilled`（当前确认深度 `2`），公开 Trades/Activity 每 `3 s` 交叉确认和兜底；Positions/pUSD 默认每 `15 s` 全量核对，发现新目标事件时立即强制核对。Gap/Cursor、Activity confirmation、Position projection、reconciliation 与 checkpoint 仍保留。
+- Polygon 快速源只接受目标为 maker 的官方 `OrderFilled`，逐 token 用公开 CLOB `markets-by-token` 绑定 condition；按官方成交微单位重建与 Data API 一致的 price/size。启动时从当前已确认 head 建 cursor，不追补启动前交易。
+- Polygon RPC 暂时失败时降级到 Data API，不伪造 gap；已确认 cursor block hash 改变、log/block hash 不符，或同一成交与 Data API 的经济 locator 相同但 source identity 不同，会立即 `MAJOR_DESYNC` 并停止新开仓。
 - Paper：不可变 Signal/Execution Context、Risk、Reservation、完整 REST 盘口、VWAP/FAK、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
 - 待成交 BUY 使用公开无认证 CLOB Market WebSocket 作为盘口变化唤醒；执行前仍读取完整 REST 盘口，断线或无事件时每 `15 s` 兜底。STOP/SELL 安全退出仍按每个 Paper cycle 处理。
 - 完全相同的待成交盘口和 fee 不重复写完整订单尝试；盘口变化后才产生新尝试。等待原因拆分为 `BUY_NO_ASK`、`BUY_BEST_ASK_ABOVE_LIMIT`、`BUY_ZERO_EXECUTABLE_LIQUIDITY` 等。
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.7.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.8.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.6.0`、Replay `2.0.0`、Paper `1.8.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.5.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
 - Signal Context 将官方市场结束时间分为 `VERIFIED` / `UNAVAILABLE`；Paper 对后者只使用不可变、有限时长的 `execution_deadline_at`，Live 继续拒绝该状态。
 - Observe 先提交事件/projection/checkpoint，再逐个富化 Signal；单市场元数据失败只记 warning 并在后续轮询重试，不能再制造连接 gap 或污染其它市场 Signal。
 - 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成两个独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。无法证明完整 outcome set、余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
-- 新的市场 WebSocket 文件和测试已纳入 `coreCompatibilityHash` / verification suite；本核心不能续用旧 Campaign 时间。
+- 新的市场 WebSocket、Polygon `OrderFilled` 快速源、Campaign 安全退出 helper 和测试均纳入 `coreCompatibilityHash` / verification suite；本核心不能续用旧 Campaign 时间。
 
 ## Confirmed BUY policy
 - 当前默认继续保持首开最低 `1 pUSD`、市场最低额首开自动抬升上限 `5 pUSD`、BUY 绝对最高价 `0.95`。
@@ -32,16 +34,16 @@
 
 ## Current runtime and Campaign
 - 真实业务库已 backup-first 升到 Schema `2.29.0`；迁移前备份为 `data/operator/backups/phase0-before-2.29.0-2026-07-22T10-11-59-892Z.sqlite`。迁移前后关键业务表逐项同数，`integrity_check=ok`、外键失败 `0`，旧备份与历史记录均保留。
-- 2026-07-22 新核心 Campaign `PC-D6C6BDF51D42647D8EA6` 已按用户要求安全暂停；Session `PS-E950DE127004911B0EC3` 累计有效运行 `0.75 h`，当前无 Observe/Paper/Supervisor 子进程，Reservation 为 `0`。
-- 本次捕获 4 个 BUY、2 个 SELL Signal，但 6 个均被错误标记为 `GAP_EVENT`，Order/Fill 均为 `0`；该时长属于缺陷核心证据，修复后不能续算。
-- 旧目标 replacement Campaign `PC-C268FD8331F1F503DFF6` 为 `PAUSED`；其他旧 Campaign/Session 终态均只读保留。
-- 当前未由 Codex 启动 Paper、Observe 或 Campaign supervisor；完成代码后也不得自动启动，等待用户明确要求。
+- 最近一轮 Campaign `PC-80F7ECAFC26347B92117`、Session `PS-94D8F66D8CC9042A3B44` 已于 2026-07-22 18:47 左右安全停止并完成报告：Observe 成功 `626`、失败 `0`、新事件 `3`、Signal/Order/Fill `0`、Active Reservation `0`，Gate 始终为 `PAPER + LIVE_DISABLED`。
+- 这 3 个事件均是目标卖出启动前已有而 Paper baseline 未持有的历史仓位（`565.72`、`101`、`17.05` 份），不是目标新开 BUY；因此按“不得卖空或伪造初始仓位”规则不生成 SELL Signal。
+- 第三笔 SELL 的 Data API 发布比 Positions 变化慢约 `30 s`，说明单靠 3 秒 Data API 轮询不能保证 3 秒发现；正在以 Polygon 已确认 `OrderFilled` 快速源修复。
+- 当前维护窗口内无 Observe/Paper/Campaign supervisor；维护自动化临时 `PAUSED`，防止未提交核心被自动启动。最终全量验证、干净提交和安全预检通过后，按用户已明确要求自动启动新 Campaign 并恢复维护自动化，持续测试到 2026-07-23 08:00（Asia/Shanghai）。
 
 ## Known blockers before small Live
 - 新目标最近抽样中频繁出现标准二元 `MERGE`；Paper 已有等价双腿退出语义，但仍须用新核心短测取得自然 MERGE/成交证据。无法证明完整集合的 MERGE 继续硬阻断。
 - 官方结束时间缺失的市场只允许 bounded Paper；Live 继续失败关闭，后续须决定是否接受独立的 Live deadline 风险策略。
 - tracked negative-risk conversion 仍只形成不可执行义务并硬阻断；没有受控 Paper 语义和未来明确授权的链上适配器。
-- 仍需从新干净核心完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 覆盖及最终 8 小时 Observe。
+- 仍需从新干净核心重新累计 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 覆盖及最终 8 小时 Observe；旧核心或旧 Campaign 时长不能混算。
 - geoblock/compliance、隔离钱包、真实 signer 和小额 Live 的再次明确授权均未完成。
 
 ## Operator workflow

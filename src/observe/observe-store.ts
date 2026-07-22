@@ -69,6 +69,7 @@ export interface CommitPollInput {
     conditionId: string;
     errorDetail: string;
   }>;
+  sourceWarnings: string[];
   reconciliation: ReconciliationResult;
   replayState: string;
   gapRecovered: boolean;
@@ -252,7 +253,7 @@ export class ObserveStore {
       )
       .all(baselineRunId) as Array<{
         source_event_key: string;
-        source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY";
+        source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY" | "POLYGON_ORDER_FILLED";
         source_timestamp: number;
         is_gap: number;
         activity_confirmed: number;
@@ -302,7 +303,9 @@ export class ObserveStore {
         isGap: row.is_gap !== 0,
         isCombo: row.is_combo !== 0,
         activityConfirmed: row.activity_confirmed !== 0,
-        ...(row.source_type === "DATA_API_TRADE" ? { trade: JSON.parse(row.raw_json) } : { activity: JSON.parse(row.raw_json) }),
+        ...(row.source_type === "DATA_API_TRADE" || row.source_type === "POLYGON_ORDER_FILLED"
+          ? { trade: JSON.parse(row.raw_json) }
+          : { activity: JSON.parse(row.raw_json) }),
         ...(conversion ? { conversion } : {}),
       };
     });
@@ -402,6 +405,100 @@ export class ObserveStore {
     }
   }
 
+  failCrossSourceTradeIdentityMismatch(input: {
+    observeRunId: string;
+    baseline: ObserveBaseline;
+    polygonSourceEventKey: string;
+    dataApiSourceEventKey: string;
+    transactionHash: string;
+    asset: string;
+    detectedAt: string;
+  }): void {
+    const detail = {
+      observeRunId: input.observeRunId,
+      baselineRunId: input.baseline.baselineRunId,
+      transactionHash: input.transactionHash,
+      asset: input.asset,
+      polygonSourceEventKey: input.polygonSourceEventKey,
+      dataApiSourceEventKey: input.dataApiSourceEventKey,
+    };
+    const issueId = createHash("sha256").update(stableJson({
+      issueType: "POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH",
+      targetId: input.baseline.targetId,
+      ...detail,
+    })).digest("hex");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        `INSERT OR IGNORE INTO reconciliation_issues(
+          issue_id,target_id,asset_id,issue_type,expected_value,observed_value,
+          sync_status,status,detail_json,created_at,resolved_at
+        ) VALUES (?, ?, ?, 'POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH', ?, ?,
+          'MAJOR_DESYNC', 'OPEN', ?, ?, NULL)`,
+      ).run(
+        issueId,
+        input.baseline.targetId,
+        input.asset,
+        input.polygonSourceEventKey,
+        input.dataApiSourceEventKey,
+        stableJson(detail),
+        input.detectedAt,
+      );
+      this.database.prepare(
+        "UPDATE monitor_targets SET sync_status='MAJOR_DESYNC',updated_at=? WHERE target_id=?",
+      ).run(input.detectedAt, input.baseline.targetId);
+      this.database.prepare(
+        `UPDATE observe_runs
+         SET state='FAILED',stopped_at=?,stop_reason='POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH',last_heartbeat_at=?
+         WHERE observe_run_id=? AND state='RUNNING'`,
+      ).run(input.detectedAt, input.detectedAt, input.observeRunId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  failPolygonTradeFeedUnsafe(input: {
+    observeRunId: string;
+    baseline: ObserveBaseline;
+    errorDetail: string;
+    detectedAt: string;
+  }): void {
+    const detail = {
+      observeRunId: input.observeRunId,
+      baselineRunId: input.baseline.baselineRunId,
+      errorDetail: input.errorDetail,
+    };
+    const issueId = createHash("sha256").update(stableJson({
+      issueType: "POLYGON_TRADE_FEED_UNSAFE",
+      targetId: input.baseline.targetId,
+      ...detail,
+    })).digest("hex");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        `INSERT OR IGNORE INTO reconciliation_issues(
+          issue_id,target_id,asset_id,issue_type,expected_value,observed_value,
+          sync_status,status,detail_json,created_at,resolved_at
+        ) VALUES (?, ?, NULL, 'POLYGON_TRADE_FEED_UNSAFE', 'CONFIRMED_CHAIN_STABLE', ?,
+          'MAJOR_DESYNC', 'OPEN', ?, ?, NULL)`,
+      ).run(issueId, input.baseline.targetId, input.errorDetail, stableJson(detail), input.detectedAt);
+      this.database.prepare(
+        "UPDATE monitor_targets SET sync_status='MAJOR_DESYNC',updated_at=? WHERE target_id=?",
+      ).run(input.detectedAt, input.baseline.targetId);
+      this.database.prepare(
+        `UPDATE observe_runs
+         SET state='FAILED',stopped_at=?,stop_reason='POLYGON_TRADE_FEED_UNSAFE',last_heartbeat_at=?
+         WHERE observe_run_id=? AND state='RUNNING'`,
+      ).run(input.detectedAt, input.detectedAt, input.observeRunId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   nextPollSequence(observeRunId: string): number {
     const row = this.database
       .prepare("SELECT COALESCE(MAX(sequence),0)+1 next_sequence FROM observe_polls WHERE observe_run_id=?")
@@ -473,7 +570,7 @@ export class ObserveStore {
           input.sequence,
           input.startedAt,
           input.completedAt,
-          input.snapshot.trades.data.length,
+          input.snapshot.trades.data.length + (input.snapshot.polygonOrderFilled?.trades.length ?? 0),
           input.snapshot.activity.data.length,
           input.snapshot.positions.data.length,
           input.newEvents.length,
@@ -482,8 +579,11 @@ export class ObserveStore {
           input.newEvents.filter((event) => event.isGap).length,
           checkpointId,
           input.signalEnrichmentFailures.length,
-          input.signalEnrichmentFailures.length > 0
-            ? stableJson(input.signalEnrichmentFailures)
+          input.signalEnrichmentFailures.length > 0 || input.sourceWarnings.length > 0
+            ? stableJson({
+              signalEnrichmentFailures: input.signalEnrichmentFailures,
+              sourceWarnings: input.sourceWarnings,
+            })
             : null,
         );
       this.savePollCaptures(pollId, input.snapshot);
@@ -748,6 +848,15 @@ export class ObserveStore {
     const openConnectionWindow = this.database
       .prepare("SELECT 1 FROM connection_windows WHERE target_id=? AND reconnected_at IS NULL LIMIT 1")
       .get(runTarget.target_id);
+    const polygonHealth = this.database.prepare(
+      `SELECT
+         SUM(CASE WHEN warning_detail LIKE '%POLYGON_ORDER_FILLED_DEGRADED:%' THEN 1 ELSE 0 END) degraded_polls
+       FROM observe_polls WHERE observe_run_id=?`,
+    ).get(observeRunId) as { degraded_polls: number | null };
+    const polygonEvents = this.database.prepare(
+      `SELECT count(*) count FROM observe_events
+       WHERE first_observe_run_id=? AND source_type='POLYGON_ORDER_FILLED'`,
+    ).get(observeRunId) as { count: number };
     return {
       observeRunId,
       baselineRunId: row.baseline_run_id,
@@ -770,6 +879,8 @@ export class ObserveStore {
       checkpointProjectionHashMismatch: false,
       lastCheckpointId: checkpoint?.checkpoint_id ?? null,
       finalSyncStatus: reconciliation?.sync_status ?? null,
+      polygonTradeFeedDegradedPolls: polygonHealth.degraded_polls ?? 0,
+      polygonOrderFilledEvents: polygonEvents.count,
     };
   }
 
@@ -783,6 +894,9 @@ export class ObserveStore {
       ["data-activity-recent", snapshot.activity],
       ["data-positions", snapshot.positions],
       ["polygon-pusd-balance", snapshot.pUsdBalance],
+      ...(snapshot.polygonOrderFilled?.capture
+        ? [["polygon-order-filled", snapshot.polygonOrderFilled.capture] as [string, ApiCapture<unknown>]]
+        : []),
     ];
     const insertCapture = this.database.prepare(
       `INSERT OR IGNORE INTO api_captures(

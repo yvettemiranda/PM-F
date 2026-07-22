@@ -2,9 +2,11 @@ import {
   activityEventKey,
   resolveSourceEventMultiplicity,
   sourceEventKey,
+  sourceEventOccurrences,
 } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { decimalToScaled, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
+import type { PublicTrade } from "../domain/models.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
 import { reconcileProjection } from "./reconciliation.js";
@@ -25,8 +27,25 @@ import {
   type NegativeRiskConversionReceiptProvider,
 } from "./negative-risk-conversion.js";
 import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
+import { PolygonOrderFilledFeedUnsafeError } from "./polygon-order-filled-trade-feed.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
+
+function crossSourceTradeLocator(trade: {
+  transactionHash: string;
+  asset: string;
+  side: string;
+  size: string | number;
+  timestamp: number;
+}): string {
+  return [
+    trade.transactionHash.toLowerCase(),
+    trade.asset,
+    trade.side,
+    decimalToScaled(trade.size, SHARE_SCALE_DIGITS).toString(),
+    String(trade.timestamp),
+  ].join("\u001f");
+}
 
 function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -203,6 +222,16 @@ export class ObserveOnlyRunner {
     } catch (error) {
       if (signal?.aborted) return false;
       const failedAt = this.now().toISOString();
+      if (error instanceof PolygonOrderFilledFeedUnsafeError) {
+        this.store.failPolygonTradeFeedUnsafe({
+          observeRunId: started.observeRunId,
+          baseline: started.baseline,
+          errorDetail: error.message,
+          detectedAt: failedAt,
+        });
+        this.lastPollCompletedAt = failedAt;
+        throw error;
+      }
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, failedAt, error);
       this.lastPollCompletedAt = failedAt;
       this.gapActive = true;
@@ -257,7 +286,56 @@ export class ObserveOnlyRunner {
       tradeRows,
       activityTrades.map((item) => item.trade),
     );
+    const polygonTradeOccurrences = sourceEventOccurrences(
+      (snapshot.polygonOrderFilled?.trades ?? [])
+        .filter((trade) => trade.timestamp > baselineSecond),
+    );
+    const polygonIdentities = new Map<string, Array<{ sourceEventKey: string; trade: PublicTrade }>>();
+    for (const event of [
+      ...storedEvents.filter((item) => item.sourceType === "POLYGON_ORDER_FILLED" && item.trade),
+      ...polygonTradeOccurrences.map((occurrence): ObserveEvent => ({
+        sourceEventKey: occurrence.sourceEventKey,
+        sourceType: "POLYGON_ORDER_FILLED",
+        sourceTimestamp: occurrence.trade.timestamp,
+        isGap: false,
+        isCombo: false,
+        activityConfirmed: false,
+        trade: occurrence.trade,
+      })),
+    ]) {
+      const trade = event.trade!;
+      const locator = crossSourceTradeLocator(trade);
+      const group = polygonIdentities.get(locator) ?? [];
+      if (!group.some((item) => item.sourceEventKey === event.sourceEventKey)) {
+        group.push({ sourceEventKey: event.sourceEventKey, trade });
+      }
+      polygonIdentities.set(locator, group);
+    }
+    const apiIdentities = new Map<string, { sourceEventKey: string; trade: PublicTrade }>();
+    for (const occurrence of [...multiplicity.trades, ...multiplicity.activityTrades]) {
+      apiIdentities.set(occurrence.sourceEventKey, occurrence);
+    }
+    for (const apiIdentity of apiIdentities.values()) {
+      const polygonGroup = polygonIdentities.get(crossSourceTradeLocator(apiIdentity.trade));
+      if (!polygonGroup || polygonGroup.length === 0) continue;
+      if (polygonGroup.some((item) => item.sourceEventKey === apiIdentity.sourceEventKey)) continue;
+      const polygonIdentity = polygonGroup[0]!;
+      const detectedAt = this.now().toISOString();
+      this.store.failCrossSourceTradeIdentityMismatch({
+        observeRunId: started.observeRunId,
+        baseline: started.baseline,
+        polygonSourceEventKey: polygonIdentity.sourceEventKey,
+        dataApiSourceEventKey: apiIdentity.sourceEventKey,
+        transactionHash: apiIdentity.trade.transactionHash.toLowerCase(),
+        asset: apiIdentity.trade.asset,
+        detectedAt,
+      });
+      throw new Error(`POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH:${apiIdentity.trade.transactionHash}`);
+    }
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
+    for (const occurrence of polygonTradeOccurrences) {
+      if (occurrence.occurrenceIndex > 0) confirmedRepeatedKeys.add(occurrence.sourceEventKey);
+    }
     const storedTradeKeys = new Set(
       storedEvents.filter((event) => event.trade !== undefined).map((event) => event.sourceEventKey),
     );
@@ -274,6 +352,15 @@ export class ObserveOnlyRunner {
       && (this.gapCutoffAt === null
         || sourceTimestamp <= Math.floor(Date.parse(this.gapCutoffAt) / 1_000));
     const incoming: ObserveEvent[] = [
+      ...polygonTradeOccurrences.map(({ trade, sourceEventKey }): ObserveEvent => ({
+        sourceEventKey,
+        sourceType: "POLYGON_ORDER_FILLED",
+        sourceTimestamp: trade.timestamp,
+        isGap: eventIsGap(trade.timestamp),
+        isCombo: false,
+        activityConfirmed: false,
+        trade,
+      })),
       ...multiplicity.trades
         .map(({ trade, sourceEventKey }): ObserveEvent => ({
           sourceEventKey,
@@ -355,6 +442,9 @@ export class ObserveOnlyRunner {
     }
     const allEvents = [...storedEvents, ...newEvents];
     const signalEnrichmentFailures: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["signalEnrichmentFailures"] = [];
+    const sourceWarnings = snapshot.polygonOrderFilled?.status === "DEGRADED"
+      ? [`POLYGON_ORDER_FILLED_DEGRADED:${snapshot.polygonOrderFilled.errorDetail}`]
+      : [];
     const marketCache = new Map<string, Promise<Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>>();
     const mergeOutcomeAssetsByCondition = new Map<string, readonly string[]>();
     const pendingMergeConditions = new Set<string>();
@@ -427,7 +517,10 @@ export class ObserveOnlyRunner {
       projection.signals.map((candidate) => candidate.signalId),
     );
     const signalCandidates = projection.signals.filter((candidate) => !existingSignalIds.has(candidate.signalId));
-    const currentTradeKeys = new Set(multiplicity.trades.map((item) => item.sourceEventKey));
+    const currentTradeKeys = new Set([
+      ...multiplicity.trades.map((item) => item.sourceEventKey),
+      ...polygonTradeOccurrences.map((item) => item.sourceEventKey),
+    ]);
     const currentActivityKeys = new Set(multiplicity.activityTrades.map((item) => item.sourceEventKey));
     const ambiguousKeys = new Set(
       multiplicity.ambiguousRepeatedKeys.filter((key) => !confirmedRepeatedKeys.has(key)),
@@ -437,6 +530,7 @@ export class ObserveOnlyRunner {
         event.trade
         && event.sourceEventKey !== sourceEventKey(event.trade)
         && !event.activityConfirmed
+        && event.sourceType !== "POLYGON_ORDER_FILLED"
       ) {
         ambiguousKeys.add(event.sourceEventKey);
       }
@@ -593,6 +687,7 @@ export class ObserveOnlyRunner {
       capitalEstimate,
       signalContexts,
       signalEnrichmentFailures,
+      sourceWarnings,
       reconciliation,
       replayState: this.gapActive ? "GAP_RECOVERED" : "ONLINE",
       gapRecovered: this.gapActive,

@@ -9,7 +9,10 @@
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
-- 3 秒 Trades/Activity 提高公开 API 请求频率；Positions/pUSD 已限制为 15 秒并在新事件时提前刷新，仍需短测观察限流、gap 和 scheduling gap。
+- Polygon 每秒快速源单个有效区块会读取 block head、cursor header、两个官方 Exchange log range 和 confirmed header；请求均只读但频率高于原 Data API，需观察 RPC 限流、poll 实际延迟和 degraded 比例。RPC 失败时 Data API 3 秒兜底，不得把 degraded 误报为无交易。
+- 当前使用 2 个确认区块以平衡速度和重组风险；深度重组会在 cursor hash 复核时 `MAJOR_DESYNC`，但确认深度是否足够仍需长测数据支持，不能在 Live 前凭单次短测下结论。
+- 当前只查询 target 作为 maker 的 canonical `OrderFilled`。最近 100 条 Data API Trade 与 97 份链上 receipt 抽样均可逐条找到 target-maker canonical log，但仍需自然长测继续交叉确认特殊撮合路径。
+- Data API 继续每 3 秒请求、Positions/pUSD 每 15 秒并在新事件时提前刷新；需短测观察限流、gap 和 scheduling gap。
 - Market WebSocket 只提供 wake hint，可能断线、丢消息或收到乱序增量；执行始终 REST 复核并每 15 秒兜底，不能把 WebSocket 消息直接当成交证据。
 - 待成交 BUY 不再为完全相同盘口重复写完整 attempt，但仍会在 wake/fallback 时发 REST 请求；需要短测确认 API 和数据库增长率。
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性需新核心 Campaign 验证。
@@ -18,6 +21,9 @@
 - 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
+- Data API Trades/Activity 可能晚于链上成交约 30 秒发布，单纯缩短 HTTP 轮询仍会晚发现；当前用 Polygon 已确认 `OrderFilled` 每秒扫描作为快速源，Data API 改为交叉确认和兜底。
+- Polygon 与 Data API 若对同一 transaction/asset/side/size/timestamp 产生不同 source identity，当前不猜测哪一个正确，直接持久化 issue、置 `MAJOR_DESYNC` 并停止。
+- Campaign runner 曾在最终报告已写完、子进程已退出后仍被依赖 worker handle 挂住；当前 flush stdout/stderr 后主动按最终状态码退出，并有真实残留 interval 的进程级测试。
 - Signal 富化失败曾被误记为 Data API gap，导致已实时看到的 4 BUY + 2 SELL 永久不可执行；当前事件先持久化，每条 Signal 独立重试，富化 warning 不再扩大 gap。
 - 官方结束时间为空曾抛出 `MARKET_END_TIME_UNAVAILABLE`；当前 Signal Context 显式记录 `UNAVAILABLE` 和不可变 bounded deadline，Paper 可继续，Live 仍失败关闭。
 - 标准二元 MERGE 曾无条件触发 `MAJOR_DESYNC`；当前 Observe/Replay 只有在官方 CLOB token set 精确匹配时才生成两个唯一的等价 `TARGET_SELL` 并清理 projection，目标历史抽样的 72 次 MERGE 均有两条 prior asset，正式验证仍以逐 condition 官方 capture 为准。
@@ -25,7 +31,7 @@
 - Replay 曾记录 MERGE 却不生成在线等价退出，且非交易 Activity 页边界重复会执行两次；当前按时间交织并去重 Activity，与 Observe 使用同一归一价格和官方 outcome-set 规则。
 - BUY 原对称 `98%—102%` 下限会拒绝更低的改善价格；当前只设追高上限，低价改善允许成交。
 - 低价市场原 `2%` 上限可能小于两个 tick，导致自然 BUY 长期无法落入合法价格；当前取 `2%` 与 `2 tick` 较宽者并受 `0.95` 封顶。
-- Observe 原 15 秒统一轮询导致目标事件发现慢；当前事件 3 秒、状态 15 秒，新事件立即强制状态核对。
+- Observe 原 15 秒统一轮询导致目标事件发现慢；当前 Polygon 1 秒、Data API 3 秒、状态 15 秒，新事件立即强制状态核对。
 - 单个 WAITING BUY 曾在未变化盘口下高频生成重复 attempt，造成 API、数据库和报告噪声；当前 WebSocket/15 秒控制重试，且相同盘口+fee 不重复写完整 attempt。
 - Paper 等待原因曾合并为 `PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY`；当前按无卖盘、超限、零可执行流动性拆分。
 - 新增 WebSocket/test 文件若未进入 verification 清单会触发 `PAPER_VERIFICATION_TEST_FILE_SET_MISMATCH`；已把运行文件纳入 core hash、测试纳入 verification suite，旧 Campaign 不会误续。

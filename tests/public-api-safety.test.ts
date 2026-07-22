@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PolymarketPublicApi } from "../src/adapters/polymarket-public.js";
 import { parseClobMarket, parsePublicActivity } from "../src/adapters/public-api-schema.js";
+import { ORDER_FILLED_TOPIC, POLYMARKET_CTF_EXCHANGES } from "../src/adapters/polygon-order-filled.js";
 
 describe("Polymarket public API safety", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -58,6 +59,74 @@ describe("Polymarket public API safety", () => {
       method: "eth_getTransactionReceipt",
       params: [transactionHash],
     }]);
+  });
+
+  it("uses read-only Polygon log methods and the public market-by-token resolver", async () => {
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      requests.push({ url, body });
+      if (url.includes("markets-by-token")) {
+        return new Response(JSON.stringify({
+          condition_id: `0x${"2".repeat(64)}`,
+          primary_token_id: "123",
+          secondary_token_id: "456",
+        }), { status: 200 });
+      }
+      if (body?.method === "eth_blockNumber") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 10, result: "0x65" }), { status: 200 });
+      }
+      if (body?.method === "eth_getBlockByNumber") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: 12,
+          result: {
+            number: "0x65",
+            hash: `0x${"3".repeat(64)}`,
+            parentHash: `0x${"4".repeat(64)}`,
+            timestamp: "0x66",
+          },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 11, result: [] }), { status: 200 });
+    }));
+    const api = new PolymarketPublicApi({ maxRetries: 0 });
+
+    await expect(api.polygonBlockNumber()).resolves.toMatchObject({ data: { result: "0x65" } });
+    await expect(api.polygonBlock("0x65")).resolves.toMatchObject({ data: { result: { number: "0x65" } } });
+    await expect(api.polygonOrderFilledLogs(
+      POLYMARKET_CTF_EXCHANGES[0],
+      wallet,
+      "0x64",
+      "0x65",
+    )).resolves.toMatchObject({ data: { result: [] } });
+    await expect(api.clobMarketByToken("123")).resolves.toMatchObject({
+      data: { primary_token_id: "123", secondary_token_id: "456" },
+    });
+
+    expect(requests[2]?.body).toEqual({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "eth_getLogs",
+      params: [{
+        address: POLYMARKET_CTF_EXCHANGES[0],
+        fromBlock: "0x64",
+        toBlock: "0x65",
+        topics: [
+          ORDER_FILLED_TOPIC,
+          null,
+          `0x${wallet.slice(2).padStart(64, "0")}`,
+        ],
+      }],
+    });
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://polygon.drpc.org",
+      "https://polygon.drpc.org",
+      "https://polygon.drpc.org",
+      "https://clob.polymarket.com/markets-by-token/123",
+    ]);
   });
 
   it("rejects ambiguous or stringly-typed market resolution evidence", () => {

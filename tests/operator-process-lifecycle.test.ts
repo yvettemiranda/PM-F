@@ -38,6 +38,27 @@ afterEach(() => {
 });
 
 describe("operator worker lifecycle", () => {
+  it("flushes campaign output before forcing an otherwise-leaking worker to exit", async () => {
+    const fixture = join(projectRoot, "tests/fixtures/process-exit-after-flush.ts");
+    const child = spawn(process.execPath, ["--import", "tsx", fixture], {
+      cwd: projectRoot,
+      stdio: "pipe",
+    });
+    childProcesses.push(child);
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    expect(await waitForExit(child)).toBe(7);
+    expect(stdout).toContain("CAMPAIGN_FINALIZED\n");
+    expect(stderr).toContain("CAMPAIGN_STDERR_FLUSHED\n");
+  }, 10_000);
+
   it("tracks and terminates the actual TypeScript worker process", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-lifecycle-"));
     temporaryDirectories.push(directory);

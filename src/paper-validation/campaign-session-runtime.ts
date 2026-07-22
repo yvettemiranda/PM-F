@@ -53,7 +53,7 @@ export function buildObserveChildSpec(input: {
     args: [
       input.binding.targetWallet,
       "--duration-seconds=0",
-      "--poll-seconds=3",
+      "--poll-seconds=1",
       "--reconciliation-seconds=15",
       `--minimum-soak-seconds=${input.minimumSoakSeconds}`,
       `--result-file=${input.resultFile}`,

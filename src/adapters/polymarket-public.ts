@@ -3,6 +3,7 @@ import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from 
 import { stableJson } from "../domain/versioning.js";
 import {
   parseClobMarket,
+  parseClobMarketByToken,
   parseClobMarketInfo,
   parseClobOrderbook,
   parseClobTime,
@@ -14,6 +15,16 @@ import {
   parseRelayerDeployment,
   parseRpcResponse,
 } from "./public-api-schema.js";
+import {
+  ORDER_FILLED_TOPIC,
+  POLYMARKET_CTF_EXCHANGES,
+  parsePolygonBlockNumberResponse,
+  parsePolygonBlockResponse,
+  parsePolygonLogsResponse,
+  type PolygonBlockNumberResponse,
+  type PolygonBlockResponse,
+  type PolygonLogsResponse,
+} from "./polygon-order-filled.js";
 import {
   parsePolygonTransactionReceiptResponse,
   type PolygonTransactionReceiptResponse,
@@ -73,6 +84,12 @@ export interface ClobMarketInfo {
   mos: number;
 }
 
+export interface ClobMarketByToken {
+  condition_id: string;
+  primary_token_id: string;
+  secondary_token_id: string;
+}
+
 export interface PublicApiOptions {
   timeoutMs?: number;
   maxRetries?: number;
@@ -82,10 +99,17 @@ export interface PublicApiOptions {
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const QUANTITY_RE = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 
 function assertAddress(address: string): string {
   if (!ADDRESS_RE.test(address)) throw new Error(`INVALID_WALLET_ADDRESS:${address}`);
   return address.toLowerCase();
+}
+
+function assertQuantity(value: string, name: string): string {
+  const normalized = value.toLowerCase();
+  if (!QUANTITY_RE.test(normalized)) throw new Error(`INVALID_${name.toUpperCase()}:${value}`);
+  return normalized;
 }
 
 function assertPageLimit(name: string, value: number, maximum: number): number {
@@ -391,6 +415,74 @@ export class PolymarketPublicApi {
 
   async clobMarketInfo(conditionId: string, signal?: AbortSignal): Promise<ApiCapture<ClobMarketInfo>> {
     return this.request(`https://clob.polymarket.com/clob-markets/${encodeURIComponent(conditionId)}`, undefined, parseClobMarketInfo, signal);
+  }
+
+  async clobMarketByToken(tokenId: string, signal?: AbortSignal): Promise<ApiCapture<ClobMarketByToken>> {
+    if (!/^\d+$/.test(tokenId)) throw new Error(`INVALID_TOKEN_ID:${tokenId}`);
+    return this.request(
+      `https://clob.polymarket.com/markets-by-token/${encodeURIComponent(tokenId)}`,
+      undefined,
+      parseClobMarketByToken,
+      signal,
+    );
+  }
+
+  async polygonBlockNumber(signal?: AbortSignal): Promise<ApiCapture<PolygonBlockNumberResponse>> {
+    return this.request(this.polygonRpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "eth_blockNumber", params: [] }),
+    }, parsePolygonBlockNumberResponse, signal);
+  }
+
+  async polygonBlock(
+    blockNumber: string,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<PolygonBlockResponse>> {
+    const normalized = assertQuantity(blockNumber, "polygon_block_number");
+    return this.request(this.polygonRpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 12,
+        method: "eth_getBlockByNumber",
+        params: [normalized, false],
+      }),
+    }, parsePolygonBlockResponse, signal);
+  }
+
+  async polygonOrderFilledLogs(
+    exchangeAddress: string,
+    makerAddress: string,
+    fromBlock: string,
+    toBlock: string,
+    signal?: AbortSignal,
+  ): Promise<ApiCapture<PolygonLogsResponse>> {
+    const exchange = assertAddress(exchangeAddress);
+    if (!POLYMARKET_CTF_EXCHANGES.includes(exchange as typeof POLYMARKET_CTF_EXCHANGES[number])) {
+      throw new Error(`INVALID_POLYMARKET_EXCHANGE:${exchangeAddress}`);
+    }
+    const maker = assertAddress(makerAddress);
+    const from = assertQuantity(fromBlock, "polygon_from_block");
+    const to = assertQuantity(toBlock, "polygon_to_block");
+    if (BigInt(from) > BigInt(to)) throw new Error(`INVALID_POLYGON_BLOCK_RANGE:${from}:${to}`);
+    const makerTopic = `0x${maker.slice(2).padStart(64, "0")}`;
+    return this.request(this.polygonRpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 11,
+        method: "eth_getLogs",
+        params: [{
+          address: exchange,
+          fromBlock: from,
+          toBlock: to,
+          topics: [ORDER_FILLED_TOPIC, null, makerTopic],
+        }],
+      }),
+    }, parsePolygonLogsResponse, signal);
   }
 
   async contractCode(address: string): Promise<ApiCapture<{ jsonrpc: string; id: number; result?: string; error?: unknown }>> {

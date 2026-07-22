@@ -11,6 +11,10 @@ import type { SourceVersion } from "../src/infra/source-version.js";
 import { ObserveOnlyRunner } from "../src/observe/observe-runner.js";
 import { PublicObserveDataSource } from "../src/observe/public-data-source.js";
 import { ObserveStore } from "../src/observe/observe-store.js";
+import {
+  PolygonOrderFilledFeedUnsafeError,
+  type PolygonOrderFilledTradeFeed,
+} from "../src/observe/polygon-order-filled-trade-feed.js";
 import type { ObserveDataSource, ObservePollSnapshot } from "../src/observe/types.js";
 import {
   NEGATIVE_RISK_ADAPTER_ADDRESS,
@@ -294,6 +298,10 @@ describe("ObserveOnlyRunner", () => {
     await runner.pollOnce();
     now = new Date("2026-07-08T00:01:10.000Z");
     await runner.pollOnce();
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 1,
+    });
     now = new Date("2026-07-08T00:01:20.000Z");
     await runner.pollOnce();
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
@@ -305,6 +313,142 @@ describe("ObserveOnlyRunner", () => {
     const check = new DatabaseSync(databasePath, { readOnly: true });
     expect((check.prepare("SELECT count(*) count FROM observe_events").get() as { count: number }).count).toBe(1);
     expect((check.prepare("SELECT count(*) count FROM observe_signal_emissions").get() as { count: number }).count).toBe(1);
+    check.close();
+  });
+
+  it("publishes a Polygon-confirmed BUY while Data API is delayed and does not duplicate its later confirmation", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({
+      transactionHash: "0xpolygon-fast-buy",
+      timestamp: baselineSecond + 70,
+    });
+    const initial = snapshot([], [], now.toISOString());
+    const chainFirst = snapshot([], [position("10")], "2026-07-08T00:01:10.000Z");
+    chainFirst.polygonOrderFilled = {
+      status: "AVAILABLE",
+      confirmedHead: "0x65",
+      fromBlock: "0x65",
+      toBlock: "0x65",
+      trades: [buy],
+      capture: capture("polygon-order-filled", {
+        evidenceVersion: "v1.0.0",
+        walletAddress: wallet,
+        confirmationDepth: 2,
+        fromBlock: "0x65",
+        toBlock: "0x65",
+        confirmedHead: "0x65",
+        logs: [],
+        blockHeaders: [],
+        marketBindings: [],
+        trades: [buy],
+      }, "2026-07-08T00:01:10.000Z"),
+    };
+    const apiConfirmation = snapshot([buy], [position("10")], "2026-07-08T00:01:20.000Z");
+    const source = new QueueSource([initial, chainFirst, apiConfirmation]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 1,
+    });
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 3,
+      processedEvents: 1,
+      emittedSignals: 1,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT r.source_type,o.activity_confirmed
+       FROM raw_events r JOIN observe_events o USING(source_event_key)`,
+    ).all()).toEqual([{ source_type: "POLYGON_ORDER_FILLED", activity_confirmed: 1 }]);
+    expect((check.prepare(
+      "SELECT count(*) count FROM signals WHERE producer_mode='OBSERVE_ONLY'",
+    ).get() as { count: number }).count).toBe(1);
+    check.close();
+  });
+
+  it("fails closed before a mismatched Data API row can duplicate a Polygon-confirmed trade", async () => {
+    const { databasePath, targetId } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const chainBuy = trade({
+      transactionHash: "0xpolygon-cross-source-mismatch",
+      price: "0.5",
+      timestamp: baselineSecond + 70,
+    });
+    const chainSnapshot = snapshot([], [position("10")], "2026-07-08T00:01:10.000Z");
+    chainSnapshot.polygonOrderFilled = {
+      status: "AVAILABLE",
+      confirmedHead: "0x65",
+      fromBlock: "0x65",
+      toBlock: "0x65",
+      trades: [chainBuy],
+      capture: null,
+    };
+    const mismatchedApi = snapshot([
+      { ...chainBuy, price: "0.51" },
+    ], [position("10")], "2026-07-08T00:01:20.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      chainSnapshot,
+      mismatchedApi,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await expect(runner.pollOnce()).rejects.toThrow("POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM signals WHERE producer_mode='OBSERVE_ONLY'",
+    ).get() as { count: number }).count).toBe(1);
+    expect(check.prepare("SELECT sync_status FROM monitor_targets WHERE target_id=?").get(targetId))
+      .toEqual({ sync_status: "MAJOR_DESYNC" });
+    check.close();
+  });
+
+  it("fails the Observe run and marks major desync on a confirmed Polygon reorg", async () => {
+    const { databasePath, targetId } = setup([]);
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      new PolygonOrderFilledFeedUnsafeError("POLYGON_TRADE_FEED_CONFIRMED_REORG:0x65"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await expect(runner.pollOnce()).rejects.toThrow("POLYGON_TRADE_FEED_CONFIRMED_REORG");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT sync_status FROM monitor_targets WHERE target_id=?").get(targetId))
+      .toEqual({ sync_status: "MAJOR_DESYNC" });
+    expect(check.prepare("SELECT state,stop_reason FROM observe_runs ORDER BY started_at DESC LIMIT 1").get())
+      .toEqual({ state: "FAILED", stop_reason: "POLYGON_TRADE_FEED_UNSAFE" });
     check.close();
   });
 
@@ -494,7 +638,10 @@ describe("ObserveOnlyRunner", () => {
           now.toISOString(),
         ),
       };
-      const delegate = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+      const delegate = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+        now: () => now,
+        polygonTradeFeed: null,
+      });
       const source: ObserveDataSource = delegate;
       const store = new ObserveStore(databasePath, sourceVersion);
       const runner = new ObserveOnlyRunner(store, source, {
@@ -559,6 +706,69 @@ describe("ObserveOnlyRunner", () => {
       processedEvents: 2,
       emittedSignals: 1,
       finalSyncStatus: "SYNCED",
+    });
+  });
+
+  it("polls Polygon every second while limiting Data API event reads to one per three seconds", async () => {
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    let tradeReads = 0;
+    let activityReads = 0;
+    let polygonReads = 0;
+    const paged = <T>(endpoint: string, rows: T[]) => ({
+      rows,
+      captures: [capture(endpoint, rows, now.toISOString())],
+      boundaryOverlapRows: [],
+      historyComplete: true,
+      stopReason: "END_OF_DATA",
+    });
+    const api = {
+      recentTrades: async () => {
+        tradeReads += 1;
+        return capture<PublicTrade[]>("trades", [], now.toISOString());
+      },
+      activitySince: async () => {
+        activityReads += 1;
+        return paged<PublicActivity>("activity", []);
+      },
+      allPositions: async () => ({
+        ...paged<PublicPosition>("positions", []),
+        merged: capture<PublicPosition[]>("positions", [], now.toISOString()),
+      }),
+      pUsdBalance: async () => capture(
+        "balance",
+        { jsonrpc: "2.0", id: 2, result: "0x0" },
+        now.toISOString(),
+      ),
+    };
+    const polygonTradeFeed = {
+      async poll() {
+        polygonReads += 1;
+        return {
+          status: polygonReads === 1 ? "INITIALIZING" as const : "AVAILABLE" as const,
+          confirmedHead: "0x65",
+          fromBlock: null,
+          toBlock: null,
+          trades: [],
+          capture: null,
+        };
+      },
+    };
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+      eventIntervalMs: 3_000,
+      reconciliationIntervalMs: 15_000,
+      now: () => now,
+      polygonTradeFeed: polygonTradeFeed as unknown as PolygonOrderFilledTradeFeed,
+    });
+
+    for (const elapsed of [0, 1_000, 2_000, 3_000]) {
+      now = new Date(Date.parse("2026-07-08T00:01:00.000Z") + elapsed);
+      await source.poll(wallet, undefined, baselineSecond);
+    }
+
+    expect({ polygonReads, tradeReads, activityReads }).toEqual({
+      polygonReads: 4,
+      tradeReads: 2,
+      activityReads: 2,
     });
   });
 

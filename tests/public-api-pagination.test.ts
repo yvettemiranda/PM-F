@@ -202,6 +202,7 @@ describe("Polymarket public API pagination", () => {
 
   it("accepts a full trade head only when it overlaps the recovered cursor", async () => {
     const fetchedAt = "2026-07-13T00:00:00.000Z";
+    let nowMs = Date.parse(fetchedAt);
     const wallet = "0x0000000000000000000000000000000000000001";
     const trade = (index: number) => ({
       proxyWallet: wallet,
@@ -240,8 +241,12 @@ describe("Polymarket public API pagination", () => {
         data: { jsonrpc: "2.0", id: 2, result: "0x0" },
       }),
     };
-    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+      now: () => new Date(nowMs),
+      polygonTradeFeed: null,
+    });
     await expect(source.poll(wallet, 1_700_000_999)).resolves.toBeDefined();
+    nowMs += 3_000;
     await expect(source.poll(wallet, undefined, 1_699_999_900))
       .resolves.toMatchObject({ trades: { data: { length: 1_000 } } });
     expect(activityStarts).toEqual([1_700_000_999, 1_699_999_900]);
@@ -249,6 +254,7 @@ describe("Polymarket public API pagination", () => {
 
   it("uses a bounded trade head after recovery when it already overlaps the committed watermark", async () => {
     const fetchedAt = "2026-07-13T00:00:00.000Z";
+    let nowMs = Date.parse(fetchedAt);
     const wallet = "0x0000000000000000000000000000000000000001";
     const trade = (timestamp: number) => ({
       proxyWallet: wallet,
@@ -288,9 +294,13 @@ describe("Polymarket public API pagination", () => {
         data: { jsonrpc: "2.0", id: 2, result: "0x0" },
       }),
     };
-    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+      now: () => new Date(nowMs),
+      polygonTradeFeed: null,
+    });
 
     await source.poll(wallet, 1_700_000_000);
+    nowMs += 3_000;
     const normal = await source.poll(wallet, undefined, 1_699_999_900);
 
     expect(requestedTradeLimits).toEqual([100]);
@@ -300,6 +310,7 @@ describe("Polymarket public API pagination", () => {
 
   it("preserves the caller overlap window after recovery so delayed Activity remains visible", async () => {
     const fetchedAt = "2026-07-13T00:00:00.000Z";
+    let nowMs = Date.parse(fetchedAt);
     const wallet = "0x0000000000000000000000000000000000000001";
     const paged = <T>(url: string, rows: T[]) => ({
       rows,
@@ -333,16 +344,21 @@ describe("Polymarket public API pagination", () => {
         data: { jsonrpc: "2.0", id: 2, result: "0x0" },
       }),
     };
-    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi);
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+      now: () => new Date(nowMs),
+      polygonTradeFeed: null,
+    });
 
     await source.poll(wallet, 1_699_999_000);
+    nowMs += 3_000;
     await source.poll(wallet, undefined, 1_699_999_800);
+    nowMs += 3_000;
     await source.poll(wallet, undefined, 1_699_999_800);
 
     expect(activityStarts).toEqual([1_699_999_000, 1_699_999_800, 1_699_999_800]);
   });
 
-  it("polls wallet events every cycle but refreshes reconciliation state every fifteen seconds", async () => {
+  it("polls Data API events every three seconds and reconciliation state every fifteen seconds", async () => {
     const wallet = "0x0000000000000000000000000000000000000001";
     let nowMs = Date.parse("2026-07-13T00:00:00.000Z");
     let tradeCalls = 0;
@@ -400,6 +416,7 @@ describe("Polymarket public API pagination", () => {
     };
     const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
       reconciliationIntervalMs: 15_000,
+      polygonTradeFeed: null,
       now: () => new Date(nowMs),
     });
 

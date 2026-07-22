@@ -1,5 +1,5 @@
 import type { PublicActivity, PublicPosition, PublicProfile, PublicTrade } from "../domain/models.js";
-import type { ClobMarket, ClobMarketInfo, ClobOrderbook } from "./polymarket-public.js";
+import type { ClobMarket, ClobMarketByToken, ClobMarketInfo, ClobOrderbook } from "./polymarket-public.js";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -200,6 +200,15 @@ export function parseClobMarketInfo(value: unknown): ClobMarketInfo {
     optionalBoolean(fee.to, "marketInfo.fd.to");
   }
   return row as unknown as ClobMarketInfo;
+}
+
+export function parseClobMarketByToken(value: unknown): ClobMarketByToken {
+  const row = record(value, "marketByToken");
+  return {
+    condition_id: hash(row.condition_id, "marketByToken.condition_id").toLowerCase(),
+    primary_token_id: tokenId(row.primary_token_id, "marketByToken.primary_token_id"),
+    secondary_token_id: tokenId(row.secondary_token_id, "marketByToken.secondary_token_id"),
+  };
 }
 
 export function parseRpcResponse(value: unknown): { jsonrpc: string; id: number; result?: string; error?: unknown } {
