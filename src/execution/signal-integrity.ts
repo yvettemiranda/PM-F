@@ -30,6 +30,8 @@ interface SignalIntegrityRow {
   capital_sizing_ratio_hash: string | null;
   target_trade_timestamp: string;
   market_end_time: string;
+  market_end_time_status: "VERIFIED" | "UNAVAILABLE";
+  execution_deadline_at: string | null;
   market_metadata_snapshot_json: string;
   market_metadata_hash: string;
   context_ruleset_hash: string;
@@ -60,7 +62,7 @@ export function executionEnvelopeIntegrityError(
             s.source_code_dirty signal_source_code_dirty,s.capital_estimate_id,
             c.context_id,c.target_id context_target_id,c.signal_id context_signal_id,c.capital_decision_id,
             c.target_trade_capital_ratio_ppm,c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
-            c.target_trade_timestamp,c.market_end_time,
+            c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
             c.market_metadata_snapshot_json,c.market_metadata_hash,
             c.ruleset_hash context_ruleset_hash,c.source_code_commit context_source_code_commit,
             c.source_code_dirty context_source_code_dirty,c.config_version,c.created_at context_created_at
@@ -124,6 +126,8 @@ export function executionEnvelopeIntegrityError(
     && row.capital_sizing_ratio_hash === (context.capitalSizingRatioHash ?? null)
     && row.target_trade_timestamp === context.targetTradeTimestamp
     && row.market_end_time === context.marketEndTime
+    && row.market_end_time_status === (context.marketEndTimeStatus ?? "VERIFIED")
+    && row.execution_deadline_at === (context.executionDeadlineAt ?? null)
     && metadataMatches
     && metadataHashMatches
     && row.market_metadata_hash === context.marketMetadataHash

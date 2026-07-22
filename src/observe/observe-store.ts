@@ -63,6 +63,12 @@ export interface CommitPollInput {
   signalsToEmit: ObserveSignal[];
   capitalEstimate: CapitalEstimate;
   signalContexts: SignalContextBundle[];
+  signalEnrichmentFailures: Array<{
+    signalId: string;
+    sourceEventKey: string;
+    conditionId: string;
+    errorDetail: string;
+  }>;
   reconciliation: ReconciliationResult;
   replayState: string;
   gapRecovered: boolean;
@@ -310,6 +316,17 @@ export class ObserveStore {
     return existing;
   }
 
+  existingSignalIds(baselineRunId: string, signalIds: string[]): Set<string> {
+    if (signalIds.length === 0) return new Set();
+    const existing = new Set<string>();
+    const query = this.database.prepare(
+      `SELECT 1 FROM signals
+       WHERE baseline_run_id=? AND signal_id=? AND producer_mode='OBSERVE_ONLY'`,
+    );
+    for (const signalId of signalIds) if (query.get(baselineRunId, signalId)) existing.add(signalId);
+    return existing;
+  }
+
   latestReconciliationReport(observeRunId: string): ReconciliationHistoryReport | null {
     const row = this.database
       .prepare(
@@ -418,13 +435,15 @@ export class ObserveStore {
       this.database
         .prepare("UPDATE observe_runs SET failed_polls=failed_polls+1,last_heartbeat_at=? WHERE observe_run_id=?")
         .run(completedAt, observeRunId);
-      const openWindow = this.database
-        .prepare("SELECT window_id FROM connection_windows WHERE target_id=? AND reconnected_at IS NULL ORDER BY disconnected_at DESC LIMIT 1")
-        .get(run.target_id);
-      if (!openWindow) {
-        this.database
-          .prepare("INSERT INTO connection_windows(window_id,target_id,disconnected_at,status,reason) VALUES (?, ?, ?, 'DISCONNECTED', ?)")
-          .run(randomUUID(), run.target_id, startedAt, errorDetail);
+      if (status === "API_FAILED") {
+        const openWindow = this.database
+          .prepare("SELECT window_id FROM connection_windows WHERE target_id=? AND reconnected_at IS NULL ORDER BY disconnected_at DESC LIMIT 1")
+          .get(run.target_id);
+        if (!openWindow) {
+          this.database
+            .prepare("INSERT INTO connection_windows(window_id,target_id,disconnected_at,status,reason) VALUES (?, ?, ?, 'DISCONNECTED', ?)")
+            .run(randomUUID(), run.target_id, startedAt, errorDetail);
+        }
       }
       this.database.exec("COMMIT");
     } catch (failure) {
@@ -444,8 +463,9 @@ export class ObserveStore {
           `INSERT INTO observe_polls(
             poll_id,observe_run_id,sequence,status,started_at,completed_at,
             trades_received,activity_received,positions_received,new_events,
-            duplicate_events,signals_emitted,gap_events,reconciliation_count,checkpoint_id
-          ) VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+            duplicate_events,signals_emitted,gap_events,reconciliation_count,checkpoint_id,
+            signal_enrichment_failures,warning_detail
+          ) VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(
           pollId,
@@ -461,6 +481,10 @@ export class ObserveStore {
           input.signalsToEmit.length,
           input.newEvents.filter((event) => event.isGap).length,
           checkpointId,
+          input.signalEnrichmentFailures.length,
+          input.signalEnrichmentFailures.length > 0
+            ? stableJson(input.signalEnrichmentFailures)
+            : null,
         );
       this.savePollCaptures(pollId, input.snapshot);
       for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
@@ -1065,7 +1089,7 @@ export class ObserveStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        createHash("sha256").update(`${input.baseline.baselineRunId}|${signal.sourceEventKey}`).digest("hex"),
+        createHash("sha256").update(`${input.baseline.baselineRunId}|${signal.signalId}`).digest("hex"),
         input.baseline.baselineRunId,
         input.observeRunId,
         pollId,
@@ -1118,10 +1142,11 @@ export class ObserveStore {
         `INSERT INTO signal_execution_contexts(
           context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
           capital_sizing_ratio_json,capital_sizing_ratio_hash,
-          target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
+          target_trade_timestamp,market_end_time,market_end_time_status,execution_deadline_at,
+          market_metadata_snapshot_json,
           market_metadata_hash,ruleset_hash,schema_version,signal_version,
           strategy_version,source_code_commit,source_code_dirty,config_version,created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         bundle.context.contextId,
@@ -1133,6 +1158,8 @@ export class ObserveStore {
         bundle.context.capitalSizingRatioHash ?? null,
         bundle.context.targetTradeTimestamp,
         bundle.context.marketEndTime,
+        bundle.context.marketEndTimeStatus ?? "VERIFIED",
+        bundle.context.executionDeadlineAt ?? null,
         JSON.stringify(bundle.context.marketMetadataSnapshot),
         bundle.context.marketMetadataHash,
         bundle.context.rulesetHash,

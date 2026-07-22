@@ -53,6 +53,8 @@ export const EXECUTOR_REQUIRED_CONTEXT_FIELDS = [
   "capitalSizingRatioHash",
   "targetTradeTimestamp",
   "marketEndTime",
+  "marketEndTimeStatus",
+  "executionDeadlineAt",
   "marketMetadataSnapshot",
   "rulesetHash",
   "sourceCodeCommit",

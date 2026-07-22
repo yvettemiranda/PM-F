@@ -44,6 +44,7 @@ export interface ObserveSignal {
   eventClassification: EventClassification;
   executionEligible: boolean;
   executionBlockReason: string | null;
+  requiredMarketOutcomeAssets?: string[];
 }
 
 export interface ObserveProjectionEntry {
@@ -57,6 +58,7 @@ export interface ObserveProjectionEntry {
 export interface ObserveProjectionResult {
   signals: ObserveSignal[];
   projection: ObserveProjectionEntry[];
+  unsupportedActivities: UnsupportedTargetActivity[];
   projectionHash: string;
   lastProcessedTimestamp: number | null;
   lastProcessedEventId: string | null;

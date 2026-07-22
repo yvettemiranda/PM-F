@@ -18,6 +18,7 @@ import {
 import { resolvedSourceEventTradeMap } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { collectTradeMultiplicityEvidence } from "../services/trade-multiplicity-evidence.js";
+import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
 
 const address = process.argv.slice(2).find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
 if (!address || !/^0x[a-f0-9]{40}$/.test(address)) {
@@ -45,6 +46,16 @@ const activityPaginationBoundaryOverlaps = activity.boundaryOverlapRows.flatMap(
   const trade = activityAsTrade(item);
   return trade ? [trade] : [];
 });
+const mergeConditionIds = [...new Set(activity.rows
+  .filter((item) => item.type === "MERGE" && item.conditionId)
+  .map((item) => item.conditionId!.toLowerCase()))].sort();
+const mergeMarkets = await Promise.all(mergeConditionIds.map((conditionId) => api.clobMarket(conditionId)));
+const verifiedMarketOutcomeAssetsByCondition = Object.fromEntries(
+  mergeMarkets.map((capture) => [
+    capture.data.condition_id.toLowerCase(),
+    verifiedBinaryMarketOutcomeAssets(capture.data, capture.data.condition_id),
+  ]),
+);
 const tradeMultiplicityEvidence = await collectTradeMultiplicityEvidence({
   walletAddress: address,
   trades: trades.rows,
@@ -79,6 +90,7 @@ const contractCaptures: ApiCapture<unknown>[] = [
   ...trades.captures,
   ...activity.captures,
   ...tradeMultiplicityEvidence.receiptCaptures,
+  ...mergeMarkets,
   ...(safe ? [safe] : []),
   ...(wallet ? [wallet] : []),
 ];
@@ -135,6 +147,12 @@ const manifestSources: CaptureManifestSource[] = [
     capture,
     paginationStatus: "NOT_PAGED",
   })),
+  ...mergeMarkets.map((capture, pageIndex): CaptureManifestSource => ({
+    endpoint: "clob-market",
+    capture,
+    pageIndex,
+    paginationStatus: "NOT_PAGED",
+  })),
   ...(tradeMultiplicityEvidence.proofCapture
     ? [{
       endpoint: "derived-trade-multiplicity-evidence",
@@ -171,6 +189,7 @@ const captures: Array<[string, ApiCapture<unknown>]> = [
   ...tradeMultiplicityEvidence.receiptCaptures.map(
     (capture): [string, ApiCapture<unknown>] => ["polygon-transaction-receipt", capture],
   ),
+  ...mergeMarkets.map((capture): [string, ApiCapture<unknown>] => ["clob-market", capture]),
   ...positionHistory.captures.map((capture): [string, ApiCapture<unknown>] => ["data-positions", capture]),
 ];
 if (tradeMultiplicityEvidence.proofCapture) {
@@ -226,6 +245,7 @@ try {
     tradePaginationBoundaryOverlaps: trades.boundaryOverlapRows,
     activityPaginationBoundaryOverlaps,
     confirmedTradeOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
+    verifiedMarketOutcomeAssetsByCondition,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });

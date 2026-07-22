@@ -205,17 +205,25 @@ class FakeMarketData implements PaperMarketDataProvider {
     };
   }
 
-  async orderbook(_assetId?: string, _conditionId?: string, _signal?: AbortSignal): Promise<PaperOrderbookSnapshot> {
+  async orderbook(requestedAssetId = assetId, requestedConditionId = conditionId, _signal?: AbortSignal): Promise<PaperOrderbookSnapshot> {
     this.orderbookCalls += 1;
     this.beforeOrderbook?.();
     if (this.orderbookError) throw this.orderbookError;
-    return this.book;
+    return requestedAssetId !== assetId && this.book.assetId === assetId
+      ? { ...this.book, assetId: requestedAssetId, conditionId: requestedConditionId }
+      : this.book;
   }
 
-  async fee(): Promise<PaperFeeSnapshot> {
+  async fee(requestedAssetId = assetId): Promise<PaperFeeSnapshot> {
     this.feeCalls += 1;
     this.beforeFee?.();
-    return { ...this.feeSnapshot, snapshotTime: this.clock().toISOString() };
+    return {
+      ...this.feeSnapshot,
+      assetId: requestedAssetId !== assetId && this.feeSnapshot.assetId === assetId
+        ? requestedAssetId
+        : this.feeSnapshot.assetId,
+      snapshotTime: this.clock().toISOString(),
+    };
   }
 
   async resolution(): Promise<PaperResolutionSnapshot> {
@@ -268,10 +276,13 @@ function insertSignal(input: {
   signalId: string;
   createdAt: string;
   signalType?: "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION";
+  assetId?: string;
+  conditionId?: string;
+  reason?: string;
   status?: string;
   executionEligible?: boolean;
   executionBlockReason?: string;
-  eventClassification?: "STANDARD_TRADE" | "NEGATIVE_RISK_CONVERSION";
+  eventClassification?: "STANDARD_TRADE" | "COMBO_ACTIVITY" | "NEGATIVE_RISK_CONVERSION";
   confidence?: CapitalConfidence;
   capitalStatus?: CapitalEstimateStatus;
   ratioPpm?: string | null;
@@ -280,6 +291,8 @@ function insertSignal(input: {
   sellDenominator?: string | null;
   targetPriceUnits?: string;
   marketEndTime?: string;
+  marketEndTimeStatus?: "VERIFIED" | "UNAVAILABLE";
+  executionDeadlineAt?: string | null;
   ruleset?: TestRuleset;
   exactSizing?: {
     targetPriceUnits: string;
@@ -295,7 +308,9 @@ function insertSignal(input: {
   const rulesetHash = input.ruleset?.hash ?? RULESET_HASH;
   const rulesetSnapshotJson = input.ruleset?.snapshotJson ?? RULESET_SNAPSHOT_JSON;
   const configVersion = input.ruleset?.configVersion ?? VERSIONS.configVersion;
-  const metadataJson = stableJson({ tokens: [{ token_id: assetId, outcome: "Yes" }] });
+  const signalAssetId = input.assetId ?? assetId;
+  const signalConditionId = input.conditionId ?? conditionId;
+  const metadataJson = stableJson({ tokens: [{ token_id: signalAssetId, outcome: "Yes" }] });
   const metadataHash = createHash("sha256").update(metadataJson).digest("hex");
   const exactRatio = input.exactSizing ? buildExactCapitalRatio(input.exactSizing) : null;
   const exactRatioJson = exactRatio ? stableJson(exactRatio) : null;
@@ -308,7 +323,7 @@ function insertSignal(input: {
       source_timestamp,asset_id,condition_id,side,price_units,size_micros,gap_event,
       is_combo,raw_json,created_at,event_classification
     ) VALUES (?, ?, 'test', 'DATA_API_TRADE', ?, ?, ?, ?, ?, ?, ?, 0, 0, '{}', ?, 'STANDARD_TRADE')`,
-  ).run(sourceKey, input.targetId, `tx-${input.signalId}`, Math.floor(Date.parse(input.createdAt) / 1_000), assetId, conditionId, input.signalType === "TARGET_SELL" ? "SELL" : "BUY", targetPriceUnits, targetSizeMicros, input.createdAt);
+  ).run(sourceKey, input.targetId, `tx-${input.signalId}`, Math.floor(Date.parse(input.createdAt) / 1_000), signalAssetId, signalConditionId, input.signalType === "TARGET_SELL" ? "SELL" : "BUY", targetPriceUnits, targetSizeMicros, input.createdAt);
   if (capitalId) {
     db.prepare(
       `INSERT INTO capital_estimates(
@@ -352,7 +367,7 @@ function insertSignal(input: {
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OBSERVE_ONLY')`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
     input.targetId,
@@ -360,12 +375,13 @@ function insertSignal(input: {
     sourceKey,
     input.signalType ?? "TARGET_BUY",
     input.status ?? "PUBLISHED",
-    assetId,
-    conditionId,
+    signalAssetId,
+    signalConditionId,
     targetPriceUnits,
     targetSizeMicros,
     input.sellNumerator ?? null,
     input.sellDenominator ?? null,
+    input.reason ?? "TEST",
     VERSIONS.schemaVersion,
     VERSIONS.signalVersion,
     VERSIONS.strategyVersion,
@@ -384,10 +400,11 @@ function insertSignal(input: {
     `INSERT INTO signal_execution_contexts(
       context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
       capital_sizing_ratio_json,capital_sizing_ratio_hash,
-      target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
+      target_trade_timestamp,market_end_time,market_end_time_status,execution_deadline_at,
+      market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
     input.targetId,
@@ -398,6 +415,8 @@ function insertSignal(input: {
     input.signalType === "TARGET_SELL" ? null : exactRatioHash,
     input.createdAt,
     input.marketEndTime ?? new Date(Date.parse(input.createdAt) + 60 * 60 * 1_000).toISOString(),
+    input.marketEndTimeStatus ?? "VERIFIED",
+    input.executionDeadlineAt ?? null,
     metadataJson,
     metadataHash,
     rulesetHash,
@@ -518,7 +537,8 @@ function loadPaperSignal(databasePath: string, signalId: string) {
             s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
             s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
             c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
-            c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
+            c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
+            c.market_metadata_snapshot_json,
             c.market_metadata_hash,c.ruleset_hash,c.source_code_commit,
             c.source_code_dirty,c.config_version,c.created_at context_created_at,
             ce.capital_estimate_status,ce.capital_confidence,
@@ -537,6 +557,8 @@ function loadPaperSignal(databasePath: string, signalId: string) {
     targetTradeCapitalRatioPpm: row.target_trade_capital_ratio_ppm as string | null,
     targetTradeTimestamp: row.target_trade_timestamp as string,
     marketEndTime: row.market_end_time as string,
+    marketEndTimeStatus: row.market_end_time_status as "VERIFIED" | "UNAVAILABLE",
+    executionDeadlineAt: row.execution_deadline_at as string | null,
     marketMetadataSnapshot: JSON.parse(row.market_metadata_snapshot_json as string),
     marketMetadataHash: row.market_metadata_hash as string,
     rulesetHash: row.ruleset_hash as string,
@@ -608,6 +630,36 @@ describe("PaperExecutor", () => {
     const executionId = await env.executor.consumeSignal(env.accountId, "buy-two-ticks-above-target");
 
     expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("executes a BUY with an unavailable market end using its immutable bounded deadline", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.5", size: "1000" }],
+      [{ price: "0.49", size: "1000" }],
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-without-market-end",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      marketEndTime: "",
+      marketEndTimeStatus: "UNAVAILABLE",
+      executionDeadlineAt: "2026-07-08T00:30:01.000Z",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-without-market-end");
+
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT state,reason FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({ state: "EXECUTED", reason: "FAK_FILLED" });
+    expect(env.executor.settlementCandidates(env.accountId)).toEqual([]);
+    expect(database.prepare(
+      "SELECT deadline_at FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({ deadline_at: "2026-07-08T00:30:01.000Z" });
+    database.close();
     env.executor.close();
   });
 
@@ -1533,6 +1585,71 @@ describe("PaperExecutor", () => {
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const sizes = (db.prepare("SELECT current_size_micros FROM paper_positions ORDER BY created_at,paper_position_id").all() as Array<{ current_size_micros: string }>).map((row) => row.current_size_micros);
     expect(sizes.sort()).toEqual(["100000000", "90000000"].sort());
+    db.close();
+    env.executor.close();
+  });
+
+  it("executes both equivalent exit legs produced by a target MERGE", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "merge-open-yes",
+      assetId: "asset-yes",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "merge-open-no",
+      assetId: "asset-no",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "merge-open-yes");
+    await env.executor.consumeSignal(env.accountId, "merge-open-no");
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "merge-exit-yes",
+      signalType: "TARGET_SELL",
+      assetId: "asset-yes",
+      createdAt: "2026-07-08T00:00:03.000Z",
+      targetPriceUnits: "444444444444444444",
+      sellNumerator: "1",
+      sellDenominator: "1",
+      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+      eventClassification: "COMBO_ACTIVITY",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "merge-exit-no",
+      signalType: "TARGET_SELL",
+      assetId: "asset-no",
+      createdAt: "2026-07-08T00:00:04.000Z",
+      targetPriceUnits: "555555555555555556",
+      sellNumerator: "1",
+      sellDenominator: "1",
+      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+      eventClassification: "COMBO_ACTIVITY",
+    });
+    env.setClock(new Date("2026-07-08T00:00:05.000Z"));
+    env.market.book = env.market.makeBook([], [{ price: "0.6", size: "10000" }]);
+
+    const executions = await env.executor.consumeAvailableSignals(env.accountId);
+
+    expect(executions).toHaveLength(2);
+    expect(executions.map((executionId) => env.executor.executionState(executionId)))
+      .toEqual(["EXECUTED", "EXECUTED"]);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT count(*) count FROM paper_positions
+       WHERE paper_account_id=? AND CAST(current_size_micros AS INTEGER)>0`,
+    ).get(env.accountId)).toEqual({ count: 0 });
+    expect(db.prepare(
+      `SELECT count(*) count FROM paper_executions
+       WHERE paper_account_id=? AND execution_type='TARGET_SELL' AND reason='SELL_COMPLETED'`,
+    ).get(env.accountId)).toEqual({ count: 2 });
     db.close();
     env.executor.close();
   });
@@ -2534,6 +2651,8 @@ describe("PaperExecutor", () => {
       capitalSizingRatioHash: "capital_sizing_ratio_hash",
       targetTradeTimestamp: "target_trade_timestamp",
       marketEndTime: "market_end_time",
+      marketEndTimeStatus: "market_end_time_status",
+      executionDeadlineAt: "execution_deadline_at",
       marketMetadataSnapshot: "market_metadata_snapshot_json",
       rulesetHash: "ruleset_hash",
       sourceCodeCommit: "source_code_commit",

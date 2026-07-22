@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PublicTrade } from "../src/domain/models.js";
+import { activityEventKey } from "../src/domain/idempotency.js";
 import { ReplayEngine } from "../src/replay/replay-engine.js";
 
 const wallet = "0x0000000000000000000000000000000000000001";
+const verifiedMergeOutcomeAssets = { "0xcondition": ["asset-no", "asset-yes"] } as const;
 const trade = (overrides: Partial<PublicTrade>): PublicTrade => ({
   proxyWallet: wallet,
   transactionHash: "0x1",
@@ -273,6 +275,219 @@ describe("ReplayEngine", () => {
     expect(sell?.sellRatioNumerator).toBe("30000000");
     expect(sell?.sellRatioDenominator).toBe("100000000");
     expect(report.metrics.finalRecognizedPositions["asset-1"]).toBe("70000000");
+  });
+
+  it("replays a complete-set MERGE as two proportional equivalent exits", () => {
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xmerge-yes", asset: "asset-yes", price: "0.4", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xmerge-no", asset: "asset-no", price: "0.5", size: "10", timestamp: 101 }),
+      ],
+      activity: [{
+        proxyWallet: wallet,
+        transactionHash: "0xmerge-complete-set",
+        conditionId: "0xcondition",
+        type: "MERGE",
+        size: "10",
+        timestamp: 102,
+      }],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    const exits = report.signals
+      .filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")
+      .sort((left, right) => left.asset.localeCompare(right.asset));
+    expect(report.status).toBe("PASSED");
+    expect(exits).toMatchObject([
+      {
+        asset: "asset-no",
+        targetPriceUnits: "555555555555555556",
+        sellRatioNumerator: "10000000",
+        sellRatioDenominator: "10000000",
+      },
+      {
+        asset: "asset-yes",
+        targetPriceUnits: "444444444444444444",
+        sellRatioNumerator: "10000000",
+        sellRatioDenominator: "10000000",
+      },
+    ]);
+    expect(new Set(exits.map((signal) => signal.signalId)).size).toBe(2);
+    expect(report.eventOutcomes[activityEventKey({
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-complete-set",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 102,
+    })]?.signalIds).toHaveLength(2);
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+  });
+
+  it("deduplicates a non-trade MERGE before applying its position effect", () => {
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-page-boundary",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 102,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xmerge-boundary-yes", asset: "asset-yes", price: "0.4", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xmerge-boundary-no", asset: "asset-no", price: "0.5", size: "10", timestamp: 101 }),
+      ],
+      activity: [merge, { ...merge }],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.metrics).toMatchObject({
+      inputRows: 4,
+      uniqueEvents: 3,
+      duplicateRows: 1,
+      comboEvents: 1,
+      finalRecognizedPositions: {},
+    });
+    expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")).toHaveLength(2);
+    expect(report.positionLedger.filter((entry) => entry.sourceEventKey === activityEventKey(merge))).toHaveLength(2);
+  });
+
+  it("projects a complete MERGE before failing closed when a tracked leg cannot be priced", () => {
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-unpriced",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 102,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xmerge-unpriced-yes", asset: "asset-yes", price: "0", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xmerge-unpriced-no", asset: "asset-no", price: "0.5", size: "10", timestamp: 101 }),
+      ],
+      activity: [merge],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toContain("UNSUPPORTED_TARGET_ACTIVITY:MERGE");
+    expect(report.eventOutcomes[activityEventKey(merge)]).toMatchObject({
+      eventClassification: "COMBO_ACTIVITY",
+      reason: "MERGE_UNSUPPORTED_TARGET_ACTIVITY",
+    });
+    expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")).toHaveLength(0);
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.positionLedger.filter((entry) => entry.reason === "UNPRICED_MERGE_TRACKED_FIRST_NO_EXECUTION"))
+      .toHaveLength(2);
+  });
+
+  it("projects known MERGE legs but emits no exits without an exact official outcome set", () => {
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-official-mismatch",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 102,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xmerge-mismatch-yes", asset: "asset-yes", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xmerge-mismatch-no", asset: "asset-no", size: "10", timestamp: 101 }),
+      ],
+      activity: [merge],
+      verifiedMarketOutcomeAssetsByCondition: { "0xcondition": ["asset-no", "asset-other"] },
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toContain("UNSUPPORTED_TARGET_ACTIVITY:MERGE");
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")).toHaveLength(0);
+    expect(report.positionLedger.filter((entry) => entry.reason === "UNVERIFIED_MERGE_OUTCOME_SET_NO_EXECUTION"))
+      .toHaveLength(2);
+  });
+
+  it("marks replay incomplete when a MERGE lacks a provable complete outcome set", () => {
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-one-leg",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 101,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [trade({ transactionHash: "0xonly-one-leg", size: "10", timestamp: 100 })],
+      activity: [merge],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toContain("UNSUPPORTED_TARGET_ACTIVITY:MERGE");
+    expect(report.eventOutcomes[activityEventKey(merge)]).toMatchObject({
+      eventClassification: "COMBO_ACTIVITY",
+      reason: "MERGE_UNSUPPORTED_TARGET_ACTIVITY",
+    });
+    expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")).toHaveLength(0);
+  });
+
+  it("projects REDEEM after tracked buys without inventing an executable sell", () => {
+    const redeem = {
+      proxyWallet: wallet,
+      transactionHash: "0xredeem-condition",
+      conditionId: "0xcondition",
+      type: "REDEEM",
+      timestamp: 102,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xredeem-yes", asset: "asset-yes", size: "10", timestamp: 100 }),
+        trade({ transactionHash: "0xredeem-no", asset: "asset-no", size: "10", timestamp: 101 }),
+      ],
+      activity: [redeem],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.eventOutcomes[activityEventKey(redeem)]).toEqual({
+      eventClassification: "NON_TRADE_ACTIVITY",
+      reason: "REDEEM_PROJECTED",
+    });
+    expect(report.signals).toHaveLength(2);
+    expect(report.signals.every((signal) => signal.signalType === "TARGET_BUY")).toBe(true);
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
   });
 
   it("records a gap behavior signal that is never execution eligible", () => {

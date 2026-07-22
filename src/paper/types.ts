@@ -42,6 +42,10 @@ export interface SignalExecutionContext {
   capitalSizingRatioHash?: string | null;
   targetTradeTimestamp: string;
   marketEndTime: string;
+  /** Explicit for contexts produced on schema 2.29.0+; omitted means a legacy verified end time. */
+  marketEndTimeStatus?: "VERIFIED" | "UNAVAILABLE";
+  /** Immutable BUY deadline; legacy contexts derive it from targetTradeTimestamp + marketEndTime. */
+  executionDeadlineAt?: string | null;
   marketMetadataSnapshot: Record<string, unknown>;
   marketMetadataHash: string;
   rulesetHash: string;

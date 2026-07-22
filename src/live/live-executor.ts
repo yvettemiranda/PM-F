@@ -1690,6 +1690,13 @@ export class LiveExecutor implements ExecutorInterface {
   }
 
   private buyDeadline(input: ExecutorSignalInput): string {
+    const explicitDeadline = input.context.executionDeadlineAt === null || input.context.executionDeadlineAt === undefined
+      ? Number.NaN
+      : Date.parse(input.context.executionDeadlineAt);
+    if (Number.isFinite(explicitDeadline)) return new Date(explicitDeadline).toISOString();
+    if (input.context.marketEndTimeStatus === "UNAVAILABLE") {
+      throw new Error("LIVE_EXECUTION_DEADLINE_MISSING");
+    }
     const target = Date.parse(input.context.targetTradeTimestamp);
     const end = Date.parse(input.context.marketEndTime);
     if (!Number.isFinite(target) || !Number.isFinite(end)) throw new Error("LIVE_WAIT_TIME_INPUT_INVALID");
@@ -1723,7 +1730,8 @@ export class LiveExecutor implements ExecutorInterface {
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
-              c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
+              c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
+              c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash,c.source_code_commit,c.source_code_dirty,
               c.config_version,c.created_at context_created_at,
               ce.capital_estimate_status,ce.capital_confidence,
@@ -1754,6 +1762,8 @@ export class LiveExecutor implements ExecutorInterface {
       capital_sizing_ratio_hash: string | null;
       target_trade_timestamp: string;
       market_end_time: string;
+      market_end_time_status: "VERIFIED" | "UNAVAILABLE";
+      execution_deadline_at: string | null;
       market_metadata_snapshot_json: string;
       market_metadata_hash: string;
       ruleset_hash: string;
@@ -1783,6 +1793,8 @@ export class LiveExecutor implements ExecutorInterface {
       capitalSizingRatioHash: row.capital_sizing_ratio_hash,
       targetTradeTimestamp: row.target_trade_timestamp,
       marketEndTime: row.market_end_time,
+      marketEndTimeStatus: row.market_end_time_status,
+      executionDeadlineAt: row.execution_deadline_at,
       marketMetadataSnapshot: metadata as Record<string, unknown>,
       marketMetadataHash: row.market_metadata_hash,
       rulesetHash: row.ruleset_hash,

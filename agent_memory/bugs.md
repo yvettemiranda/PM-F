@@ -1,8 +1,10 @@
 # Bugs And Risks
 
 ## Active blockers
-- 新目标高频使用 `MERGE`，普通 Trades 不能表达该操作。当前会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，不会假装同步；安全 projection/copy 语义仍未实现，是小额 Live 硬 blocker。
 - tracked negative-risk conversion 没有真实复制能力；当前生成不可执行义务并暂停 Paper/未来 Live。
+- SPLIT 仍没有安全的 position projection/copy 语义，会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
+- 无法证明恰好两个完整 outcome、余额不足或缺少 tracked leg 价格的 MERGE 会立即硬阻断；不会猜测资产集合或价格。
+- 官方市场结束时间缺失时只允许 bounded Paper；Live Gate 继续拒绝，尚未形成可接受的真实资金 deadline 策略。
 - 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
@@ -16,6 +18,11 @@
 - 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
+- Signal 富化失败曾被误记为 Data API gap，导致已实时看到的 4 BUY + 2 SELL 永久不可执行；当前事件先持久化，每条 Signal 独立重试，富化 warning 不再扩大 gap。
+- 官方结束时间为空曾抛出 `MARKET_END_TIME_UNAVAILABLE`；当前 Signal Context 显式记录 `UNAVAILABLE` 和不可变 bounded deadline，Paper 可继续，Live 仍失败关闭。
+- 标准二元 MERGE 曾无条件触发 `MAJOR_DESYNC`；当前 Observe/Replay 只有在官方 CLOB token set 精确匹配时才生成两个唯一的等价 `TARGET_SELL` 并清理 projection，目标历史抽样的 72 次 MERGE 均有两条 prior asset，正式验证仍以逐 condition 官方 capture 为准。
+- 同一个 MERGE source event 的第二条 Signal、Replay classification 和 position ledger 曾分别会被旧唯一约束静默吞掉；migration 034 重建三张证据表并按 signal/asset 唯一，旧行原样迁移、不可变触发器重建。
+- Replay 曾记录 MERGE 却不生成在线等价退出，且非交易 Activity 页边界重复会执行两次；当前按时间交织并去重 Activity，与 Observe 使用同一归一价格和官方 outcome-set 规则。
 - BUY 原对称 `98%—102%` 下限会拒绝更低的改善价格；当前只设追高上限，低价改善允许成交。
 - 低价市场原 `2%` 上限可能小于两个 tick，导致自然 BUY 长期无法落入合法价格；当前取 `2%` 与 `2 tick` 较宽者并受 `0.95` 封顶。
 - Observe 原 15 秒统一轮询导致目标事件发现慢；当前事件 3 秒、状态 15 秒，新事件立即强制状态核对。

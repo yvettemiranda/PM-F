@@ -487,6 +487,8 @@ function buildExecutionBinding(input: {
   sourceCodeCommit: string;
   targetTradeTimestamp: string;
   marketEndTime: string;
+  marketEndTimeStatus: "VERIFIED" | "UNAVAILABLE";
+  executionDeadlineAt: string | null;
 }): ExecutionBinding {
   const execution = row(
     input.database,
@@ -613,8 +615,16 @@ function buildExecutionBinding(input: {
   }
   const targetTime = parseIso(input.targetTradeTimestamp, "TARGET_TRADE_TIME");
   const deadline = parseIso(execution.deadline_at, "EXECUTION_DEADLINE");
-  const marketEnd = parseIso(input.marketEndTime, "MARKET_END_TIME");
-  if (deadline < targetTime || deadline > marketEnd) {
+  const contextDeadline = input.executionDeadlineAt === null
+    ? deadline
+    : parseIso(input.executionDeadlineAt, "CONTEXT_EXECUTION_DEADLINE");
+  if (deadline !== contextDeadline) {
+    throw new Error("REPLAY_EVIDENCE_EXECUTION_DEADLINE_CONTEXT_MISMATCH");
+  }
+  const deadlineOutsideWindow = input.marketEndTimeStatus === "VERIFIED"
+    ? deadline > parseIso(input.marketEndTime, "MARKET_END_TIME")
+    : input.marketEndTime !== "" || deadline - targetTime > RULESET.maxWaitMs;
+  if (deadline < targetTime || deadlineOutsideWindow) {
     throw new Error("REPLAY_EVIDENCE_EXECUTION_DEADLINE_OUTSIDE_MARKET_WINDOW");
   }
   const bookTime = parseIso(String(book.market_snapshot_time), "ORDERBOOK_TIME");
@@ -838,6 +848,10 @@ export function buildReplayValidationEvidenceArtifact(
         sourceCodeCommit: input.sourceCodeCommit,
         targetTradeTimestamp: String(context?.target_trade_timestamp),
         marketEndTime: String(context?.market_end_time),
+        marketEndTimeStatus: context?.market_end_time_status === "UNAVAILABLE" ? "UNAVAILABLE" : "VERIFIED",
+        executionDeadlineAt: typeof context?.execution_deadline_at === "string"
+          ? context.execution_deadline_at
+          : null,
       })
       : null;
     assertScenarioFacts(input.source, coverage, sourceBinding, execution);

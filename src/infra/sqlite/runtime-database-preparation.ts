@@ -48,6 +48,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.26.0",
   "2.27.0",
   "2.28.0",
+  "2.29.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -251,7 +252,14 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     observe_checkpoints: ["projection_snapshot_hash"],
     observe_runs: ["campaign_id", "campaign_session_id"],
     signals: ["target_id"],
-    signal_execution_contexts: ["target_id", "capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
+    signal_execution_contexts: [
+      "target_id",
+      "capital_sizing_ratio_json",
+      "capital_sizing_ratio_hash",
+      "market_end_time_status",
+      "execution_deadline_at",
+    ],
+    observe_polls: ["signal_enrichment_failures", "warning_detail"],
     risk_decisions: ["capital_sizing_decision_json", "capital_sizing_decision_hash"],
     paper_orderbook_snapshots: [
       "min_order_size",
@@ -283,8 +291,10 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     if (!row) throw new Error(`RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:trigger:${trigger}`);
   }
   for (const index of [
+    "observe_signal_emissions_source_event_idx",
     "paper_validation_campaign_transition_sequence_idx",
     "paper_validation_session_transition_sequence_idx",
+    "replay_event_classifications_event_idx",
   ]) {
     const row = database.prepare(
       "SELECT 1 ok FROM sqlite_master WHERE type='index' AND name=?",

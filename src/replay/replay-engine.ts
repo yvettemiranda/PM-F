@@ -8,6 +8,7 @@ import {
 import type { EventClassification, IdentityStatus, PublicActivity, PublicTrade, Signal, SourceEvent } from "../domain/models.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { VERSIONS, stableJson } from "../domain/versioning.js";
+import { mergeExitPrices } from "../observe/position-projector.js";
 
 export interface ReplayGap {
   fromTimestamp: number;
@@ -32,6 +33,7 @@ export interface ReplayInput {
   tradePaginationBoundaryOverlaps?: PublicTrade[];
   activityPaginationBoundaryOverlaps?: PublicTrade[];
   confirmedTradeOccurrenceCounts?: Readonly<Record<string, number>>;
+  verifiedMarketOutcomeAssetsByCondition?: Readonly<Record<string, readonly string[]>>;
 }
 
 export interface ReplayReport {
@@ -73,6 +75,7 @@ export interface ReplayPositionLedgerEntry {
 export interface ReplayEventOutcome {
   eventClassification: EventClassification;
   signalId?: string;
+  signalIds?: string[];
   signalType?: "TARGET_BUY" | "TARGET_SELL";
   executionEligible?: boolean;
   reason: string;
@@ -142,7 +145,7 @@ export class ReplayEngine {
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
     const ambiguousRepeatedKeys = new Set(multiplicity.ambiguousRepeatedKeys);
     const events: SourceEvent[] = [];
-    const duplicateRows = multiplicity.trades.filter((item) => item.occurrenceIndex > 0).length
+    let duplicateRows = multiplicity.trades.filter((item) => item.occurrenceIndex > 0).length
       + multiplicity.activityTrades.filter((item) => item.occurrenceIndex > 0).length
       + multiplicity.reconciledPaginationOverlapRows;
 
@@ -185,6 +188,8 @@ export class ReplayEngine {
 
     const trackedPositions = new Map<string, bigint>();
     const historicalPositions = new Map<string, bigint>();
+    const conditionByAsset = new Map<string, string>();
+    const lastPriceByAsset = new Map<string, bigint>();
     for (const baseline of input.positionBaseline ?? []) {
       historicalPositions.set(baseline.asset, decimalToScaled(baseline.size, SHARE_SCALE_DIGITS));
     }
@@ -192,17 +197,6 @@ export class ReplayEngine {
     const eventOutcomes: Record<string, ReplayEventOutcome> = {};
     const positionLedger: ReplayPositionLedgerEntry[] = [];
     const officialNonTradeTypes = new Set(["SPLIT", "MERGE", "REDEEM", "REWARD", "CONVERSION", "MAKER_REBATE", "REFERRAL_REWARD"]);
-    for (const item of input.activity) {
-      if (isTradeActivity(item)) continue;
-      const key = activityEventKey(item);
-      if (["SPLIT", "MERGE", "CONVERSION"].includes(item.type)) {
-        eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: `${item.type}_RECORDED_WITHOUT_SIGNAL` };
-      } else if (officialNonTradeTypes.has(item.type)) {
-        eventOutcomes[key] = { eventClassification: "NON_TRADE_ACTIVITY", reason: `${item.type}_RECORDED_WITHOUT_SIGNAL` };
-      } else {
-        eventOutcomes[key] = { eventClassification: "UNRECOGNIZED", reason: `UNRECOGNIZED_ACTIVITY_TYPE:${item.type}` };
-      }
-    }
     for (const key of ambiguousRepeatedKeys) {
       eventOutcomes[key] = {
         eventClassification: "UNRECOGNIZED",
@@ -212,8 +206,167 @@ export class ReplayEngine {
     let historicalSells = 0;
     let gapEvents = 0;
     let comboEvents = 0;
+    const activityIncompleteReasons = new Set<string>();
+    const uniqueNonTradeActivities = new Map<string, PublicActivity>();
+    for (const activity of input.activity.filter((item) => !isTradeActivity(item))) {
+      const key = activityEventKey(activity);
+      if (uniqueNonTradeActivities.has(key)) {
+        duplicateRows += 1;
+      } else {
+        uniqueNonTradeActivities.set(key, activity);
+      }
+    }
+    const orderedItems = [
+      ...events.map((event) => ({
+        kind: "TRADE" as const,
+        timestamp: event.trade.timestamp,
+        sourceEventKey: event.sourceEventKey,
+        event,
+      })),
+      ...[...uniqueNonTradeActivities.entries()].map(([sourceEventKey, activity]) => ({
+        kind: "ACTIVITY" as const,
+        timestamp: activity.timestamp,
+        sourceEventKey,
+        activity,
+      })),
+    ].sort((left, right) => (
+      left.timestamp - right.timestamp || left.sourceEventKey.localeCompare(right.sourceEventKey)
+    ));
 
-    for (const event of events) {
+    for (const ordered of orderedItems) {
+      if (ordered.kind === "ACTIVITY") {
+        const activity = ordered.activity;
+        const key = ordered.sourceEventKey;
+        const conditionId = activity.conditionId?.toLowerCase();
+        if (activity.type === "MERGE") {
+          comboEvents += 1;
+          let amount: bigint | null = null;
+          try {
+            if (activity.size !== undefined) amount = decimalToScaled(activity.size, SHARE_SCALE_DIGITS);
+          } catch {
+            amount = null;
+          }
+          const assets = conditionId ? [...conditionByAsset.entries()]
+            .filter(([asset, knownConditionId]) => (
+              knownConditionId === conditionId
+              && (trackedPositions.get(asset) ?? 0n) + (historicalPositions.get(asset) ?? 0n) > 0n
+            ))
+            .map(([asset]) => asset)
+            .sort() : [];
+          const structurallyUnsupported = amount === null || amount <= 0n || assets.length !== 2 || assets.some((asset) => (
+            (trackedPositions.get(asset) ?? 0n) + (historicalPositions.get(asset) ?? 0n) < amount!
+          ));
+          const officialAssets = conditionId
+            ? input.verifiedMarketOutcomeAssetsByCondition?.[conditionId]
+            : undefined;
+          const authoritativeOutcomeSetInvalid = officialAssets === undefined
+            || officialAssets.length !== 2
+            || [...officialAssets].sort().some((asset, index) => asset !== assets[index]);
+          const exitPrices = structurallyUnsupported ? new Map<string, bigint>() : mergeExitPrices(assets, lastPriceByAsset);
+          const gapEvent = insideGap(activity.timestamp, input.gaps ?? []);
+          const unpricedTrackedExit = !gapEvent && !structurallyUnsupported && assets.some((asset) => (
+            (trackedPositions.get(asset) ?? 0n) > 0n && !exitPrices.has(asset)
+          ));
+          if (structurallyUnsupported) {
+            eventOutcomes[key] = {
+              eventClassification: "COMBO_ACTIVITY",
+              reason: "MERGE_UNSUPPORTED_TARGET_ACTIVITY",
+            };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:MERGE");
+            continue;
+          }
+          const mergeSignals: Signal[] = [];
+          for (const asset of assets) {
+            const beforeTracked = trackedPositions.get(asset) ?? 0n;
+            const beforeHistorical = historicalPositions.get(asset) ?? 0n;
+            const trackedMerged = amount! < beforeTracked ? amount! : beforeTracked;
+            const historicalMerged = amount! - trackedMerged;
+            trackedPositions.set(asset, beforeTracked - trackedMerged);
+            historicalPositions.set(asset, beforeHistorical - historicalMerged);
+            const syntheticEvent: SourceEvent = {
+              sourceEventKey: key,
+              trade: {
+                proxyWallet: activity.proxyWallet,
+                transactionHash: activity.transactionHash,
+                conditionId: conditionId!,
+                asset,
+                side: "SELL",
+                price: "0",
+                size: activity.size!,
+                timestamp: activity.timestamp,
+              },
+              priceUnits: exitPrices.get(asset) ?? 0n,
+              sizeMicros: amount!,
+              gapEvent,
+              isCombo: true,
+            };
+            if (trackedMerged > 0n && !unpricedTrackedExit && !authoritativeOutcomeSetInvalid) {
+              const signal = this.signal(
+                input.targetId,
+                syntheticEvent,
+                "TARGET_SELL",
+                gapEvent ? "GAP_MERGE_EXIT_RECORDED" : "TARGET_MERGE_EQUIVALENT_EXIT",
+                "COMBO_ACTIVITY",
+                !gapEvent,
+                gapEvent ? "GAP_EVENT" : undefined,
+                trackedMerged,
+                beforeTracked,
+                asset,
+              );
+              signals.push(signal);
+              mergeSignals.push(signal);
+            }
+            positionLedger.push(this.ledger(
+              syntheticEvent,
+              beforeHistorical,
+              beforeHistorical - historicalMerged,
+              beforeTracked,
+              beforeTracked - trackedMerged,
+              trackedMerged,
+              gapEvent
+                ? "GAP_MERGE_TRACKED_FIRST_NO_EXECUTION"
+                : authoritativeOutcomeSetInvalid
+                  ? "UNVERIFIED_MERGE_OUTCOME_SET_NO_EXECUTION"
+                  : unpricedTrackedExit ? "UNPRICED_MERGE_TRACKED_FIRST_NO_EXECUTION" : "TARGET_MERGE_TRACKED_FIRST",
+            ));
+          }
+          if (unpricedTrackedExit || authoritativeOutcomeSetInvalid) {
+            eventOutcomes[key] = {
+              eventClassification: "COMBO_ACTIVITY",
+              reason: "MERGE_UNSUPPORTED_TARGET_ACTIVITY",
+            };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:MERGE");
+            continue;
+          }
+          if (gapEvent) gapEvents += 1;
+          eventOutcomes[key] = mergeSignals.length > 0
+            ? { ...this.outcome(mergeSignals[0]!), signalIds: mergeSignals.map((signal) => signal.signalId) }
+            : { eventClassification: "COMBO_ACTIVITY", reason: "HISTORICAL_MERGE_PROJECTED" };
+          continue;
+        }
+        if (activity.type === "REDEEM") {
+          if (conditionId) {
+            for (const [asset, knownConditionId] of conditionByAsset) {
+              if (knownConditionId !== conditionId) continue;
+              historicalPositions.set(asset, 0n);
+              trackedPositions.set(asset, 0n);
+            }
+          }
+          eventOutcomes[key] = { eventClassification: "NON_TRADE_ACTIVITY", reason: "REDEEM_PROJECTED" };
+          continue;
+        }
+        if (activity.type === "SPLIT" || activity.type === "CONVERSION") {
+          comboEvents += 1;
+          eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: `${activity.type}_RECORDED_WITHOUT_SIGNAL` };
+          activityIncompleteReasons.add(`UNSUPPORTED_TARGET_ACTIVITY:${activity.type}`);
+          continue;
+        }
+        eventOutcomes[key] = officialNonTradeTypes.has(activity.type)
+          ? { eventClassification: "NON_TRADE_ACTIVITY", reason: `${activity.type}_RECORDED_WITHOUT_SIGNAL` }
+          : { eventClassification: "UNRECOGNIZED", reason: `UNRECOGNIZED_ACTIVITY_TYPE:${activity.type}` };
+        continue;
+      }
+      const event = ordered.event;
       const beforeTracked = trackedPositions.get(event.trade.asset) ?? 0n;
       const beforeHistorical = historicalPositions.get(event.trade.asset) ?? 0n;
       if (event.isCombo) {
@@ -225,6 +378,8 @@ export class ReplayEngine {
         positionLedger.push(this.ledger(event, beforeHistorical, beforeHistorical, beforeTracked, beforeTracked, 0n, "COMBO_NO_PROJECTION"));
         continue;
       }
+      conditionByAsset.set(event.trade.asset, event.trade.conditionId.toLowerCase());
+      lastPriceByAsset.set(event.trade.asset, event.priceUnits);
       if (event.gapEvent) gapEvents += 1;
 
       if (event.trade.side === "BUY") {
@@ -324,6 +479,7 @@ export class ReplayEngine {
     if (input.sourceCodeCommit === "UNCOMMITTED") incompleteReasons.push("SOURCE_CODE_COMMIT_MISSING");
     if (input.sourceCodeDirty) incompleteReasons.push("SOURCE_CODE_DIRTY");
     if (ambiguousEvents > 0) incompleteReasons.push("AMBIGUOUS_DUPLICATE_EVENTS");
+    incompleteReasons.push(...activityIncompleteReasons);
     const status = incompleteReasons.length > 0 ? "INCOMPLETE" : "PASSED";
     const finalTrackedPositions = Object.fromEntries(
       [...trackedPositions.entries()].filter(([, value]) => value !== 0n).map(([asset, value]) => [asset, value.toString()]),
@@ -338,7 +494,7 @@ export class ReplayEngine {
       signals,
       eventOutcomes,
       positionLedger,
-      events.length,
+      events.length + uniqueNonTradeActivities.size,
       duplicateRows,
       confirmedDuplicateRows,
       multiplicity.reconciledPaginationOverlapRows,
@@ -363,8 +519,15 @@ export class ReplayEngine {
     executionBlockReason?: string,
     numerator?: bigint,
     denominator?: bigint,
+    idempotencyDiscriminator?: string,
   ): Signal {
-    const idempotency = signalIdempotencyKey(event.sourceEventKey, type, VERSIONS.signalVersion);
+    const idempotency = signalIdempotencyKey(
+      idempotencyDiscriminator
+        ? `${event.sourceEventKey}\u001f${idempotencyDiscriminator}`
+        : event.sourceEventKey,
+      type,
+      VERSIONS.signalVersion,
+    );
     return {
       signalId: idempotency,
       targetId,

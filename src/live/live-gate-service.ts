@@ -78,6 +78,7 @@ interface SignalRow {
   target_size_micros: string;
   context_id: string | null;
   context_market_end_time: string | null;
+  context_market_end_time_status: "VERIFIED" | "UNAVAILABLE" | null;
 }
 
 interface RiskDecisionRow {
@@ -1094,6 +1095,9 @@ export class LiveGateService implements LiveGate {
   }
 
   private marketStatusCheck(signal: SignalRow | null): LiveGateCheck {
+    if (signal?.context_market_end_time_status === "UNAVAILABLE") {
+      return { name: "market_status", passed: false, reason: "MARKET_END_TIME_UNAVAILABLE" };
+    }
     if (!signal?.context_market_end_time) return { name: "market_status", passed: false, reason: "MARKET_METADATA_MISSING" };
     const passed = this.now().valueOf() < Date.parse(signal.context_market_end_time);
     return { name: "market_status", passed, reason: passed ? "OK" : "MARKET_CLOSED" };
@@ -1183,7 +1187,8 @@ export class LiveGateService implements LiveGate {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.status,s.execution_eligible,s.ruleset_hash,s.signal_type,
               s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
-              c.context_id,c.market_end_time context_market_end_time
+              c.context_id,c.market_end_time context_market_end_time,
+              c.market_end_time_status context_market_end_time_status
        FROM signals s
        LEFT JOIN signal_execution_contexts c ON c.signal_id=s.signal_id
        WHERE s.signal_id=?`,

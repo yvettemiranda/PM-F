@@ -101,19 +101,21 @@ export function generateGoldenCandidates(input: {
 
   const comboActivity = input.activity.find((item) => ["SPLIT", "MERGE", "CONVERSION"].includes(item.type));
   if (comboActivity) {
+    const sourceEventKey = activityEventKey(comboActivity);
+    const replayOutcome = input.replay.eventOutcomes[sourceEventKey];
     candidates.push(candidate({
       captureRunId: input.manifest.captureRunId,
       sampleWallet: input.manifest.walletAddress,
       sampleRole: input.sampleRole,
       caseType: "COMBO",
-      sourceEventKey: activityEventKey(comboActivity),
+      sourceEventKey,
       sourceTransactionHash: comboActivity.transactionHash,
-      expectedSignalType: null,
-      expectedSignalPresent: false,
-      expectedExecutionEligible: null,
-      expectedEventClassification: "COMBO_ACTIVITY",
-      expectedReason: `${comboActivity.type}_RECORDED_WITHOUT_SIGNAL`,
-      evidence: { activity: comboActivity },
+      expectedSignalType: replayOutcome?.signalType ?? null,
+      expectedSignalPresent: replayOutcome?.signalId !== undefined,
+      expectedExecutionEligible: replayOutcome?.executionEligible ?? null,
+      expectedEventClassification: replayOutcome?.eventClassification ?? "COMBO_ACTIVITY",
+      expectedReason: replayOutcome?.reason ?? `${comboActivity.type}_RECORDED_WITHOUT_SIGNAL`,
+      evidence: { activity: comboActivity, replayOutcome: replayOutcome ?? null },
     }));
   }
 

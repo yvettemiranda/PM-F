@@ -630,6 +630,77 @@ export class Phase0Database {
         throw error;
       }
     }
+    const signalEnrichmentResilienceApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.29.0");
+    if (!signalEnrichmentResilienceApplied) {
+      const signalEnrichmentResilienceSql = readFileSync(
+        new URL("./034_signal_enrichment_resilience.sql", import.meta.url),
+        "utf8",
+      );
+      const requiredColumns = [
+        ["observe_polls", "signal_enrichment_failures"],
+        ["observe_polls", "warning_detail"],
+        ["signal_execution_contexts", "market_end_time_status"],
+        ["signal_execution_contexts", "execution_deadline_at"],
+      ] as const;
+      const existingColumnCount = requiredColumns.filter(([table, column]) => (
+        (this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+          .some((row) => row.name === column)
+      )).length;
+      if (existingColumnCount !== 0 && existingColumnCount !== requiredColumns.length) {
+        throw new Error("MIGRATION_034_PARTIAL_COLUMNS_PRESENT");
+      }
+      if (existingColumnCount === requiredColumns.length) {
+        const emissionTable = this.database.prepare(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='observe_signal_emissions'",
+        ).get() as { sql: string } | undefined;
+        const bucketLedgerTable = this.database.prepare(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='position_bucket_ledger'",
+        ).get() as { sql: string } | undefined;
+        const replayClassificationTable = this.database.prepare(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='replay_event_classifications'",
+        ).get() as { sql: string } | undefined;
+        const sourceEventIndex = this.database.prepare(
+          "SELECT 1 ok FROM sqlite_master WHERE type='index' AND name='observe_signal_emissions_source_event_idx'",
+        ).get();
+        const replayClassificationIndex = this.database.prepare(
+          "SELECT 1 ok FROM sqlite_master WHERE type='index' AND name='replay_event_classifications_event_idx'",
+        ).get();
+        const rebuiltEvidenceTriggers = [
+          "position_bucket_ledger_no_update",
+          "position_bucket_ledger_no_delete",
+          "replay_event_classifications_no_update",
+          "replay_event_classifications_no_delete",
+        ].every((name) => this.database.prepare(
+          "SELECT 1 ok FROM sqlite_master WHERE type='trigger' AND name=?",
+        ).get(name));
+        const normalizedEmissionSql = emissionTable?.sql.replace(/\s+/g, " ") ?? "";
+        const normalizedBucketLedgerSql = bucketLedgerTable?.sql.replace(/\s+/g, " ") ?? "";
+        const normalizedReplayClassificationSql = replayClassificationTable?.sql.replace(/\s+/g, " ") ?? "";
+        if (
+          !sourceEventIndex
+          || !replayClassificationIndex
+          || !rebuiltEvidenceTriggers
+          || !normalizedEmissionSql.includes("UNIQUE(baseline_run_id, signal_id)")
+          || !normalizedBucketLedgerSql.includes("UNIQUE(replay_run_id, source_event_key, asset_id)")
+          || !normalizedReplayClassificationSql.includes("UNIQUE(replay_run_id, source_event_key, signal_id)")
+        ) {
+          throw new Error("MIGRATION_034_PARTIAL_SCHEMA_PRESENT");
+        }
+      }
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        if (existingColumnCount === 0) this.database.exec(signalEnrichmentResilienceSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.29.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(
@@ -1541,7 +1612,7 @@ export class Phase0Database {
       );
       for (const entry of report.positionLedger) {
         insertBucketLedger.run(
-          createHash("sha256").update(`${replayRunId}|${entry.sourceEventKey}`).digest("hex"),
+          createHash("sha256").update(`${replayRunId}|${entry.sourceEventKey}|${entry.asset}`).digest("hex"),
           replayRunId,
           entry.sourceEventKey,
           entry.asset,
@@ -1563,24 +1634,36 @@ export class Phase0Database {
           source_code_dirty, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
+      const replaySignalsById = new Map(report.signals.map((signal) => [signal.signalId, signal]));
       for (const [eventKey, outcome] of Object.entries(report.eventOutcomes)) {
-        insertClassification.run(
-          createHash("sha256").update(`${replayRunId}|${eventKey}`).digest("hex"),
-          replayRunId,
-          eventKey,
-          outcome.eventClassification,
-          outcome.signalId ?? null,
-          outcome.signalType ?? null,
-          outcome.executionEligible === undefined ? null : outcome.executionEligible ? 1 : 0,
-          outcome.reason,
-          VERSIONS.schemaVersion,
-          VERSIONS.signalVersion,
-          VERSIONS.replayVersion,
-          RULESET_HASH,
-          this.sourceVersion.commit,
-          this.sourceVersion.dirty ? 1 : 0,
-          now,
-        );
+        const signalIds = outcome.signalIds?.length
+          ? outcome.signalIds
+          : outcome.signalId ? [outcome.signalId] : [null];
+        for (const signalId of signalIds) {
+          const replaySignal = signalId === null ? undefined : replaySignalsById.get(signalId);
+          if (signalId !== null && !replaySignal) {
+            throw new Error(`REPLAY_CLASSIFICATION_SIGNAL_MISSING:${eventKey}:${signalId}`);
+          }
+          insertClassification.run(
+            createHash("sha256").update(`${replayRunId}|${eventKey}|${signalId ?? "NO_SIGNAL"}`).digest("hex"),
+            replayRunId,
+            eventKey,
+            replaySignal?.eventClassification ?? outcome.eventClassification,
+            signalId,
+            replaySignal?.signalType ?? outcome.signalType ?? null,
+            replaySignal === undefined
+              ? outcome.executionEligible === undefined ? null : outcome.executionEligible ? 1 : 0
+              : replaySignal.executionEligible ? 1 : 0,
+            replaySignal?.reason ?? outcome.reason,
+            VERSIONS.schemaVersion,
+            VERSIONS.signalVersion,
+            VERSIONS.replayVersion,
+            RULESET_HASH,
+            this.sourceVersion.commit,
+            this.sourceVersion.dirty ? 1 : 0,
+            now,
+          );
+        }
       }
       this.saveTransition("REPLAY", replayRunId, null, "CREATED", "REPLAY_REQUESTED", now, 0);
       this.saveTransition("REPLAY", replayRunId, "CREATED", "INPUT_VALIDATING", "INPUT_RECEIVED", now, 1);

@@ -109,6 +109,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/030_paper_runtime_resilience.sql",
   "src/infra/sqlite/031_validation_duration_policy.sql",
   "src/infra/sqlite/032_negative_risk_conversion.sql",
+  "src/infra/sqlite/034_signal_enrichment_resilience.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
@@ -126,6 +127,7 @@ export const VALIDATION_POLICY_FILES = [
   "src/paper-validation/replay-evidence.ts",
   "src/paper-validation/report.ts",
   "src/paper-validation/types.ts",
+  "src/replay/replay-engine.ts",
   "src/services/api-contract.ts",
   "src/services/trade-multiplicity-evidence.ts",
 ] as const;

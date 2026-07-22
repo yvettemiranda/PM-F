@@ -24,6 +24,7 @@ import {
   verifyNegativeRiskConversion,
   type NegativeRiskConversionReceiptProvider,
 } from "./negative-risk-conversion.js";
+import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
@@ -353,6 +354,43 @@ export class ObserveOnlyRunner {
       stored.isGap = stored.isGap || confirmation.isGap;
     }
     const allEvents = [...storedEvents, ...newEvents];
+    const signalEnrichmentFailures: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["signalEnrichmentFailures"] = [];
+    const marketCache = new Map<string, Promise<Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>>();
+    const mergeOutcomeAssetsByCondition = new Map<string, readonly string[]>();
+    const pendingMergeConditions = new Set<string>();
+    const mergeEventsByCondition = new Map<string, ObserveEvent[]>();
+    for (const event of allEvents) {
+      const conditionId = event.activity?.type === "MERGE"
+        ? event.activity.conditionId?.toLowerCase()
+        : undefined;
+      if (!conditionId) continue;
+      const grouped = mergeEventsByCondition.get(conditionId) ?? [];
+      grouped.push(event);
+      mergeEventsByCondition.set(conditionId, grouped);
+    }
+    for (const [conditionId, mergeEvents] of mergeEventsByCondition) {
+      if (!this.options.signalMarketMetadataProvider) continue;
+      try {
+        const marketPromise = this.options.signalMarketMetadataProvider.market(conditionId, signal);
+        marketCache.set(conditionId, marketPromise);
+        const market = await marketPromise;
+        mergeOutcomeAssetsByCondition.set(
+          conditionId,
+          verifiedBinaryMarketOutcomeAssets(market.market, conditionId),
+        );
+      } catch (error) {
+        const errorDetail = error instanceof Error ? error.message : String(error);
+        if (!errorDetail.startsWith("MARKET_OUTCOME_SET_")) pendingMergeConditions.add(conditionId);
+        for (const event of mergeEvents) {
+          signalEnrichmentFailures.push({
+            signalId: `MERGE_MARKET_OUTCOME_SET:${event.sourceEventKey}`,
+            sourceEventKey: event.sourceEventKey,
+            conditionId,
+            errorDetail,
+          });
+        }
+      }
+    }
     const conversionEvidence: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["conversionEvidence"] = [];
     let projection: ReturnType<typeof projectObserveEvents>;
     try {
@@ -373,20 +411,22 @@ export class ObserveOnlyRunner {
       projection = projectObserveEvents(
         started.baseline,
         allEvents,
-        { requireVerifiedConversions: true },
+        {
+          requireVerifiedConversions: true,
+          mergeOutcomeAssetsByCondition,
+          pendingMergeConditions,
+        },
       );
     } catch (error) {
       this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
       this.lastPollCompletedAt = completedAt;
-      this.gapActive = true;
-      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
       return false;
     }
-    const signalCandidateKeys = new Set([
-      ...newEvents.filter((event) => event.activityConfirmed).map((event) => event.sourceEventKey),
-      ...eventConfirmations.map((event) => event.sourceEventKey),
-    ]);
-    const signalsToEmit = projection.signals.filter((signal) => signalCandidateKeys.has(signal.sourceEventKey));
+    const existingSignalIds = this.store.existingSignalIds(
+      started.baseline.baselineRunId,
+      projection.signals.map((candidate) => candidate.signalId),
+    );
+    const signalCandidates = projection.signals.filter((candidate) => !existingSignalIds.has(candidate.signalId));
     const currentTradeKeys = new Set(multiplicity.trades.map((item) => item.sourceEventKey));
     const currentActivityKeys = new Set(multiplicity.activityTrades.map((item) => item.sourceEventKey));
     const ambiguousKeys = new Set(
@@ -408,12 +448,7 @@ export class ObserveOnlyRunner {
         tradesCount: currentTradeKeys.has(key) || storedTradeKeys.has(key) ? 1 : 0,
         activityCount: currentActivityKeys.has(key) ? 1 : 0,
       }));
-    const unsupportedActivities: UnsupportedTargetActivity[] = allEvents.flatMap((event) => {
-      const activityType = event.activity?.type;
-      return activityType === "MERGE" || activityType === "SPLIT"
-        ? [{ sourceEventKey: event.sourceEventKey, activityType } satisfies UnsupportedTargetActivity]
-        : [];
-    });
+    const unsupportedActivities: UnsupportedTargetActivity[] = projection.unsupportedActivities;
     const previousReport = this.store.latestReconciliationReport(started.observeRunId);
     const reconciliation = reconcileProjection(
       projection.projection,
@@ -456,8 +491,6 @@ export class ObserveOnlyRunner {
         "PROCESSING_FAILED",
       );
       this.lastPollCompletedAt = completedAt;
-      this.gapActive = true;
-      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
       return false;
     }
     if (conversionEvidence.length > 0 && reconciliation.syncStatus !== "SYNCED") {
@@ -470,8 +503,6 @@ export class ObserveOnlyRunner {
         "PROCESSING_FAILED",
       );
       this.lastPollCompletedAt = completedAt;
-      this.gapActive = true;
-      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
       return false;
     }
     const balanceResult = snapshot.pUsdBalance.data.result;
@@ -486,53 +517,65 @@ export class ObserveOnlyRunner {
       walletBalanceSnapshotTime: snapshot.pUsdBalance.fetchedAt,
     });
     const signalContexts: SignalContextBundle[] = [];
-    try {
-      if (this.options.signalMarketMetadataProvider) {
-      const marketCache = new Map<string, Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>();
+    const signalsToEmit: typeof signalCandidates = [];
+    if (this.options.signalMarketMetadataProvider) {
       const eventByKey = new Map(
         [...storedEvents, ...newEvents].map((event) => [event.sourceEventKey, event]),
       );
-      for (const candidateSignal of signalsToEmit.filter((item) => item.executionEligible)) {
-        const event = eventByKey.get(candidateSignal.sourceEventKey);
-        if (!event?.trade) throw new Error(`Signal event missing: ${candidateSignal.signalId}`);
-        let market = marketCache.get(candidateSignal.conditionId);
-        if (!market) {
-          market = await this.options.signalMarketMetadataProvider.market(candidateSignal.conditionId, signal);
-          marketCache.set(candidateSignal.conditionId, market);
+      for (const candidateSignal of signalCandidates) {
+        if (!candidateSignal.executionEligible) {
+          signalsToEmit.push(candidateSignal);
+          continue;
         }
-        const capitalDecision = candidateSignal.signalType === "TARGET_BUY" ? estimateTargetCapital({
-          walletAddress: this.options.walletAddress,
-          sourceEventKey: candidateSignal.sourceEventKey,
-          identityStatus: "IDENTITY_CONFIRMED",
-          syncStatus: reconciliation.syncStatus,
-          positions: snapshot.positions.data,
-          positionSnapshotTime: snapshot.positions.fetchedAt,
-          walletBalanceMicros,
-          walletBalanceSnapshotTime: snapshot.pUsdBalance.fetchedAt,
-          targetTrade: event.trade,
-        }) : null;
-        signalContexts.push({
-          signal: candidateSignal,
-          capitalDecision,
-          context: buildSignalExecutionContext({
+        try {
+          const event = eventByKey.get(candidateSignal.sourceEventKey);
+          if (!event) throw new Error(`Signal event missing: ${candidateSignal.signalId}`);
+          let marketPromise = marketCache.get(candidateSignal.conditionId);
+          if (!marketPromise) {
+            marketPromise = this.options.signalMarketMetadataProvider.market(candidateSignal.conditionId, signal);
+            marketCache.set(candidateSignal.conditionId, marketPromise);
+          }
+          const market = await marketPromise;
+          if (candidateSignal.signalType === "TARGET_BUY" && !event.trade) {
+            throw new Error(`Signal source trade missing: ${candidateSignal.signalId}`);
+          }
+          const capitalDecision = candidateSignal.signalType === "TARGET_BUY" ? estimateTargetCapital({
+            walletAddress: this.options.walletAddress,
+            sourceEventKey: candidateSignal.sourceEventKey,
+            identityStatus: "IDENTITY_CONFIRMED",
+            syncStatus: reconciliation.syncStatus,
+            positions: snapshot.positions.data,
+            positionSnapshotTime: snapshot.positions.fetchedAt,
+            walletBalanceMicros,
+            walletBalanceSnapshotTime: snapshot.pUsdBalance.fetchedAt,
+            targetTrade: event.trade!,
+          }) : null;
+          signalContexts.push({
             signal: candidateSignal,
-            event,
-            market: market.market,
-            marketSourceUrl: market.sourceUrl,
-            marketFetchedAt: market.fetchedAt,
             capitalDecision,
-            ...(this.options.sourceVersion ? { sourceVersion: this.options.sourceVersion } : {}),
-            createdAt: completedAt,
-          }),
-        });
+            context: buildSignalExecutionContext({
+              signal: candidateSignal,
+              event,
+              market: market.market,
+              marketSourceUrl: market.sourceUrl,
+              marketFetchedAt: market.fetchedAt,
+              capitalDecision,
+              ...(this.options.sourceVersion ? { sourceVersion: this.options.sourceVersion } : {}),
+              createdAt: completedAt,
+            }),
+          });
+          signalsToEmit.push(candidateSignal);
+        } catch (error) {
+          signalEnrichmentFailures.push({
+            signalId: candidateSignal.signalId,
+            sourceEventKey: candidateSignal.sourceEventKey,
+            conditionId: candidateSignal.conditionId,
+            errorDetail: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
-      }
-    } catch (error) {
-      this.store.recordFailedPoll(started.observeRunId, sequence, pollStartedAt, completedAt, error, "PROCESSING_FAILED");
-      this.lastPollCompletedAt = completedAt;
-      this.gapActive = true;
-      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
-      return false;
+    } else {
+      signalsToEmit.push(...signalCandidates);
     }
     this.store.commitSuccessfulPoll({
       observeRunId: started.observeRunId,
@@ -549,6 +592,7 @@ export class ObserveOnlyRunner {
       signalsToEmit,
       capitalEstimate,
       signalContexts,
+      signalEnrichmentFailures,
       reconciliation,
       replayState: this.gapActive ? "GAP_RECOVERED" : "ONLINE",
       gapRecovered: this.gapActive,

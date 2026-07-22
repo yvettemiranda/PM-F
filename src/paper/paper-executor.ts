@@ -1044,7 +1044,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       .filter((position) => position.status !== "FROZEN" && BigInt(position.current_size_micros) > 0n)
       .flatMap((position) => {
         const signal = this.loadSignal(position.signal_id);
-        if (!signal.context) return [];
+        if (!signal.context || signal.context.marketEndTimeStatus === "UNAVAILABLE") return [];
         return [{
           positionId: position.paper_position_id,
           accountId: position.paper_account_id,
@@ -1416,6 +1416,13 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
 
   private buyDeadline(signal: PaperSignalEnvelope): string {
     const context = signal.context!;
+    const explicitDeadline = context.executionDeadlineAt === null || context.executionDeadlineAt === undefined
+      ? Number.NaN
+      : Date.parse(context.executionDeadlineAt);
+    if (Number.isFinite(explicitDeadline)) return new Date(explicitDeadline).toISOString();
+    if (context.marketEndTimeStatus === "UNAVAILABLE") {
+      throw new Error("PAPER_EXECUTION_DEADLINE_MISSING");
+    }
     const target = Date.parse(context.targetTradeTimestamp);
     const end = Date.parse(context.marketEndTime);
     const rules = registeredExecutionRules(this.database, context.rulesetHash);
@@ -3214,7 +3221,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
-              c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
+              c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
+              c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
               c.source_code_commit context_source_code_commit,
               c.source_code_dirty context_source_code_dirty,
@@ -3254,6 +3262,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         capitalSizingRatioHash: row.capital_sizing_ratio_hash as string | null,
         targetTradeTimestamp: row.target_trade_timestamp as string,
         marketEndTime: row.market_end_time as string,
+        marketEndTimeStatus: row.market_end_time_status as "VERIFIED" | "UNAVAILABLE",
+        executionDeadlineAt: row.execution_deadline_at as string | null,
         marketMetadataSnapshot: JSON.parse(row.market_metadata_snapshot_json as string),
         marketMetadataHash: row.market_metadata_hash as string,
         rulesetHash: row.context_ruleset_hash as string,

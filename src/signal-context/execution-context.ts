@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ClobMarket } from "../adapters/polymarket-public.js";
-import { stableJson, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
+import { stableJson, RULESET, RULESET_HASH, VERSIONS } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import type { ObserveEvent, ObserveSignal } from "../observe/types.js";
 import type { SignalExecutionContext } from "../paper/types.js";
 import type { CapitalEstimate } from "../services/capital-estimator.js";
+import { assertExpectedBinaryMarketOutcomeAssets } from "./market-outcome-set.js";
 
 export interface SignalContextBundle {
   signal: ObserveSignal;
@@ -30,22 +31,47 @@ export function buildSignalExecutionContext(input: {
   createdAt: string;
 }): SignalExecutionContext {
   if (!input.signal.targetId.trim()) throw new Error(`SIGNAL_TARGET_ID_REQUIRED:${input.signal.signalId}`);
-  const trade = input.event.trade;
-  if (!trade) throw new Error(`Signal source trade missing: ${input.signal.signalId}`);
-  if (!input.market.end_date_iso) throw new Error(`MARKET_END_TIME_UNAVAILABLE:${input.signal.conditionId}`);
+  const sourceTimestamp = input.event.trade?.timestamp ?? input.event.activity?.timestamp;
+  if (sourceTimestamp === undefined) throw new Error(`Signal source timestamp missing: ${input.signal.signalId}`);
+  const targetTradeTimestamp = new Date(sourceTimestamp * 1_000).toISOString();
+  const targetTradeMs = Date.parse(targetTradeTimestamp);
+  const verifiedMarketOutcomeAssets = input.signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT"
+    ? assertExpectedBinaryMarketOutcomeAssets(
+      input.market,
+      input.signal.conditionId,
+      input.signal.requiredMarketOutcomeAssets ?? [],
+    )
+    : null;
+  const rawMarketEndTime = input.market.end_date_iso;
+  const hasMarketEndTime = typeof rawMarketEndTime === "string" && rawMarketEndTime.length > 0;
+  const marketEndTimeStatus = hasMarketEndTime ? "VERIFIED" as const : "UNAVAILABLE" as const;
+  const marketEndMs = hasMarketEndTime ? Date.parse(rawMarketEndTime) : Number.NaN;
+  if (marketEndTimeStatus === "VERIFIED" && !Number.isFinite(marketEndMs)) {
+    throw new Error(`MARKET_END_TIME_INVALID:${input.signal.conditionId}`);
+  }
+  const remainingMarketMs = marketEndTimeStatus === "VERIFIED"
+    ? Math.max(0, marketEndMs - targetTradeMs)
+    : RULESET.maxWaitMs;
+  const executionWaitMs = marketEndTimeStatus === "VERIFIED"
+    ? Math.min((remainingMarketMs * RULESET.waitRatioPpm) / 1_000_000, RULESET.maxWaitMs)
+    : RULESET.maxWaitMs;
+  const executionDeadlineAt = new Date(targetTradeMs + executionWaitMs).toISOString();
   const metadata = {
     sourceUrl: input.marketSourceUrl,
     fetchedAt: input.marketFetchedAt,
     conditionId: input.market.condition_id,
     question: input.market.question ?? null,
     marketSlug: input.market.market_slug ?? null,
-    endDateIso: input.market.end_date_iso,
+    endDateIso: rawMarketEndTime ?? null,
+    marketEndTimeStatus,
+    executionDeadlineAt,
     closed: input.market.closed,
     active: input.market.active ?? null,
     acceptingOrders: input.market.accepting_orders ?? null,
     takerBaseFee: input.market.taker_base_fee ?? null,
     is5050Outcome: input.market.is_50_50_outcome ?? false,
     tokens: input.market.tokens,
+    verifiedMarketOutcomeAssets,
   };
   const metadataHash = createHash("sha256").update(stableJson(metadata)).digest("hex");
   const capitalSizingRatio = input.signal.signalType === "TARGET_BUY"
@@ -71,8 +97,10 @@ export function buildSignalExecutionContext(input: {
     input.signal.signalId,
     input.signal.targetId,
     input.capitalDecision?.capitalEstimateId ?? "NONE",
-    String(trade.timestamp),
-    input.market.end_date_iso,
+    String(sourceTimestamp),
+    rawMarketEndTime ?? "UNAVAILABLE",
+    marketEndTimeStatus,
+    executionDeadlineAt,
     metadataHash,
     capitalSizingRatioHash ?? "NO_EXACT_CAPITAL_RATIO",
     RULESET_HASH,
@@ -87,8 +115,10 @@ export function buildSignalExecutionContext(input: {
       : null,
     capitalSizingRatio,
     capitalSizingRatioHash,
-    targetTradeTimestamp: new Date(trade.timestamp * 1_000).toISOString(),
-    marketEndTime: input.market.end_date_iso,
+    targetTradeTimestamp,
+    marketEndTime: rawMarketEndTime ?? "",
+    marketEndTimeStatus,
+    executionDeadlineAt,
     marketMetadataSnapshot: metadata,
     marketMetadataHash: metadataHash,
     rulesetHash: RULESET_HASH,

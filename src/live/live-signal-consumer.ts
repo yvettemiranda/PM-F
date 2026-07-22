@@ -725,7 +725,8 @@ export class LiveSignalConsumer {
               s.ruleset_hash signal_ruleset_hash,
               c.context_id,c.target_id context_target_id,c.signal_id context_signal_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
-              c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,
+              c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
+              c.market_metadata_snapshot_json,
               c.market_metadata_hash,c.ruleset_hash context_ruleset_hash,
               c.source_code_commit context_source_code_commit,
               c.source_code_dirty context_source_code_dirty,
@@ -764,8 +765,18 @@ export class LiveSignalConsumer {
       if (!Number.isFinite(Date.parse(row.target_trade_timestamp as string))) {
         throw new Error("EXECUTION_CONTEXT_TARGET_TIME_INVALID");
       }
-      if (!Number.isFinite(Date.parse(row.market_end_time as string))) {
+      const marketEndTimeStatus = row.market_end_time_status as "VERIFIED" | "UNAVAILABLE";
+      if (marketEndTimeStatus === "VERIFIED" && !Number.isFinite(Date.parse(row.market_end_time as string))) {
         throw new Error("EXECUTION_CONTEXT_MARKET_END_INVALID");
+      }
+      if (marketEndTimeStatus === "UNAVAILABLE" && row.market_end_time !== "") {
+        throw new Error("EXECUTION_CONTEXT_MARKET_END_STATUS_INVALID");
+      }
+      if (
+        (marketEndTimeStatus === "UNAVAILABLE" || row.execution_deadline_at !== null)
+        && !Number.isFinite(Date.parse(row.execution_deadline_at as string))
+      ) {
+        throw new Error("EXECUTION_CONTEXT_DEADLINE_INVALID");
       }
       const metadataHash = createHash("sha256").update(stableJson(metadata)).digest("hex");
       if (metadataHash !== row.market_metadata_hash) throw new Error("EXECUTION_CONTEXT_METADATA_HASH_MISMATCH");
@@ -782,6 +793,8 @@ export class LiveSignalConsumer {
       capitalSizingRatioHash: row.capital_sizing_ratio_hash as string | null,
       targetTradeTimestamp: row.target_trade_timestamp as string,
       marketEndTime: row.market_end_time as string,
+      marketEndTimeStatus: row.market_end_time_status as "VERIFIED" | "UNAVAILABLE",
+      executionDeadlineAt: row.execution_deadline_at as string | null,
       marketMetadataSnapshot: metadata!,
       marketMetadataHash: row.market_metadata_hash as string,
       rulesetHash: row.context_ruleset_hash as string,

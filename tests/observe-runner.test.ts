@@ -1480,14 +1480,240 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
-  it.each(["MERGE", "SPLIT"] as const)(
-    "fails closed immediately when target %s cannot be projected or copied",
-    async (activityType) => {
+  it("projects a target MERGE into proportional CLOB exit signals without desync", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const yes = trade({
+      transactionHash: "0xmerge-yes-buy",
+      asset: "asset-yes",
+      price: "0.4",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const no = trade({
+      transactionHash: "0xmerge-no-buy",
+      asset: "asset-no",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 71,
+    });
+    const merged = activity({
+      type: "MERGE",
+      transactionHash: "0xmerge-complete-set",
+      size: "10",
+      timestamp: baselineSecond + 72,
+    });
+    const liveSnapshot = snapshot([yes, no], [], "2026-07-08T00:01:20.000Z");
+    liveSnapshot.activity = capture("activity", [
+      { ...yes, type: "TRADE", isCombo: false },
+      { ...no, type: "TRADE", isCombo: false },
+      merged,
+    ], liveSnapshot.activity.fetchedAt);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      liveSnapshot,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      signalMarketMetadataProvider: {
+        async market() {
+          return {
+            sourceUrl: "https://clob.test/markets/0xcondition",
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: "0xcondition",
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [
+                { token_id: "asset-yes", outcome: "Yes" },
+                { token_id: "asset-no", outcome: "No" },
+              ],
+            },
+          };
+        },
+      },
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:20.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 3,
+      emittedSignals: 2,
+      majorDesyncCount: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    const mergeSignals = check.prepare(
+      `SELECT asset_id,signal_type,sell_ratio_numerator,sell_ratio_denominator,reason,
+              target_price_units
+       FROM signals WHERE source_event_key=(
+         SELECT source_event_key FROM raw_events WHERE source_transaction_hash='0xmerge-complete-set'
+       ) ORDER BY asset_id`,
+    ).all();
+    expect(mergeSignals).toEqual([
+      {
+        asset_id: "asset-no",
+        signal_type: "TARGET_SELL",
+        sell_ratio_numerator: "10000000",
+        sell_ratio_denominator: "10000000",
+        reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+        target_price_units: "555555555555555556",
+      },
+      {
+        asset_id: "asset-yes",
+        signal_type: "TARGET_SELL",
+        sell_ratio_numerator: "10000000",
+        sell_ratio_denominator: "10000000",
+        reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+        target_price_units: "444444444444444444",
+      },
+    ]);
+    expect((check.prepare(
+      `SELECT count(*) count FROM observe_signal_emissions
+       WHERE source_event_key=(
+         SELECT source_event_key FROM raw_events WHERE source_transaction_hash='0xmerge-complete-set'
+       )`,
+    ).get() as { count: number }).count).toBe(2);
+    expect((check.prepare("SELECT count(*) count FROM observe_position_projection").get() as { count: number }).count).toBe(0);
+    check.close();
+  });
+
+  it("fails closed when official market tokens do not prove the projected MERGE outcome set", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const yes = trade({
+      transactionHash: "0xmerge-unverified-yes",
+      asset: "asset-yes",
+      price: "0.4",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const no = trade({
+      transactionHash: "0xmerge-unverified-no",
+      asset: "asset-no",
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 71,
+    });
+    const merged = activity({
+      type: "MERGE",
+      transactionHash: "0xmerge-unverified-set",
+      size: "10",
+      timestamp: baselineSecond + 72,
+    });
+    const liveSnapshot = snapshot([yes, no], [], "2026-07-08T00:01:20.000Z");
+    liveSnapshot.activity = capture("activity", [
+      { ...yes, type: "TRADE", isCombo: false },
+      { ...no, type: "TRADE", isCombo: false },
+      merged,
+    ], liveSnapshot.activity.fetchedAt);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      liveSnapshot,
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      signalMarketMetadataProvider: {
+        async market() {
+          return {
+            sourceUrl: "https://clob.test/markets/0xcondition",
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: "0xcondition",
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [
+                { token_id: "asset-yes", outcome: "Yes" },
+                { token_id: "asset-no", outcome: "No" },
+                { token_id: "asset-other", outcome: "Other" },
+              ],
+            },
+          };
+        },
+      },
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:20.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      emittedSignals: 2,
+      majorDesyncCount: 1,
+      finalSyncStatus: "MAJOR_DESYNC",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect((check.prepare(
+      "SELECT count(*) count FROM signals WHERE reason='TARGET_MERGE_EQUIVALENT_EXIT'",
+    ).get() as { count: number }).count).toBe(0);
+    expect(check.prepare(
+      "SELECT signal_enrichment_failures,warning_detail FROM observe_polls WHERE sequence=2",
+    ).get()).toMatchObject({
+      signal_enrichment_failures: 1,
+      warning_detail: expect.stringContaining("MARKET_OUTCOME_SET_NOT_BINARY"),
+    });
+    check.close();
+  });
+
+  it.each([0, 1])(
+    "fails closed when a target MERGE has only %i provable outcome legs",
+    async (legCount) => {
+      const baselinePositions = legCount === 0 ? [] : [position("100")];
+      const { databasePath } = setup(baselinePositions);
+      let now = new Date("2026-07-08T00:01:00.000Z");
+      const merged = activity({
+        type: "MERGE",
+        transactionHash: `0xmerge-incomplete-${legCount}`,
+        size: "10",
+        timestamp: baselineSecond + 70,
+      });
+      const store = new ObserveStore(databasePath, sourceVersion);
+      const runner = new ObserveOnlyRunner(store, new QueueSource([
+        snapshot([], baselinePositions, now.toISOString()),
+        snapshotWithActivity([merged], legCount === 0 ? [] : [position("90")], "2026-07-08T00:01:10.000Z"),
+      ]), {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+      });
+
+      expect(await runner.pollOnce()).toBe(true);
+      now = new Date("2026-07-08T00:01:10.000Z");
+      expect(await runner.pollOnce()).toBe(true);
+      expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+        emittedSignals: 0,
+        majorDesyncCount: 1,
+        finalSyncStatus: "MAJOR_DESYNC",
+      });
+      store.close();
+      const check = new DatabaseSync(databasePath, { readOnly: true });
+      expect(JSON.parse((check.prepare(
+        "SELECT detail_json FROM reconciliation_reports WHERE sync_status='MAJOR_DESYNC'",
+      ).get() as { detail_json: string }).detail_json)).toContainEqual(expect.objectContaining({
+        issueType: "UNSUPPORTED_TARGET_ACTIVITY",
+        activityType: "MERGE",
+      }));
+      check.close();
+    },
+  );
+
+  it(
+    "fails closed immediately when target SPLIT cannot be projected or copied",
+    async () => {
       const { databasePath } = setup();
       let now = new Date("2026-07-08T00:01:00.000Z");
       const unsupported = activity({
-        type: activityType,
-        transactionHash: `0xunsupported-${activityType.toLowerCase()}`,
+        type: "SPLIT",
+        transactionHash: "0xunsupported-split",
         timestamp: baselineSecond + 70,
       });
       const store = new ObserveStore(databasePath, sourceVersion);
@@ -1519,7 +1745,7 @@ describe("ObserveOnlyRunner", () => {
       ).get() as { detail_json: string };
       expect(JSON.parse(report.detail_json)).toContainEqual(expect.objectContaining({
         issueType: "UNSUPPORTED_TARGET_ACTIVITY",
-        activityType,
+        activityType: "SPLIT",
       }));
       expect(check.prepare("SELECT sync_status FROM monitor_targets").get())
         .toEqual({ sync_status: "MAJOR_DESYNC" });
@@ -1929,7 +2155,199 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
-  it("does not publish a Paper-eligible signal when execution context construction fails", async () => {
+  it("keeps a live BUY executable when the official market end time is unavailable", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({ transactionHash: "0xcontext-no-end", timestamp: baselineSecond + 70 });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([
+        snapshot([], [position("100")], now.toISOString()),
+        snapshot([buy], [position("110")], "2026-07-08T00:01:10.000Z"),
+      ]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+        signalMarketMetadataProvider: {
+          async market() {
+            return {
+              sourceUrl: "https://clob.test/markets/condition",
+              fetchedAt: now.toISOString(),
+              market: {
+                condition_id: "0xcondition",
+                end_date_iso: null,
+                closed: false,
+                active: true,
+                accepting_orders: true,
+                tokens: [{ token_id: "asset-1", outcome: "Yes" }],
+              },
+            };
+          },
+        },
+      },
+    );
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:10.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 2,
+      failedPolls: 0,
+      processedEvents: 1,
+      emittedSignals: 1,
+      gapEvents: 0,
+    });
+    store.close();
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT market_end_time,market_end_time_status,execution_deadline_at
+       FROM signal_execution_contexts`,
+    ).get()).toEqual({
+      market_end_time: "",
+      market_end_time_status: "UNAVAILABLE",
+      execution_deadline_at: "2026-07-08T00:31:10.000Z",
+    });
+    check.close();
+  });
+
+  it("persists a live trade and retries only its Signal enrichment after a transient metadata failure", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({ transactionHash: "0xcontext-retry", timestamp: baselineSecond + 70 });
+    let metadataAttempts = 0;
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([
+        snapshot([], [position("100")], now.toISOString()),
+        snapshot([buy], [position("110")], "2026-07-08T00:01:10.000Z"),
+        snapshot([buy], [position("110")], "2026-07-08T00:01:13.000Z"),
+      ]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+        signalMarketMetadataProvider: {
+          async market() {
+            metadataAttempts += 1;
+            if (metadataAttempts === 1) throw new Error("temporary market metadata failure");
+            return {
+              sourceUrl: "https://clob.test/markets/condition",
+              fetchedAt: now.toISOString(),
+              market: {
+                condition_id: "0xcondition",
+                end_date_iso: "2026-07-08T01:00:00.000Z",
+                closed: false,
+                tokens: [{ token_id: "asset-1", outcome: "Yes" }],
+              },
+            };
+          },
+        },
+      },
+    );
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:10.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 2,
+      failedPolls: 0,
+      processedEvents: 1,
+      emittedSignals: 0,
+      gapEvents: 0,
+    });
+    now = new Date("2026-07-08T00:01:13.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 3,
+      failedPolls: 0,
+      processedEvents: 1,
+      emittedSignals: 1,
+      gapEvents: 0,
+    });
+    expect(metadataAttempts).toBe(2);
+    store.close();
+  });
+
+  it("isolates metadata failure to one market while publishing another market in the same poll", async () => {
+    const secondPosition: PublicPosition = {
+      ...position("100"),
+      asset: "asset-2",
+      conditionId: "0xcondition-2",
+      outcome: "No",
+    };
+    const { databasePath } = setup([position("100"), secondPosition]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const blockedBuy = trade({
+      transactionHash: "0xcontext-one-market-fails",
+      timestamp: baselineSecond + 70,
+    });
+    const healthyBuy = trade({
+      transactionHash: "0xcontext-other-market-succeeds",
+      conditionId: "0xcondition-2",
+      asset: "asset-2",
+      timestamp: baselineSecond + 71,
+    });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(
+      store,
+      new QueueSource([
+        snapshot([], [position("100"), secondPosition], now.toISOString()),
+        snapshot([blockedBuy, healthyBuy], [
+          position("110"),
+          { ...secondPosition, size: "110", currentValue: "55" },
+        ], "2026-07-08T00:01:11.000Z"),
+      ]),
+      {
+        walletAddress: wallet,
+        pollIntervalMs: 1_000,
+        now: () => now,
+        signalMarketMetadataProvider: {
+          async market(requestedConditionId) {
+            if (requestedConditionId === "0xcondition") {
+              throw new Error("first market metadata unavailable");
+            }
+            return {
+              sourceUrl: "https://clob.test/markets/condition-2",
+              fetchedAt: now.toISOString(),
+              market: {
+                condition_id: requestedConditionId,
+                end_date_iso: "2026-07-08T01:00:00.000Z",
+                closed: false,
+                tokens: [{ token_id: "asset-2", outcome: "No" }],
+              },
+            };
+          },
+        },
+      },
+    );
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:11.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 2,
+      failedPolls: 0,
+      processedEvents: 2,
+      emittedSignals: 1,
+      gapEvents: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT asset_id FROM signals").all()).toEqual([{ asset_id: "asset-2" }]);
+    expect(check.prepare(
+      "SELECT signal_enrichment_failures,warning_detail FROM observe_polls WHERE sequence=2",
+    ).get()).toEqual({
+      signal_enrichment_failures: 1,
+      warning_detail: expect.stringContaining("first market metadata unavailable"),
+    });
+    check.close();
+  });
+
+  it("persists the event without publishing a Paper-eligible signal when execution context construction fails", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");
     const buy = trade({ transactionHash: "0xcontext-fail", timestamp: baselineSecond + 70 });
@@ -1949,13 +2367,26 @@ describe("ObserveOnlyRunner", () => {
     );
     expect(await runner.pollOnce()).toBe(true);
     now = new Date("2026-07-08T00:01:10.000Z");
-    expect(await runner.pollOnce()).toBe(false);
+    expect(await runner.pollOnce()).toBe(true);
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
-    expect(store.runMetrics(runner.start().observeRunId).failedPolls).toBe(1);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 2,
+      failedPolls: 0,
+      processedEvents: 1,
+      emittedSignals: 0,
+      gapEvents: 0,
+    });
     store.close();
     const check = new DatabaseSync(databasePath, { readOnly: true });
     expect((check.prepare("SELECT count(*) count FROM signals").get() as { count: number }).count).toBe(0);
-    expect((check.prepare("SELECT status FROM observe_polls WHERE sequence=2").get() as { status: string }).status).toBe("PROCESSING_FAILED");
+    expect((check.prepare("SELECT count(*) count FROM raw_events").get() as { count: number }).count).toBe(1);
+    expect(check.prepare(
+      "SELECT status,signal_enrichment_failures,warning_detail FROM observe_polls WHERE sequence=2",
+    ).get()).toEqual({
+      status: "SUCCESS",
+      signal_enrichment_failures: 1,
+      warning_detail: expect.stringContaining("market metadata unavailable"),
+    });
     check.close();
   });
 });

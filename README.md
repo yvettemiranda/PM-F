@@ -16,7 +16,7 @@
 - Candidate Golden Cases（必须由用户确认后才能批准）
 - Signal `executionEligible`；断线行为 Signal 永远禁止进入执行层
 - Observe Only Runner：增量轮询、checkpoint 恢复、前向仓位投影和只报告不修正的 reconciliation
-- 不可变 `signal_execution_context`：为 Paper 输出交易时间、市场结束时间、市场元数据和逐 BUY 资金决策
+- 不可变 `signal_execution_context`：为 Paper 输出交易时间、市场结束时间状态、执行截止时间、市场元数据和逐 BUY 资金决策
 - Paper Executor：独立模拟账户、资金 reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、止损、结算和审计账本
 - Phase 1A 架构优化：统一 Executor Interface、Risk Manager、Risk Decision 全链路关联、Portfolio Projection Service、Ruleset Registry、Live 安全占位、Settlement Service、PnL Model、不可变 Audit Log、Position `FROZEN` 保护态和核心对象版本字段
 - Phase 2/3：Live Gate Safety Layer、Live Executor 架构、Order/CLOB/Signer/Wallet/Redeem adapters、Live Order/Fill/Position/Ledger/Reconciliation/Crash Recovery/Emergency Stop。默认仍使用 disabled/fake adapter，不默认创建真实交易能力
@@ -77,9 +77,11 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 
 Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行成交时，Phase 0 不会直接合并或接受，而是只读查询 Polygon `eth_getTransactionReceipt`。只有官方 V2 Exchange 回执能以不同 `orderHash` 精确证明相同经济成交次数时，才生成稳定的多 occurrence `source_event_key`；RPC 不可用、旧版/未知合约、金额或 maker 不符、重复 `orderHash`、proof 重放不一致时都保持 `AMBIGUOUS_DUPLICATE_EVENTS`。
 
-`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Trades 和 Activity 默认每 3 秒发现一次；Positions 与 pUSD 默认每 15 秒全量核对一次，发现新的目标事件时会立即提前核对。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
+`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Trades 和 Activity 默认每 3 秒发现一次；Positions 与 pUSD 默认每 15 秒全量核对一次，发现新的目标事件时会立即提前核对。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。单个市场的元数据获取或校验失败只会记录 `signal_enrichment_failures` warning，并在后续轮询重试该 Signal；它不会再伪造连接 gap，也不会阻断同一轮其他市场。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
 
-普通目标 BUY/SELL 可进入跟单链路；REDEEM 由跟单账户按自身持仓结算。已验证的 negative-risk `CONVERSION` 只形成不可执行审计义务。`MERGE/SPLIT` 尚无可证明的投影或复制语义：Observe 会在发现后立即写入 `UNSUPPORTED_TARGET_ACTIVITY` 并置为 `MAJOR_DESYNC`，而不是等待普通持仓差异宽限期或假装仍然同步。
+普通目标 BUY/SELL 可进入跟单链路；REDEEM 由跟单账户按自身持仓结算。标准市场 `MERGE` 只有在官方 CLOB market token 列表精确证明完整二元 outcome set 后，才会从目标投影中扣除完整套，并按各 outcome 的目标持仓比例生成独立 `TARGET_SELL` 等价退出；Phase 0 会把该 market 证据收入 Capture Manifest，Observe 的瞬时获取失败只延后信号并重试。各腿沿用 SELL 的盘口、滑点、Risk 和幂等规则，不需要 signer 或链上写入。若 MERGE 金额、官方 outcome set、已知仓位或退出定价证据不足，仍写入 `UNSUPPORTED_TARGET_ACTIVITY` 并 fail closed。已验证的 negative-risk `CONVERSION` 只形成不可执行审计义务，`SPLIT` 仍会立即置为 `MAJOR_DESYNC`，不会假装已经复制。
+
+官方市场结束时间为空时，Paper 使用 Signal 生成时固化的有界截止时间（当前最多 30 分钟）继续尝试，避免把正常交易误判为 gap；该状态在 context 中明确记为 `UNAVAILABLE`。Live Gate 对这类 context 仍固定拒绝 `MARKET_END_TIME_UNAVAILABLE`，不会把 Paper 的容错自动扩大到真实资金。
 
 用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context；待成交 BUY 使用公开、无认证的 CLOB Market WebSocket 作为盘口变化唤醒信号，但每次执行判断仍重新读取完整 REST 盘口，并保留 15 秒兜底检查。WebSocket 不参与签名、下单或链上写入。
 

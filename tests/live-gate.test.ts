@@ -218,6 +218,8 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   decision: "ALLOW" | "REJECT";
   signalType?: "TARGET_BUY" | "TARGET_SELL";
   marketEndTime?: string;
+  marketEndTimeStatus?: "VERIFIED" | "UNAVAILABLE";
+  executionDeadlineAt?: string | null;
   requestedAmountMicros?: string | null;
   requestedSizeMicros?: string | null;
   ruleset?: TestRuleset;
@@ -271,16 +273,19 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   db.prepare(
     `INSERT INTO signal_execution_contexts(
       context_id,target_id,signal_id,capital_decision_id,target_trade_capital_ratio_ppm,
-      target_trade_timestamp,market_end_time,market_metadata_snapshot_json,
+      target_trade_timestamp,market_end_time,market_end_time_status,execution_deadline_at,
+      market_metadata_snapshot_json,
       market_metadata_hash,ruleset_hash,schema_version,signal_version,strategy_version,
       source_code_commit,source_code_dirty,config_version,created_at
-    ) VALUES (?, ?, ?, NULL, '100000', ?, ?, '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ) VALUES (?, ?, ?, NULL, '100000', ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     contextId,
     targetId,
     input.signalId,
     createdAt,
     input.marketEndTime ?? "2026-07-10T00:00:00.000Z",
+    input.marketEndTimeStatus ?? "VERIFIED",
+    input.executionDeadlineAt ?? null,
     `metadata-${input.signalId}`,
     rulesetHash,
     VERSIONS.schemaVersion,
@@ -869,6 +874,26 @@ describe("LiveGateService", () => {
     const gate = service(env.databasePath);
     const result = await gate.checkExecution(executionInput("allow-signal", "risk-allow"));
     expect(result.allowed).toBe(true);
+    gate.close();
+  });
+
+  it("blocks Live execution when the market end time is unavailable", async () => {
+    const env = setup();
+    passPrerequisites(env.databasePath);
+    insertWallet(env.databasePath);
+    insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "unknown-market-end",
+      riskDecisionId: "risk-unknown-market-end",
+      decision: "ALLOW",
+      marketEndTime: "",
+      marketEndTimeStatus: "UNAVAILABLE",
+      executionDeadlineAt: "2026-07-09T00:30:00.000Z",
+    });
+    setLiveActive(env.databasePath);
+    const gate = service(env.databasePath);
+    const result = await gate.checkExecution(executionInput("unknown-market-end", "risk-unknown-market-end"));
+    expect(result.allowed).toBe(false);
+    expect(result.blockedReasons).toContain("MARKET_END_TIME_UNAVAILABLE");
     gate.close();
   });
 

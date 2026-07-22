@@ -55,7 +55,7 @@ export interface ClobMarket {
   condition_id: string;
   question?: string;
   market_slug?: string;
-  end_date_iso?: string;
+  end_date_iso?: string | null;
   closed: boolean;
   active?: boolean;
   accepting_orders?: boolean;

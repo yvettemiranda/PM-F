@@ -157,6 +157,9 @@ export function parseClobMarket(value: unknown): ClobMarket {
   const row = record(value, "market");
   hash(row.condition_id, "market.condition_id");
   if (typeof row.closed !== "boolean") throw new Error("API_SCHEMA_INVALID:market.closed:boolean");
+  if (row.end_date_iso !== undefined && row.end_date_iso !== null) {
+    text(row.end_date_iso, "market.end_date_iso");
+  }
   optionalBoolean(row.active, "market.active");
   optionalBoolean(row.accepting_orders, "market.accepting_orders");
   optionalBoolean(row.is_50_50_outcome, "market.is_50_50_outcome");

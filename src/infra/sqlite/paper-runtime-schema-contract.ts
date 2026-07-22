@@ -26,6 +26,7 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.25.0",
   "2.26.0",
   "2.27.0",
+  "2.29.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
@@ -46,7 +47,14 @@ export const PAPER_RUNTIME_REQUIRED_COLUMNS = Object.freeze({
   observe_checkpoints: ["projection_snapshot_hash"],
   observe_runs: ["campaign_id", "campaign_session_id"],
   signals: ["target_id"],
-  signal_execution_contexts: ["target_id", "capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
+  signal_execution_contexts: [
+    "target_id",
+    "capital_sizing_ratio_json",
+    "capital_sizing_ratio_hash",
+    "market_end_time_status",
+    "execution_deadline_at",
+  ],
+  observe_polls: ["signal_enrichment_failures", "warning_detail"],
   risk_decisions: ["capital_sizing_decision_json", "capital_sizing_decision_hash"],
   paper_orderbook_snapshots: [
     "min_order_size",
@@ -135,13 +143,24 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
 
 export const PAPER_RUNTIME_REQUIRED_INDEXES = [
   "negative_risk_conversion_evidence_run_idx",
+  "observe_signal_emissions_source_event_idx",
   "paper_settlement_retry_due_idx",
   "paper_validation_evidence_adjudications_campaign_idx",
   "paper_validation_campaign_transition_sequence_idx",
   "paper_validation_session_transition_sequence_idx",
+  "replay_event_classifications_event_idx",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_SQL_FRAGMENTS = Object.freeze({
+  observe_signal_emissions: [
+    "UNIQUE(baseline_run_id, signal_id)",
+  ],
+  position_bucket_ledger: [
+    "UNIQUE(replay_run_id, source_event_key, asset_id)",
+  ],
+  replay_event_classifications: [
+    "UNIQUE(replay_run_id, source_event_key, signal_id)",
+  ],
   paper_validation_campaigns: [
     "CHECK(required_active_runtime_ms >= 86400000)",
     "CHECK(required_continuous_runtime_ms >= 14400000)",

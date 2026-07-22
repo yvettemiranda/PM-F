@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import { ReplayEngine } from "../src/replay/replay-engine.js";
-import { sourceEventKey } from "../src/domain/idempotency.js";
+import { activityEventKey, sourceEventKey } from "../src/domain/idempotency.js";
 import { stableJson } from "../src/domain/versioning.js";
 import { estimateTargetCapital } from "../src/services/capital-estimator.js";
 import { assertObserveProjectionSnapshotMigrationPreflight } from "../src/infra/sqlite/migration-preflight.js";
@@ -128,6 +128,56 @@ describe("Phase0Database", () => {
       (check.prepare("SELECT count(*) count FROM state_transitions WHERE entity_type='SIGNAL'").get() as { count: number }).count,
     ).toBe(8);
     expect((check.prepare("SELECT count(*) count FROM replay_runs").get() as { count: number }).count).toBe(2);
+    check.close();
+  });
+
+  it("persists both position-ledger legs for one MERGE source event", () => {
+    const { databasePath } = workspace();
+    const trades = [
+      trade({ transactionHash: "0xmerge-db-yes", asset: "asset-yes", price: "0.4", timestamp: 100 }),
+      trade({ transactionHash: "0xmerge-db-no", asset: "asset-no", price: "0.5", timestamp: 101 }),
+    ];
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-db",
+      conditionId: "0x2",
+      type: "MERGE",
+      size: "10",
+      timestamp: 102,
+    };
+    const activity = [merge];
+    const report = new ReplayEngine().run({
+      targetId: replayTargetId,
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades,
+      activity,
+      verifiedMarketOutcomeAssetsByCondition: { "0x2": ["asset-no", "asset-yes"] },
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+    const database = new Phase0Database(databasePath);
+    database.initialize();
+    const targetId = database.ensureTarget(wallet, "IDENTITY_CONFIRMED");
+    database.saveReplay(targetId, trades, activity, report);
+    database.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    const mergeLedger = check.prepare(
+      `SELECT asset_id FROM position_bucket_ledger
+       WHERE source_event_key=? ORDER BY asset_id`,
+    ).all(activityEventKey(merge));
+    expect(mergeLedger).toEqual([{ asset_id: "asset-no" }, { asset_id: "asset-yes" }]);
+    const mergeClassifications = check.prepare(
+      `SELECT s.asset_id,c.signal_id
+       FROM replay_event_classifications c
+       JOIN signals s ON s.signal_id=c.signal_id
+       WHERE c.source_event_key=? ORDER BY s.asset_id`,
+    ).all(activityEventKey(merge));
+    expect(mergeClassifications).toEqual([
+      { asset_id: "asset-no", signal_id: expect.any(String) },
+      { asset_id: "asset-yes", signal_id: expect.any(String) },
+    ]);
     check.close();
   });
 

@@ -11,6 +11,8 @@ import {
   assertStoredTradeMultiplicityProofDocument,
   verifyTradeMultiplicityEvidence,
 } from "../services/trade-multiplicity-evidence.js";
+import type { ClobMarket } from "../adapters/polymarket-public.js";
+import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
 
 const captureRunId = process.argv.slice(2).find((argument) => /^[a-f0-9]{64}$/.test(argument));
 if (!captureRunId) throw new Error("Usage: pnpm phase05:replay-capture -- <capture-run-id>");
@@ -46,6 +48,12 @@ try {
     return trade ? [trade] : [];
   });
   const positions = flatten<PublicPosition>("data-positions");
+  const verifiedMarketOutcomeAssetsByCondition = Object.fromEntries(
+    database.loadCapturePayloads(captureRunId, "clob-market").map((payload) => payload as ClobMarket).map((market) => [
+      market.condition_id.toLowerCase(),
+      verifiedBinaryMarketOutcomeAssets(market, market.condition_id),
+    ]),
+  );
   const profile = single<PublicProfile>("gamma-public-profile");
   const code = single<{ result?: string }>("polygon-eth-get-code");
   const safePayloads = database.loadCapturePayloads(captureRunId, "relayer-safe");
@@ -99,6 +107,7 @@ try {
     tradePaginationBoundaryOverlaps,
     activityPaginationBoundaryOverlaps,
     confirmedTradeOccurrenceCounts: tradeMultiplicityEvidence.confirmedOccurrenceCounts,
+    verifiedMarketOutcomeAssetsByCondition,
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: sourceVersion.dirty,
   });
