@@ -341,4 +341,82 @@ describe("Polymarket public API pagination", () => {
 
     expect(activityStarts).toEqual([1_699_999_000, 1_699_999_800, 1_699_999_800]);
   });
+
+  it("polls wallet events every cycle but refreshes reconciliation state every fifteen seconds", async () => {
+    const wallet = "0x0000000000000000000000000000000000000001";
+    let nowMs = Date.parse("2026-07-13T00:00:00.000Z");
+    let tradeCalls = 0;
+    let activityCalls = 0;
+    let positionCalls = 0;
+    let balanceCalls = 0;
+    let exposeNewTrade = false;
+    const paged = <T>(url: string, rows: T[]) => ({
+      rows,
+      captures: [{ url, fetchedAt: new Date(nowMs).toISOString(), latencyMs: 0, status: 200, data: rows }],
+      historyComplete: true,
+      stopReason: "END_OF_DATA",
+    });
+    const api = {
+      recentTrades: async () => {
+        tradeCalls += 1;
+        return {
+          url: "fake://trades",
+          fetchedAt: new Date(nowMs).toISOString(),
+          latencyMs: 0,
+          status: 200,
+          data: exposeNewTrade ? [{
+            proxyWallet: wallet,
+            transactionHash: "0xnew-trade",
+            conditionId: "0xcondition",
+            asset: "asset-new-trade",
+            side: "BUY" as const,
+            price: "0.12",
+            size: "5",
+            timestamp: Math.floor(nowMs / 1_000),
+          }] : [],
+        };
+      },
+      activitySince: async () => {
+        activityCalls += 1;
+        return paged("fake://activity", []);
+      },
+      allPositions: async () => {
+        positionCalls += 1;
+        return {
+          ...paged("fake://positions", []),
+          merged: { url: "fake://positions", fetchedAt: new Date(nowMs).toISOString(), latencyMs: 0, status: 200, data: [] },
+        };
+      },
+      pUsdBalance: async () => {
+        balanceCalls += 1;
+        return {
+          url: "fake://balance",
+          fetchedAt: new Date(nowMs).toISOString(),
+          latencyMs: 0,
+          status: 200,
+          data: { jsonrpc: "2.0", id: 2, result: "0x0" },
+        };
+      },
+    };
+    const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+      reconciliationIntervalMs: 15_000,
+      now: () => new Date(nowMs),
+    });
+
+    await source.poll(wallet, undefined, 1_699_999_000);
+    nowMs += 3_000;
+    await source.poll(wallet, undefined, 1_699_999_000);
+    nowMs += 12_000;
+    await source.poll(wallet, undefined, 1_699_999_000);
+    nowMs += 3_000;
+    exposeNewTrade = true;
+    await source.poll(wallet, undefined, 1_699_999_000);
+
+    expect({ tradeCalls, activityCalls, positionCalls, balanceCalls }).toEqual({
+      tradeCalls: 4,
+      activityCalls: 4,
+      positionCalls: 3,
+      balanceCalls: 3,
+    });
+  });
 });

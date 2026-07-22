@@ -51,7 +51,12 @@ export function replaceMarketConstraintResult(
 }
 
 export function parseMarketOrderConstraints(input: { minOrderSize: string | undefined; tickSize: string | undefined }):
-  | { minOrderSizeMicros: bigint; tickSizeUnits: bigint; amountScaleDigits: number }
+  | {
+    minOrderSizeMicros: bigint;
+    normalizedMinOrderSizeMicros: bigint;
+    tickSizeUnits: bigint;
+    amountScaleDigits: number;
+  }
   | { error: string } {
   if (!input.minOrderSize) return { error: "MIN_ORDER_SIZE_UNAVAILABLE" };
   if (!input.tickSize) return { error: "TICK_SIZE_UNAVAILABLE" };
@@ -62,7 +67,14 @@ export function parseMarketOrderConstraints(input: { minOrderSize: string | unde
     if (tick <= 0n || tick >= PRICE_SCALE || PRICE_SCALE % tick !== 0n) return { error: "TICK_SIZE_INVALID" };
     const amountScaleDigits = CLOB_AMOUNT_DIGITS_BY_TICK_UNITS.get(tick.toString());
     if (amountScaleDigits === undefined) return { error: "TICK_SIZE_UNSUPPORTED_BY_CLOB_SDK" };
-    return { minOrderSizeMicros: minSize, tickSizeUnits: tick, amountScaleDigits };
+    const sharePrecision = Math.min(SHARE_SCALE_DIGITS, amountScaleDigits);
+    const shareStep = 10n ** BigInt(SHARE_SCALE_DIGITS - sharePrecision);
+    return {
+      minOrderSizeMicros: minSize,
+      normalizedMinOrderSizeMicros: ceilToStep(minSize, shareStep),
+      tickSizeUnits: tick,
+      amountScaleDigits,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { error: message.startsWith("Precision exceeds") ? "ORDERBOOK_CONSTRAINT_PRECISION_UNSUPPORTED" : "ORDERBOOK_CONSTRAINT_INVALID" };
@@ -92,6 +104,8 @@ function ceilToStep(value: bigint, step: bigint): bigint {
 export function cappedBuyPriceUpperUnits(input: {
   targetPriceUnits: bigint;
   maximumRatioPpm: number;
+  minimumTickSteps?: number;
+  tickSizeUnits?: bigint;
   maximumBuyPriceUnits: bigint;
 }): bigint {
   if (
@@ -100,7 +114,21 @@ export function cappedBuyPriceUpperUnits(input: {
     || input.maximumRatioPpm <= 0
     || input.maximumBuyPriceUnits <= 0n
   ) throw new Error("BUY_PRICE_UPPER_BOUND_INPUT_INVALID");
-  const rawUpper = (input.targetPriceUnits * BigInt(input.maximumRatioPpm)) / 1_000_000n;
+  if ((input.minimumTickSteps === undefined) !== (input.tickSizeUnits === undefined)) {
+    throw new Error("BUY_PRICE_TICK_BOUND_INPUT_INCOMPLETE");
+  }
+  const ratioUpper = (input.targetPriceUnits * BigInt(input.maximumRatioPpm)) / 1_000_000n;
+  let rawUpper = ratioUpper;
+  if (input.minimumTickSteps !== undefined && input.tickSizeUnits !== undefined) {
+    if (
+      !Number.isSafeInteger(input.minimumTickSteps)
+      || input.minimumTickSteps < 0
+      || input.tickSizeUnits <= 0n
+      || input.tickSizeUnits >= PRICE_SCALE
+    ) throw new Error("BUY_PRICE_TICK_BOUND_INPUT_INVALID");
+    const tickUpper = input.targetPriceUnits + input.tickSizeUnits * BigInt(input.minimumTickSteps);
+    if (tickUpper > rawUpper) rawUpper = tickUpper;
+  }
   return rawUpper < input.maximumBuyPriceUnits ? rawUpper : input.maximumBuyPriceUnits;
 }
 
@@ -110,6 +138,8 @@ export function evaluateBuyMarketConstraint(input: {
   requestedAmountMicros: bigint;
   upperPriceUnits: bigint;
   maximumBuyPriceUnits?: bigint;
+  executableMinimumNotionalMicros?: bigint;
+  executableMinimumTotalMicros?: bigint;
 }): MarketOrderConstraintEvidence {
   const parsed = parseMarketOrderConstraints(input);
   const unavailable = (reason: string): MarketOrderConstraintEvidence => finish({
@@ -132,11 +162,19 @@ export function evaluateBuyMarketConstraint(input: {
   });
   if ("error" in parsed) return unavailable(parsed.error);
   const maximumBuyPrice = input.maximumBuyPriceUnits ?? (PRICE_SCALE - 1n);
+  const hasExecutableMinimum = input.executableMinimumNotionalMicros !== undefined
+    || input.executableMinimumTotalMicros !== undefined;
   if (
     input.requestedAmountMicros <= 0n
     || input.upperPriceUnits <= 0n
     || maximumBuyPrice <= 0n
     || maximumBuyPrice >= PRICE_SCALE
+    || (hasExecutableMinimum && (
+      input.executableMinimumNotionalMicros === undefined
+      || input.executableMinimumTotalMicros === undefined
+      || input.executableMinimumNotionalMicros <= 0n
+      || input.executableMinimumTotalMicros < input.executableMinimumNotionalMicros
+    ))
   ) {
     return unavailable("BUY_ORDER_CONSTRAINT_INPUT_INVALID");
   }
@@ -149,10 +187,12 @@ export function evaluateBuyMarketConstraint(input: {
   if (effectivePrice <= 0n) return unavailable("BUY_LIMIT_PRICE_BELOW_TICK");
   const sharePrecision = Math.min(SHARE_SCALE_DIGITS, parsed.amountScaleDigits);
   const shareStep = 10n ** BigInt(SHARE_SCALE_DIGITS - sharePrecision);
-  const minimumPassingSize = ceilToStep(parsed.minOrderSizeMicros, shareStep);
-  const derivedMinNotional = ceilDivide(parsed.minOrderSizeMicros * effectivePrice, PRICE_SCALE);
+  const minimumPassingSize = parsed.normalizedMinOrderSizeMicros;
+  const derivedMinNotional = input.executableMinimumNotionalMicros
+    ?? ceilDivide(parsed.minOrderSizeMicros * effectivePrice, PRICE_SCALE);
   const minimumPassingAmount = ceilToStep(
-    ceilDivide(minimumPassingSize * effectivePrice, PRICE_SCALE),
+    input.executableMinimumTotalMicros
+      ?? ceilDivide(minimumPassingSize * effectivePrice, PRICE_SCALE),
     CLOB_MARKET_BUY_AMOUNT_STEP_MICROS,
   );
   // clob-client-v2 normalizes market BUY amounts to two USDC decimals. Mirror
@@ -177,9 +217,13 @@ export function evaluateBuyMarketConstraint(input: {
     configuredMaximumBuyPriceUnits: maximumBuyPrice.toString(),
     priceRounding: "FLOOR_TO_TICK",
   });
-  const proposedSize = (normalizedAmount * PRICE_SCALE) / effectivePrice;
+  const proposedSize = input.executableMinimumTotalMicros === undefined
+    ? (normalizedAmount * PRICE_SCALE) / effectivePrice
+    : (normalizedAmount * minimumPassingSize) / minimumPassingAmount;
   const normalizedSize = floorToStep(proposedSize, shareStep);
-  const pass = normalizedSize >= parsed.minOrderSizeMicros;
+  const pass = input.executableMinimumTotalMicros === undefined
+    ? normalizedSize >= parsed.minOrderSizeMicros
+    : normalizedAmount >= minimumPassingAmount;
   return finish({
     side: "BUY",
     result: pass ? "PASS" : "REJECT",

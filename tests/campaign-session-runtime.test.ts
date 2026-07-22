@@ -48,6 +48,8 @@ describe("Paper Campaign runtime contract", () => {
     expect(observe.args).toContain("--baseline-run-id=baseline-test");
     expect(observe.args).toContain("--minimum-soak-seconds=7200");
     expect(observe.args).toContain("--market-clock-offset-ms=1700");
+    expect(observe.args).toContain("--poll-seconds=3");
+    expect(observe.args).toContain("--reconciliation-seconds=15");
   });
 
   it("fails closed on child binding drift", () => {

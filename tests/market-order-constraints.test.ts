@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  cappedBuyPriceUpperUnits,
   evaluateBuyMarketConstraint,
   evaluateSellMarketConstraint,
   orderbookConstraintAvailability,
+  parseMarketOrderConstraints,
 } from "../src/execution/market-order-constraints.js";
 
 describe("market order constraints", () => {
+  it("widens a low-price BUY upper bound to two market ticks", () => {
+    expect(cappedBuyPriceUpperUnits({
+      targetPriceUnits: 120_000_000_000_000_000n,
+      maximumRatioPpm: 1_020_000,
+      minimumTickSteps: 2,
+      tickSizeUnits: 10_000_000_000_000_000n,
+      maximumBuyPriceUnits: 950_000_000_000_000_000n,
+    })).toBe(140_000_000_000_000_000n);
+  });
+
   it("floors a 974-micro BUY to the SDK two-decimal precision and rejects without amplification", () => {
     const evidence = evaluateBuyMarketConstraint({
       minOrderSize: "5",
@@ -65,6 +77,17 @@ describe("market order constraints", () => {
     expect(evidence.result).toBe("REJECT");
     expect(evidence.derivedMinNotionalMicros).toBe("2550000");
     expect(evidence.minimumPassingAmountMicros).toBe("2550000");
+  });
+
+  it("rounds the market minimum shares up to the SDK precision for the market tick", () => {
+    expect(parseMarketOrderConstraints({
+      minOrderSize: "1.23456",
+      tickSize: "0.01",
+    })).toMatchObject({
+      minOrderSizeMicros: 1_234_560n,
+      normalizedMinOrderSizeMicros: 1_234_600n,
+      amountScaleDigits: 4,
+    });
   });
 
   it("keeps undersized normal and stop exits pending by rejecting the order precondition", () => {

@@ -55,7 +55,14 @@ import { PortfolioProjectionService } from "../portfolio/portfolio-projection.js
 import { PaperAcceptanceSummaryService, type PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
 import { RiskManager, type RiskDecision } from "../risk/risk-manager.js";
 import { SettlementService, type SettlementCandidate, type SettlementStore } from "../settlement/settlement-service.js";
-import { bestExecutionAskPriceUnits, executableSellVwap, matchPaperBuy, matchPaperSell } from "./matching.js";
+import {
+  bestExecutionAskPriceUnits,
+  buyNoFillReason,
+  executableSellVwap,
+  matchPaperBuy,
+  matchPaperSell,
+  quoteExecutionBuySize,
+} from "./matching.js";
 import type {
   PaperAccountSnapshot,
   PaperExecutionState,
@@ -78,6 +85,17 @@ export type PaperTransactionBarrier =
   | "RESERVATION_BEFORE_COMMIT"
   | "BUY_FILL_BEFORE_COMMIT"
   | "SETTLEMENT_BEFORE_COMMIT";
+
+export interface PaperPendingBuyMarket {
+  assetId: string;
+  conditionId: string;
+}
+
+export interface PaperPendingRetryOptions {
+  includeBuys?: boolean;
+  includeExits?: boolean;
+  buyAssetIds?: ReadonlySet<string>;
+}
 
 type ExecutionType = "TARGET_BUY" | "TARGET_SELL" | "STOP_LOSS" | "SETTLEMENT";
 
@@ -789,24 +807,62 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (!this.recordMarketDataSuccess(execution.paper_account_id, execution.asset_id, execution.condition_id)) {
       return execution.state;
     }
+    if (
+      execution.execution_type === "TARGET_BUY"
+      && this.buyAttemptMarketStateUnchanged(execution, book, fee)
+    ) {
+      return execution.state;
+    }
     return execution.execution_type === "TARGET_BUY"
       ? this.attemptBuy(execution, book, fee, age)
       : this.attemptSell(execution, book, fee, age);
   }
 
-  async retryPending(accountId: string, signal?: AbortSignal): Promise<void> {
+  pendingBuyMarkets(accountId: string): PaperPendingBuyMarket[] {
+    if (this.accountRow(accountId).status !== "ACTIVE") return [];
+    return (this.database.prepare(
+      `SELECT asset_id,condition_id FROM paper_executions
+       WHERE paper_account_id=? AND execution_type='TARGET_BUY' AND state='WAITING_EXECUTION'
+       ORDER BY created_at,paper_execution_id`,
+    ).all(accountId) as Array<{ asset_id: string; condition_id: string }>).map((row) => ({
+      assetId: row.asset_id,
+      conditionId: row.condition_id,
+    }));
+  }
+
+  async retryPending(
+    accountId: string,
+    signal?: AbortSignal,
+    options: PaperPendingRetryOptions = {},
+  ): Promise<void> {
     if (this.accountRow(accountId).status !== "ACTIVE") return;
+    const includeBuys = options.includeBuys ?? true;
+    const includeExits = options.includeExits ?? true;
     const rows = this.database.prepare(
-      `SELECT paper_execution_id FROM paper_executions
+      `SELECT paper_execution_id,execution_type,asset_id,deadline_at FROM paper_executions
        WHERE paper_account_id=? AND state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
        ORDER BY CASE state
          WHEN 'STOP_EXIT_PENDING' THEN 0
          WHEN 'EXIT_PENDING' THEN 1
          ELSE 2
        END,created_at,paper_execution_id`,
-    ).all(accountId) as Array<{ paper_execution_id: string }>;
+    ).all(accountId) as Array<{
+      paper_execution_id: string;
+      execution_type: ExecutionType;
+      asset_id: string;
+      deadline_at: string | null;
+    }>;
     for (const row of rows) {
       if (signal?.aborted) break;
+      if (row.execution_type === "TARGET_BUY") {
+        const expired = row.deadline_at !== null && this.marketNowMs() > Date.parse(row.deadline_at);
+        if (
+          !expired
+          && (!includeBuys || (options.buyAssetIds && !options.buyAssetIds.has(row.asset_id)))
+        ) continue;
+      } else if (!includeExits) {
+        continue;
+      }
       await this.attemptExecution(row.paper_execution_id, signal);
     }
   }
@@ -1386,7 +1442,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   ): void {
     const rules = registeredExecutionRules(this.database, signal.context!.rulesetHash);
     if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${signal.context!.rulesetHash}`);
-    const lower = ratio(BigInt(signal.targetPriceUnits), rules.buyPriceMinRatioPpm);
+    const lower = rules.buyPriceImprovementAllowed
+      ? 0n
+      : ratio(BigInt(signal.targetPriceUnits), rules.buyPriceMinRatioPpm);
     const upper = cappedBuyPriceUpperUnits({
       targetPriceUnits: BigInt(signal.targetPriceUnits),
       maximumRatioPpm: rules.buyPriceMaxRatioPpm,
@@ -1459,14 +1517,55 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     ).get(activeExecution.paper_execution_id) as { price_limit_lower_units: string; price_limit_upper_units: string };
     const rules = registeredExecutionRules(this.database, activeExecution.ruleset_hash);
     if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${activeExecution.ruleset_hash}`);
-    let constraint = evaluateBuyMarketConstraint({
+    const parsedConstraints = parseMarketOrderConstraints({
       minOrderSize: book.minOrderSize,
       tickSize: book.tickSize,
-      requestedAmountMicros: BigInt(reservation.remaining_amount_micros),
-      upperPriceUnits: BigInt(bounds.price_limit_upper_units),
+    });
+    if ("error" in parsedConstraints) {
+      throw new Error(`PAPER_MARKET_CONSTRAINTS_UNAVAILABLE_AFTER_VALIDATION:${parsedConstraints.error}`);
+    }
+    const dynamicUpper = cappedBuyPriceUpperUnits({
+      targetPriceUnits: BigInt(activeExecution.target_price_units!),
+      maximumRatioPpm: rules.buyPriceMaxRatioPpm,
+      ...(rules.buyPriceMinimumTickSteps > 0 ? {
+        minimumTickSteps: rules.buyPriceMinimumTickSteps,
+        tickSizeUnits: parsedConstraints.tickSizeUnits,
+      } : {}),
       maximumBuyPriceUnits: rules.buyMaximumPriceUnits,
     });
+    const lowerPriceUnits = rules.buyPriceImprovementAllowed
+      ? 0n
+      : BigInt(bounds.price_limit_lower_units);
     const bestAsk = bestExecutionAskPriceUnits(book.asks);
+    const minimumQuote = quoteExecutionBuySize({
+      asks: book.asks,
+      requestedSizeMicros: parsedConstraints.normalizedMinOrderSizeMicros,
+      lowerPriceUnits,
+      upperPriceUnits: dynamicUpper,
+      feeRatePpm: BigInt(fee.feeRatePpm!),
+      feeExponent: fee.exponent!,
+    });
+    const firstEntryMinimumEligible = this.firstEntryMinimumEligible(
+      activeExecution.paper_account_id,
+      activeExecution.asset_id,
+      activeExecution.paper_execution_id,
+    );
+    const executableMinimum = minimumQuote.complete ? {
+      executableMinimumNotionalMicros: BigInt(minimumQuote.filledNotionalMicros),
+      executableMinimumTotalMicros: BigInt(minimumQuote.filledNotionalMicros)
+        + BigInt(minimumQuote.feeMicros),
+    } : null;
+    const evaluateConstraint = (requestedAmountMicros: bigint): MarketOrderConstraintEvidence => (
+      evaluateBuyMarketConstraint({
+        minOrderSize: book.minOrderSize,
+        tickSize: book.tickSize,
+        requestedAmountMicros,
+        upperPriceUnits: dynamicUpper,
+        maximumBuyPriceUnits: rules.buyMaximumPriceUnits,
+        ...(executableMinimum ?? {}),
+      })
+    );
+    let constraint = evaluateConstraint(BigInt(reservation.remaining_amount_micros));
     if (bestAsk !== null && bestAsk > rules.buyMaximumPriceUnits) {
       this.rejectBuyForMarketConstraint(
         activeExecution,
@@ -1476,6 +1575,23 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         replaceMarketConstraintResult(constraint, "REJECT", "BUY_EXECUTION_PRICE_ABOVE_MAX"),
       );
       return "REJECTED";
+    }
+    if (!minimumQuote.complete && firstEntryMinimumEligible) {
+      const reason = buyNoFillReason({
+        bestAskPriceUnits: bestAsk,
+        lowerPriceUnits,
+        upperPriceUnits: dynamicUpper,
+        inRangeReason: "BUY_MARKET_MINIMUM_LIQUIDITY_UNAVAILABLE",
+      });
+      this.recordNoFillAttempt(
+        activeExecution,
+        book,
+        fee,
+        reason,
+        age,
+        replaceMarketConstraintResult(constraint, "PASS", reason),
+      );
+      return "WAITING_EXECUTION";
     }
     if (
       constraint.result === "REJECT"
@@ -1497,24 +1613,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           "SELECT reservation_id,original_amount_micros,remaining_amount_micros FROM paper_reservations WHERE paper_execution_id=? AND status='ACTIVE'",
         ).get(activeExecution.paper_execution_id) as ActiveReservation | undefined;
         if (!reservation) throw new Error("ACTIVE_RESERVATION_NOT_FOUND_AFTER_AUTO_LIFT");
-        constraint = evaluateBuyMarketConstraint({
-          minOrderSize: book.minOrderSize,
-          tickSize: book.tickSize,
-          requestedAmountMicros: BigInt(reservation.remaining_amount_micros),
-          upperPriceUnits: BigInt(bounds.price_limit_upper_units),
-          maximumBuyPriceUnits: rules.buyMaximumPriceUnits,
-        });
+        constraint = evaluateConstraint(BigInt(reservation.remaining_amount_micros));
       }
     }
     if (constraint.result !== "PASS") {
       const rejection = constraint.minimumPassingAmountMicros !== null
         && rules.buyMarketMinimumAutoLiftCapMicros > 0n
         && BigInt(constraint.minimumPassingAmountMicros) > rules.buyMarketMinimumAutoLiftCapMicros
-        && this.firstEntryMinimumEligible(
-          activeExecution.paper_account_id,
-          activeExecution.asset_id,
-          activeExecution.paper_execution_id,
-        )
+        && firstEntryMinimumEligible
         ? replaceMarketConstraintResult(constraint, "REJECT", "BUY_MARKET_MINIMUM_ABOVE_AUTO_LIFT_CAP")
         : constraint;
       this.rejectBuyForMarketConstraint(activeExecution, book, fee, age, rejection);
@@ -1523,13 +1629,18 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const matched = matchPaperBuy({
       asks: book.asks,
       reservationMicros: BigInt(constraint.normalizedOrderAmountMicros!),
-      lowerPriceUnits: BigInt(bounds.price_limit_lower_units),
+      lowerPriceUnits,
       upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
     });
     if (BigInt(matched.filledSizeMicros) === 0n) {
-      this.recordNoFillAttempt(activeExecution, book, fee, "PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY", age, constraint);
+      const reason = buyNoFillReason({
+        bestAskPriceUnits: bestAsk,
+        lowerPriceUnits,
+        upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
+      });
+      this.recordNoFillAttempt(activeExecution, book, fee, reason, age, constraint);
       return "WAITING_EXECUTION";
     }
     const now = this.now().toISOString();
@@ -2469,7 +2580,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       book.marketSnapshotTime,
       book.receivedAt,
       age,
-      createHash("sha256").update(stableJson(payload)).digest("hex"),
+      this.orderbookPayloadHash(payload),
       JSON.stringify(book.bids),
       JSON.stringify(book.asks),
       book.sourceUrl,
@@ -2513,6 +2624,49 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       minOrderSize: book.minOrderSize ?? null,
       tickSize: book.tickSize ?? null,
     })]);
+  }
+
+  private orderbookPayloadHash(payload: {
+    bids: PaperOrderbookSnapshot["bids"];
+    asks: PaperOrderbookSnapshot["asks"];
+    minOrderSize: string | null;
+    tickSize: string | null;
+  }): string {
+    return createHash("sha256").update(stableJson(payload)).digest("hex");
+  }
+
+  private buyAttemptMarketStateUnchanged(
+    execution: ExecutionRow,
+    book: PaperOrderbookSnapshot,
+    fee: PaperFeeSnapshot,
+  ): boolean {
+    if (execution.attempt_count === 0) return false;
+    const prior = this.database.prepare(
+      `SELECT b.payload_hash,f.status,f.fee_rate_ppm,f.base_fee,f.fee_exponent
+       FROM paper_orders o
+       JOIN paper_orderbook_snapshots b ON b.orderbook_snapshot_id=o.orderbook_snapshot_id
+       JOIN paper_fee_snapshots f ON f.fee_snapshot_id=o.fee_snapshot_id
+       WHERE o.paper_execution_id=?
+       ORDER BY o.attempt_sequence DESC LIMIT 1`,
+    ).get(execution.paper_execution_id) as {
+      payload_hash: string;
+      status: string;
+      fee_rate_ppm: string | null;
+      base_fee: number | null;
+      fee_exponent: number | null;
+    } | undefined;
+    if (!prior) return false;
+    const payloadHash = this.orderbookPayloadHash({
+      bids: book.bids,
+      asks: book.asks,
+      minOrderSize: book.minOrderSize ?? null,
+      tickSize: book.tickSize ?? null,
+    });
+    return prior.payload_hash === payloadHash
+      && prior.status === fee.status
+      && prior.fee_rate_ppm === fee.feeRatePpm
+      && prior.base_fee === fee.baseFee
+      && prior.fee_exponent === fee.exponent;
   }
 
   private insertMarketConstraintEvidence(
@@ -2710,7 +2864,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       requestedAmount,
       requestedSize,
       targetPrice: target,
-      lower: signal.signalType === "TARGET_BUY" ? ratio(target, rules.buyPriceMinRatioPpm) : null,
+      lower: signal.signalType === "TARGET_BUY"
+        ? rules.buyPriceImprovementAllowed
+          ? 0n
+          : ratio(target, rules.buyPriceMinRatioPpm)
+        : null,
       upper: buyUpper,
       capitalMode,
       deadline,

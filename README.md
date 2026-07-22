@@ -55,7 +55,7 @@ pnpm operator:control -- set-ruleset --file=/绝对路径/profile-overrides.json
 pnpm operator:control -- reset-ruleset
 pnpm phase0:validate -- 0x目标地址
 pnpm phase05:replay-capture -- capture_run_id
-pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=15
+pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=3 --reconciliation-seconds=15
 pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
 pnpm validate:final -- --type=all --campaign-id=PC-... --session-id=PS-...
 pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
@@ -77,11 +77,13 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 
 Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行成交时，Phase 0 不会直接合并或接受，而是只读查询 Polygon `eth_getTransactionReceipt`。只有官方 V2 Exchange 回执能以不同 `orderHash` 精确证明相同经济成交次数时，才生成稳定的多 occurrence `source_event_key`；RPC 不可用、旧版/未知合约、金额或 maker 不符、重复 `orderHash`、proof 重放不一致时都保持 `AMBIGUOUS_DUPLICATE_EVENTS`。
 
-`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
+`observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Trades 和 Activity 默认每 3 秒发现一次；Positions 与 pUSD 默认每 15 秒全量核对一次，发现新的目标事件时会立即提前核对。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
 
 普通目标 BUY/SELL 可进入跟单链路；REDEEM 由跟单账户按自身持仓结算。已验证的 negative-risk `CONVERSION` 只形成不可执行审计义务。`MERGE/SPLIT` 尚无可证明的投影或复制语义：Observe 会在发现后立即写入 `UNSUPPORTED_TARGET_ACTIVITY` 并置为 `MAJOR_DESYNC`，而不是等待普通持仓差异宽限期或假装仍然同步。
 
-用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context，只调用公开无认证的 CLOB 市场数据 GET 接口。
+用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context；待成交 BUY 使用公开、无认证的 CLOB Market WebSocket 作为盘口变化唤醒信号，但每次执行判断仍重新读取完整 REST 盘口，并保留 15 秒兜底检查。WebSocket 不参与签名、下单或链上写入。
+
+BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。首开最低仍为 1 pUSD；若真实市场最小单更高，只在首开时精确抬升且不超过 5 pUSD。SELL、止损和结算不受这条 BUY 上限影响。
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
 

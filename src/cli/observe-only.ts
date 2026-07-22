@@ -12,7 +12,7 @@ import { PAPER_VALIDATION_FINAL_OBSERVE_MS } from "../paper-validation/types.js"
 
 const args = process.argv.slice(2);
 const address = args.find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
-if (!address) throw new Error("Usage: pnpm observe:run -- 0x<address> [--duration-seconds=300] [--poll-seconds=15]");
+if (!address) throw new Error("Usage: pnpm observe:run -- 0x<address> [--duration-seconds=300] [--poll-seconds=3] [--reconciliation-seconds=15]");
 const numberArg = (name: string, fallback: number): number => {
   const value = args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
   const parsed = value === undefined ? fallback : Number(value);
@@ -20,7 +20,8 @@ const numberArg = (name: string, fallback: number): number => {
   return parsed;
 };
 const durationSeconds = numberArg("duration-seconds", 0);
-const pollSeconds = numberArg("poll-seconds", 15);
+const pollSeconds = numberArg("poll-seconds", 3);
+const reconciliationSeconds = numberArg("reconciliation-seconds", 15);
 const minimumSoakSeconds = numberArg("minimum-soak-seconds", PAPER_VALIDATION_FINAL_OBSERVE_MS / 1_000);
 const valueArg = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.split("=")[1];
 const marketClockOffsetText = valueArg("market-clock-offset-ms") ?? "0";
@@ -38,13 +39,18 @@ if (args.some((argument) => argument.startsWith("--baseline-run-id=")) && !basel
   throw new Error("Invalid --baseline-run-id: value is required");
 }
 if (pollSeconds <= 0) throw new Error("Invalid --poll-seconds: value must be greater than 0");
+if (reconciliationSeconds < pollSeconds) {
+  throw new Error("Invalid --reconciliation-seconds: value must be greater than or equal to --poll-seconds");
+}
 const databasePath = resolve("data/phase0/phase0.sqlite");
 const sourceVersion = resolveSourceVersion();
 const databasePreparation = await prepareRuntimeDatabase({ databasePath, sourceVersion });
 console.log(JSON.stringify({ event: "RUNTIME_DATABASE_READY", ...databasePreparation }));
 
 const store = new ObserveStore(databasePath, sourceVersion);
-const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(), {
+const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(undefined, {
+  reconciliationIntervalMs: reconciliationSeconds * 1_000,
+}), {
   walletAddress: address,
   ...(baselineRunId ? { baselineRunId } : {}),
   ...(campaignId && sessionId ? { campaignId, campaignSessionId: sessionId } : {}),

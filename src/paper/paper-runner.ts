@@ -1,6 +1,10 @@
-import type { PaperExecutor } from "./paper-executor.js";
+import type {
+  PaperExecutor,
+  PaperPendingRetryOptions,
+} from "./paper-executor.js";
 import type { PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
 import type { PaperAccountSnapshot, PaperSignalConsumptionScope } from "./types.js";
+import type { MarketChangeFeed } from "../execution/market-change-feed.js";
 
 const DEFAULT_REPORT_DETAIL_LIMIT = 100;
 
@@ -10,6 +14,8 @@ export interface PaperRunnerOptions {
   durationMs?: number;
   reportDetailLimit?: number;
   signalScope?: PaperSignalConsumptionScope;
+  marketChangeFeed?: MarketChangeFeed;
+  pendingBuyFallbackIntervalMs?: number;
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
 }
@@ -60,6 +66,8 @@ export class PaperRunner {
   private readonly now: () => Date;
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly reportDetailLimit: number;
+  private readonly pendingBuyFallbackIntervalMs: number;
+  private lastPendingBuyFallbackAtMs: number | null = null;
 
   constructor(private readonly executor: PaperExecutor, private readonly options: PaperRunnerOptions) {
     const intervalMs = options.intervalMs ?? 1_000;
@@ -72,6 +80,10 @@ export class PaperRunner {
     this.reportDetailLimit = options.reportDetailLimit ?? DEFAULT_REPORT_DETAIL_LIMIT;
     if (!Number.isSafeInteger(this.reportDetailLimit) || this.reportDetailLimit <= 0) {
       throw new Error(`PAPER_REPORT_DETAIL_LIMIT_MUST_BE_POSITIVE:${String(this.reportDetailLimit)}`);
+    }
+    this.pendingBuyFallbackIntervalMs = options.pendingBuyFallbackIntervalMs ?? 15_000;
+    if (!Number.isFinite(this.pendingBuyFallbackIntervalMs) || this.pendingBuyFallbackIntervalMs <= 0) {
+      throw new Error(`PAPER_PENDING_BUY_FALLBACK_INTERVAL_MUST_BE_POSITIVE:${String(this.pendingBuyFallbackIntervalMs)}`);
     }
     this.now = options.now ?? (() => new Date());
     this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -124,12 +136,16 @@ export class PaperRunner {
 
   async finalDrain(signal?: AbortSignal): Promise<number> {
     if (signal?.aborted) throw new Error("FINAL_DRAIN_INCOMPLETE");
-    const consumed = await this.executeCycle(signal, (error) => { throw error; });
+    const consumed = await this.executeCycle(signal, (error) => { throw error; }, true);
     if (signal?.aborted) throw new Error("FINAL_DRAIN_INCOMPLETE");
     return consumed;
   }
 
-  private async executeCycle(signal: AbortSignal | undefined, onError: (error: unknown) => void): Promise<number> {
+  private async executeCycle(
+    signal: AbortSignal | undefined,
+    onError: (error: unknown) => void,
+    forceAllPending = false,
+  ): Promise<number> {
     let consumedSignals = 0;
     // Check before any pending order can be retried. A tracked conversion that
     // Paper cannot reproduce pauses the account and terminates this Session.
@@ -137,19 +153,50 @@ export class PaperRunner {
       this.options.accountId,
       this.options.signalScope,
     );
-    const runStage = async (action: () => Promise<void>): Promise<void> => {
-      if (signal?.aborted) return;
+    const runStage = async (action: () => Promise<void>): Promise<boolean> => {
+      if (signal?.aborted) return false;
       try {
         await action();
+        return true;
       } catch (error) {
         if (isCancellationFromSignal(error, signal)) throw error;
         onError(error);
+        return false;
       }
     };
     await runStage(async () => this.executor.recoverMarketData(this.options.accountId, signal));
     await runStage(async () => { await this.executor.processSettlements(this.options.accountId, signal); });
     await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
-    await runStage(async () => this.executor.retryPending(this.options.accountId, signal));
+    let retryOptions: PaperPendingRetryOptions | undefined;
+    if (this.options.marketChangeFeed && !forceAllPending) {
+      let pendingAssetIds = new Set<string>();
+      const pendingRead = await runStage(async () => {
+        const pending = this.executor.pendingBuyMarkets(this.options.accountId);
+        pendingAssetIds = new Set(pending.map((market) => market.assetId));
+      });
+      if (pendingRead) {
+        await runStage(async () => {
+          this.options.marketChangeFeed!.replaceSubscriptions([...pendingAssetIds]);
+        });
+      }
+      let changedAssetIds: string[] = [];
+      const drained = await runStage(async () => {
+        changedAssetIds = this.options.marketChangeFeed!.drainChangedAssetIds();
+      });
+      const currentTime = this.now().valueOf();
+      const fallbackDue = this.lastPendingBuyFallbackAtMs === null
+        || currentTime - this.lastPendingBuyFallbackAtMs >= this.pendingBuyFallbackIntervalMs;
+      const changedPendingAssets = pendingRead && drained
+        ? new Set(changedAssetIds.filter((assetId) => pendingAssetIds.has(assetId)))
+        : new Set<string>();
+      if (fallbackDue) this.lastPendingBuyFallbackAtMs = currentTime;
+      retryOptions = fallbackDue
+        ? { includeBuys: true, includeExits: true }
+        : changedPendingAssets.size > 0
+          ? { includeBuys: true, includeExits: true, buyAssetIds: changedPendingAssets }
+          : { includeBuys: false, includeExits: true };
+    }
+    await runStage(async () => this.executor.retryPending(this.options.accountId, signal, retryOptions));
     await runStage(async () => {
       consumedSignals += (await this.executor.consumeAvailableSignals(
         this.options.accountId,
@@ -157,6 +204,15 @@ export class PaperRunner {
         this.options.signalScope,
       )).length;
     });
+    if (this.options.marketChangeFeed && !forceAllPending) {
+      await runStage(async () => {
+        const pending = this.executor.pendingBuyMarkets(this.options.accountId);
+        this.options.marketChangeFeed!.replaceSubscriptions(pending.map((market) => market.assetId));
+        if (pending.length > 0 && this.lastPendingBuyFallbackAtMs === null) {
+          this.lastPendingBuyFallbackAtMs = this.now().valueOf();
+        }
+      });
+    }
     return consumedSignals;
   }
 

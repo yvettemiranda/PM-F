@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { marketClockOffsetIsValid } from "../execution/market-data.js";
+import { PublicClobMarketChangeFeed } from "../execution/market-change-feed.js";
 import { prepareRuntimeDatabase } from "../infra/sqlite/runtime-database-preparation.js";
 import { resolveSourceVersion } from "../infra/source-version.js";
 import { selectPaperAccount } from "../paper/paper-account-selection.js";
@@ -94,6 +95,7 @@ const main = async (): Promise<void> => {
     sourceVersion,
     marketClockOffsetMs,
   });
+  const marketChangeFeed = new PublicClobMarketChangeFeed();
   const accountLookup = new DatabaseSync(databasePath, { readOnly: true });
   accountLookup.exec("PRAGMA busy_timeout=5000;");
   const controller = new AbortController();
@@ -177,17 +179,23 @@ const main = async (): Promise<void> => {
       campaignId,
       sessionId,
       marketClockOffsetMs,
+      marketWakeSource: "PUBLIC_CLOB_WEBSOCKET_WITH_REST_VERIFICATION",
+      pendingBuyFallbackSeconds: 15,
       readyAt: new Date().toISOString(),
     };
     if (readyFile) await writeTextAtomically(readyFile, `${JSON.stringify(ready, null, 2)}\n`);
     console.log(JSON.stringify({ event: "PAPER_RUNNER_READY", ...ready }));
 
-    const runner = new PaperRunner(executor, paperRunnerOptions({
-      accountId: selection.accountId,
-      intervalMs: intervalSeconds * 1_000,
-      ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
-      campaignScope,
-    }));
+    const runner = new PaperRunner(executor, {
+      ...paperRunnerOptions({
+        accountId: selection.accountId,
+        intervalMs: intervalSeconds * 1_000,
+        ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
+        campaignScope,
+      }),
+      marketChangeFeed,
+      pendingBuyFallbackIntervalMs: 15_000,
+    });
     let report = await runner.run(controller.signal);
     let finalDrainConsumedSignals = 0;
     let cancelledWaitingBuyCount = 0;
@@ -229,6 +237,7 @@ const main = async (): Promise<void> => {
       safety: {
         privateKeyLoaded: false,
         authenticatedTradingClientPresent: false,
+        publicMarketWebSocketPresent: true,
         realOrdersCreated: 0,
         chainWrites: 0,
         liveExecutorPresent: false,
@@ -246,6 +255,7 @@ const main = async (): Promise<void> => {
     } catch {
       // It may already be closed after account selection.
     }
+    marketChangeFeed.close();
     executor.close();
   }
 };

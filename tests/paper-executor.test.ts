@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
+import { registeredExecutionRules } from "../src/domain/ruleset-registry.js";
 import { EXECUTOR_REQUIRED_CONTEXT_FIELDS } from "../src/execution/types.js";
 import {
   buildExactCapitalRatio,
@@ -109,6 +110,8 @@ function installHistoricalPaperRuleset(databasePath: string): TestRuleset {
   snapshot.versions.configVersion = "test-paper-historical-config-v1";
   snapshot.rules.stopTriggerRatioPpm = 600_000;
   snapshot.rules.stopSellMaxSlippagePpm = 200_000;
+  delete snapshot.rules.buyPriceImprovementAllowed;
+  delete snapshot.rules.buyPriceMinimumTickSteps;
   const snapshotJson = stableJson(snapshot);
   const hash = createHash("sha256").update(snapshotJson).digest("hex");
   const configVersion = "test-paper-historical-config-v1";
@@ -574,6 +577,143 @@ afterEach(() => {
 });
 
 describe("PaperExecutor", () => {
+  it("preserves the symmetric price behavior of rulesets created before the tick policy", () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    const historical = installHistoricalPaperRuleset(env.databasePath);
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+
+    expect(registeredExecutionRules(database, historical.hash)).toMatchObject({
+      buyPriceImprovementAllowed: false,
+      buyPriceMinimumTickSteps: 0,
+    });
+
+    database.close();
+    env.executor.close();
+  });
+
+  it("fills a BUY at two ticks above a low target price", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.14", size: "1000" }],
+      [{ price: "0.12", size: "1000" }],
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-two-ticks-above-target",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      targetPriceUnits: "120000000000000000",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-two-ticks-above-target");
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("accepts a BUY price improvement below the target price", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.10", size: "1000" }],
+      [{ price: "0.09", size: "1000" }],
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-below-target",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      targetPriceUnits: "120000000000000000",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-below-target");
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    env.executor.close();
+  });
+
+  it("keeps a one-pUSD first entry when the improved executable depth already satisfies the market minimum", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = {
+      ...env.market.makeBook(
+        [{ price: "0.10", size: "10" }],
+        [{ price: "0.09", size: "1000" }],
+      ),
+      minOrderSize: "10",
+      tickSize: "0.01",
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-improved-market-minimum",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      targetPriceUnits: "120000000000000000",
+      ratioPpm: "1000",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-improved-market-minimum");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    expect(database.prepare(
+      "SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({ requested_amount_micros: "1000000" });
+    database.close();
+    env.executor.close();
+  });
+
+  it("lifts a first entry to the exact multi-level executable market minimum", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = {
+      ...env.market.makeBook(
+        [
+          { price: "0.10", size: "1" },
+          { price: "0.14", size: "9" },
+        ],
+        [{ price: "0.09", size: "1000" }],
+      ),
+      minOrderSize: "10",
+      tickSize: "0.01",
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-multi-level-market-minimum",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      targetPriceUnits: "120000000000000000",
+      ratioPpm: "1000",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-multi-level-market-minimum");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    expect(database.prepare(
+      "SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({ requested_amount_micros: "1360000" });
+    database.close();
+    env.executor.close();
+  });
+
+  it("does not chase a BUY beyond the wider of two ticks and two percent", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook(
+      [{ price: "0.15", size: "1000" }],
+      [{ price: "0.12", size: "1000" }],
+    );
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-three-ticks-above-target",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      targetPriceUnits: "120000000000000000",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "buy-three-ticks-above-target");
+
+    expect(env.executor.executionState(executionId)).toBe("WAITING_EXECUTION");
+    env.executor.close();
+  });
+
   it("keeps the exact proportional evidence but lifts a first entry to the actual market minimum", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = {
@@ -611,19 +751,19 @@ describe("PaperExecutor", () => {
        WHERE risk_decision_id=(SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?)`,
     ).get(executionId) as { capital_sizing_decision_json: string };
     expect(execution).toEqual({
-      requested_amount_micros: "2550000",
+      requested_amount_micros: "2500000",
       reason: "FAK_FILLED",
     });
     expect(reservation).toEqual({ status: "CONSUMED", remaining_amount_micros: "0" });
     expect(constraint).toMatchObject({
       check_result: "PASS",
       reason: "MARKET_MIN_ORDER_SIZE_SATISFIED",
-      proposed_amount_micros: "2550000",
-      normalized_order_amount_micros: "2550000",
+      proposed_amount_micros: "2500000",
+      normalized_order_amount_micros: "2500000",
     });
     expect(JSON.parse(risk.capital_sizing_decision_json).calculatedAmountMicros).toBe("974");
     expect(db.prepare("SELECT requested_amount_micros FROM risk_decisions WHERE risk_decision_id=(SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?)").get(executionId))
-      .toEqual({ requested_amount_micros: "2550000" });
+      .toEqual({ requested_amount_micros: "2500000" });
     expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT count(*) count FROM paper_fill_ledger").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT count(*) count FROM paper_positions").get()).toEqual({ count: 1 });
@@ -696,9 +836,9 @@ describe("PaperExecutor", () => {
     const evidence = db.prepare(
       "SELECT reason,derived_min_notional_micros FROM paper_market_constraint_evidence WHERE paper_execution_id=?",
     ).get(executionId) as { reason: string; derived_min_notional_micros: string };
-    expect(evidence).toEqual({ reason: "MARKET_MIN_ORDER_SIZE_SATISFIED", derived_min_notional_micros: "2550000" });
+    expect(evidence).toEqual({ reason: "MARKET_MIN_ORDER_SIZE_SATISFIED", derived_min_notional_micros: "2500000" });
     expect(db.prepare("SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?").get(executionId))
-      .toEqual({ requested_amount_micros: "2550000" });
+      .toEqual({ requested_amount_micros: "2500000" });
     expect(db.prepare("SELECT count(*) count FROM paper_orders").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT status FROM paper_reservations WHERE paper_execution_id=?").get(executionId))
       .toEqual({ status: "CONSUMED" });
@@ -754,7 +894,7 @@ describe("PaperExecutor", () => {
     const rows = db.prepare(
       "SELECT paper_execution_id,requested_amount_micros FROM paper_executions ORDER BY created_at,paper_execution_id",
     ).all() as Array<{ paper_execution_id: string; requested_amount_micros: string }>;
-    expect(rows.find((row) => row.paper_execution_id === first)?.requested_amount_micros).toBe("2550000");
+    expect(rows.find((row) => row.paper_execution_id === first)?.requested_amount_micros).toBe("1000000");
     expect(BigInt(rows.find((row) => row.paper_execution_id === second)!.requested_amount_micros)).toBeLessThan(1_000_000n);
     db.close();
     env.executor.close();
@@ -782,7 +922,7 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(reopened)).toBe("EXECUTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare("SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?").get(reopened))
-      .toEqual({ requested_amount_micros: "2550000" });
+      .toEqual({ requested_amount_micros: "2500000" });
     expect(db.prepare("SELECT count(*) count FROM paper_positions WHERE CAST(current_size_micros AS INTEGER)>0").get())
       .toEqual({ count: 1 });
     db.close();
@@ -1171,6 +1311,42 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("does not write duplicate attempts for an unchanged BUY book and records specific wait reasons", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "retry-only-on-book-change",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "retry-only-on-book-change");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    const attempts = () => database.prepare(
+      "SELECT attempt_sequence,reject_reason FROM paper_orders WHERE paper_execution_id=? ORDER BY attempt_sequence",
+    ).all(executionId);
+
+    expect(env.executor.pendingBuyMarkets(env.accountId)).toEqual([{ assetId, conditionId }]);
+    expect(attempts()).toEqual([{ attempt_sequence: 1, reject_reason: "BUY_NO_ASK" }]);
+    await env.executor.retryPending(env.accountId);
+    expect(attempts()).toEqual([{ attempt_sequence: 1, reject_reason: "BUY_NO_ASK" }]);
+
+    env.market.book = env.market.makeBook([{ price: "0.6", size: "1000" }], []);
+    await env.executor.retryPending(env.accountId);
+    expect(attempts()).toEqual([
+      { attempt_sequence: 1, reject_reason: "BUY_NO_ASK" },
+      { attempt_sequence: 2, reject_reason: "BUY_BEST_ASK_ABOVE_LIMIT" },
+    ]);
+
+    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], []);
+    await env.executor.retryPending(env.accountId);
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    expect(env.executor.pendingBuyMarkets(env.accountId)).toEqual([]);
+    expect(attempts()).toHaveLength(3);
+    database.close();
+    env.executor.close();
+  });
+
   it("keeps a partial fill, releases the remainder, and does not chase", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = env.market.makeBook([{ price: "0.5", size: "100" }], []);
@@ -1310,7 +1486,8 @@ describe("PaperExecutor", () => {
     const executionId = await env.executor.consumeSignal(env.accountId, "timeout");
     expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("100000000");
     env.setClock(new Date("2026-07-08T00:00:07.000Z"));
-    expect(await env.executor.attemptExecution(executionId)).toBe("EXPIRED");
+    await env.executor.retryPending(env.accountId, undefined, { includeBuys: false });
+    expect(env.executor.executionState(executionId)).toBe("EXPIRED");
     expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("0");
     env.executor.close();
   });

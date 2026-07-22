@@ -1283,7 +1283,7 @@ describe("LiveExecutor", () => {
     fresh.close();
   });
 
-  it("does not submit a BUY when the full-depth executable price is outside the configured two-sided window", async () => {
+  it("does not submit a BUY when the best ask is above the asymmetric limit", async () => {
     const env = setup();
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -1301,8 +1301,68 @@ describe("LiveExecutor", () => {
     expect(count(env.databasePath, "live_orders")).toBe(0);
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((db.prepare("SELECT reason FROM live_market_checks").get() as { reason: string }).reason)
-      .toBe("BUY_PRICE_OR_LIQUIDITY_WAIT");
+      .toBe("BUY_BEST_ASK_ABOVE_LIMIT");
     db.close();
+    executor.close();
+  });
+
+  it("uses the same two-tick asymmetric BUY window as Paper", async () => {
+    const env = setup();
+    const signal = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-buy-two-ticks-above-target",
+      riskDecisionId: "risk-live-buy-two-ticks-above-target",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      targetPriceUnits: "120000000000000000",
+    });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.14", size: "1000" }],
+        bids: [{ price: "0.12", size: "1000" }],
+        tickSize: "0.01",
+      }),
+    });
+
+    const result = await executor.executeBuy({
+      accountId,
+      signal: signal.signal,
+      context: signal.context,
+      riskDecisionId: "risk-live-buy-two-ticks-above-target",
+    });
+
+    expect(result).toMatchObject({ state: "EXECUTED" });
+    executor.close();
+  });
+
+  it("accepts the same BUY price improvement below target as Paper", async () => {
+    const env = setup();
+    const signal = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-buy-below-target",
+      riskDecisionId: "risk-live-buy-below-target",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      targetPriceUnits: "120000000000000000",
+    });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.10", size: "1000" }],
+        bids: [{ price: "0.09", size: "1000" }],
+        tickSize: "0.01",
+      }),
+    });
+
+    const result = await executor.executeBuy({
+      accountId,
+      signal: signal.signal,
+      context: signal.context,
+      riskDecisionId: "risk-live-buy-below-target",
+    });
+
+    expect(result).toMatchObject({ state: "EXECUTED" });
     executor.close();
   });
 
@@ -1729,8 +1789,8 @@ describe("LiveExecutor", () => {
     }>;
     expect(positions).toHaveLength(1);
     expect(positions[0]).toMatchObject({
-      current_size_micros: "5100000",
-      remaining_cost_micros: "2550000",
+      current_size_micros: "5000000",
+      remaining_cost_micros: "2500000",
     });
     expect(await executor.getBalance({ accountId })).toMatchObject({
       reservedBalanceMicros: "0",
@@ -1738,7 +1798,7 @@ describe("LiveExecutor", () => {
     expect(signer.payloads).toHaveLength(1);
     expect(signer.payloads[0]).toMatchObject({
       riskDecisionId: result!.riskDecisionId,
-      budgetMicros: "2550000",
+      budgetMicros: "2500000",
     });
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare(
@@ -1750,10 +1810,10 @@ describe("LiveExecutor", () => {
        JOIN live_orders o ON o.live_execution_id=e.live_execution_id
        WHERE e.live_execution_id=?`,
     ).get(result!.executionId)).toEqual({
-      execution_amount: "2550000",
-      risk_amount: "2550000",
+      execution_amount: "2500000",
+      risk_amount: "2500000",
       consumption_risk: result!.riskDecisionId,
-      order_budget: "2550000",
+      order_budget: "2500000",
     });
     const reservationTotal = db.prepare(
       `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
@@ -1852,8 +1912,8 @@ describe("LiveExecutor", () => {
        WHERE e.live_execution_id=?`,
     ).get(result!.executionId)).toEqual({
       reason: "ALLOWANCE_INSUFFICIENT",
-      requested_amount_micros: "2550000",
-      risk_amount: "2550000",
+      requested_amount_micros: "2500000",
+      risk_amount: "2500000",
     });
     db.close();
     consumer.close();
@@ -1892,8 +1952,8 @@ describe("LiveExecutor", () => {
        WHERE e.live_execution_id=?`,
     ).get(result!.executionId)).toEqual({
       reason: "LIVE_SINGLE_TRADE_LIMIT_EXCEEDED",
-      requested_amount_micros: "2550000",
-      risk_amount: "2550000",
+      requested_amount_micros: "2500000",
+      risk_amount: "2500000",
       decision: "REJECT",
       consumption_risk: result!.riskDecisionId,
     });
@@ -1955,7 +2015,7 @@ describe("LiveExecutor", () => {
     expect(result).toMatchObject({ signalId: second.signal.signalId, state: "REJECTED" });
     expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
     expect(await executor.getBalance({ accountId })).toMatchObject({
-      reservedBalanceMicros: "2550000",
+      reservedBalanceMicros: "1000000",
     });
     consumer.close();
     executor.close();
@@ -1998,7 +2058,7 @@ describe("LiveExecutor", () => {
       remaining_cost_micros: string;
     }>;
     expect(positions).toHaveLength(1);
-    expect(positions[0]).toMatchObject({ remaining_cost_micros: "2550000" });
+    expect(positions[0]).toMatchObject({ remaining_cost_micros: "2500000" });
     consumer.close();
     executor.close();
   });
@@ -2025,7 +2085,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("persists a lifted Live BUY across restart and retries without duplicating Risk or reservation", async () => {
+  it("lifts a pending Live BUY after book recovery and re-risks exactly once", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const waiting = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2045,13 +2105,13 @@ describe("LiveExecutor", () => {
       `SELECT requested_amount_micros,risk_decision_id FROM live_executions
        WHERE live_execution_id=?`,
     ).get(first!.executionId)).toEqual({
-      requested_amount_micros: "2550000",
+      requested_amount_micros: "1000000",
       risk_decision_id: first!.riskDecisionId,
     });
     expect((beforeRestart.prepare(
       `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
        FROM live_reservation_ledger WHERE live_execution_id=?`,
-    ).get(first!.executionId) as { total: number }).total).toBe(2_550_000);
+    ).get(first!.executionId) as { total: number }).total).toBe(1_000_000);
     const riskCount = (beforeRestart.prepare(
       "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
     ).get(env.signal.signalId) as { count: number }).count;
@@ -2060,7 +2120,14 @@ describe("LiveExecutor", () => {
     waiting.close();
 
     const signer = new RecordingFakeSigner();
-    const resumed = liveExecutor(env.databasePath, { signer });
+    const resumed = liveExecutor(env.databasePath, {
+      signer,
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
     expect(await resumed.retryPending(accountId, "BUYS_ONLY")).toEqual([first!.executionId]);
 
     const afterRestart = new DatabaseSync(env.databasePath, { readOnly: true });
@@ -2068,20 +2135,25 @@ describe("LiveExecutor", () => {
       `SELECT outcome,reason FROM live_market_checks
        WHERE live_execution_id=? ORDER BY rowid`,
     ).all(first!.executionId)).toEqual([
-      { outcome: "WAIT", reason: "BUY_PRICE_OR_LIQUIDITY_WAIT" },
+      { outcome: "WAIT", reason: "BUY_NO_ASK" },
       { outcome: "ALLOW", reason: "LIVE_BUY_MARKET_CHECK_ALLOW" },
     ]);
-    expect(afterRestart.prepare(
+    const finalExecution = afterRestart.prepare(
       `SELECT state,requested_amount_micros,risk_decision_id FROM live_executions
        WHERE live_execution_id=?`,
-    ).get(first!.executionId)).toEqual({
+    ).get(first!.executionId) as {
+      state: string;
+      requested_amount_micros: string;
+      risk_decision_id: string;
+    };
+    expect(finalExecution).toMatchObject({
       state: "EXECUTED",
-      requested_amount_micros: "2550000",
-      risk_decision_id: first!.riskDecisionId,
+      requested_amount_micros: "2500000",
     });
+    expect(finalExecution.risk_decision_id).not.toBe(first!.riskDecisionId);
     expect((afterRestart.prepare(
       "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
-    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount);
+    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount + 1);
     const reservationTotal = afterRestart.prepare(
       `SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total
        FROM live_reservation_ledger WHERE live_execution_id=?`,
@@ -2089,14 +2161,14 @@ describe("LiveExecutor", () => {
     expect(BigInt(reservationTotal.total)).toBe(0n);
     expect(signer.payloads).toHaveLength(1);
     expect(signer.payloads[0]).toMatchObject({
-      riskDecisionId: first!.riskDecisionId,
-      budgetMicros: "2550000",
+      riskDecisionId: finalExecution.risk_decision_id,
+      budgetMicros: "2500000",
     });
     afterRestart.close();
     resumed.close();
   });
 
-  it("recovers an execution committed before Consumption without recalculating Risk after restart", async () => {
+  it("recovers a pending execution and re-risks once when the exact market minimum becomes known", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const waiting = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2138,7 +2210,7 @@ describe("LiveExecutor", () => {
       requested_amount_micros: string;
       state: string;
     };
-    expect(execution).toMatchObject({ requested_amount_micros: "2550000", state: "WAITING_EXECUTION" });
+    expect(execution).toMatchObject({ requested_amount_micros: "1000000", state: "WAITING_EXECUTION" });
     expect((beforeRestart.prepare(
       "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
     ).get(env.signal.signalId) as { count: number }).count).toBe(0);
@@ -2150,27 +2222,34 @@ describe("LiveExecutor", () => {
     waiting.close();
 
     const signer = new RecordingFakeSigner();
-    const resumed = liveExecutor(env.databasePath, { signer });
+    const resumed = liveExecutor(env.databasePath, {
+      signer,
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
     const consumer = new LiveSignalConsumer(env.databasePath, resumed, sourceVersion, () => new Date(now));
     const [result] = await consumer.consumeAvailableSignals(accountId);
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       signalId: env.signal.signalId,
-      riskDecisionId: execution.risk_decision_id,
       executionId: execution.live_execution_id,
       state: "EXECUTED",
     });
+    expect(result!.riskDecisionId).not.toBe(execution.risk_decision_id);
     const afterRestart = new DatabaseSync(env.databasePath, { readOnly: true });
     expect((afterRestart.prepare(
       "SELECT count(*) count FROM risk_decisions WHERE signal_id=?",
-    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount);
+    ).get(env.signal.signalId) as { count: number }).count).toBe(riskCount + 1);
     expect((afterRestart.prepare(
       "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
     ).get(env.signal.signalId) as { count: number }).count).toBe(1);
     expect(signer.payloads).toHaveLength(1);
     expect(signer.payloads[0]).toMatchObject({
-      riskDecisionId: execution.risk_decision_id,
-      budgetMicros: "2550000",
+      riskDecisionId: result!.riskDecisionId,
+      budgetMicros: "2500000",
     });
     afterRestart.close();
     consumer.close();

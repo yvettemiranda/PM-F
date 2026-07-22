@@ -11,6 +11,8 @@ export interface RegisteredStopLossRules {
 export interface RegisteredExecutionRules extends RegisteredStopLossRules {
   buyPriceMinRatioPpm: number;
   buyPriceMaxRatioPpm: number;
+  buyPriceImprovementAllowed: boolean;
+  buyPriceMinimumTickSteps: number;
   buyMaximumPriceUnits: bigint;
   buyFirstEntryMinimumAmountMicros: bigint;
   buyMarketMinimumAutoLiftCapMicros: bigint;
@@ -83,6 +85,10 @@ export function registeredExecutionRules(
   const snapshotTrigger = (rules as { stopTriggerRatioPpm?: unknown }).stopTriggerRatioPpm;
   const snapshotBuyMin = (rules as { buyPriceMinRatioPpm?: unknown }).buyPriceMinRatioPpm;
   const snapshotBuyMax = (rules as { buyPriceMaxRatioPpm?: unknown }).buyPriceMaxRatioPpm;
+  const snapshotBuyPriceImprovementAllowed = (rules as { buyPriceImprovementAllowed?: unknown })
+    .buyPriceImprovementAllowed;
+  const snapshotBuyMinimumTickSteps = (rules as { buyPriceMinimumTickSteps?: unknown })
+    .buyPriceMinimumTickSteps;
   const snapshotBuyMaximumPrice = (rules as { buyMaximumPricePpm?: unknown }).buyMaximumPricePpm;
   const snapshotBuyFirstEntryMinimum = (rules as { buyFirstEntryMinimumAmountMicros?: unknown })
     .buyFirstEntryMinimumAmountMicros;
@@ -96,6 +102,8 @@ export function registeredExecutionRules(
   const legacyBuyAmountPolicy = snapshotBuyMaximumPrice === undefined
     && snapshotBuyFirstEntryMinimum === undefined
     && snapshotBuyAutoLiftCap === undefined;
+  const legacyBuyTickPolicy = snapshotBuyPriceImprovementAllowed === undefined
+    && snapshotBuyMinimumTickSteps === undefined;
   if (
     !validRatioPpm(row.stop_loss_ratio_ppm)
     || !validRatioPpm(snapshotTrigger)
@@ -105,6 +113,10 @@ export function registeredExecutionRules(
     || !validPriceRatioPpm(snapshotBuyMin)
     || !validPriceRatioPpm(snapshotBuyMax)
     || snapshotBuyMin >= snapshotBuyMax
+    || (!legacyBuyTickPolicy && (
+      typeof snapshotBuyPriceImprovementAllowed !== "boolean"
+      || !validPositiveSafeInteger(snapshotBuyMinimumTickSteps)
+    ))
     || (!legacyBuyAmountPolicy && (
       !validRatioPpm(snapshotBuyMaximumPrice)
       || !validPositiveSafeInteger(snapshotBuyFirstEntryMinimum)
@@ -129,6 +141,12 @@ export function registeredExecutionRules(
     maxSlippagePpm,
     buyPriceMinRatioPpm: row.buy_price_lower_ratio_ppm,
     buyPriceMaxRatioPpm: row.buy_price_upper_ratio_ppm,
+    buyPriceImprovementAllowed: legacyBuyTickPolicy
+      ? false
+      : snapshotBuyPriceImprovementAllowed as boolean,
+    buyPriceMinimumTickSteps: legacyBuyTickPolicy
+      ? 0
+      : snapshotBuyMinimumTickSteps as number,
     buyMaximumPriceUnits: legacyBuyAmountPolicy
       ? 999_999_999_999_999_999n
       : (BigInt(snapshotBuyMaximumPrice as number) * 1_000_000_000_000_000_000n) / 1_000_000n,

@@ -74,7 +74,7 @@ describe("operator control", () => {
       ruleset: {
         source: "PROJECT_DEFAULT",
         name: "Project Default",
-        configVersion: "v1.3.0",
+        configVersion: "v1.4.0",
       },
       controls: {
         targetWallet: { available: true, blockedReason: null },

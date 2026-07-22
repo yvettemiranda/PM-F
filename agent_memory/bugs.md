@@ -1,46 +1,32 @@
 # Bugs And Risks
 
 ## Active blockers
-- 当前 Campaign `PC-0969675B1A77CA978A5B` 已因旧 projector 的负风险转换缺陷 `BLOCKED`；不可修补、重开或计入新核心，只能创建 replacement Campaign。
-- 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然关键场景及最终 8 小时 Observe。
-- 新目标高频使用 `MERGE`，普通 Trades 未覆盖最近抽样 MERGE。Observe 现已对 MERGE/SPLIT 明确立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，不会假装同步；但真实投影/复制语义仍未实现，因此它仍是小额 Live 的硬 blocker。
-- tracked negative-risk conversion 的真实执行能力尚未实现：当前会生成不可执行义务并硬阻断 Campaign。没有受控 Paper/Fake 执行语义和未来明确授权的链上适配器前，不可宣称 Live-ready。
-- Live 所需 geoblock/compliance、隔离钱包、真实 signer 和用户再次明确授权均未完成。
+- 新目标高频使用 `MERGE`，普通 Trades 不能表达该操作。当前会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`，不会假装同步；安全 projection/copy 语义仍未实现，是小额 Live 硬 blocker。
+- tracked negative-risk conversion 没有真实复制能力；当前生成不可执行义务并暂停 Paper/未来 Live。
+- 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
+- geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
-- Data API `CONVERSION` Activity 可能省略 `eventSlug`、asset、title 等字段；只能在 Polygon 成功回执、NegRiskAdapter 事件和目标 Positions 元数据完全一致时接受。
-- 目标若在长 Gap 内连续发生 conversion 与后续卖出，当前 Positions 可能已不再包含全部目标资产元数据；系统会失败关闭，不能猜测或追补。
-- Positions 与 Trades/Activity 可能短暂不同步；同一差异连续达到阈值且持续满 120 秒仍升级 `MAJOR_DESYNC`。
-- Data API 历史 offset 限制和相邻页边界重复仍可能发生；官方 V2 Exchange 的完全相同成交可用 append-only 链上 multiplicity proof 精确确认，旧版/未知合约、provider 不可用或任一字段不一致时继续阻断。
+- 3 秒 Trades/Activity 提高公开 API 请求频率；Positions/pUSD 已限制为 15 秒并在新事件时提前刷新，仍需短测观察限流、gap 和 scheduling gap。
+- Market WebSocket 只提供 wake hint，可能断线、丢消息或收到乱序增量；执行始终 REST 复核并每 15 秒兜底，不能把 WebSocket 消息直接当成交证据。
+- 待成交 BUY 不再为完全相同盘口重复写完整 attempt，但仍会在 wake/fallback 时发 REST 请求；需要短测确认 API 和数据库增长率。
+- `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性需新核心 Campaign 验证。
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
-- `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性仍需新核心自然 Campaign 验证。
-- 真实数据库较大；转换回执使用压缩、内容寻址和 append-only 保存，但仍需观察长跑增长率。
-- `data` 当前约 8.5 GB，其中 `data/operator/backups` 约 5.1 GB（4 份数据库备份）。数据库 Campaign/Session/capture 记录有外键和审计价值，不应删除；如需腾空间，应另行确认保留最新 `2.28.0` 前备份后，把更旧备份做可恢复归档，而不是直接清库。
-- 公开 HTTP/RPC 响应没有服务器数字签名；目前能证明的是官方 URL、链上回执内容、本地内容寻址和不可变证据的一致性。
+- Data API offset、分页边界和短暂 Positions/Trades/Activity 不同步仍可能触发 gap recovery 或 reconciliation；不得以“尽量成交”为由降低这些数据完整性 Gate。
+- 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
-- Data API 不暴露逐 fill ID，导致新目标两组真实双成交被标为 ambiguous；现先要求本次 Trades/Activity 全部属于当前目标，再只对 ambiguous 交易读取 Polygon 成功回执，限定官方 V2 Exchange `OrderFilled`，用不同 `orderHash` 和 BUY/SELL 精确抵押金额确认 occurrence 次数。回执与派生 proof 内容寻址保存并在 Replay 中重验，不通过时不删除 warning、不放行 Campaign。
-- UI 参数曾只能展示编译期 `RULESET`；现由不可变 operator profile 复用同一 `RULESET` 深接口，完整校验、原子保存、运行锁和数据库安全 Gate 双重保护，并绑定 ruleset/Paper core。只开放已验证的 Paper 策略/风险 key，基础设施安全项、模式和 Live-only 参数继续冻结。
-- 目标钱包曾是 `操作入口/lib/common.sh` 的代码常量，切换会改变源码版本且不适合 UI；现由原子运行时选择文件和统一 TypeScript 模块管理，operator lock 存在时 fail closed。
-- Live Gate 曾把最终 Observe 前置项错误命名为 24 小时，与实际 8 小时政策冲突；`2.28.0` migration 保留 evidence 地改名，不降低 Paper 24 小时、Crash Recovery、一致性、geoblock 或用户授权门禁。
-- MERGE/SPLIT 曾只记录并依赖持仓差异在宽限期后升级；现当次轮询即写明确不支持原因并置 `MAJOR_DESYNC`。
-- 目标切换曾只替换固定地址但 preflight/runner/status 仍选择全库 Campaign，可能误续跑或冻结旧钱包；现所有入口按目标钱包/target 隔离。
-- 隔离 proof 和 supplemental Replay evidence 曾可能跨钱包复用；现 Phase 0 proof 绑定 `targetWallet`，Replay evidence 只计入当前目标 signal binding。
-- Observe 曾把 `CONVERSION` 只作为 combo Activity 记录并直接跳过 projection，导致源资产残留、目标资产缺失和 `MAJOR_DESYNC`；现用链上 ERC-1155 净额、Adapter 事件与 Positions 三方验证后重分 bucket。
-- 简单匹配单条 TransferBatch 会被 NegRiskAdapter 的内部中转腿误导；现按目标钱包汇总整笔回执的所有 CTF TransferBatch 净变化。
-- Data API 真实 `CONVERSION.eventSlug` 为空；现只在 Activity 有值时核对，否则由全部目标 Positions 的一致事件归属推导。
-- 转换证据曾无持久化与重启语义；现 capture/legs/hash append-only 保存并进入 checkpoint replay，重启不重复 RPC。
-- historical-only 转换不会误发交易；mixed/tracked 转换不会静默标记成功，而会生成明确不可执行义务并在 Gate/Integrity 硬阻断。
-- Adapter 转换证明现精确绑定目标钱包 stakeholder 且必须唯一；0 条、重复或歧义证明均失败关闭。
-- 普通 reconciliation 的数量容差不再用于签发 conversion verified evidence；转换涉及资产按 micros 零容差对账。
-- tracked conversion 不再只等到验收时阻断；Paper/Live 在候选选择前和逐笔执行前复核，Paper 立即暂停/冻结，Live 立即 emergency stop，竞态窗口已有注入测试。
-- 真实业务库已 backup-first 升到 `2.28.0`，历史终态、`PAPER + LIVE_DISABLED`、0 active Reservation 和 0 running Observe 均只读复核通过；迁移前 `2.27.0` 备份保留。
-- 回执或 provider 异常曾可能只能表现为后续通用对账差异；现 Poll 在写入前以具体错误失败关闭，不留下半成品。
-- 首开最低 1 pUSD、市场最低额最多 5 pUSD、BUY 最高价 0.95、最终 Risk/Reservation/Gate 绑定和 Live Fake 恢复语义已完成，旧核心证据只读保留。
-- Observe/Paper/Settlement 共用应用内 MarketClock；运行时长和调度使用单调时钟；AbortSignal 贯穿公开请求、分页和退避。
-- 核心哈希覆盖实际 Paper/Observe/恢复/Schema 语义，测试文件清单与 suite hash 不一致时直接失败关闭。
+- BUY 原对称 `98%—102%` 下限会拒绝更低的改善价格；当前只设追高上限，低价改善允许成交。
+- 低价市场原 `2%` 上限可能小于两个 tick，导致自然 BUY 长期无法落入合法价格；当前取 `2%` 与 `2 tick` 较宽者并受 `0.95` 封顶。
+- Observe 原 15 秒统一轮询导致目标事件发现慢；当前事件 3 秒、状态 15 秒，新事件立即强制状态核对。
+- 单个 WAITING BUY 曾在未变化盘口下高频生成重复 attempt，造成 API、数据库和报告噪声；当前 WebSocket/15 秒控制重试，且相同盘口+fee 不重复写完整 attempt。
+- Paper 等待原因曾合并为 `PRICE_OUT_OF_RANGE_OR_ZERO_LIQUIDITY`；当前按无卖盘、超限、零可执行流动性拆分。
+- 新增 WebSocket/test 文件若未进入 verification 清单会触发 `PAPER_VERIFICATION_TEST_FILE_SET_MISMATCH`；已把运行文件纳入 core hash、测试纳入 verification suite，旧 Campaign 不会误续。
+- Live 内部计划的合法微单位取整曾被误判越价；现只对未改变的内部计划允许该取整，signer 变更导致的真实越价继续拒绝。
+- Market WebSocket helper 抛错时曾使 Runner 退回每个 cycle 全量重试 BUY；当前异常路径也受 15 秒 REST fallback 限制，退出任务仍每个 cycle 处理。
+- 市场最低额曾按 BUY 最高追价计算，可能把实际已足够的 1 pUSD 放大；当前按允许价格内的真实多档 ask 深度和 fee 精确计算。空盘口先保持原 Reservation，恢复后按精确金额重新 Risk，不凭假定价格提前放大。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-- 未再次明确授权前，禁止 private key/seed、真实 signer、认证 CLOB client、submit/cancel、approve、真实 redeem 和链上写入。
+- 未再次明确授权前，禁止 private key/seed、真实 signer、认证 CLOB client、submit/cancel、approve、真实 redeem、真实订单和链上写入。
 - 禁止覆盖历史失败证据、跨核心混算时长、降低数据/时钟/恢复/账本安全门或绕过 geoblock。

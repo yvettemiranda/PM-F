@@ -16,15 +16,18 @@ import { RULESET, RULESET_HASH } from "../domain/versioning.js";
 import { registeredExecutionRules, registeredStopLossRules } from "../domain/ruleset-registry.js";
 import {
   bestExecutionAskPriceUnits,
+  buyNoFillReason,
   executableSellVwap,
   matchExecutionBuy,
   matchExecutionSell,
+  quoteExecutionBuySize,
   type ExecutionMatchResult,
 } from "../execution/orderbook-matching.js";
 import {
   cappedBuyPriceUpperUnits,
   evaluateBuyMarketConstraint,
   evaluateSellMarketConstraint,
+  parseMarketOrderConstraints,
 } from "../execution/market-order-constraints.js";
 import {
   executableOrderbookAgeMs,
@@ -1846,11 +1849,27 @@ export class LiveExecutor implements ExecutorInterface {
     if (!executionRules) {
       throw new Error(`HISTORICAL_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
     }
-    const lower = side === "BUY" ? ratio(target, executionRules.buyPriceMinRatioPpm) : null;
+    const parsedConstraints = side === "BUY"
+      ? parseMarketOrderConstraints({ minOrderSize: book.minOrderSize, tickSize: book.tickSize })
+      : null;
+    const lower = side === "BUY"
+      ? executionRules.buyPriceImprovementAllowed
+        ? 0n
+        : ratio(target, executionRules.buyPriceMinRatioPpm)
+      : null;
     const upper = side === "BUY"
       ? cappedBuyPriceUpperUnits({
         targetPriceUnits: target,
         maximumRatioPpm: executionRules.buyPriceMaxRatioPpm,
+        ...(
+          executionRules.buyPriceMinimumTickSteps > 0
+          && parsedConstraints !== null && !("error" in parsedConstraints)
+            ? {
+              minimumTickSteps: executionRules.buyPriceMinimumTickSteps,
+              tickSizeUnits: parsedConstraints.tickSizeUnits,
+            }
+            : {}
+        ),
         maximumBuyPriceUnits: executionRules.buyMaximumPriceUnits,
       })
       : null;
@@ -1926,12 +1945,53 @@ export class LiveExecutor implements ExecutorInterface {
         };
       }
       const budget = BigInt(approval.requested_amount_micros!);
+      const firstEntryMinimumEligible = isLiveFirstEntryBuyEligible(
+        this.database,
+        execution.live_account_id,
+        execution.asset_id,
+        execution.live_execution_id,
+      );
+      const minimumQuote = parsedConstraints !== null && !("error" in parsedConstraints)
+        ? quoteExecutionBuySize({
+          asks: book.asks,
+          requestedSizeMicros: parsedConstraints.normalizedMinOrderSizeMicros,
+          lowerPriceUnits: lower!,
+          upperPriceUnits: upper!,
+          feeRatePpm: feeRate,
+          feeExponent: fee.exponent,
+        })
+        : null;
+      if (minimumQuote && !minimumQuote.complete && firstEntryMinimumEligible) {
+        const reason = buyNoFillReason({
+          bestAskPriceUnits: bestAsk,
+          lowerPriceUnits: lower!,
+          upperPriceUnits: upper!,
+          inRangeReason: "BUY_MARKET_MINIMUM_LIQUIDITY_UNAVAILABLE",
+        });
+        return {
+          book,
+          fee,
+          ageMs,
+          match: minimumQuote,
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: upper!.toString(),
+          outcome: "WAIT",
+          reason,
+        };
+      }
       const constraint = evaluateBuyMarketConstraint({
         minOrderSize: book.minOrderSize,
         tickSize: book.tickSize,
         requestedAmountMicros: budget,
         upperPriceUnits: upper!,
         maximumBuyPriceUnits: executionRules.buyMaximumPriceUnits,
+        ...(minimumQuote?.complete ? {
+          executableMinimumNotionalMicros: BigInt(minimumQuote.filledNotionalMicros),
+          executableMinimumTotalMicros: BigInt(minimumQuote.filledNotionalMicros)
+            + BigInt(minimumQuote.feeMicros),
+        } : {}),
       });
       if (constraint.result !== "PASS") {
         return {
@@ -1958,6 +2018,11 @@ export class LiveExecutor implements ExecutorInterface {
         feeExponent: fee.exponent,
       });
       if (BigInt(match.filledSizeMicros) === 0n) {
+        const reason = buyNoFillReason({
+          bestAskPriceUnits: bestAsk,
+          lowerPriceUnits: lower!,
+          upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
+        });
         return {
           book,
           fee,
@@ -1968,7 +2033,7 @@ export class LiveExecutor implements ExecutorInterface {
           upperPriceUnits: upper!.toString(),
           limitPriceUnits: upper!.toString(),
           outcome: "WAIT",
-          reason: "BUY_PRICE_OR_LIQUIDITY_WAIT",
+          reason,
         };
       }
       const observedLimit = BigInt(match.levels.at(-1)!.priceUnits);
@@ -2332,9 +2397,11 @@ export class LiveExecutor implements ExecutorInterface {
     const signedSize = BigInt(sizeMicros);
     if (signedSize > BigInt(plannedSizeMicros)) throw new Error("SIGNED_ORDER_SIZE_EXCEEDS_EXECUTION_PLAN");
     if (signedAmount > signedSize) throw new Error("SIGNED_ORDER_PRICE_ABOVE_ONE");
-    const signedPriceNumerator = signedAmount * PRICE_SCALE;
     const plannedLimitNumerator = BigInt(plan.limitPriceUnits) * signedSize;
-    if (side === "BUY" && signedPriceNumerator > plannedLimitNumerator) {
+    const signedPriceNumerator = signedAmount * PRICE_SCALE;
+    const signedOrderMatchesPlan = signedAmount === BigInt(plannedAmountMicros)
+      && signedSize === BigInt(plannedSizeMicros);
+    if (side === "BUY" && !signedOrderMatchesPlan && signedPriceNumerator > plannedLimitNumerator) {
       throw new Error("SIGNED_ORDER_BUY_PRICE_EXCEEDS_LIMIT");
     }
     if (side === "SELL" && signedPriceNumerator < plannedLimitNumerator) {

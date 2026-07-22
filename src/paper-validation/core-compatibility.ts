@@ -40,6 +40,7 @@ export const CORE_COMPATIBILITY_PAPER_FILES = [
 export const CORE_COMPATIBILITY_EXECUTION_FILES = [
   "src/execution/buy-amount-policy.ts",
   "src/execution/capital-sizing.ts",
+  "src/execution/market-change-feed.ts",
   "src/execution/market-data.ts",
   "src/execution/market-order-constraints.ts",
   "src/execution/orderbook-matching.ts",
@@ -186,6 +187,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/live-executor.test.ts",
   "tests/live-gate.test.ts",
   "tests/live-risk-manager.test.ts",
+  "tests/market-change-feed.test.ts",
   "tests/market-order-constraints.test.ts",
   "tests/negative-risk-conversion.test.ts",
   "tests/observe-runner.test.ts",

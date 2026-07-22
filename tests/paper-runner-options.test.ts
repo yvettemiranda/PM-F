@@ -3,6 +3,7 @@ import type { PaperExecutor } from "../src/paper/paper-executor.js";
 import type { PaperAcceptanceSummary } from "../src/paper/paper-acceptance-summary.js";
 import { PaperRunner, paperRunCompletionStatus } from "../src/paper/paper-runner.js";
 import type { PaperAccountSnapshot } from "../src/paper/types.js";
+import type { MarketChangeFeed } from "../src/execution/market-change-feed.js";
 
 const unusedExecutor = {} as PaperExecutor;
 
@@ -214,6 +215,98 @@ describe("PaperRunner options", () => {
     }).run();
 
     expect(calls).toEqual(["recover", "settlement", "stop", "pending", "signals"]);
+  });
+
+  it("uses market changes to wake pending BUY retries while retaining a REST fallback", async () => {
+    let clock = new Date("2026-07-15T00:00:00.000Z");
+    let nextChanges: string[] = [];
+    let waits = 0;
+    const subscriptions: string[][] = [];
+    const retryScopes: Array<{
+      includeBuys: boolean | undefined;
+      includeExits: boolean | undefined;
+      buyAssetIds: string[] | null;
+    }> = [];
+    const marketChangeFeed: MarketChangeFeed = {
+      replaceSubscriptions: (assetIds) => { subscriptions.push([...assetIds]); },
+      drainChangedAssetIds: () => {
+        const changed = nextChanges;
+        nextChanges = [];
+        return changed;
+      },
+      close: () => undefined,
+    };
+    const executor = {
+      ...idleExecutor(),
+      pendingBuyMarkets: () => [{ assetId: "asset-1", conditionId: "condition-1" }],
+      retryPending: async (_accountId: string, _signal?: AbortSignal, options?: {
+        includeBuys?: boolean;
+        includeExits?: boolean;
+        buyAssetIds?: ReadonlySet<string>;
+      }) => {
+        retryScopes.push({
+          includeBuys: options?.includeBuys,
+          includeExits: options?.includeExits,
+          buyAssetIds: options?.buyAssetIds ? [...options.buyAssetIds] : null,
+        });
+      },
+    } as unknown as PaperExecutor;
+
+    await new PaperRunner(executor, {
+      accountId: "paper",
+      intervalMs: 1_000,
+      durationMs: 3_000,
+      pendingBuyFallbackIntervalMs: 15_000,
+      marketChangeFeed,
+      now: () => clock,
+      wait: async (milliseconds) => {
+        waits += 1;
+        clock = new Date(clock.valueOf() + milliseconds);
+        if (waits === 1) nextChanges = ["asset-1"];
+      },
+    }).run();
+
+    expect(subscriptions).toContainEqual(["asset-1"]);
+    expect(retryScopes).toEqual([
+      { includeBuys: true, includeExits: true, buyAssetIds: null },
+      { includeBuys: true, includeExits: true, buyAssetIds: ["asset-1"] },
+      { includeBuys: false, includeExits: true, buyAssetIds: null },
+    ]);
+  });
+
+  it("does not collapse to per-cycle BUY retries when the WebSocket feed throws", async () => {
+    let clock = new Date("2026-07-15T00:00:00.000Z");
+    const retryScopes: Array<{ includeBuys?: boolean; includeExits?: boolean } | undefined> = [];
+    const marketChangeFeed: MarketChangeFeed = {
+      replaceSubscriptions: () => { throw new Error("WS_FEED_FAILED"); },
+      drainChangedAssetIds: () => { throw new Error("WS_FEED_FAILED"); },
+      close: () => undefined,
+    };
+    const executor = {
+      ...idleExecutor(),
+      pendingBuyMarkets: () => [{ assetId: "asset-1", conditionId: "condition-1" }],
+      retryPending: async (
+        _accountId: string,
+        _signal?: AbortSignal,
+        options?: { includeBuys?: boolean; includeExits?: boolean },
+      ) => { retryScopes.push(options); },
+    } as unknown as PaperExecutor;
+
+    await new PaperRunner(executor, {
+      accountId: "paper",
+      intervalMs: 1_000,
+      durationMs: 3_000,
+      pendingBuyFallbackIntervalMs: 15_000,
+      marketChangeFeed,
+      now: () => clock,
+      wait: async (milliseconds) => { clock = new Date(clock.valueOf() + milliseconds); },
+    }).run();
+
+    expect(retryScopes).toEqual([
+      { includeBuys: true, includeExits: true },
+      { includeBuys: false, includeExits: true },
+      { includeBuys: false, includeExits: true },
+    ]);
   });
 
   it("terminates the Paper session before retrying work when a conversion blocks it", async () => {

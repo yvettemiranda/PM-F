@@ -65,6 +65,7 @@ function result(
   const size = levels.reduce((sum, level) => sum + level.size, 0n);
   const levelNotional = side === "BUY" ? buyNotionalMicros : notionalMicros;
   const notional = levels.reduce((sum, level) => sum + levelNotional(level.size, level.price), 0n);
+  const priceSizeNumerator = levels.reduce((sum, level) => sum + level.size * level.price, 0n);
   const fee = roundedFee(levels, feeRatePpm, exponent);
   const outputLevels: ExecutionMatchedLevel[] = levels.map((level) => ({
     priceUnits: level.price.toString(),
@@ -76,7 +77,7 @@ function result(
     filledSizeMicros: size.toString(),
     filledNotionalMicros: notional.toString(),
     feeMicros: fee.toString(),
-    vwapPriceUnits: size > 0n ? ((notional * PRICE_SCALE) / size).toString() : null,
+    vwapPriceUnits: size > 0n ? (priceSizeNumerator / size).toString() : null,
     complete,
   };
 }
@@ -117,6 +118,33 @@ export function matchExecutionBuy(input: {
   return { ...matched, complete: consumed >= input.reservationMicros - 1n };
 }
 
+export function quoteExecutionBuySize(input: {
+  asks: ExecutionOrderbookLevel[];
+  requestedSizeMicros: bigint;
+  lowerPriceUnits: bigint;
+  upperPriceUnits: bigint;
+  feeRatePpm: bigint;
+  feeExponent: number;
+}): ExecutionMatchResult {
+  let remaining = input.requestedSizeMicros;
+  const asks = parsed(input.asks, false);
+  const best = asks[0];
+  if (
+    remaining <= 0n
+    || !best
+    || best.price < input.lowerPriceUnits
+    || best.price > input.upperPriceUnits
+  ) return result([], input.feeRatePpm, input.feeExponent, false, "BUY");
+  const fills: Array<{ price: bigint; size: bigint }> = [];
+  for (const level of asks) {
+    if (level.price > input.upperPriceUnits || remaining === 0n) break;
+    const size = level.size < remaining ? level.size : remaining;
+    fills.push({ price: level.price, size });
+    remaining -= size;
+  }
+  return result(fills, input.feeRatePpm, input.feeExponent, remaining === 0n, "BUY");
+}
+
 export function matchExecutionSell(input: {
   bids: ExecutionOrderbookLevel[];
   requestedSizeMicros: bigint;
@@ -142,6 +170,18 @@ export function executableSellVwap(bids: ExecutionOrderbookLevel[], requestedSiz
 
 export function bestExecutionAskPriceUnits(asks: ExecutionOrderbookLevel[]): bigint | null {
   return parsed(asks, false)[0]?.price ?? null;
+}
+
+export function buyNoFillReason(input: {
+  bestAskPriceUnits: bigint | null;
+  lowerPriceUnits: bigint;
+  upperPriceUnits: bigint;
+  inRangeReason?: string;
+}): string {
+  if (input.bestAskPriceUnits === null) return "BUY_NO_ASK";
+  if (input.bestAskPriceUnits < input.lowerPriceUnits) return "BUY_BEST_ASK_BELOW_LEGACY_LIMIT";
+  if (input.bestAskPriceUnits > input.upperPriceUnits) return "BUY_BEST_ASK_ABOVE_LIMIT";
+  return input.inRangeReason ?? "BUY_ZERO_EXECUTABLE_LIQUIDITY";
 }
 
 // Backwards-compatible Paper names. The implementation is deliberately shared

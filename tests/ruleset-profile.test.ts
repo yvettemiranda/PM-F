@@ -38,7 +38,7 @@ describe("operator ruleset profile", () => {
     expect(selected).toMatchObject({
       source: "PROJECT_DEFAULT",
       name: "Project Default",
-      configVersion: "v1.3.0",
+      configVersion: "v1.4.0",
       rules: DEFAULT_RULESET,
     });
     expect(selected.parameterHash).toMatch(/^[a-f0-9]{64}$/);
@@ -62,7 +62,7 @@ describe("operator ruleset profile", () => {
       rules: Record<string, unknown>;
     };
     expect(document.schemaVersion).toBe(1);
-    expect(document.baseRulesetVersion).toBe("v1.5.0");
+    expect(document.baseRulesetVersion).toBe("v1.6.0");
     expect(Object.keys(document.rules).sort()).toEqual(Object.keys(DEFAULT_RULESET).sort());
   });
 
