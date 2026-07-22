@@ -997,6 +997,54 @@ function insertPublishedSignalWithoutContext(
   db.close();
 }
 
+function insertBlockingConversionSignal(
+  databasePath: string,
+  targetId: string,
+  signalId: string,
+): void {
+  const db = new DatabaseSync(databasePath);
+  db.exec("PRAGMA foreign_keys=ON");
+  const sourceKey = `source-${signalId}`;
+  db.prepare(
+    `INSERT INTO raw_events(
+      source_event_key,target_id,identity_version,source_type,source_transaction_hash,
+      source_timestamp,asset_id,condition_id,side,price_units,size_micros,gap_event,
+      is_combo,raw_json,created_at,event_classification
+    ) VALUES (?, ?, 'activity-v1', 'DATA_API_ACTIVITY', ?, 1773014401, ?, ?, 'NONE',
+      '0', '0', 0, 1, '{}', ?, 'COMBO_ACTIVITY')`,
+  ).run(sourceKey, targetId, `tx-${signalId}`, assetId, conditionId, now);
+  db.prepare(
+    `INSERT INTO signals(
+      signal_id,target_id,signal_idempotency_key,source_event_key,signal_type,status,asset_id,
+      condition_id,target_price_units,target_size_micros,sell_ratio_numerator,
+      sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
+      risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
+      created_at,execution_eligible,execution_block_reason,event_classification,
+      capital_estimate_id,source_code_dirty,producer_mode
+    ) VALUES (?, ?, ?, ?, 'TARGET_CONVERSION', 'PUBLISHED', ?, ?, '0', '10000000',
+      '6000000', '6000000', 'TRACKED_NEGATIVE_RISK_CONVERSION_RECORDED', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      0, 'NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE', 'NEGATIVE_RISK_CONVERSION',
+      NULL, 0, 'OBSERVE_ONLY')`,
+  ).run(
+    signalId,
+    targetId,
+    `idem-${signalId}`,
+    sourceKey,
+    assetId,
+    conditionId,
+    VERSIONS.schemaVersion,
+    VERSIONS.signalVersion,
+    VERSIONS.strategyVersion,
+    VERSIONS.riskVersion,
+    VERSIONS.replayVersion,
+    RULESET_SNAPSHOT_JSON,
+    RULESET_HASH,
+    sourceVersion.commit,
+    now,
+  );
+  db.close();
+}
+
 afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -2206,6 +2254,74 @@ describe("LiveExecutor", () => {
     expect((db.prepare(
       "SELECT state FROM live_executions WHERE signal_id='live-missing-context'",
     ).get() as { state: string }).state).toBe("REJECTED");
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("emergency-disables Live before a tracked conversion can be skipped", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect(await consumer.consumeAvailableSignals(accountId)).toHaveLength(1);
+
+    insertBlockingConversionSignal(env.databasePath, env.targetId, "live-tracked-conversion");
+    const later = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-after-conversion",
+      riskDecisionId: "unused-after-conversion-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "100000",
+    });
+
+    await expect(consumer.consumeAvailableSignals(accountId)).rejects.toThrow(
+      "LIVE_TARGET_CONVERSION_BLOCKED:NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE:live-tracked-conversion",
+    );
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT execution_mode,live_gate_state,state_reason FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({
+      execution_mode: "PAPER",
+      live_gate_state: "LIVE_DISABLED",
+      state_reason: "EMERGENCY_STOP:TARGET_CONVERSION_BLOCKED:NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE:live-tracked-conversion",
+    });
+    expect((db.prepare(
+      "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
+    ).get(later.signal.signalId) as { count: number }).count).toBe(0);
+    expect((db.prepare(
+      "SELECT count(*) count FROM live_executions WHERE signal_id=?",
+    ).get(later.signal.signalId) as { count: number }).count).toBe(0);
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("rechecks conversion blockers after selecting eligible Live candidates", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const originalAssert = consumer.assertNoBlockingTargetConversion.bind(consumer);
+    let checks = 0;
+    consumer.assertNoBlockingTargetConversion = async (requestedAccountId, checkpoint) => {
+      checks += 1;
+      if (checks === 2) {
+        insertBlockingConversionSignal(env.databasePath, env.targetId, "live-conversion-in-race-window");
+      }
+      await originalAssert(requestedAccountId, checkpoint);
+    };
+
+    await expect(consumer.consumeAvailableSignals(accountId)).rejects.toThrow(
+      "LIVE_TARGET_CONVERSION_BLOCKED:",
+    );
+
+    expect(checks).toBe(2);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((db.prepare(
+      "SELECT count(*) count FROM live_executions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(0);
+    expect(db.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
     db.close();
     consumer.close();
     executor.close();

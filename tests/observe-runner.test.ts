@@ -1628,6 +1628,62 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("does not persist conversion evidence until the Positions quantity projection is synced", async () => {
+    const sourceAsset = "100";
+    const destinationAssets = ["201", "202", "203", "204"];
+    const groupConditionId = `0x${"4".repeat(64)}`;
+    const transactionHash = `0x${"3".repeat(64)}`;
+    const conversion = activity({
+      type: "CONVERSION",
+      transactionHash,
+      conditionId: groupConditionId,
+      size: "10",
+      eventSlug: "fed-decision-in-july-test",
+      timestamp: baselineSecond + 30,
+    });
+    const inconsistentPositions = destinationAssets.map((asset, index) => (
+      negativeRiskPosition(asset, String(index + 1), index === 0 ? "9.999999" : "10")
+    ));
+    const { databasePath, baselineRunId } = setup([negativeRiskPosition(sourceAsset, "9")]);
+    const now = new Date("2026-07-08T00:01:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshotWithActivity([conversion], inconsistentPositions, now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      negativeRiskConversionReceiptProvider: {
+        async transactionReceipt() {
+          return conversionReceipt(
+            transactionHash,
+            groupConditionId,
+            sourceAsset,
+            destinationAssets,
+            10_000_000n,
+          );
+        },
+      },
+    });
+
+    expect(await runner.pollOnce()).toBe(false);
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT status,error_detail FROM observe_polls").get()).toEqual({
+      status: "PROCESSING_FAILED",
+      error_detail: "NEGATIVE_RISK_CONVERSION_POSITION_QUANTITY_MISMATCH:201",
+    });
+    expect((check.prepare(
+      "SELECT count(*) count FROM negative_risk_conversion_evidence",
+    ).get() as { count: number }).count).toBe(0);
+    expect((check.prepare("SELECT count(*) count FROM raw_events").get() as { count: number }).count).toBe(0);
+    expect((check.prepare("SELECT count(*) count FROM observe_checkpoints").get() as { count: number }).count).toBe(0);
+    check.close();
+  });
+
   it("waits for Activity confirmation before publishing a Trades-only event", async () => {
     const { databasePath } = setup();
     let now = new Date("2026-07-08T00:01:00.000Z");

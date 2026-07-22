@@ -59,8 +59,11 @@ function normalizedHash(value: string, reason: string): string {
   return normalized;
 }
 
-function topicAddress(topic: string): string {
-  const normalized = normalizedHash(topic, "NEGATIVE_RISK_CONVERSION_TRANSFER_TOPIC_INVALID");
+function topicAddress(
+  topic: string,
+  reason = "NEGATIVE_RISK_CONVERSION_TRANSFER_TOPIC_INVALID",
+): string {
+  const normalized = normalizedHash(topic, reason);
   return `0x${normalized.slice(-40)}`;
 }
 
@@ -132,7 +135,7 @@ export function verifyNegativeRiskConversion(input: {
   }
 
   const deltas = new Map<string, bigint>();
-  let adapterProofFound = false;
+  let adapterProofCount = 0;
   for (const log of receipt.logs) {
     const address = log.address.toLowerCase();
     const topics = log.topics.map((topic) => topic.toLowerCase());
@@ -170,19 +173,28 @@ export function verifyNegativeRiskConversion(input: {
       address === NEGATIVE_RISK_ADAPTER_ADDRESS
       && topics[0] === NEGATIVE_RISK_CONVERSION_TOPIC
       && topics[2] === groupConditionId
-      && HEX_RE.test(log.data.toLowerCase())
     ) {
+      if (topics.length !== 4 || !HEX_RE.test(log.data.toLowerCase())) {
+        throw new Error("NEGATIVE_RISK_CONVERSION_ADAPTER_LOG_INVALID");
+      }
+      const stakeholder = topicAddress(
+        topics[1]!,
+        "NEGATIVE_RISK_CONVERSION_ADAPTER_STAKEHOLDER_INVALID",
+      );
+      if (stakeholder !== walletAddress) continue;
       try {
         const [loggedAmount] = decodeAbiParameters([{ type: "uint256" }], log.data as Hex);
-        if (loggedAmount === amountMicros) adapterProofFound = true;
+        if (loggedAmount === amountMicros) adapterProofCount += 1;
       } catch {
-        // A malformed candidate cannot prove the conversion; another exact
-        // adapter event in the same receipt may still do so.
+        throw new Error("NEGATIVE_RISK_CONVERSION_ADAPTER_LOG_INVALID");
       }
     }
   }
-  if (!adapterProofFound) {
+  if (adapterProofCount === 0) {
     throw new Error("NEGATIVE_RISK_CONVERSION_ADAPTER_PROOF_MISSING");
+  }
+  if (adapterProofCount !== 1) {
+    throw new Error("NEGATIVE_RISK_CONVERSION_ADAPTER_PROOF_AMBIGUOUS");
   }
 
   const negative = [...deltas.entries()].filter(([, delta]) => delta < 0n);

@@ -4,6 +4,7 @@ import {
   sourceEventKey,
 } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
+import { decimalToScaled, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
 import { reconcileProjection } from "./reconciliation.js";
@@ -414,6 +415,57 @@ export class ObserveOnlyRunner {
       previousReport,
       sourceEventAmbiguities,
     );
+    const expectedPositions = new Map(
+      projection.projection.map((entry) => [entry.asset, BigInt(entry.expectedTotalMicros)]),
+    );
+    const observedPositions = new Map(
+      snapshot.positions.data.map((position) => [
+        position.asset,
+        decimalToScaled(position.size, SHARE_SCALE_DIGITS),
+      ]),
+    );
+    const conversionAssets = new Set(
+      conversionEvidence.flatMap(({ conversion }) => [
+        conversion.sourceAsset,
+        ...conversion.destinationAssets.map((destination) => destination.asset),
+      ]),
+    );
+    const exactMismatchAsset = [...conversionAssets].find((asset) => (
+      (expectedPositions.get(asset) ?? 0n) !== (observedPositions.get(asset) ?? 0n)
+    ));
+    // A receipt proves the on-chain conversion, but it is not sufficient on
+    // its own: the same poll's public Positions snapshot must also reconcile
+    // with the complete ordered projection before evidence becomes immutable.
+    // Retrying the poll is safer than certifying a conversion during even a
+    // transient quantity disagreement.
+    if (conversionEvidence.length > 0 && exactMismatchAsset) {
+      this.store.recordFailedPoll(
+        started.observeRunId,
+        sequence,
+        pollStartedAt,
+        completedAt,
+        new Error(`NEGATIVE_RISK_CONVERSION_POSITION_QUANTITY_MISMATCH:${exactMismatchAsset}`),
+        "PROCESSING_FAILED",
+      );
+      this.lastPollCompletedAt = completedAt;
+      this.gapActive = true;
+      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
+      return false;
+    }
+    if (conversionEvidence.length > 0 && reconciliation.syncStatus !== "SYNCED") {
+      this.store.recordFailedPoll(
+        started.observeRunId,
+        sequence,
+        pollStartedAt,
+        completedAt,
+        new Error(`NEGATIVE_RISK_CONVERSION_POSITIONS_UNVERIFIED:${reconciliation.syncStatus}`),
+        "PROCESSING_FAILED",
+      );
+      this.lastPollCompletedAt = completedAt;
+      this.gapActive = true;
+      this.gapCutoffAt = this.marketTime(completedAt).toISOString();
+      return false;
+    }
     const balanceResult = snapshot.pUsdBalance.data.result;
     const walletBalanceMicros = balanceResult && /^0x[0-9a-f]+$/i.test(balanceResult) ? BigInt(balanceResult) : null;
     const capitalEstimate = estimateTargetCapital({

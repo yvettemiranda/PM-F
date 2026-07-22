@@ -52,6 +52,10 @@ function isCancellationFromSignal(error: unknown, signal?: AbortSignal): boolean
   return "cause" in error && error.cause === signal.reason;
 }
 
+function isTargetConversionBlock(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("PAPER_TARGET_CONVERSION_BLOCKED:");
+}
+
 export class PaperRunner {
   private readonly now: () => Date;
   private readonly wait: (milliseconds: number) => Promise<void>;
@@ -93,6 +97,7 @@ export class PaperRunner {
       } catch (error) {
         if (isCancellationFromSignal(error, signal)) break;
         recordError(error);
+        if (isTargetConversionBlock(error)) break;
       }
       cycles += 1;
       const remaining = deadline - this.now().valueOf();
@@ -126,6 +131,12 @@ export class PaperRunner {
 
   private async executeCycle(signal: AbortSignal | undefined, onError: (error: unknown) => void): Promise<number> {
     let consumedSignals = 0;
+    // Check before any pending order can be retried. A tracked conversion that
+    // Paper cannot reproduce pauses the account and terminates this Session.
+    this.executor.assertNoBlockingTargetConversion(
+      this.options.accountId,
+      this.options.signalScope,
+    );
     const runStage = async (action: () => Promise<void>): Promise<void> => {
       if (signal?.aborted) return;
       try {

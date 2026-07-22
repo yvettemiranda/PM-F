@@ -180,6 +180,34 @@ describe("negative-risk conversion", () => {
     })).toThrow("NEGATIVE_RISK_CONVERSION_ADAPTER_PROOF_MISSING");
   });
 
+  it("rejects adapter proof for a stakeholder other than the target wallet", () => {
+    const receipt = receiptCapture();
+    const proof = receipt.data.result!.logs.at(-1)!;
+    receipt.data.result!.logs[receipt.data.result!.logs.length - 1] = {
+      ...proof,
+      topics: proof.topics.map((topic, index) => (
+        index === 1 ? `0x${"0".repeat(24)}${intermediary.slice(2)}` : topic
+      )),
+    };
+    expect(() => verifyNegativeRiskConversion({
+      activity: conversionActivity(),
+      walletAddress: wallet,
+      positions: positions(),
+      receipt,
+    })).toThrow("NEGATIVE_RISK_CONVERSION_ADAPTER_PROOF_MISSING");
+  });
+
+  it("rejects ambiguous duplicate adapter proofs", () => {
+    const receipt = receiptCapture();
+    receipt.data.result!.logs.push(conversionLog());
+    expect(() => verifyNegativeRiskConversion({
+      activity: conversionActivity(),
+      walletAddress: wallet,
+      positions: positions(),
+      receipt,
+    })).toThrow("NEGATIVE_RISK_CONVERSION_ADAPTER_PROOF_AMBIGUOUS");
+  });
+
   it("rejects destination metadata that is not in the same negative-risk event", () => {
     const invalidPositions = positions();
     invalidPositions[0] = { ...invalidPositions[0]!, eventSlug: "different-event" };

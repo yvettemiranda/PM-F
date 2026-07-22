@@ -127,6 +127,11 @@ interface PositionRow {
   config_version: string;
 }
 
+interface BlockingConversionSignal {
+  signalId: string;
+  blockReason: string;
+}
+
 interface RiskDecisionRow {
   risk_decision_id: string;
   paper_account_id: string | null;
@@ -274,6 +279,23 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (existing?.paper_execution_id) return existing.paper_execution_id;
     const envelope = this.loadSignal(signalId);
     if (envelope.status !== "PUBLISHED") throw new Error("SIGNAL_NOT_PUBLISHED");
+    if (
+      envelope.signalType === "TARGET_CONVERSION"
+      && envelope.executionEligible === false
+      && envelope.executionBlockReason
+      && [
+        "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+        "GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED",
+      ].includes(envelope.executionBlockReason)
+    ) {
+      this.pauseAccountForBlockingConversion(accountId, {
+        signalId: envelope.signalId,
+        blockReason: envelope.executionBlockReason,
+      });
+      throw new Error(
+        `PAPER_TARGET_CONVERSION_BLOCKED:${envelope.executionBlockReason}:${envelope.signalId}`,
+      );
+    }
     if (!envelope.executionEligible) {
       throw new Error(envelope.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE");
     }
@@ -292,7 +314,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   ): Promise<string[]> {
     const account = this.accountRow(accountId);
     if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
-    if (scope) this.assertSignalConsumptionScope(accountId, account.target_id, scope);
+    this.assertNoBlockingTargetConversion(accountId, scope);
     const checkpoint = this.database.prepare(
       "SELECT last_signal_created_at,last_signal_id FROM paper_consumer_checkpoints WHERE paper_account_id=?",
     ).get(accountId) as { last_signal_created_at: string | null; last_signal_id: string | null };
@@ -331,9 +353,74 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const executions: string[] = [];
     for (const row of rows) {
       if (signal?.aborted) break;
+      this.assertNoBlockingTargetConversion(accountId, scope);
       executions.push(await this.consumeSignal(accountId, row.signal_id, signal));
     }
     return executions;
+  }
+
+  /**
+   * Pauses the Paper account and freezes its positions as soon as an
+   * unfollowable tracked conversion enters this consumer's active window.
+   * This is intentionally durable and is also called by PaperRunner before it
+   * retries pending work, so a later eligible signal cannot slip past it.
+   */
+  assertNoBlockingTargetConversion(
+    accountId: string,
+    scope?: PaperSignalConsumptionScope,
+  ): void {
+    const account = this.accountRow(accountId);
+    if (!account.target_id) throw new Error(`PAPER_ACCOUNT_TARGET_NOT_BOUND:${accountId}`);
+    if (scope) this.assertSignalConsumptionScope(accountId, account.target_id, scope);
+    const checkpoint = this.database.prepare(
+      "SELECT last_signal_created_at,last_signal_id FROM paper_consumer_checkpoints WHERE paper_account_id=?",
+    ).get(accountId) as { last_signal_created_at: string | null; last_signal_id: string | null } | undefined;
+    if (!checkpoint) throw new Error(`PAPER_CONSUMER_CHECKPOINT_NOT_FOUND:${accountId}`);
+    const scopeFilter = scope
+      ? `AND EXISTS (
+           SELECT 1 FROM observe_runs o
+           WHERE o.observe_run_id=s.observe_run_id
+             AND o.campaign_id=? AND o.campaign_session_id=?
+         )`
+      : "";
+    const statement = this.database.prepare(
+      `SELECT s.signal_id,s.execution_block_reason
+       FROM signals s
+       WHERE s.target_id=? AND s.created_at>=? AND s.status='PUBLISHED'
+         AND s.signal_type='TARGET_CONVERSION' AND s.execution_eligible=0
+         AND s.execution_block_reason IN (
+           'NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE',
+           'GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED'
+         )
+         ${scopeFilter}
+         AND (? IS NULL OR s.created_at>? OR (s.created_at=? AND s.signal_id>?))
+       ORDER BY s.created_at,s.signal_id LIMIT 1`,
+    );
+    const trailing = [
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_created_at,
+      checkpoint.last_signal_id,
+    ] as const;
+    const row = (scope
+      ? statement.get(
+        account.target_id,
+        account.signal_cutoff_at,
+        scope.campaignId,
+        scope.sessionId,
+        ...trailing,
+      )
+      : statement.get(account.target_id, account.signal_cutoff_at, ...trailing)) as {
+      signal_id: string;
+      execution_block_reason: string;
+    } | undefined;
+    if (!row) return;
+    const blocker: BlockingConversionSignal = {
+      signalId: row.signal_id,
+      blockReason: row.execution_block_reason,
+    };
+    this.pauseAccountForBlockingConversion(accountId, blocker);
+    throw new Error(`PAPER_TARGET_CONVERSION_BLOCKED:${blocker.blockReason}:${blocker.signalId}`);
   }
 
   private assertSignalConsumptionScope(
@@ -708,6 +795,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   async retryPending(accountId: string, signal?: AbortSignal): Promise<void> {
+    if (this.accountRow(accountId).status !== "ACTIVE") return;
     const rows = this.database.prepare(
       `SELECT paper_execution_id FROM paper_executions
        WHERE paper_account_id=? AND state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
@@ -724,6 +812,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   }
 
   async checkStopLosses(accountId: string, signal?: AbortSignal): Promise<string[]> {
+    if (this.accountRow(accountId).status !== "ACTIVE") return [];
     const positions = this.openPositions(accountId);
     const created: string[] = [];
     const positionsByMarket = new Map<string, PositionRow[]>();
@@ -3483,6 +3572,43 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       }
       this.database.exec("COMMIT");
       return positions.length;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private pauseAccountForBlockingConversion(
+    accountId: string,
+    blocker: BlockingConversionSignal,
+  ): void {
+    const reason = `NEGATIVE_RISK_CONVERSION_UNFOLLOWED:${blocker.signalId}:${blocker.blockReason}`;
+    const now = this.now().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const account = this.accountRow(accountId);
+      if (account.status === "ACTIVE") {
+        this.database.prepare(
+          "UPDATE paper_accounts SET status='PAUSED',updated_at=? WHERE paper_account_id=? AND status='ACTIVE'",
+        ).run(now, accountId);
+        this.transition("PAPER_ACCOUNT", accountId, "ACTIVE", "PAUSED", reason, now);
+        for (const position of this.openPositions(accountId, true)) {
+          this.database.prepare(
+            `UPDATE paper_positions
+             SET status='FROZEN',frozen_from_status=?,frozen_reason=?,frozen_at=?,updated_at=?
+             WHERE paper_position_id=? AND status!='FROZEN'`,
+          ).run(position.status, reason, now, now, position.paper_position_id);
+          this.transition(
+            "PAPER_POSITION",
+            position.paper_position_id,
+            position.status,
+            "FROZEN",
+            reason,
+            now,
+          );
+        }
+      }
+      this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;

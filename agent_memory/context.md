@@ -19,8 +19,8 @@
 
 ## Current implementation baseline
 - 当前代码 Schema 为 `2.27.0`、Signal `1.6.0`；Strategy `2.2.0`、Risk `1.6.0`、Paper `1.6.0`、Live `1.6.0`、Validation `1.3.0`、Operational `1.3.0`、Ruleset `v1.5.0`、Config `v1.3.0`。
-- 负风险 `CONVERSION` 必须由 Activity、Polygon 成功回执/NegRiskAdapter 日志和 Positions 元数据三方证明；证据 append-only 保存并进入 projection/checkpoint 恢复。
-- historical-only conversion 只重分 bucket；tracked conversion 当前生成不可执行审计义务并硬阻断，绝不静默跳过或误当 SELL。
+- 负风险 `CONVERSION` 必须由 Activity、Polygon 成功回执/目标钱包唯一 NegRiskAdapter 日志和 Positions 三方证明；转换涉及资产必须与完整 projection 做 micros 零容差数量核对，证据才可 append-only 保存并进入 checkpoint 恢复。
+- historical-only conversion 只重分 bucket；tracked conversion 当前生成不可执行审计义务并立即闭锁：Paper 账户 `PAUSED`/仓位冻结，Live 紧急停机并强制 `PAPER + LIVE_DISABLED`，绝不静默跳过、越过后续信号或误当 SELL。
 - 所有 Paper/Observe 市场时间判断共用 Session 固定的 CLOB `/time` 5 样本中位数偏移；不修改 macOS 时间。
 - Session 时长、4/24 小时截止和 checkpoint 使用单调时钟；报告仍保留可审计 UTC 时间。
 - Observe 使用固定频率调度，AbortSignal 贯穿公开请求、分页和退避；恢复只抓 cursor 之后的增量历史。

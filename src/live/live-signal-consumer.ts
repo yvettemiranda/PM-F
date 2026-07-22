@@ -57,6 +57,7 @@ export class LiveSignalConsumer {
   async consumeAvailableSignals(accountId: string, limit = 100): Promise<LiveSignalConsumptionResult[]> {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) throw new Error("LIVE_SIGNAL_CONSUMER_LIMIT_INVALID");
     const checkpoint = this.ensureCheckpoint(accountId);
+    await this.assertNoBlockingTargetConversion(accountId, checkpoint);
     const rows = this.database.prepare(
       `SELECT s.signal_id,q.signal_sequence
        FROM signals s
@@ -75,6 +76,7 @@ export class LiveSignalConsumer {
     }>;
     const results: LiveSignalConsumptionResult[] = [];
     for (const row of rows) {
+      await this.assertNoBlockingTargetConversion(accountId, checkpoint);
       let loaded: LoadedLiveSignal;
       try {
         loaded = this.loadSignal(row.signal_id, row.signal_sequence);
@@ -204,6 +206,39 @@ export class LiveSignalConsumer {
       results.push(this.finishConsumption(accountId, loaded, result.executionId));
     }
     return results;
+  }
+
+  /**
+   * A tracked negative-risk conversion cannot be represented as a CLOB order.
+   * Disable the Live gate through the executor before any pending BUY or later
+   * Signal can run. The blocker remains behind the activation boundary until
+   * an operator starts a fresh, re-baselined account.
+   */
+  async assertNoBlockingTargetConversion(
+    accountId: string,
+    existingCheckpoint?: ConsumerCheckpoint,
+  ): Promise<void> {
+    const checkpoint = existingCheckpoint ?? this.ensureCheckpoint(accountId);
+    const blocker = this.database.prepare(
+      `SELECT s.signal_id,s.execution_block_reason
+       FROM signals s
+       JOIN signal_ingest_sequences q ON q.signal_id=s.signal_id
+       WHERE s.status='PUBLISHED' AND s.signal_type='TARGET_CONVERSION'
+         AND s.execution_eligible=0
+         AND s.execution_block_reason IN (
+           'NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE',
+           'GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED'
+         )
+         AND q.signal_sequence>?
+       ORDER BY q.signal_sequence LIMIT 1`,
+    ).get(checkpoint.cutoff_signal_sequence) as {
+      signal_id: string;
+      execution_block_reason: string;
+    } | undefined;
+    if (!blocker) return;
+    const reason = `TARGET_CONVERSION_BLOCKED:${blocker.execution_block_reason}:${blocker.signal_id}`;
+    await this.executor.emergencyStop(accountId, reason);
+    throw new Error(`LIVE_${reason}`);
   }
 
   /** Synchronizes the consumer with the exact boundary captured by the latest

@@ -75,6 +75,7 @@ const acceptanceSummary: PaperAcceptanceSummary = {
 
 function idleExecutor(): PaperExecutor {
   return {
+    assertNoBlockingTargetConversion: () => undefined,
     recoverMarketData: async () => undefined,
     consumeAvailableSignals: async () => [],
     retryPending: async () => undefined,
@@ -213,6 +214,29 @@ describe("PaperRunner options", () => {
     }).run();
 
     expect(calls).toEqual(["recover", "settlement", "stop", "pending", "signals"]);
+  });
+
+  it("terminates the Paper session before retrying work when a conversion blocks it", async () => {
+    const calls: string[] = [];
+    const executor = {
+      ...idleExecutor(),
+      assertNoBlockingTargetConversion: () => {
+        calls.push("conversion-block");
+        throw new Error("PAPER_TARGET_CONVERSION_BLOCKED:NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE:signal");
+      },
+      retryPending: async () => { calls.push("pending"); },
+      consumeAvailableSignals: async () => { calls.push("signals"); return []; },
+    } as unknown as PaperExecutor;
+
+    const report = await new PaperRunner(executor, {
+      accountId: "paper",
+      durationMs: 60_000,
+    }).run();
+
+    expect(calls).toEqual(["conversion-block"]);
+    expect(report.cycles).toBe(0);
+    expect(report.errorCount).toBe(1);
+    expect(report.errors[0]?.message).toContain("PAPER_TARGET_CONVERSION_BLOCKED:");
   });
 
   it("isolates a stage error so later safety stages still run in the same cycle", async () => {

@@ -141,6 +141,13 @@ export class LiveRunner {
       wasActive = active;
       if (active) {
         activeCycles += 1;
+        // Check before retrying pending BUYs. The consumer routes a tracked
+        // conversion through emergencyStop(), which durably disables the Live
+        // gate and prevents any later copy signal from crossing the blocker.
+        const conversionSafety = await capture(
+          "CHECK_TARGET_CONVERSION_BLOCK",
+          () => this.consumer.assertNoBlockingTargetConversion(this.options.accountId),
+        );
         const stopLoss = await capture<LiveStopLossCheckResult>(
           "CHECK_STOP_LOSSES",
           () => this.executor.checkStopLosses(this.options.accountId),
@@ -153,7 +160,7 @@ export class LiveRunner {
           retriedExecutions += (await this.executor.retryPending(this.options.accountId, "EXITS_ONLY")).length;
         });
 
-        if (stopLossHealthy) {
+        if (stopLossHealthy && conversionSafety.ok) {
           await capture("RETRY_PENDING_BUYS", async () => {
             retriedExecutions += (await this.executor.retryPending(this.options.accountId, "BUYS_ONLY")).length;
           });

@@ -264,9 +264,11 @@ function insertSignal(input: {
   targetId: string;
   signalId: string;
   createdAt: string;
-  signalType?: "TARGET_BUY" | "TARGET_SELL";
+  signalType?: "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION";
   status?: string;
   executionEligible?: boolean;
+  executionBlockReason?: string;
+  eventClassification?: "STANDARD_TRADE" | "NEGATIVE_RISK_CONVERSION";
   confidence?: CapitalConfidence;
   capitalStatus?: CapitalEstimateStatus;
   ratioPpm?: string | null;
@@ -347,7 +349,7 @@ function insertSignal(input: {
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
       capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
     input.targetId,
@@ -371,7 +373,8 @@ function insertSignal(input: {
     sourceVersion.commit,
     input.createdAt,
     (input.executionEligible ?? true) ? 1 : 0,
-    (input.executionEligible ?? true) ? null : "GAP_EVENT",
+    (input.executionEligible ?? true) ? null : input.executionBlockReason ?? "GAP_EVENT",
+    input.eventClassification ?? "STANDARD_TRADE",
     capitalId,
   );
   db.prepare(
@@ -1042,6 +1045,90 @@ describe("PaperExecutor", () => {
     expect((database.prepare(
       "SELECT count(*) count FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id='gap-batch'",
     ).get(env.accountId) as { count: number }).count).toBe(0);
+    database.close();
+    env.executor.close();
+  });
+
+  it("pauses the Paper account before a tracked conversion can be skipped", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "tracked-conversion",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      signalType: "TARGET_CONVERSION",
+      executionEligible: false,
+      executionBlockReason: "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+      eventClassification: "NEGATIVE_RISK_CONVERSION",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "eligible-after-conversion",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+
+    await expect(env.executor.consumeAvailableSignals(env.accountId)).rejects.toThrow(
+      "PAPER_TARGET_CONVERSION_BLOCKED:NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE:tracked-conversion",
+    );
+
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT status FROM paper_accounts WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ status: "PAUSED" });
+    expect((database.prepare(
+      "SELECT count(*) count FROM paper_signal_consumptions WHERE paper_account_id=?",
+    ).get(env.accountId) as { count: number }).count).toBe(0);
+    expect(database.prepare(
+      `SELECT to_state,reason FROM paper_state_transitions
+       WHERE entity_type='PAPER_ACCOUNT' AND entity_id=? ORDER BY sequence DESC LIMIT 1`,
+    ).get(env.accountId)).toEqual({
+      to_state: "PAUSED",
+      reason: "NEGATIVE_RISK_CONVERSION_UNFOLLOWED:tracked-conversion:NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+    });
+    database.close();
+    env.executor.close();
+  });
+
+  it("rechecks conversion blockers after selecting eligible Paper candidates", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "candidate-before-race",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+    env.setClock(new Date("2026-07-08T00:00:03.000Z"));
+    const originalAssert = env.executor.assertNoBlockingTargetConversion.bind(env.executor);
+    let checks = 0;
+    env.executor.assertNoBlockingTargetConversion = (accountId, scope) => {
+      checks += 1;
+      if (checks === 2) {
+        insertSignal({
+          databasePath: env.databasePath,
+          targetId: env.targetId,
+          signalId: "conversion-in-race-window",
+          createdAt: "2026-07-08T00:00:01.000Z",
+          signalType: "TARGET_CONVERSION",
+          executionEligible: false,
+          executionBlockReason: "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+          eventClassification: "NEGATIVE_RISK_CONVERSION",
+        });
+      }
+      originalAssert(accountId, scope);
+    };
+
+    await expect(env.executor.consumeAvailableSignals(env.accountId)).rejects.toThrow(
+      "PAPER_TARGET_CONVERSION_BLOCKED:",
+    );
+
+    expect(checks).toBe(2);
+    expect(count(env.databasePath, "paper_executions")).toBe(0);
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT status FROM paper_accounts WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ status: "PAUSED" });
     database.close();
     env.executor.close();
   });
