@@ -519,11 +519,19 @@ operator_latest_result_since() {
   return 1
 }
 
+# Campaign 收尾可能发生在启动终端已经关闭之后。所有收尾 Node 子命令都必须
+# 脱离继承的 TTY，否则 Node 初始化 stderr 时可能永久卡在失效的终端设备上。
+operator_headless_node() {
+  local error_file="${OPERATOR_HEADLESS_ERROR_FILE:-/dev/null}"
+  command -v node >/dev/null 2>&1 || return 1
+  node "$@" </dev/null 2>>"$error_file"
+}
+
 operator_copy_sanitized_observe_report() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+  operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     json "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
@@ -531,7 +539,7 @@ operator_copy_sanitized_paper_report() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+  operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     json "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
@@ -539,7 +547,7 @@ operator_copy_sanitized_log() {
   local source_file="$1"
   local destination_file="$2"
   command -v node >/dev/null 2>&1 || return 1
-  node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+  operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     log "$source_file" "$destination_file" "$PROJECT_ROOT" "$HOME"
 }
 
@@ -552,7 +560,7 @@ operator_is_bundle_compatible_isolated_evidence() {
   [[ "$expected_core_compatibility_hash" =~ '^[0-9a-fA-F]{64}$' ]] || return 1
   (
     cd "$PROJECT_ROOT"
-    node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-evidence.ts" \
+    operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/paper-campaign-evidence.ts" \
       verify-for-bundle \
       "--file=$evidence_file" \
       "--target-wallet=$TARGET_WALLET" \
@@ -572,6 +580,7 @@ operator_create_codex_bundle() {
   local stamp bundle_root bundle_dir bundle_fallback bundle_zip bundle_zip_temporary observe_report paper_report
   local -a included=()
   local -a missing=()
+  local OPERATOR_HEADLESS_ERROR_FILE="${log_file}.postprocess-errors.log"
 
   stamp="$(date +%Y%m%d-%H%M%S)-$$"
   bundle_root="$PROJECT_ROOT/交给Codex"
@@ -661,14 +670,15 @@ operator_create_codex_bundle() {
   local manifest_metadata source_provenance
   source_provenance="$(
     cd "$PROJECT_ROOT"
-    node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" provenance "$PROJECT_ROOT"
+    operator_headless_node --import tsx \
+      "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" provenance "$PROJECT_ROOT"
   )"
   manifest_metadata="$(
     OPERATOR_CAMPAIGN_ID="$OPERATOR_CAMPAIGN_ID" \
     OPERATOR_SESSION_ID="$OPERATOR_SESSION_ID" \
     OPERATOR_REPORT_ID="$OPERATOR_REPORT_ID" \
     OPERATOR_SOURCE_PROVENANCE="$source_provenance" \
-    node --import tsx -e '
+    operator_headless_node --import tsx -e '
       import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
       const value = (name) => process.env[name] || null;
       const provenance = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
@@ -686,7 +696,7 @@ operator_create_codex_bundle() {
       }));
     '
   )"
-  if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+  if operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
     included+=("bundle-manifest.json")
   else
@@ -784,6 +794,7 @@ operator_create_campaign_bundle() {
   local archive_entry_count expected_archive_entry_count
   local -a included=()
   local -a missing=()
+  local OPERATOR_HEADLESS_ERROR_FILE="${log_file}.postprocess-errors.log"
 
   if [[ ! -f "$pointer_file" ]]; then
     print "没有找到 Campaign 结果指针；保留日志供 Codex 排查。"
@@ -794,7 +805,7 @@ operator_create_campaign_bundle() {
     campaign_report=""
     run_result=""
   else
-    metadata="$(node -e '
+    metadata="$(operator_headless_node -e '
       const fs = require("node:fs");
       const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
       const fields = ["campaignId", "sessionId", "reportId", "sessionReportFile", "campaignReportFile", "runResultFile"];
@@ -807,7 +818,7 @@ operator_create_campaign_bundle() {
   [[ "$report_id" == PR-* ]] || report_id="UNKNOWN"
 
   if [[ -n "$run_result" && -f "$run_result" ]]; then
-    metadata="$(node -e '
+    metadata="$(operator_headless_node -e '
       const fs = require("node:fs");
       const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
       process.stdout.write([value.paperReportFile ?? "", value.observeReportFile ?? ""].join("\t"));
@@ -819,15 +830,15 @@ operator_create_campaign_bundle() {
   fi
   source_provenance="$(
     cd "$PROJECT_ROOT"
-    node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+    operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
       provenance "$PROJECT_ROOT" "$session_report" "$campaign_report" "$run_result"
   )"
-  report_source_commit="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" node -e '
+  report_source_commit="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" operator_headless_node -e '
     const value = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
     if (typeof value.sourceCommit === "string") process.stdout.write(value.sourceCommit);
   ')"
   [[ "$report_source_commit" =~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' ]] || report_source_commit="UNKNOWN"
-  report_core_compatibility_hash="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" node -e '
+  report_core_compatibility_hash="$(OPERATOR_SOURCE_PROVENANCE="$source_provenance" operator_headless_node -e '
     const value = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
     if (typeof value.coreCompatibilityHash === "string") process.stdout.write(value.coreCompatibilityHash);
   ')"
@@ -998,7 +1009,7 @@ operator_create_campaign_bundle() {
     OPERATOR_SESSION_ID="$session_id" \
     OPERATOR_REPORT_ID="$report_id" \
     OPERATOR_SOURCE_PROVENANCE="$source_provenance" \
-    node --import tsx -e '
+    operator_headless_node --import tsx -e '
       import { RULESET_HASH, VERSIONS } from "./src/domain/versioning.ts";
       const provenance = JSON.parse(process.env.OPERATOR_SOURCE_PROVENANCE || "{}");
       process.stdout.write(JSON.stringify({
@@ -1015,7 +1026,7 @@ operator_create_campaign_bundle() {
       }));
     '
   )"
-  if node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
+  if operator_headless_node --import tsx "$PROJECT_ROOT/src/cli/redact-diagnostic.ts" \
     manifest "$bundle_dir" "$bundle_dir/bundle-manifest.json" "" "" "$manifest_metadata"; then
     included+=("bundle-manifest.json")
   else

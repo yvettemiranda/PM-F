@@ -13,11 +13,17 @@ if (( OPERATOR_SESSIONS_STOPPED == 0 )); then
   print "当前没有正在运行的累计验证。"
 else
   print "已发送安全暂停请求，正在等待报告和 ZIP 自动生成……"
+  integer lock_wait_ticks="${OPERATOR_STOP_LOCK_WAIT_TICKS:-2400}"
+  [[ "$lock_wait_ticks" == <-> ]] || lock_wait_ticks=2400
   attempt=0
-  while [[ -d "$RUN_DIR/active.lock" ]] && (( attempt < 240 )); do
-    sleep 1
+  while [[ -d "$RUN_DIR/active.lock" ]] && (( attempt < lock_wait_ticks )); do
+    sleep 0.1
     (( attempt += 1 ))
   done
+  if [[ -d "$RUN_DIR/active.lock" ]]; then
+    print "启动进程尚未释放安全锁，正在重新核对运行身份。"
+    operator_stop_registered_sessions
+  fi
   if [[ -d "$RUN_DIR/active.lock" ]]; then
     print "4 分钟内尚未完成收尾，正在核对并收割经过身份验证的遗留子进程。"
     OPERATOR_ORPHAN_SUPERVISOR_WAIT_TICKS=10 \
@@ -27,6 +33,8 @@ else
         "$DATA_DIR/operator/paper-campaign-latest.json" || true
     attempt=0
     while [[ -d "$RUN_DIR/active.lock" ]] && (( attempt < 100 )); do
+      operator_stop_registered_sessions
+      [[ -d "$RUN_DIR/active.lock" ]] || break
       sleep 0.1
       (( attempt += 1 ))
     done

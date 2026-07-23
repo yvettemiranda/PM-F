@@ -20,18 +20,19 @@
 - 只抵消等待 BUY 且没有真实持仓时，Live 记录 `TARGET_EXIT_APPLIED_TO_WAITING_BUY` 而不伪造 SELL 订单；调整与该目标退出执行原子提交，记录失败会整笔回滚并关闭 Gate。
 - Live 中被目标 SELL 缩减的等待 BUY 不会在后续重试时被市场最低额规则反向抬升；Gate 拒绝时等待 BUY 不发生改变。
 - 修复安全启动编排死角：同 Paper core 的 `PAUSED` Campaign 在验证策略/测试套件变化时允许重建隔离测试与 Phase 0/Replay proof 后继续；`RUNNING`、崩溃恢复中、BLOCKED 或 core 不同仍拒绝刷新，避免移动未完成 Session 的证据。
+- 修复 launcher 终端/PTY 被关闭后的收尾卡死：诊断包 Node 子命令统一脱离 stdin/stderr TTY，错误写入独立 postprocess log；安全暂停会重新判定运行身份，并清理暂停过程中才失效的安全锁。
 
 ## Verification
 - TDD/回归覆盖：小额最低1/最高5、比例结果超过5仍封顶、市场最低额超过5、精确1%边界、9次与第10次、`>=1%` 不限、部分成交计一次、零成交/取消/过期不计、未清义务不重置、完整新周期重置。
 - 覆盖同 orderHash 多 fill VWAP、不同订单不合并、Polygon/Data API 聚合去重、无法证明时失败关闭。
 - 覆盖 90%、105%、0.95 边界、目标参考价高于0.95但实际价合法、FAK 部分成交、tick-rounded 市场最低量、等待/过期/释放资金、SELL 调整等待 BUY、SELL 持续退出、止损锁和新周期解锁。
 - 覆盖真实缺少 `smallFollowBuyMaxCount` 的历史 Ruleset，确认不会被 V4 重解释；MEDIUM 无 ratio 的 1U fallback 已覆盖。
-- 最终全量为 `54/54` 测试文件、`744/744` 测试通过；新增 Live SELL/等待 BUY 的完整退出、部分退出、Gate 阻断、原子回滚、损坏 Reservation 关闭 Gate 和不反向抬升测试，“同 orderHash 跨 transaction 独立经济成交”测试，以及 PAUSED 同 core 隔离证据刷新策略测试。TypeScript、`git diff --check` 和调试痕迹检查均通过。
+- 当前全量为 `54/54` 测试文件、`746/746` 测试通过；新增 Live SELL/等待 BUY 的完整退出、部分退出、Gate 阻断、原子回滚、损坏 Reservation 关闭 Gate 和不反向抬升测试，“同 orderHash 跨 transaction 独立经济成交”、PAUSED 同 core 隔离证据刷新，以及死 TTY 收尾和安全锁竞态回归。TypeScript 与 `git diff --check` 通过。
 
 ## Runtime state
-- Campaign `PC-1F69671B63722CC4E3EC` 已安全暂停并保全 `0.17 h` Paper 证据；当前没有 Observe/Paper/Supervisor 或任何 Live 进程。Live-only 修复没有改变 Paper core，隔离证据按新套件重建后继续同一 Campaign，不需要丢弃有效时长。
+- Campaign `PC-1F69671B63722CC4E3EC` 已安全暂停并保全两个一致性通过 Session，累计约 `0.55 h`、最长连续约 `0.38 h`；当前没有 Observe/Paper/Supervisor 或任何 Live 进程，安全锁已清理。
 - 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；收尾前仍需再次只读核对进程、Git、数据库、Gate、Campaign、磁盘和 Live 零记录。
 
 ## Next steps
-1. 跑完启动编排修复的全量测试，完成安全复核并提交。
-2. 用最终干净提交刷新隔离 proof 并继续同 Paper core Campaign，重点观察自然 BUY/SELL、聚合去重、9 次计数、止损锁、延迟、RPC degraded 和数据库增长。
+1. 提交 Operational `1.9.0` 的死 TTY 与安全锁竞态修复。
+2. 用最终干净提交刷新隔离 proof并继续同 Paper core Campaign，重点观察自然 BUY/SELL、聚合去重、9 次计数、止损锁、延迟、RPC degraded 和数据库增长。

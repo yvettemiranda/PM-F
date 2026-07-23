@@ -32,19 +32,19 @@
 - MEDIUM 资本证据缺少比例时保留既有 `1 pUSD` fixed fallback，并归为小额 BUY；HIGH 使用精确比例，完整估值时按账户总权益计算。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.14.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.8.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.14.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.9.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
 - `BUY_AMOUNT_POLICY_V4` 只用于包含 `smallFollowBuyMaxCount` 的新 Ruleset。v1.8/V3 与 v1.7/V2 历史证据继续按不可变旧语义验证，不能套用新金额、价格或 SELL 规则。
 - 本次没有数据库结构变更，也没有修改扫描频率、账本边界或安全 Gate。任何新 Campaign 必须使用最终干净提交生成的新 core compatibility hash。
 
 ## Current runtime and evidence
 - 历史 Campaign `PC-105EC3F76A2AC49D59E6` 为 `PAUSED`；旧核心累计 `4.84 h`，只作诊断证据，不能计入当前新核心验收。
-- 新规则提交 `d06de6d` 创建的 Campaign `PC-1F69671B63722CC4E3EC` 已在发现 Live SELL/等待 BUY 对齐缺口后安全暂停；Session `PS-1D3D3B5DFA8A35BACBC2` 保留 `603018 ms`（约 `0.17 h`）证据，`387/0` 次 Observe 成功/失败轮询、零事件、零执行。本次只修 Live，Paper core compatibility hash 未变；重新完成隔离验证后，该 Paper 时长仍可在同 Campaign 中继续累计。
+- 新规则 Campaign `PC-1F69671B63722CC4E3EC` 已完成两个一致性通过的安全停止 Session，累计有效运行 `1985098 ms`（约 `0.55 h`），最长连续 `1382080 ms`（约 `0.38 h`）。最新 Session `PS-C39472847DB20C4E7B4B` 有 `891/0` 次 Observe 成功/失败轮询、3 个运行期自然 SELL、8 个停机 gap 信号正确禁止追补，仍无可执行自然 BUY、Order 或 Fill。
 - 历史结果：`15605` 次成功轮询、`11` 次已恢复 timeout、`30` 个目标事件、`9 BUY / 21 SELL`、gap `0`、最终 `SYNCED`；9 个 BUY 为 `1 FAK_FILLED / 5 BELOW_MARKET_MIN_ORDER_SIZE / 3 WAIT_TIMEOUT`。
-- 当前无 Observe/Paper/Supervisor 子进程；暂停入口的终端 shell 只停在双击窗口收尾提示，不持有 active lock，也不写数据库，重启前清理。目标仍正确，数据库 Schema `2.29.0`，`integrity_check=ok`、外键失败 `0`，Gate 为 `PAPER + LIVE_DISABLED`，Live Execution/Order/Fill 均为 `0`。
-- `data/` 最近约 `854 MB`、主库约 `832 MiB`；增长主要来自新核心启动前重新生成的不可变 Phase 0/Replay 证据，不是每秒 Paper 成交写入。旧多代迁移备份已按用户授权清理，迁移备份默认只保留最新校验通过的 `1` 份。
+- 当前无 Observe/Paper/Supervisor 子进程，安全锁已由修复后的暂停入口清理；数据库与报告已完成 final drain/估值且一致性通过。目标仍正确，数据库 Schema `2.29.0`，最近 `quick_check=ok`、外键失败 `0`，Gate 为 `PAPER + LIVE_DISABLED`，Live Execution/Order/Fill 均为 `0`。
+- `data/` 最近约 `908 MB`、主库约 `878 MiB`；增长主要来自不可变 Phase 0/Replay 和运行证据，不是 Paper 成交。旧多代迁移备份已按用户授权清理，迁移备份默认只保留最新校验通过的 `1` 份。
 
 ## Remaining blockers before small Live
-- 新核心尚无自然短测/长测；历史 `4.84 h` 不计入。需要先做新 core 短时 Paper，再开始干净最终 Campaign。
+- 新核心已有约 `0.55 h` 自然短测，但尚无可执行自然 BUY/Order/Fill，也未满足 `4 h` 连续和 `24 h` 累计门槛；历史 `4.84 h` 不计入。
 - SPLIT 和 tracked negative-risk conversion 仍无可执行复制语义；无法证明完整集合的 MERGE 仍硬阻断。
 - 官方结束时间缺失的 Live 策略、自然 SELL/REALIZED_PNL、最终 Observe 时长、合规/geoblock、隔离钱包、signer 和 Live arming 尚未完成。
 

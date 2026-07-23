@@ -5,7 +5,7 @@
 - SPLIT 没有安全的 position projection/copy 语义，会触发 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明完整 outcome set、余额或定价的 MERGE 继续硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 新 Ruleset `v1.9.0` 尚无自然 Campaign 时长；旧核心 `4.84 h` 只能作诊断证据。自然 SELL/REALIZED_PNL 与最终 Observe 时长仍未完成。
+- 新 Ruleset `v1.9.0` 仅累计约 `0.55 h` 自然 Campaign 时长；旧核心 `4.84 h` 只能作诊断证据。可执行自然 BUY/Order/Fill、自然 SELL/REALIZED_PNL 与最终 Observe 时长仍未完成。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
@@ -31,6 +31,8 @@
 - BUY 原先允许所有低价改善且使用 `2%/2 tick` 上限；当前新 Ruleset 严格执行目标价 90%—105%及实际价0.95上限，历史价格规则不变。
 - Live `TARGET_SELL` 原先只按真实 Position 计算卖出量，没有像 Paper 一样先取消或同比例缩减同 asset/condition 的等待 BUY；当前已补齐 Reservation/Cash/Risk/Audit、Gate 前置、原子回滚、幂等、损坏账本时持久关闭 Gate 和禁止最低额反向抬升的完整路径。
 - Live-only 提交不会改变 Paper core hash，但会改变隔离验证套件；启动器原先只允许 PASSED Campaign 刷新证据，导致同 core 的安全 PAUSED Campaign 无法续跑。当前只对 `PAUSED/PASSED + same core + policy/suite changed` 开放 proof refresh，未完成或不同 core 状态继续 fail closed。
+- launcher 的启动终端/PTY 中断后，收尾阶段新起的 Node 脱敏进程曾卡在 `TTYWrap/uv_tty_init/open`；当前所有诊断包 Node 子命令均使用 `/dev/null` stdin 和独立错误日志，死 TTY 集成回归已覆盖。
+- 安全暂停若先判定 launcher 存活、而 launcher 随后在收尾中退出，旧入口可能等待后遗留 `active.lock`；当前等待后会重新判定身份，并在受控遗留进程收割期间重复清理刚变陈旧的锁。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
