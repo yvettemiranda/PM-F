@@ -21,6 +21,7 @@
 - 当前 Live 仅在隔离 fake 路径回归，真实 runtime 未接线；不能把单元测试等同实盘就绪。
 
 ## Resolved in current implementation
+- Paper 曾在普通 `TARGET_SELL` 尾仓保持 `EXIT_PENDING` 时，把同资产后续独立 BUY 标记为 `SAME_ASSET_EXIT_PENDING` 并等到 BUY 截止；隔离 Live 没有该阻塞，既漏跟又造成 Paper/Live 不一致。当前普通退出义务与后续 BUY 分别保留、独立执行；止损的禁止重开规则不变，并有双模式交错回归。
 - 旧风控会因目标参考价高于 `0.95` 提前拒绝，即使自身实际成交价合法；当前新 Ruleset 只对自身含手续费实际 VWAP执行 `0.95` 上限，旧 Ruleset 行为保留。
 - 小额金额曾可能被 available-cash cap 压到 `1 pUSD` 以下并成交；当前小额保持 1U 下限，现金不足整笔拒绝。
 - MEDIUM 资本证据无 ratio 时曾无法分类并报 `BUY_FOLLOW_RATIO_EVIDENCE_UNAVAILABLE`；当前 fixed fallback 明确归为小额 BUY并保持1U。

@@ -1610,6 +1610,69 @@ describe("LiveExecutor", () => {
     seller.close();
   });
 
+  it("executes an independent same-asset BUY while an older target exit remains pending", async () => {
+    const env = setup();
+    const opener = liveExecutor(env.databasePath);
+    await opener.executeBuy({
+      accountId,
+      signal: env.signal,
+      context: env.context,
+      riskDecisionId: "risk-live-buy",
+    });
+    opener.close();
+
+    const sell = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-sell-pending-before-independent-buy",
+      riskDecisionId: "risk-live-sell-pending-before-independent-buy",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      requestedAmountMicros: null,
+      requestedSizeMicros: "10000000",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+    const seller = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        bids: [{ price: "0.44", size: "1000" }],
+      }),
+    });
+    const pendingExit = await seller.executeSell({
+      accountId,
+      signal: sell.signal,
+      context: sell.context,
+      riskDecisionId: "risk-live-sell-pending-before-independent-buy",
+    });
+    expect(pendingExit.state).toBe("EXIT_PENDING");
+    seller.close();
+
+    const rebuy = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-independent-buy-after-pending-sell",
+      riskDecisionId: "risk-live-independent-buy-after-pending-sell",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:02.000Z",
+    });
+    const buyer = liveExecutor(env.databasePath);
+    const result = await buyer.executeBuy({
+      accountId,
+      signal: rebuy.signal,
+      context: rebuy.context,
+      riskDecisionId: "risk-live-independent-buy-after-pending-sell",
+    });
+
+    expect(result.state).toBe("EXECUTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state FROM live_executions WHERE live_execution_id=?",
+    ).get(pendingExit.executionId)).toEqual({ state: "EXIT_PENDING" });
+    expect(db.prepare(
+      "SELECT count(*) count FROM live_positions WHERE live_account_id=? AND status='OPEN'",
+    ).get(accountId)).toEqual({ count: 2 });
+    db.close();
+    buyer.close();
+  });
+
   it("retains the remaining asset reservation after a terminal partial FAK SELL and completes on retry", async () => {
     const env = setup();
     const buyer = liveExecutor(env.databasePath);

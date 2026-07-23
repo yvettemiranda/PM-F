@@ -773,13 +773,6 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         }
       }
     }
-    if (
-      execution.execution_type === "TARGET_BUY"
-      && this.hasPendingSameAssetExit(execution)
-    ) {
-      this.updatePendingReason(execution, "SAME_ASSET_EXIT_PENDING");
-      return "WAITING_EXECUTION";
-    }
     if (!this.marketDataRetryDue(execution.paper_account_id, execution.asset_id, execution.condition_id)) {
       return execution.state;
     }
@@ -2875,20 +2868,6 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private updatePendingReason(execution: ExecutionRow, reason: string): void {
     this.database.prepare("UPDATE paper_executions SET reason=?,updated_at=? WHERE paper_execution_id=?")
       .run(reason, this.now().toISOString(), execution.paper_execution_id);
-  }
-
-  private hasPendingSameAssetExit(execution: ExecutionRow): boolean {
-    return Boolean(this.database.prepare(
-      `SELECT 1 present FROM paper_executions
-       WHERE paper_account_id=? AND asset_id=?
-         AND state IN ('EXIT_PENDING','STOP_EXIT_PENDING')
-         AND paper_execution_id<>?
-       LIMIT 1`,
-    ).get(
-      execution.paper_account_id,
-      execution.asset_id,
-      execution.paper_execution_id,
-    ));
   }
 
   private saveMarketSnapshots(book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): void {

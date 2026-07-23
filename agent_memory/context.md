@@ -32,14 +32,16 @@
 - MEDIUM 资本证据缺少比例时保留既有 `1 pUSD` fixed fallback，并归为小额 BUY；HIGH 使用精确比例，完整估值时按账户总权益计算。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.14.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.9.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.15.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.9.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
 - `BUY_AMOUNT_POLICY_V4` 只用于包含 `smallFollowBuyMaxCount` 的新 Ruleset。v1.8/V3 与 v1.7/V2 历史证据继续按不可变旧语义验证，不能套用新金额、价格或 SELL 规则。
 - 本次没有数据库结构变更，也没有修改扫描频率、账本边界或安全 Gate。任何新 Campaign 必须使用最终干净提交生成的新 core compatibility hash。
+- 普通 `TARGET_SELL` 的 `EXIT_PENDING` 与后续真实到达的 BUY 是两笔独立义务：旧退出继续保留和重试，但不得阻塞后续 BUY。`STOP_EXIT_PENDING` 仍由止损重开锁拒绝本轮后续 BUY。
 
 ## Current runtime and evidence
-- 用户已授权只保留当前规则版本。2026-07-23 23:45 安全停止后永久删除混合旧规则数据库、全部旧 Campaign/Capture/Replay/日志、旧 `work/`、`outputs/` 和历史 ZIP；仓库由约 `1.2 GB` 降至约 `232 MB`。
-- 清理前最后一份新版报告 `Paper累计验证_PC-1F69671B63722CC4E3EC_PS-2E60CA25BFAAF53F0489_20260723-234415-40339.zip` 及 SHA-256 `fb976dd7e05d9525b4a081c68599c37cab888d6e0b0f0fd8e0699c81f13ec90e` 保留在 `交给Codex/`；它只作脱敏审计证据，不可恢复数据库，也不继续累计原约 `0.55 h` 时长。
-- 当前源码提交为 `4f60d95695a19633cfb8f4b080d541a27c500dc4`；清理后尚未重新初始化 `data/`。下一次安全启动必须从空白 Schema `2.29.0` 重新抓取 Phase 0/Replay、创建新 Campaign，并验证 `PAPER + LIVE_DISABLED`。
+- 用户已授权只保留当前规则版本。2026-07-23 23:45 已永久删除更早的混合旧规则数据库、旧 Campaign/Capture/Replay/日志、`work/`、`outputs/` 和旧 ZIP。
+- 新版 Campaign `PC-9CE4EA3EBBE605DF9E54` 自然暴露 `SAME_ASSET_EXIT_PENDING` 阻塞独立 BUY：一个 `0.096538` 股尾仓退出使后续 1 pUSD BUY 等到过期。2026-07-24 05:51 已安全暂停，累计约 `5.99 h`、11 个 BUY Signal、3 个 BUY Fill、3 个持仓、0 个 Live 记录。
+- 诊断报告 `Paper累计验证_PC-9CE4EA3EBBE605DF9E54_PS-DD61330BCD0C886521F7_20260724-055146-58952.zip` 的 SHA-256 为 `ea14fbc1df00114aa350b910e517553dbdbc43b175ce24d8bd199235315fa88f`。该旧 Paper `1.14.0` Campaign 只作问题证据，不与修复后的 Paper `1.15.0` 累计时长。
+- 修复提交完成后从空白 Schema `2.29.0` 重新启动新 Campaign；必须再次验证 `PAPER + LIVE_DISABLED`，且不追补暂停期间交易。
 
 ## Remaining blockers before small Live
 - 清理后新版 Campaign 时长从零重新累计；清理前约 `0.55 h` 和更早 `4.84 h` 均只作诊断证据，不再进入 Gate。

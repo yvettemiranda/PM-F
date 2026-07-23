@@ -2262,7 +2262,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("defers a new same-asset BUY until an older exit intent is resolved", async () => {
+  it("executes a new independent same-asset BUY while an undersized target exit remains pending", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({
       databasePath: env.databasePath,
@@ -2272,7 +2272,6 @@ describe("PaperExecutor", () => {
     });
     await env.executor.consumeSignal(env.accountId, "same-asset-open");
 
-    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], []);
     insertSignal({
       databasePath: env.databasePath,
       targetId: env.targetId,
@@ -2280,7 +2279,7 @@ describe("PaperExecutor", () => {
       createdAt: "2026-07-08T00:00:02.000Z",
       signalType: "TARGET_SELL",
       sellNumerator: "1",
-      sellDenominator: "1",
+      sellDenominator: "2000",
     });
     const exitId = await env.executor.consumeSignal(env.accountId, "same-asset-exit");
     expect(env.executor.executionState(exitId)).toBe("EXIT_PENDING");
@@ -2293,20 +2292,19 @@ describe("PaperExecutor", () => {
     });
     const rebuyId = await env.executor.consumeSignal(env.accountId, "same-asset-rebuy");
 
-    expect(env.executor.executionState(rebuyId)).toBe("WAITING_EXECUTION");
+    expect(env.executor.executionState(rebuyId)).toBe("EXECUTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare(
-      "SELECT reason,attempt_count FROM paper_executions WHERE paper_execution_id=?",
-    ).get(rebuyId)).toEqual({ reason: "SAME_ASSET_EXIT_PENDING", attempt_count: 0 });
+      "SELECT state,reason,attempt_count FROM paper_executions WHERE paper_execution_id=?",
+    ).get(exitId)).toEqual({
+      state: "EXIT_PENDING",
+      reason: "BELOW_MARKET_MIN_ORDER_SIZE",
+      attempt_count: 0,
+    });
+    expect(db.prepare(
+      "SELECT count(*) count FROM paper_positions WHERE paper_account_id=? AND status='OPEN'",
+    ).get(env.accountId)).toEqual({ count: 2 });
     db.close();
-
-    env.market.book = env.market.makeBook(
-      [{ price: "0.5", size: "1000" }],
-      [{ price: "0.5", size: "1000" }],
-    );
-    await env.executor.retryPending(env.accountId);
-    expect(env.executor.executionState(exitId)).toBe("EXECUTED");
-    expect(env.executor.executionState(rebuyId)).toBe("EXECUTED");
     env.executor.close();
   });
 
