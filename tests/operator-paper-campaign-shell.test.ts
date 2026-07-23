@@ -335,6 +335,8 @@ describe("Paper Campaign operator shell", () => {
     expect(existingCampaignGuard).toBeGreaterThan(launcher.indexOf("paper-campaign-preflight.ts"));
     expect(existingCampaignGuard).toBeLessThan(launcher.indexOf('title "首次运行：自动完成隔离验证"'));
     expect(launcher).toContain("为保护崩溃恢复游标，本次不会先刷新 Phase 0 数据");
+    expect(launcher).toContain("value.isolatedEvidenceRefreshRequired");
+    expect(launcher).toContain("安全暂停的同核心 Campaign 验证套件发生变化");
     for (const name of [
       "2_安全暂停并生成报告.command",
       "3_查看进度和打开最新结果.command",

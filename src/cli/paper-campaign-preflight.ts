@@ -13,6 +13,7 @@ import {
   paperCompatibilityRevalidationRequired,
 } from "../paper-validation/operator-policy.js";
 import {
+  paperCompatibilityEvidenceRefreshRequired,
   preparePaperCampaignPreMigration,
 } from "../paper-validation/preflight.js";
 
@@ -45,6 +46,15 @@ const result = preparePaperCampaignPreMigration({
   now: new Date().toISOString(),
   targetWallet,
 });
+const isolatedEvidenceRefreshRequired = result.campaignId !== null
+  && result.campaignCoreCompatibilityHash !== null
+  && paperCompatibilityEvidenceRefreshRequired({
+    campaignState: result.campaignState ?? "UNKNOWN",
+    previousCoreCompatibilityHash: result.campaignCoreCompatibilityHash,
+    currentCoreCompatibilityHash: coreCompatibilityHash,
+    previousCompatibilityIdentity: result.latestCompatibilityIdentity,
+    currentCompatibilityIdentity: compatibilityEvidence,
+  });
 if (result.mismatchFrozen) {
   console.error(JSON.stringify({
     status: "CONTINUING",
@@ -72,6 +82,7 @@ console.log(JSON.stringify({
       result.latestCompatibilityIdentity,
       compatibilityEvidence,
     ),
+  isolatedEvidenceRefreshRequired,
   sourceCodeCommit: sourceVersion.commit,
   coreCompatibilityHash,
   targetWallet,

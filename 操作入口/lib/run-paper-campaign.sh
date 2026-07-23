@@ -171,6 +171,11 @@ PREFLIGHT_CAMPAIGN_ID="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
   else if (typeof value.campaignId === "string" && /^PC-/.test(value.campaignId)) process.stdout.write(value.campaignId);
   else process.exit(2);
 ')"
+PREFLIGHT_CAMPAIGN_STATE="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
+  const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
+  if (typeof value.campaignState === "string" && value.campaignState.length > 0) process.stdout.write(value.campaignState);
+  else process.stdout.write("UNKNOWN");
+')"
 PREFLIGHT_REPLACEMENT_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
   const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
   if (value.replacementRequired === true) process.stdout.write("yes");
@@ -179,8 +184,8 @@ PREFLIGHT_REPLACEMENT_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
 ')"
 PREFLIGHT_REVALIDATION_REQUIRED="$(PREFLIGHT_OUTPUT="$PREFLIGHT_OUTPUT" node -e '
   const value = JSON.parse(process.env.PREFLIGHT_OUTPUT ?? "{}");
-  if (value.terminalRevalidationRequired === true) process.stdout.write("yes");
-  else if (value.terminalRevalidationRequired === false) process.stdout.write("no");
+  if (value.isolatedEvidenceRefreshRequired === true) process.stdout.write("yes");
+  else if (value.isolatedEvidenceRefreshRequired === false) process.stdout.write("no");
   else process.exit(2);
 ')"
 abort_if_stop_requested
@@ -198,7 +203,11 @@ if ! node --import tsx src/cli/paper-campaign-evidence.ts verify \
   if [[ "$PREFLIGHT_REPLACEMENT_REQUIRED" == "yes" ]]; then
     print "旧 Campaign 属于已结束的旧核心版本；将只读保留，并为修复后的核心重建隔离证据。"
   elif [[ "$PREFLIGHT_REVALIDATION_REQUIRED" == "yes" ]]; then
-    print "已通过 Campaign 的验收策略或测试套件发生变化；将保留原始运行时长并重建隔离证据。"
+    if [[ "$PREFLIGHT_CAMPAIGN_STATE" == "PAUSED" ]]; then
+      print "安全暂停的同核心 Campaign 验证套件发生变化；将保留有效 Paper 时长并重建隔离证据。"
+    else
+      print "已通过 Campaign 的验收策略或测试套件发生变化；将保留原始运行时长并重建隔离证据。"
+    fi
   fi
   title "首次运行：自动完成隔离验证"
   print "只使用 Paper、Replay、Fake/Disabled Adapter；不会连接真实资金。"

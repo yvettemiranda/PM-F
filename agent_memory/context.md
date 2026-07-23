@@ -32,13 +32,13 @@
 - MEDIUM 资本证据缺少比例时保留既有 `1 pUSD` fixed fallback，并归为小额 BUY；HIGH 使用精确比例，完整估值时按账户总权益计算。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.14.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.7.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.14.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.8.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
 - `BUY_AMOUNT_POLICY_V4` 只用于包含 `smallFollowBuyMaxCount` 的新 Ruleset。v1.8/V3 与 v1.7/V2 历史证据继续按不可变旧语义验证，不能套用新金额、价格或 SELL 规则。
 - 本次没有数据库结构变更，也没有修改扫描频率、账本边界或安全 Gate。任何新 Campaign 必须使用最终干净提交生成的新 core compatibility hash。
 
 ## Current runtime and evidence
 - 历史 Campaign `PC-105EC3F76A2AC49D59E6` 为 `PAUSED`；旧核心累计 `4.84 h`，只作诊断证据，不能计入当前新核心验收。
-- 新规则提交 `d06de6d` 创建的 Campaign `PC-1F69671B63722CC4E3EC` 已在发现 Live SELL/等待 BUY 对齐缺口后安全暂停；Session `PS-1D3D3B5DFA8A35BACBC2` 保留 `603018 ms`（约 `0.17 h`）诊断证据，`387/0` 次 Observe 成功/失败轮询、零事件、零执行，不能计入修复后核心。
+- 新规则提交 `d06de6d` 创建的 Campaign `PC-1F69671B63722CC4E3EC` 已在发现 Live SELL/等待 BUY 对齐缺口后安全暂停；Session `PS-1D3D3B5DFA8A35BACBC2` 保留 `603018 ms`（约 `0.17 h`）证据，`387/0` 次 Observe 成功/失败轮询、零事件、零执行。本次只修 Live，Paper core compatibility hash 未变；重新完成隔离验证后，该 Paper 时长仍可在同 Campaign 中继续累计。
 - 历史结果：`15605` 次成功轮询、`11` 次已恢复 timeout、`30` 个目标事件、`9 BUY / 21 SELL`、gap `0`、最终 `SYNCED`；9 个 BUY 为 `1 FAK_FILLED / 5 BELOW_MARKET_MIN_ORDER_SIZE / 3 WAIT_TIMEOUT`。
 - 当前无 Observe/Paper/Supervisor 子进程；暂停入口的终端 shell 只停在双击窗口收尾提示，不持有 active lock，也不写数据库，重启前清理。目标仍正确，数据库 Schema `2.29.0`，`integrity_check=ok`、外键失败 `0`，Gate 为 `PAPER + LIVE_DISABLED`，Live Execution/Order/Fill 均为 `0`。
 - `data/` 最近约 `854 MB`、主库约 `832 MiB`；增长主要来自新核心启动前重新生成的不可变 Phase 0/Replay 证据，不是每秒 Paper 成交写入。旧多代迁移备份已按用户授权清理，迁移备份默认只保留最新校验通过的 `1` 份。

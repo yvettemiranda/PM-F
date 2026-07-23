@@ -15,7 +15,7 @@ export const DEFAULT_VERSIONS = Object.freeze({
   paperVersion: "1.14.0",
   liveVersion: "1.12.0",
   validationVersion: "1.7.0",
-  operationalVersion: "1.7.0",
+  operationalVersion: "1.8.0",
   rulesetVersion: "v1.9.0",
   feeModelVersion: "clob-fd-v1",
   configVersion: "v1.6.0",

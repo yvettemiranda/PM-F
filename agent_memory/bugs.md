@@ -30,6 +30,7 @@
 - Polygon 同一 orderHash 的多个 fill 曾各自触发 Signal；当前在快速源先按 transaction+orderHash 聚合，并在唯一经济证据匹配时消除 Data API 重复。
 - BUY 原先允许所有低价改善且使用 `2%/2 tick` 上限；当前新 Ruleset 严格执行目标价 90%—105%及实际价0.95上限，历史价格规则不变。
 - Live `TARGET_SELL` 原先只按真实 Position 计算卖出量，没有像 Paper 一样先取消或同比例缩减同 asset/condition 的等待 BUY；当前已补齐 Reservation/Cash/Risk/Audit、Gate 前置、原子回滚、幂等、损坏账本时持久关闭 Gate 和禁止最低额反向抬升的完整路径。
+- Live-only 提交不会改变 Paper core hash，但会改变隔离验证套件；启动器原先只允许 PASSED Campaign 刷新证据，导致同 core 的安全 PAUSED Campaign 无法续跑。当前只对 `PAUSED/PASSED + same core + policy/suite changed` 开放 proof refresh，未完成或不同 core 状态继续 fail closed。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

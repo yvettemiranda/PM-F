@@ -24,6 +24,29 @@ function sha256(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
+/**
+ * A safely paused same-core Campaign may refresh its isolated proof when the
+ * validation policy or verification suite changes. RUNNING/crash-recovery
+ * states stay blocked so Phase 0 refresh cannot move evidence underneath an
+ * unfinished Session; terminal same-core revalidation remains supported.
+ */
+export function paperCompatibilityEvidenceRefreshRequired(input: {
+  campaignState: string;
+  previousCoreCompatibilityHash: string;
+  currentCoreCompatibilityHash: string;
+  previousCompatibilityIdentity: CompatibilityIdentity | null;
+  currentCompatibilityIdentity: CompatibilityIdentity;
+}): boolean {
+  return ["PAUSED", "PASSED"].includes(input.campaignState)
+    && input.previousCoreCompatibilityHash === input.currentCoreCompatibilityHash
+    && (
+      input.previousCompatibilityIdentity?.validationPolicyHash
+        !== input.currentCompatibilityIdentity.validationPolicyHash
+      || input.previousCompatibilityIdentity?.verificationSuiteHash
+        !== input.currentCompatibilityIdentity.verificationSuiteHash
+    );
+}
+
 function tableExists(database: DatabaseSync, tableName: string): boolean {
   return Boolean(database.prepare(
     "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name=?",

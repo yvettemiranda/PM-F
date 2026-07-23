@@ -6,6 +6,7 @@ import {
   paperCampaignPlannedDurationOverride,
   paperQualifyingFinalizationPolicy,
 } from "../src/paper-validation/operator-policy.js";
+import { paperCompatibilityEvidenceRefreshRequired } from "../src/paper-validation/preflight.js";
 import type { CampaignSnapshot } from "../src/paper-validation/types.js";
 
 function snapshot(overrides: Partial<CampaignSnapshot>): CampaignSnapshot {
@@ -182,6 +183,33 @@ describe("paper Campaign operator policy", () => {
         verificationSuiteHash: "6".repeat(64),
       },
     )).toBe("REFUSE_TERMINAL");
+  });
+
+  it("refreshes isolated evidence for a safely paused same-core Campaign only", () => {
+    const previous = snapshot({}).latestCompatibilityIdentity!;
+    const changed = { ...previous, verificationSuiteHash: "6".repeat(64) };
+    const required = (campaignState: string, currentCore = "a".repeat(64)) => (
+      paperCompatibilityEvidenceRefreshRequired({
+        campaignState,
+        previousCoreCompatibilityHash: "a".repeat(64),
+        currentCoreCompatibilityHash: currentCore,
+        previousCompatibilityIdentity: previous,
+        currentCompatibilityIdentity: changed,
+      })
+    );
+
+    expect(required("PAUSED")).toBe(true);
+    expect(required("PASSED")).toBe(true);
+    expect(required("RUNNING")).toBe(false);
+    expect(required("BLOCKED")).toBe(false);
+    expect(required("PAUSED", "b".repeat(64))).toBe(false);
+    expect(paperCompatibilityEvidenceRefreshRequired({
+      campaignState: "PAUSED",
+      previousCoreCompatibilityHash: "a".repeat(64),
+      currentCoreCompatibilityHash: "a".repeat(64),
+      previousCompatibilityIdentity: previous,
+      currentCompatibilityIdentity: previous,
+    })).toBe(false);
   });
 
   it("keeps a coverage-incomplete Campaign on a useful 4-hour session", () => {
