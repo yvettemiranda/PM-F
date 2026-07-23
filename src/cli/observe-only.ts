@@ -9,6 +9,7 @@ import { PolymarketPublicApi } from "../adapters/polymarket-public.js";
 import { PublicSignalMarketMetadataProvider } from "../signal-context/public-market-metadata.js";
 import { marketClockOffsetIsValid } from "../execution/market-data.js";
 import { PAPER_VALIDATION_FINAL_OBSERVE_MS } from "../paper-validation/types.js";
+import { PolygonOrderFilledWakeFeed } from "../observe/polygon-order-filled-wake-feed.js";
 
 const args = process.argv.slice(2);
 const address = args.find((argument) => /^0x[a-fA-F0-9]{40}$/.test(argument))?.toLowerCase();
@@ -59,6 +60,7 @@ const runner = new ObserveOnlyRunner(store, new PublicObserveDataSource(undefine
   ...(durationSeconds > 0 ? { durationMs: durationSeconds * 1_000 } : {}),
   signalMarketMetadataProvider: new PublicSignalMarketMetadataProvider(),
   negativeRiskConversionReceiptProvider: new PolymarketPublicApi(),
+  wakeSource: new PolygonOrderFilledWakeFeed(),
   sourceVersion,
 });
 const controller = new AbortController();

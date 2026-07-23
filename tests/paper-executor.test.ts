@@ -990,7 +990,57 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("does not apply the minimum again while the asset already has a Paper position", async () => {
+  it("inherits the 1-to-5 pUSD minimum policy after an amplified first BUY actually fills", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = { ...env.market.book, minOrderSize: "5", tickSize: "0.01" };
+    const exactSizing = {
+      targetPriceUnits: "500000000000000000",
+      targetSizeMicros: "2460160",
+      targetVisibleCapitalMicros: "1261997070000",
+    };
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "amplified-lineage-first",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      exactSizing,
+    });
+    const first = await env.executor.consumeSignal(env.accountId, "amplified-lineage-first");
+    expect(env.executor.executionState(first)).toBe("EXECUTED");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "amplified-lineage-follow-up",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      exactSizing,
+    });
+    const followUp = await env.executor.consumeSignal(env.accountId, "amplified-lineage-follow-up");
+
+    expect(env.executor.executionState(followUp)).toBe("EXECUTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(followUp)).toEqual({ requested_amount_micros: "2500000" });
+    const checks = JSON.parse((db.prepare(
+      `SELECT r.checks_json value
+       FROM paper_executions e JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(followUp) as { value: string }).value) as Array<{ name: string; detail?: string }>;
+    const policy = JSON.parse(checks.find((check) => check.name === "buy_amount_policy")!.detail!);
+    expect(policy).toMatchObject({
+      result: "LIFTED",
+      minimumLiftEligibility: "AMPLIFIED_POSITION",
+      finalAmountMicros: "2500000",
+    });
+    expect(db.prepare(
+      "SELECT count(*) count FROM paper_positions WHERE CAST(current_size_micros AS INTEGER)>0",
+    ).get()).toEqual({ count: 2 });
+    db.close();
+    env.executor.close();
+  });
+
+  it("does not inherit the minimum when the opening Paper BUY was not amplified", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "existing-position-buy", createdAt: "2026-07-08T00:00:01.000Z" });
     await env.executor.consumeSignal(env.accountId, "existing-position-buy");

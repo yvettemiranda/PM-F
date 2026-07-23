@@ -28,6 +28,7 @@ import {
 } from "./negative-risk-conversion.js";
 import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
 import { PolygonOrderFilledFeedUnsafeError } from "./polygon-order-filled-trade-feed.js";
+import type { ObserveWakeResult, ObserveWakeSource } from "./polygon-order-filled-wake-feed.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
 
@@ -78,6 +79,7 @@ export interface ObserveRunnerOptions {
   signalMarketMetadataProvider?: SignalMarketMetadataProvider;
   negativeRiskConversionReceiptProvider?: NegativeRiskConversionReceiptProvider;
   sourceVersion?: SourceVersion;
+  wakeSource?: ObserveWakeSource;
 }
 
 function assertRecoveryCoverage(snapshot: Awaited<ReturnType<ObserveDataSource["poll"]>>, gapFrom: string): void {
@@ -705,21 +707,22 @@ export class ObserveOnlyRunner {
     const deadline = this.options.durationMs && this.options.durationMs > 0
       ? runStartedMs + this.options.durationMs
       : Number.POSITIVE_INFINITY;
-    let scheduledPollAt = runStartedMs;
+    let nextCadenceAt = runStartedMs;
     let failed = false;
     let reason = "DURATION_COMPLETE";
     try {
       while (!signal?.aborted && this.monotonicNow() < deadline) {
         await this.pollOnce(signal);
         const completedAt = this.monotonicNow();
-        const nextPollAt = Math.max(scheduledPollAt + this.options.pollIntervalMs, completedAt);
+        if (completedAt >= nextCadenceAt) {
+          nextCadenceAt = Math.max(nextCadenceAt + this.options.pollIntervalMs, completedAt);
+        }
         const remaining = deadline - completedAt;
         if (remaining <= 0) break;
         await this.waitForNextPoll(
-          Math.min(Math.max(0, nextPollAt - completedAt), remaining),
+          Math.min(Math.max(0, nextCadenceAt - completedAt), remaining),
           signal,
         );
-        scheduledPollAt = nextPollAt;
       }
       if (signal?.aborted) reason = "ABORTED";
     } catch (error) {
@@ -727,6 +730,11 @@ export class ObserveOnlyRunner {
       reason = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
+      try {
+        this.options.wakeSource?.close();
+      } catch {
+        // A public wake hint must never mask Observe shutdown evidence.
+      }
       this.store.stopRun(started.observeRunId, this.now().toISOString(), reason, failed);
     }
     const metrics = this.store.runMetrics(started.observeRunId);
@@ -737,8 +745,27 @@ export class ObserveOnlyRunner {
     return metrics;
   }
 
-  private async waitForNextPoll(milliseconds: number, signal?: AbortSignal): Promise<void> {
-    if (milliseconds <= 0 || signal?.aborted) return;
-    await this.wait(milliseconds, signal);
+  private async waitForNextPoll(
+    milliseconds: number,
+    signal?: AbortSignal,
+  ): Promise<ObserveWakeResult> {
+    if (milliseconds <= 0 || signal?.aborted) return "TIMEOUT";
+    if (!this.options.wakeSource) {
+      await this.wait(milliseconds, signal);
+      return "TIMEOUT";
+    }
+    const startedAt = this.monotonicNow();
+    try {
+      return await this.options.wakeSource.waitForWake(
+        this.options.walletAddress,
+        milliseconds,
+        signal,
+      );
+    } catch {
+      const elapsed = Math.max(0, this.monotonicNow() - startedAt);
+      const fallbackMs = Math.max(0, milliseconds - elapsed);
+      if (fallbackMs > 0 && !signal?.aborted) await this.wait(fallbackMs, signal);
+      return "TIMEOUT";
+    }
   }
 }

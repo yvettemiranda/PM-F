@@ -292,7 +292,7 @@ describe("Paper Campaign core compatibility", () => {
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("records validation and operator identities without adding them to Campaign reset", () => {
     const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);

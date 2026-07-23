@@ -40,7 +40,7 @@ import { DisabledRedeemAdapter } from "./disabled-redeem-adapter.js";
 import { DisabledSigner } from "./disabled-signer.js";
 import { DisabledWalletProvider } from "./disabled-wallet-provider.js";
 import { DisabledLiveMarketDataProvider, type LiveMarketDataProvider } from "./live-market-data.js";
-import { isLiveFirstEntryBuyEligible } from "./live-buy-eligibility.js";
+import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-adapter.js";
 import type { RedeemAdapter } from "./redeem-adapter.js";
 import type { Signer } from "./signer.js";
@@ -1365,7 +1365,7 @@ export class LiveExecutor implements ExecutorInterface {
           break;
         }
         adjustmentAttempts += 1;
-        const adjustment = await this.tryLiftFirstEntryToMarketMinimum(
+        const adjustment = await this.tryLiftEligibleBuyToMarketMinimum(
           effectiveInput,
           execution,
           approval,
@@ -1957,12 +1957,12 @@ export class LiveExecutor implements ExecutorInterface {
         };
       }
       const budget = BigInt(approval.requested_amount_micros!);
-      const firstEntryMinimumEligible = isLiveFirstEntryBuyEligible(
+      const minimumLiftEligible = liveBuyMinimumLiftEligibility(
         this.database,
         execution.live_account_id,
         execution.asset_id,
         execution.live_execution_id,
-      );
+      ) !== "NONE";
       const minimumQuote = parsedConstraints !== null && !("error" in parsedConstraints)
         ? quoteExecutionBuySize({
           asks: book.asks,
@@ -1973,7 +1973,7 @@ export class LiveExecutor implements ExecutorInterface {
           feeExponent: fee.exponent,
         })
         : null;
-      if (minimumQuote && !minimumQuote.complete && firstEntryMinimumEligible) {
+      if (minimumQuote && !minimumQuote.complete && minimumLiftEligible) {
         const reason = buyNoFillReason({
           bestAskPriceUnits: bestAsk,
           lowerPriceUnits: lower!,
@@ -2145,7 +2145,7 @@ export class LiveExecutor implements ExecutorInterface {
     };
   }
 
-  private async tryLiftFirstEntryToMarketMinimum(
+  private async tryLiftEligibleBuyToMarketMinimum(
     input: ExecutorSignalInput,
     execution: NonNullable<ReturnType<LiveStore["executionById"]>>,
     approval: ApprovedRiskDecisionRow,
@@ -2157,12 +2157,13 @@ export class LiveExecutor implements ExecutorInterface {
       rules.buyFirstEntryMinimumAmountMicros <= 0n
       || rules.buyMarketMinimumAutoLiftCapMicros <= 0n
     ) return { status: "NOT_ELIGIBLE" };
-    if (!isLiveFirstEntryBuyEligible(
+    const minimumLiftEligibility = liveBuyMinimumLiftEligibility(
       this.database,
       execution.live_account_id,
       execution.asset_id,
       execution.live_execution_id,
-    )) {
+    );
+    if (minimumLiftEligibility === "NONE") {
       return { status: "NOT_ELIGIBLE" };
     }
     if (requiredAmountMicros > rules.buyMarketMinimumAutoLiftCapMicros) {
@@ -2176,7 +2177,7 @@ export class LiveExecutor implements ExecutorInterface {
     if (capitalSizing.calculatedAmountMicros === null) return { status: "NOT_ELIGIBLE" };
     const amountPolicy = applyBuyAmountPolicy({
       calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros),
-      firstEntryEligible: true,
+      minimumLiftEligibility,
       firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
       marketMinimumAmountMicros: requiredAmountMicros,
       marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
@@ -2190,12 +2191,12 @@ export class LiveExecutor implements ExecutorInterface {
     let rejectionReason: string | null = null;
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      if (!isLiveFirstEntryBuyEligible(
+      if (liveBuyMinimumLiftEligibility(
         this.database,
         execution.live_account_id,
         execution.asset_id,
         execution.live_execution_id,
-      )) {
+      ) === "NONE") {
         this.database.exec("COMMIT");
         return { status: "NOT_ELIGIBLE" };
       }

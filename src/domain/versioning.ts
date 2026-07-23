@@ -9,11 +9,11 @@ export { stableJson } from "./canonical-json.js";
 export const DEFAULT_VERSIONS = Object.freeze({
   schemaVersion: "2.29.0",
   signalVersion: "1.8.0",
-  strategyVersion: "2.5.0",
-  riskVersion: "1.8.0",
+  strategyVersion: "2.6.0",
+  riskVersion: "1.9.0",
   replayVersion: "2.2.0",
-  paperVersion: "1.12.0",
-  liveVersion: "1.9.0",
+  paperVersion: "1.13.0",
+  liveVersion: "1.10.0",
   validationVersion: "1.7.0",
   operationalVersion: "1.7.0",
   rulesetVersion: "v1.8.0",
@@ -28,6 +28,8 @@ export const DEFAULT_RULESET = Object.freeze({
   buyPriceImprovementAllowed: true,
   buyPriceMinimumTickSteps: 2,
   buyMaximumPricePpm: 950_000,
+  // Historical key name retained for profile compatibility. Once an actually
+  // amplified first BUY fills, the same minimum also follows that asset lineage.
   buyFirstEntryMinimumAmountMicros: 1_000_000,
   buyMarketMinimumAutoLiftCapMicros: 5_000_000,
   waitRatioPpm: 500_000,

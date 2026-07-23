@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   buildExactCapitalRatio,
   calculateBuyCapitalSizing,
   capitalSizingHash,
 } from "../src/execution/capital-sizing.js";
+import {
+  applyBuyAmountPolicy,
+  buyAmountPolicyDecisionCarriesAmplifiedLineage,
+} from "../src/execution/buy-amount-policy.js";
+import { stableJson } from "../src/domain/canonical-json.js";
 
 const high = {
   status: "COMPLETE" as const,
@@ -35,6 +41,54 @@ describe("exact capital sizing", () => {
     expect(decision.ratioPpmDecimal).toBe(ratio.ratioPpmDecimal);
     expect(decision.roundingMode).toBe("FLOOR_ONCE_AT_PUSD_MICRO");
     expect(BigInt(decision.remainderNumerator!)).toBeGreaterThan(0n);
+  });
+
+  it("carries an amplified lineage through later unchanged BUYs but never creates it from an unchanged first entry", () => {
+    const inherited = applyBuyAmountPolicy({
+      calculatedAmountMicros: 900_000n,
+      minimumLiftEligibility: "AMPLIFIED_POSITION",
+      firstEntryMinimumAmountMicros: 1_000_000n,
+      marketMinimumAutoLiftCapMicros: 5_000_000n,
+    });
+    const ordinaryFirst = applyBuyAmountPolicy({
+      calculatedAmountMicros: 2_000_000n,
+      minimumLiftEligibility: "FIRST_ENTRY",
+      firstEntryMinimumAmountMicros: 1_000_000n,
+      marketMinimumAutoLiftCapMicros: 5_000_000n,
+    });
+
+    expect(inherited).toMatchObject({
+      result: "LIFTED",
+      reason: "AMPLIFIED_POSITION_MINIMUM_APPLIED",
+      finalAmountMicros: "1000000",
+    });
+    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(inherited)).toBe(true);
+    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(ordinaryFirst)).toBe(false);
+  });
+
+  it("recognizes intact v2 first-fill evidence without trusting a tampered historical hash", () => {
+    const payload = {
+      version: "BUY_AMOUNT_POLICY_V2",
+      result: "LIFTED",
+      reason: "FIRST_ENTRY_MINIMUM_APPLIED",
+      calculatedAmountMicros: "974",
+      finalAmountMicros: "1000000",
+      firstEntryEligible: true,
+      firstEntryMinimumAmountMicros: "1000000",
+      marketMinimumAmountMicros: null,
+      marketMinimumAutoLiftCapMicros: "5000000",
+      availableCashCapMicros: null,
+    };
+    const decision = {
+      ...payload,
+      evidenceHash: createHash("sha256").update(stableJson(payload)).digest("hex"),
+    };
+
+    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(decision)).toBe(true);
+    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage({
+      ...decision,
+      finalAmountMicros: "2000000",
+    })).toBe(false);
   });
 
   it("rejects rather than amplifying a positive ratio below account precision", () => {

@@ -27,7 +27,9 @@ import {
 import {
   applyBuyAmountPolicy,
   type BuyAmountPolicyDecision,
+  type BuyMinimumLiftEligibility,
 } from "../execution/buy-amount-policy.js";
+import { buyMinimumLiftEligibility } from "../execution/buy-minimum-eligibility.js";
 import {
   calculateBuyCapitalSizing,
   type BuyCapitalSizingDecision,
@@ -1472,7 +1474,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       && rules.buyFirstEntryMinimumAmountMicros > 0n
       ? applyBuyAmountPolicy({
         calculatedAmountMicros: calculatedAmount,
-        firstEntryEligible: this.firstEntryMinimumEligible(accountId, signal.assetId),
+        minimumLiftEligibility: this.buyMinimumLiftEligibility(accountId, signal.assetId),
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
         availableCashCapMicros: available,
@@ -1501,24 +1503,18 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  private firstEntryMinimumEligible(
+  private buyMinimumLiftEligibility(
     accountId: string,
     assetId: string,
     excludeExecutionId?: string,
-  ): boolean {
-    const positions = this.database.prepare(
-      `SELECT current_size_micros FROM paper_positions
-       WHERE paper_account_id=? AND asset_id=?`,
-    ).all(accountId, assetId) as unknown as Array<{ current_size_micros: string }>;
-    if (positions.some((position) => BigInt(position.current_size_micros) > 0n)) return false;
-    const pending = this.database.prepare(
-      `SELECT 1 present FROM paper_executions
-       WHERE paper_account_id=? AND asset_id=? AND execution_type='TARGET_BUY'
-         AND state='WAITING_EXECUTION'
-         AND (? IS NULL OR paper_execution_id<>?)
-       LIMIT 1`,
-    ).get(accountId, assetId, excludeExecutionId ?? null, excludeExecutionId ?? null);
-    return !pending;
+  ): BuyMinimumLiftEligibility {
+    return buyMinimumLiftEligibility({
+      database: this.database,
+      mode: "PAPER",
+      accountId,
+      assetId,
+      ...(excludeExecutionId ? { excludeExecutionId } : {}),
+    });
   }
 
   private buyDeadline(signal: PaperSignalEnvelope): string {
@@ -1659,13 +1655,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
     });
-    const firstEntryMinimumEligible = !this.wasWaitingBuyReducedByTargetExit(
+    const minimumLiftEligibility = this.wasWaitingBuyReducedByTargetExit(
       activeExecution.paper_execution_id,
-    ) && this.firstEntryMinimumEligible(
-      activeExecution.paper_account_id,
-      activeExecution.asset_id,
-      activeExecution.paper_execution_id,
-    );
+    ) ? "NONE" : this.buyMinimumLiftEligibility(
+        activeExecution.paper_account_id,
+        activeExecution.asset_id,
+        activeExecution.paper_execution_id,
+      );
+    const minimumLiftEligible = minimumLiftEligibility !== "NONE";
     const executableMinimum = minimumQuote.complete ? {
       executableMinimumNotionalMicros: BigInt(minimumQuote.filledNotionalMicros),
       executableMinimumTotalMicros: BigInt(minimumQuote.filledNotionalMicros)
@@ -1692,7 +1689,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       );
       return "REJECTED";
     }
-    if (!minimumQuote.complete && firstEntryMinimumEligible) {
+    if (!minimumQuote.complete && minimumLiftEligible) {
       const reason = buyNoFillReason({
         bestAskPriceUnits: bestAsk,
         lowerPriceUnits,
@@ -1714,7 +1711,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       && ["ORDER_AMOUNT_BELOW_EXECUTOR_PRECISION", "BELOW_MARKET_MIN_ORDER_SIZE"].includes(constraint.reason)
       && constraint.minimumPassingAmountMicros !== null
     ) {
-      const lift = this.tryLiftFirstEntryToMarketMinimum(
+      const lift = this.tryLiftEligibleBuyToMarketMinimum(
         activeExecution,
         book,
         fee,
@@ -1736,7 +1733,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       const rejection = constraint.minimumPassingAmountMicros !== null
         && rules.buyMarketMinimumAutoLiftCapMicros > 0n
         && BigInt(constraint.minimumPassingAmountMicros) > rules.buyMarketMinimumAutoLiftCapMicros
-        && firstEntryMinimumEligible
+        && minimumLiftEligible
         ? replaceMarketConstraintResult(constraint, "REJECT", "BUY_MARKET_MINIMUM_ABOVE_AUTO_LIFT_CAP")
         : constraint;
       this.rejectBuyForMarketConstraint(activeExecution, book, fee, age, rejection);
@@ -1867,7 +1864,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  private tryLiftFirstEntryToMarketMinimum(
+  private tryLiftEligibleBuyToMarketMinimum(
     execution: ExecutionRow,
     book: PaperOrderbookSnapshot,
     fee: PaperFeeSnapshot,
@@ -1879,11 +1876,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
     if (
       requiredAmount > rules.buyMarketMinimumAutoLiftCapMicros
-      || !this.firstEntryMinimumEligible(
+      || this.buyMinimumLiftEligibility(
         execution.paper_account_id,
         execution.asset_id,
         execution.paper_execution_id,
-      )
+      ) === "NONE"
     ) return "NOT_ELIGIBLE";
     if (!execution.signal_id || !execution.risk_decision_id) {
       throw new Error("PAPER_BUY_AUTO_LIFT_CONTEXT_UNAVAILABLE");
@@ -1899,11 +1896,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      if (!this.firstEntryMinimumEligible(
+      const minimumLiftEligibility = this.buyMinimumLiftEligibility(
         execution.paper_account_id,
         execution.asset_id,
         execution.paper_execution_id,
-      )) {
+      );
+      if (minimumLiftEligibility === "NONE") {
         this.database.exec("COMMIT");
         return "NOT_ELIGIBLE";
       }
@@ -1923,7 +1921,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       }
       const amountPolicy = applyBuyAmountPolicy({
         calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros!),
-        firstEntryEligible: true,
+        minimumLiftEligibility,
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAmountMicros: requiredAmount,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,

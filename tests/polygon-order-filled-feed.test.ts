@@ -10,6 +10,11 @@ import {
   type PolygonLogsResponse,
   type PolygonOrderFilledFeedProvider,
 } from "../src/observe/polygon-order-filled-trade-feed.js";
+import {
+  POLYGON_ORDER_FILLED_WEBSOCKET_URL,
+  PolygonOrderFilledWakeFeed,
+  type PolygonWakeWebSocket,
+} from "../src/observe/polygon-order-filled-wake-feed.js";
 
 const wallet = "0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a";
 const transactionHash = "0xb68833e931e9a298357e3200d5242599624eaaa1caf798c15f7941e416217c83";
@@ -132,5 +137,77 @@ describe("PolygonOrderFilledTradeFeed", () => {
       [POLYMARKET_CTF_EXCHANGES[0], "0x65", "0x65"],
       [POLYMARKET_CTF_EXCHANGES[1], "0x65", "0x65"],
     ]);
+  });
+
+  it("subscribes to only the target maker logs and treats the public WebSocket message as a wake hint", async () => {
+    class FakeSocket implements PolygonWakeWebSocket {
+      readyState = 0;
+      readonly sent: string[] = [];
+      private readonly listeners = new Map<string, Array<(event: { data?: unknown }) => void>>();
+
+      addEventListener(type: string, listener: (event: { data?: unknown }) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      send(data: string): void {
+        this.sent.push(data);
+      }
+
+      close(): void {
+        this.readyState = 3;
+        this.emit("close");
+      }
+
+      emit(type: string, data?: unknown): void {
+        for (const listener of this.listeners.get(type) ?? []) listener({ data });
+      }
+    }
+
+    const socket = new FakeSocket();
+    let openedUrl: string | null = null;
+    const feed = new PolygonOrderFilledWakeFeed({
+      socketFactory: (url) => {
+        openedUrl = url;
+        return socket;
+      },
+    });
+    const waiting = feed.waitForWake(wallet, 30_000);
+    socket.readyState = 1;
+    socket.emit("open");
+    expect(openedUrl).toBe(POLYGON_ORDER_FILLED_WEBSOCKET_URL);
+    const request = JSON.parse(socket.sent[0]!) as {
+      method: string;
+      params: [string, { address: string[]; topics: [string, null, string] }];
+    };
+    expect(request).toMatchObject({
+      method: "eth_subscribe",
+      params: ["logs", {
+        address: [...POLYMARKET_CTF_EXCHANGES],
+        topics: [ORDER_FILLED_TOPIC, null, pad(wallet as `0x${string}`, { size: 32 })],
+      }],
+    });
+    socket.emit("message", JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0xsubscription" }));
+    socket.emit("message", JSON.stringify({
+      jsonrpc: "2.0",
+      method: "eth_subscription",
+      params: {
+        subscription: "0xsubscription",
+        result: {
+          address: POLYMARKET_CTF_EXCHANGES[0],
+          topics: [
+            ORDER_FILLED_TOPIC,
+            `0x${"3".repeat(64)}`,
+            pad(wallet as `0x${string}`, { size: 32 }),
+            pad(POLYMARKET_CTF_EXCHANGES[0] as `0x${string}`, { size: 32 }),
+          ],
+          removed: false,
+        },
+      },
+    }));
+
+    await expect(waiting).resolves.toBe("WAKE");
+    feed.close();
   });
 });

@@ -1962,7 +1962,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("does not auto-lift a later Live BUY while the asset already has a position", async () => {
+  it("does not inherit the minimum when the opening Live BUY was not amplified", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -1986,6 +1986,47 @@ describe("LiveExecutor", () => {
     expect(result).toMatchObject({ signalId: later.signal.signalId, state: "REJECTED" });
     const positions = await executor.getPosition({ accountId, assetId }) as unknown[];
     expect(positions).toHaveLength(1);
+    consumer.close();
+    executor.close();
+  });
+
+  it("inherits the 1-to-5 pUSD minimum policy after an amplified first Live BUY fills", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+    const later = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-amplified-lineage-follow-up",
+      riskDecisionId: "unused-live-amplified-lineage-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "1",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: later.signal.signalId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_amount_micros FROM live_executions WHERE live_execution_id=?",
+    ).get(result!.executionId)).toEqual({ requested_amount_micros: "2500000" });
+    const checks = JSON.parse((db.prepare(
+      "SELECT checks_json FROM risk_decisions WHERE risk_decision_id=?",
+    ).get(result!.riskDecisionId) as { checks_json: string }).checks_json) as Array<{ name: string; detail?: string }>;
+    const policy = JSON.parse(checks.find((check) => check.name === "buy_amount_policy")!.detail!);
+    expect(policy).toMatchObject({
+      result: "LIFTED",
+      minimumLiftEligibility: "AMPLIFIED_POSITION",
+      finalAmountMicros: "2500000",
+    });
+    expect(await executor.getPosition({ accountId, assetId })).toHaveLength(2);
+    db.close();
     consumer.close();
     executor.close();
   });

@@ -12,7 +12,7 @@ import {
 } from "../execution/capital-sizing.js";
 import { applyBuyAmountPolicy, type BuyAmountPolicyDecision } from "../execution/buy-amount-policy.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
-import { isLiveFirstEntryBuyEligible } from "./live-buy-eligibility.js";
+import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 
 export interface LiveSignalConsumptionResult {
   signalId: string;
@@ -485,7 +485,7 @@ export class LiveSignalConsumer {
       && rules.buyFirstEntryMinimumAmountMicros > 0n
       ? applyBuyAmountPolicy({
         calculatedAmountMicros: calculatedAmount,
-        firstEntryEligible: isLiveFirstEntryBuyEligible(this.database, accountId, signal.assetId),
+        minimumLiftEligibility: liveBuyMinimumLiftEligibility(this.database, accountId, signal.assetId),
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
         availableCashCapMicros: available,

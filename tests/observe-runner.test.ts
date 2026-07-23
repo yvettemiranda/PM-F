@@ -1351,6 +1351,96 @@ describe("ObserveOnlyRunner", () => {
     store.close();
   });
 
+  it("polls immediately on a Polygon log wake without delaying the one-second fallback cadence", async () => {
+    const { databasePath } = setup();
+    const baseMs = Date.parse("2026-07-08T00:01:00.000Z");
+    let monotonicMs = 0;
+    const pollStarts: number[] = [];
+    const wakeWaits: number[] = [];
+    let wakeCount = 0;
+    const source: ObserveDataSource = {
+      async poll() {
+        pollStarts.push(monotonicMs);
+        return snapshot([], [position("100")], new Date(baseMs + monotonicMs).toISOString());
+      },
+    };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      durationMs: 1_100,
+      now: () => new Date(baseMs + monotonicMs),
+      monotonicNow: () => monotonicMs,
+      wakeSource: {
+        async waitForWake(_walletAddress, milliseconds) {
+          wakeWaits.push(milliseconds);
+          if (wakeCount++ === 0) {
+            monotonicMs += 100;
+            return "WAKE";
+          }
+          monotonicMs += milliseconds;
+          return "TIMEOUT";
+        },
+        close() {},
+      },
+    });
+
+    await runner.run();
+
+    expect(pollStarts).toEqual([0, 100, 1_000]);
+    expect(wakeWaits).toEqual([1_000, 900, 100]);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 3,
+      schedulingGapCount: 0,
+      unrecoveredConnectionGap: false,
+    });
+    store.close();
+  });
+
+  it("keeps the one-second poll fallback when the Polygon wake source disconnects or throws", async () => {
+    const { databasePath } = setup();
+    const baseMs = Date.parse("2026-07-08T00:01:00.000Z");
+    let monotonicMs = 0;
+    const pollStarts: number[] = [];
+    const fallbackWaits: number[] = [];
+    const source: ObserveDataSource = {
+      async poll() {
+        pollStarts.push(monotonicMs);
+        return snapshot([], [position("100")], new Date(baseMs + monotonicMs).toISOString());
+      },
+    };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      durationMs: 1_100,
+      now: () => new Date(baseMs + monotonicMs),
+      monotonicNow: () => monotonicMs,
+      wait: async (milliseconds) => {
+        fallbackWaits.push(milliseconds);
+        monotonicMs += milliseconds;
+      },
+      wakeSource: {
+        async waitForWake() {
+          throw new Error("TEST_POLYGON_WEBSOCKET_DISCONNECTED");
+        },
+        close() {},
+      },
+    });
+
+    await runner.run();
+
+    expect(pollStarts).toEqual([0, 1_000]);
+    expect(fallbackWaits).toEqual([1_000, 100]);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      successfulPolls: 2,
+      failedPolls: 0,
+      schedulingGapCount: 0,
+      unrecoveredConnectionGap: false,
+    });
+    store.close();
+  });
+
   it("clears the pending cadence timer when a safe stop aborts the wait", async () => {
     vi.useFakeTimers();
     const { databasePath } = setup();
