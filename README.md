@@ -75,7 +75,7 @@ pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
 
 运行结果保存在本机 `data/phase0/`。确定性 Replay 要求 capture 和当前工作树使用同一 Git commit，且两者都不是 dirty 状态。
 
-Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行成交时，Phase 0 不会直接合并或接受，而是只读查询 Polygon `eth_getTransactionReceipt`。只有官方 V2 Exchange 回执能以不同 `orderHash` 精确证明相同经济成交次数时，才生成稳定的多 occurrence `source_event_key`；RPC 不可用、旧版/未知合约、金额或 maker 不符、重复 `orderHash`、proof 重放不一致时都保持 `AMBIGUOUS_DUPLICATE_EVENTS`。
+Data API 不提供逐 fill ID。Polygon 快速源按同一 `transactionHash + orderHash` 归并多个 fill，金额求和并计算加权平均成交价；同一交易中的不同 `orderHash` 始终保留为独立成交。Data API 后续若以多行报告同一经济成交，只有总数量和加权价格与唯一的 Polygon 订单证据精确一致时才去重；存在多个候选订单或经济值不一致时不猜测合并，并立即失败关闭。Data API 自身出现完全相同的多行成交时，仍须由 Trades/Activity 或官方回执证明 occurrence 数量。
 
 `observe:run` 不加载私钥，也没有下单路径。省略 `--duration-seconds` 时持续运行，收到 `SIGINT`/`SIGTERM` 后安全停止；每次报告写入 `data/observe/`。Observe 默认每 1 秒读取 Polygon 上两个官方 Exchange 已确认 2 个区块的 `OrderFilled`，并把目标地址作为 maker 的成交还原成与 Data API 相同身份的交易；同时订阅公开 Polygon WebSocket 的同一 maker 日志，只把通知当作“立即再扫描一次”的唤醒信号。WebSocket 消息本身绝不生成 Signal，仍须通过已确认区块扫描、重组检查、REST/Activity 交叉确认和幂等链路；断线、乱序或丢消息时原有 1 秒轮询继续兜底。公开 Trades/Activity 仍限制为每 3 秒读取一次，Positions 与 pUSD 默认每 15 秒全量核对一次，发现新的目标事件时会立即提前核对。每个成功轮询仍写入轻量心跳和计数；当仓位与状态没有变化且保持 `SYNCED` 时，完整 Capture、资金快照、对账报告和恢复 checkpoint 最多每 15 秒保存一次。新事件、新 Signal、gap 恢复、非 `ONLINE` 或非 `SYNCED` 状态仍会立即保存完整不可变证据，因此降写入量不会降低发现频率或安全门禁。链上快速源只读、无需认证，临时不可用时降级到原 Data API 路径；确认区块重组或两条公开源身份冲突时立即 `MAJOR_DESYNC`，不能重复跟单。Activity 使用官方 `start` 时间游标分页，Trades 的满页结果必须覆盖上次已提交 cursor（且跨过同秒边界），否则 fail closed 并进入 gap recovery。相邻 offset 页出现 1 行或多行重复时，系统只记录可精确证明的最长 suffix/prefix overlap 并在 multiplicity 解析中抵消，原始 Capture 不删除；非边界重复仍须 Trades/Activity 或官方链上回执证明。单个市场的元数据获取或校验失败只会记录 `signal_enrichment_failures` warning，并在后续轮询重试该 Signal；它不会再伪造连接 gap，也不会阻断同一轮其他市场。Live Gate 前必须完成至少连续运行 8 小时、源码工作树干净、无未恢复连接 gap、无 checkpoint hash 不一致、未出现 `MAJOR_DESYNC` 且最终为 `SYNCED` 的验收。已恢复的 API 失败、链上快速源降级和短暂 `MINOR_DIFF` 会保留为 warning，系统不会自动升级运行模式。
 
@@ -87,9 +87,11 @@ Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行
 
 每个 Paper cycle 会先消费已到达的新 Signal，再检查止损并统一重试旧任务，避免目标已经退出时旧 BUY 抢先成交，也避免同一批仓位同时生成目标退出和止损。目标 `TARGET_SELL` 会同时作用于现有 Paper Position 和同一 asset/condition 的待成交 BUY：全量退出直接取消待买并释放全部 Reservation，部分退出按同一比例缩减待买金额；缩减后的金额不会再被 `1—5 pUSD` 最低额规则反向放大。只有完整 Signal/Risk 校验通过后才允许改变待买，所有调整都写入 Reservation、Cash 和 Audit 账本。若退出只抵消了尚未成交的 BUY，不会伪造 SELL 订单或成交，而是记录为已处理的 `TARGET_EXIT_APPLIED_TO_WAITING_BUY`。同一资产仍有 `EXIT_PENDING` 或 `STOP_EXIT_PENDING` 时，后到的 BUY 保留 Reservation 并标记 `SAME_ASSET_EXIT_PENDING`；退出完成后按既有优先级自动继续，不会与卖出同时成交。
 
-BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。HIGH 置信度下，后续 BUY 以可完整退出估值的账户总权益计算比例，可用现金只作为最终支付上限；不会因为资金已变成仓位就机械缩小后续跟单。估值不完整时安全退回可用现金口径。MEDIUM 置信度的固定兜底从 10 pUSD 收紧为 1 pUSD，不能因为资本证据变差反而放大交易。首开最低仍为 1 pUSD；若真实市场最小单更高，精确抬升但不超过 5 pUSD。只有当这个被放大的首笔 BUY 已实际成交并形成持仓时，同一 asset 的后续目标 BUY 才继承相同的 `1—5 pUSD` 最低额规则；首笔仍在等待、被拒绝或原本无需放大时都不激活继承，全部清仓后该 lineage 自动清零。每次 Risk 证据会明确记录 `FIRST_ENTRY`、`AMPLIFIED_POSITION` 或 `NONE`，不能把追单伪装成首单。SELL、止损和结算不受这条 BUY 上限影响。Paper 报告同时输出理论 BUY 金额、申请金额、实际成交支出和 BUY/SELL 覆盖率，便于区分“策略缩放”和“盘口没跟上”。
+每笔目标 BUY 独立判断、独立 FAK，不累计、不把未成交部分带到下一笔。目标本次成交额占可见总资金低于 `1%` 时，每笔都执行 `1—5 pUSD`：比例结果不足 `1` 时抬到 `1`，市场最低可执行金额更高时精确抬升，但硬上限为 `5`；比例结果本身超过 `5` 也截到 `5`，市场最低额超过 `5` 则直接放弃。占比大于或等于 `1%` 时只按双方资金比例，不采用最低额抬升。首次实际开仓不计追单；此后低于 `1%` 的实际成交最多 `9` 次，零成交、取消和过期不计数，大于或等于 `1%` 的 BUY 不受该次数限制。目标完整退出且自身持仓、待买和在途义务归零后开始新周期并重置次数。
 
-`TARGET_SELL` 若小于 CLOB 最小下单量，或成交后只剩不足执行器 `0.01` 股精度的尾差，不能通过放大卖单来“凑单”，否则会超过目标退出比例。Paper 会保存市场约束证据，把无法提交的剩余量从该 Execution 的待执行分配中移除并明确标记为 `CANCELLED`；已发生的部分成交、真实剩余 Position 和原始 Signal 都继续保留。`STOP_LOSS` 不采用这条终止规则，仍保持 `STOP_EXIT_PENDING`，但相同约束状态只记录一次，避免每秒重复写库。
+BUY 参考价是同一经济成交的加权平均价。最新完整 REST 盘口计算的含手续费实际成交均价必须落在目标价 `90%—105%`（含边界）且不超过 `0.95`：低于 `90%` 或高于 `0.95` 直接放弃，高于 `105%` 但不超过 `0.95` 继续等待。允许 FAK 部分成交，但当前可成交部分必须达到市场最低执行要求，剩余部分立即取消且不累计。HIGH 置信度下仍以账户总权益计算比例、可用现金只作支付上限；估值不完整时退回可用现金口径。止损一旦触发，该标的在目标本轮持仓结束前禁止重新跟 BUY；目标完整退出且自身全部义务归零后才解除。Paper 报告继续区分理论金额、申请金额和实际成交支出。
+
+`TARGET_SELL` 若小于 CLOB 最小下单量，或成交后只剩不足执行器 `0.01` 股精度的真实尾仓，不能通过放大卖单来“凑单”，也不能因等待时间过长而取消退出义务。Paper 保存市场约束证据并保持 `EXIT_PENDING`，直到后续可成交、市场结算、REDEEM 或其他安全结算完成；相同约束状态只记录一次，避免重复写库。`STOP_LOSS` 同样保持 `STOP_EXIT_PENDING`。
 
 监控层 Signal 和执行层状态必须保持独立；`executionEligible=false` 的 Signal 不得被 Paper 或 Live 消费。Paper 和未来 Live 使用同一份 Signal + Execution Context 输入，必须先经过 Risk Manager，再进入 Executor Interface。每条 Paper Execution 必须引用 `risk_decision_id`；系统触发的止损和结算也记录系统级 Risk Decision。账户状态统一由 Portfolio Projection 从 ledger/position/PnL 计算，Report/UI 不应自行计算余额或权益。服务端和页面后续仍只允许监听 `127.0.0.1`。
 

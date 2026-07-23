@@ -137,8 +137,11 @@ function normalizedDataApiPrice(collateralMicros: bigint, sizeMicros: bigint): s
 
 interface DecodedTargetFill {
   log: PolygonOrderFilledLog;
+  orderHash: string;
   asset: string;
   side: "BUY" | "SELL";
+  collateralMicros: bigint;
+  sizeMicros: bigint;
   price: string;
   size: string;
 }
@@ -152,7 +155,7 @@ function decodeTargetFill(log: PolygonOrderFilledLog, walletAddress: string): De
   if (log.topics.length !== 4 || log.topics[0]?.toLowerCase() !== ORDER_FILLED_TOPIC) {
     throw new Error("POLYGON_TRADE_FEED_ORDER_FILLED_TOPICS_INVALID");
   }
-  assertHash(log.topics[1]!, "ORDER_HASH");
+  const orderHash = assertHash(log.topics[1]!, "ORDER_HASH");
   const maker = topicAddress(log.topics[2], "MAKER");
   topicAddress(log.topics[3], "TAKER");
   if (maker !== walletAddress) throw new Error("POLYGON_TRADE_FEED_MAKER_MISMATCH");
@@ -194,8 +197,11 @@ function decodeTargetFill(log: PolygonOrderFilledLog, walletAddress: string): De
       topics: log.topics.map((topic) => topic.toLowerCase()),
       data: log.data.toLowerCase(),
     },
+    orderHash,
     asset: tokenId.toString(),
     side: isBuy ? "BUY" : "SELL",
+    collateralMicros,
+    sizeMicros,
     price: normalizedDataApiPrice(collateralMicros, sizeMicros),
     size: scaledToDecimal(sizeMicros, 6),
   };
@@ -275,6 +281,34 @@ export class PolygonOrderFilledTradeFeed {
       || Number(quantity(left.log.transactionIndex, "TRANSACTION_INDEX") - quantity(right.log.transactionIndex, "TRANSACTION_INDEX"))
       || Number(quantity(left.log.logIndex, "LOG_INDEX") - quantity(right.log.logIndex, "LOG_INDEX"))
     ));
+    const grouped = new Map<string, {
+      first: DecodedTargetFill;
+      collateralMicros: bigint;
+      sizeMicros: bigint;
+    }>();
+    for (const item of decoded) {
+      const key = `${item.log.transactionHash}\u0000${item.orderHash}`;
+      const prior = grouped.get(key);
+      if (!prior) {
+        grouped.set(key, {
+          first: item,
+          collateralMicros: item.collateralMicros,
+          sizeMicros: item.sizeMicros,
+        });
+        continue;
+      }
+      if (
+        prior.first.asset !== item.asset
+        || prior.first.side !== item.side
+        || prior.first.log.blockNumber !== item.log.blockNumber
+      ) {
+        throw new PolygonOrderFilledFeedUnsafeError(
+          `POLYGON_TRADE_FEED_ORDER_ECONOMIC_CONFLICT:${item.log.transactionHash}:${item.orderHash}`,
+        );
+      }
+      prior.collateralMicros += item.collateralMicros;
+      prior.sizeMicros += item.sizeMicros;
+    }
     const blockNumbers = [...new Set(decoded.map((item) => quantityHex(quantity(item.log.blockNumber, "LOG_BLOCK_NUMBER"))))];
     const blockCaptures = await Promise.all(blockNumbers.map((blockNumber) => this.provider.polygonBlock(blockNumber, signal)));
     const headers = blockCaptures.map((capture, index) => blockHeader(capture, blockNumbers[index]!));
@@ -286,7 +320,7 @@ export class PolygonOrderFilledTradeFeed {
       }
     }
     const marketCaptures: ApiCapture<ClobMarketByToken>[] = [];
-    for (const asset of [...new Set(decoded.map((item) => item.asset))]) {
+    for (const asset of [...new Set([...grouped.values()].map((item) => item.first.asset))]) {
       let market = this.marketCache.get(asset);
       if (!market) {
         market = await this.provider.clobMarketByToken(asset, signal);
@@ -305,18 +339,20 @@ export class PolygonOrderFilledTradeFeed {
       marketByAsset.set(market.data.primary_token_id, market.data);
       marketByAsset.set(market.data.secondary_token_id, market.data);
     }
-    const trades = decoded.map((item): PublicTrade => {
+    const trades = [...grouped.values()].map((group): PublicTrade => {
+      const item = group.first;
       const header = headerByNumber.get(quantityHex(quantity(item.log.blockNumber, "LOG_BLOCK_NUMBER")))!;
       const market = marketByAsset.get(item.asset);
       if (!market) throw new Error(`POLYGON_TRADE_FEED_MARKET_BINDING_MISSING:${item.asset}`);
       return {
         proxyWallet: walletAddress,
         transactionHash: item.log.transactionHash,
+        orderHash: item.orderHash,
         conditionId: market.condition_id.toLowerCase(),
         asset: item.asset,
         side: item.side,
-        price: item.price,
-        size: item.size,
+        price: normalizedDataApiPrice(group.collateralMicros, group.sizeMicros),
+        size: scaledToDecimal(group.sizeMicros, 6),
         timestamp: Number(quantity(header.timestamp, "BLOCK_TIMESTAMP")),
       };
     });

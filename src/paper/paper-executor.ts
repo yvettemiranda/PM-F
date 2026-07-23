@@ -17,6 +17,7 @@ import {
 } from "../execution/market-data.js";
 import {
   cappedBuyPriceUpperUnits,
+  executableBuyPriceUpperUnits,
   evaluateBuyMarketConstraint,
   evaluateSellMarketConstraint,
   orderbookConstraintAvailability,
@@ -26,10 +27,13 @@ import {
 } from "../execution/market-order-constraints.js";
 import {
   applyBuyAmountPolicy,
+  applyPriorBuyAmountPolicy,
+  classifyTargetBuyRatio,
+  type BuyAmountPolicyClass,
   type BuyAmountPolicyDecision,
-  type BuyMinimumLiftEligibility,
 } from "../execution/buy-amount-policy.js";
 import { buyMinimumLiftEligibility } from "../execution/buy-minimum-eligibility.js";
+import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
 import {
   calculateBuyCapitalSizing,
   type BuyCapitalSizingDecision,
@@ -61,6 +65,7 @@ import {
   bestExecutionAskPriceUnits,
   buyNoFillReason,
   executableSellVwap,
+  feeInclusiveBuyVwapPriceUnits,
   matchPaperBuy,
   matchPaperSell,
   quoteExecutionBuySize,
@@ -86,7 +91,6 @@ const TERMINAL_TARGET_SELL_CONSTRAINT_REASONS = new Set([
   "ORDER_SIZE_BELOW_EXECUTOR_PRECISION",
   "BELOW_MARKET_MIN_ORDER_SIZE",
 ]);
-
 export type PaperTransactionBarrier =
   | "RESERVATION_BEFORE_COMMIT"
   | "BUY_FILL_BEFORE_COMMIT"
@@ -752,6 +756,23 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.expireBuy(execution);
       return "EXPIRED";
     }
+    if (execution.execution_type === "TARGET_BUY" && execution.signal_id) {
+      const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+      if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
+      if (rules.smallFollowBuyPolicyEnabled) {
+        const follow = evaluateBuyFollowPolicy({
+          database: this.database,
+          mode: "PAPER",
+          accountId: execution.paper_account_id,
+          signalId: execution.signal_id,
+          smallFollowBuyMaxCount: rules.smallFollowBuyMaxCount,
+        });
+        if (!follow.allowed) {
+          this.rejectAndRelease(execution, follow.reason);
+          return "REJECTED";
+        }
+      }
+    }
     if (
       execution.execution_type === "TARGET_BUY"
       && this.hasPendingSameAssetExit(execution)
@@ -1316,6 +1337,43 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       this.audit("SIGNAL", signal.signalId, "RECEIVED", "PAPER_CONSUME_SIGNAL", now, { accountId });
       if (signal.signalType === "TARGET_BUY") {
         const capital = buyCapital!;
+        const rules = signal.context
+          ? registeredExecutionRules(this.database, signal.context.rulesetHash)
+          : null;
+        if (signal.context && !rules) {
+          throw new Error(`PAPER_RULESET_UNAVAILABLE:${signal.context.rulesetHash}`);
+        }
+        if (rules?.smallFollowBuyPolicyEnabled) {
+          const follow = evaluateBuyFollowPolicy({
+            database: this.database,
+            mode: "PAPER",
+            accountId,
+            signalId: signal.signalId,
+            smallFollowBuyMaxCount: rules.smallFollowBuyMaxCount,
+          });
+          if (!follow.allowed) {
+            const risk = this.riskManager.recordSystemDecision({
+              mode: this.mode,
+              accountId,
+              signalId: signal.signalId,
+              contextId: signal.context?.contextId ?? null,
+              entityId: executionId,
+              executionType: "TARGET_BUY",
+              decision: "REJECT",
+              reason: follow.reason,
+              requestedAmountMicros: capital.amount,
+              requestedSizeMicros: null,
+              rulesetHash: rules.rulesetHash,
+              now,
+            });
+            this.insertRejectedExecution(accountId, signal, executionId, idempotency, follow.reason, now, risk);
+            this.insertConsumption(accountId, signal.signalId, executionId, idempotency, "REJECTED", follow.reason, now);
+            this.audit("SIGNAL", signal.signalId, "REJECTED", follow.reason, now, { accountId, ...follow });
+            this.updateCheckpoint(accountId, signal, now);
+            this.database.exec("COMMIT");
+            return executionId;
+          }
+        }
         if (preapprovedRisk) {
           this.assertPreapprovedBuyRiskAmount(preapprovedRisk.riskDecisionId, capital.amount);
         }
@@ -1472,13 +1530,29 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const amountPolicy = calculatedAmount !== null
       && rules !== null
       && rules.buyFirstEntryMinimumAmountMicros > 0n
-      ? applyBuyAmountPolicy({
-        calculatedAmountMicros: calculatedAmount,
-        minimumLiftEligibility: this.buyMinimumLiftEligibility(accountId, signal.assetId),
-        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
-        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
-        availableCashCapMicros: available,
-      })
+      ? rules.smallFollowBuyPolicyEnabled
+        ? (() => {
+          const policyClass = this.buyPolicyClass(signal);
+          return policyClass === null ? null : applyBuyAmountPolicy({
+            calculatedAmountMicros: calculatedAmount,
+            policyClass,
+            firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+            marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+            availableCashCapMicros: available,
+          });
+        })()
+        : applyPriorBuyAmountPolicy({
+          calculatedAmountMicros: calculatedAmount,
+          minimumLiftEligibility: buyMinimumLiftEligibility({
+            database: this.database,
+            mode: "PAPER",
+            accountId,
+            assetId: signal.assetId,
+          }),
+          firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+          marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+          availableCashCapMicros: available,
+        })
       : null;
     return {
       amount: amountPolicy ? BigInt(amountPolicy.finalAmountMicros) : calculatedAmount,
@@ -1503,17 +1577,14 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  private buyMinimumLiftEligibility(
-    accountId: string,
-    assetId: string,
-    excludeExecutionId?: string,
-  ): BuyMinimumLiftEligibility {
-    return buyMinimumLiftEligibility({
-      database: this.database,
-      mode: "PAPER",
-      accountId,
-      assetId,
-      ...(excludeExecutionId ? { excludeExecutionId } : {}),
+  private buyPolicyClass(signal: PaperSignalEnvelope): BuyAmountPolicyClass | null {
+    return classifyTargetBuyRatio({
+      ratioNumerator: signal.context?.capitalSizingRatio?.ratioNumerator ?? null,
+      ratioDenominator: signal.context?.capitalSizingRatio?.ratioDenominator ?? null,
+      legacyRatioPpm: signal.context?.targetTradeCapitalRatioPpm
+        ?? signal.capitalDecision?.ratioPpm
+        ?? null,
+      fixedFallback: signal.capitalDecision?.confidence === "MEDIUM",
     });
   }
 
@@ -1643,26 +1714,34 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       } : {}),
       maximumBuyPriceUnits: rules.buyMaximumPriceUnits,
     });
-    const lowerPriceUnits = rules.buyPriceImprovementAllowed
-      ? 0n
-      : BigInt(bounds.price_limit_lower_units);
+    const executableUpper = executableBuyPriceUpperUnits(dynamicUpper, parsedConstraints.tickSizeUnits);
+    const lowerPriceUnits = BigInt(bounds.price_limit_lower_units);
+    const matchingLowerPriceUnits = rules.smallFollowBuyPolicyEnabled ? 0n : lowerPriceUnits;
     const bestAsk = bestExecutionAskPriceUnits(book.asks);
     const minimumQuote = quoteExecutionBuySize({
       asks: book.asks,
       requestedSizeMicros: parsedConstraints.normalizedMinOrderSizeMicros,
-      lowerPriceUnits,
-      upperPriceUnits: dynamicUpper,
+      lowerPriceUnits: matchingLowerPriceUnits,
+      upperPriceUnits: executableUpper,
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
     });
-    const minimumLiftEligibility = this.wasWaitingBuyReducedByTargetExit(
-      activeExecution.paper_execution_id,
-    ) ? "NONE" : this.buyMinimumLiftEligibility(
-        activeExecution.paper_account_id,
-        activeExecution.asset_id,
-        activeExecution.paper_execution_id,
-      );
-    const minimumLiftEligible = minimumLiftEligibility !== "NONE";
+    const policyClass = activeExecution.signal_id
+      ? this.buyPolicyClass(this.loadSignal(activeExecution.signal_id))
+      : null;
+    const waitingBuyReduced = this.wasWaitingBuyReducedByTargetExit(activeExecution.paper_execution_id);
+    const legacyMinimumLiftEligibility = rules.smallFollowBuyPolicyEnabled
+      ? null
+      : buyMinimumLiftEligibility({
+        database: this.database,
+        mode: "PAPER",
+        accountId: activeExecution.paper_account_id,
+        assetId: activeExecution.asset_id,
+        excludeExecutionId: activeExecution.paper_execution_id,
+      });
+    const minimumLiftEligible = !waitingBuyReduced && (rules.smallFollowBuyPolicyEnabled
+      ? policyClass === "SMALL_BUY"
+      : legacyMinimumLiftEligibility !== "NONE");
     const executableMinimum = minimumQuote.complete ? {
       executableMinimumNotionalMicros: BigInt(minimumQuote.filledNotionalMicros),
       executableMinimumTotalMicros: BigInt(minimumQuote.filledNotionalMicros)
@@ -1689,11 +1768,11 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       );
       return "REJECTED";
     }
-    if (!minimumQuote.complete && minimumLiftEligible) {
+    if (!minimumQuote.complete) {
       const reason = buyNoFillReason({
         bestAskPriceUnits: bestAsk,
-        lowerPriceUnits,
-        upperPriceUnits: dynamicUpper,
+        lowerPriceUnits: matchingLowerPriceUnits,
+        upperPriceUnits: executableUpper,
         inRangeReason: "BUY_MARKET_MINIMUM_LIQUIDITY_UNAVAILABLE",
       });
       this.recordNoFillAttempt(
@@ -1742,7 +1821,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const matched = matchPaperBuy({
       asks: book.asks,
       reservationMicros: BigInt(constraint.normalizedOrderAmountMicros!),
-      lowerPriceUnits,
+      lowerPriceUnits: matchingLowerPriceUnits,
       upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
       feeRatePpm: BigInt(fee.feeRatePpm!),
       feeExponent: fee.exponent!,
@@ -1755,6 +1834,41 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       });
       this.recordNoFillAttempt(activeExecution, book, fee, reason, age, constraint);
       return "WAITING_EXECUTION";
+    }
+    if (rules.smallFollowBuyPolicyEnabled) {
+      const feeInclusiveVwap = feeInclusiveBuyVwapPriceUnits(matched);
+      if (feeInclusiveVwap === null) throw new Error("PAPER_BUY_FEE_INCLUSIVE_VWAP_UNAVAILABLE");
+      if (feeInclusiveVwap > rules.buyMaximumPriceUnits) {
+        this.rejectBuyForMarketConstraint(
+          activeExecution,
+          book,
+          fee,
+          age,
+          replaceMarketConstraintResult(constraint, "REJECT", "BUY_EXECUTION_VWAP_ABOVE_MAX"),
+        );
+        return "REJECTED";
+      }
+      if (feeInclusiveVwap > dynamicUpper) {
+        this.recordNoFillAttempt(
+          activeExecution,
+          book,
+          fee,
+          "BUY_EXECUTION_VWAP_ABOVE_LIMIT",
+          age,
+          replaceMarketConstraintResult(constraint, "PASS", "BUY_EXECUTION_VWAP_ABOVE_LIMIT"),
+        );
+        return "WAITING_EXECUTION";
+      }
+      if (feeInclusiveVwap < lowerPriceUnits) {
+        this.rejectBuyForMarketConstraint(
+          activeExecution,
+          book,
+          fee,
+          age,
+          replaceMarketConstraintResult(constraint, "REJECT", "BUY_EXECUTION_VWAP_BELOW_LIMIT"),
+        );
+        return "REJECTED";
+      }
     }
     const now = this.now().toISOString();
     const finalState: PaperExecutionState = matched.complete ? "EXECUTED" : "PARTIALLY_EXECUTED";
@@ -1874,13 +1988,25 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   ): "LIFTED" | "NOT_ELIGIBLE" | "REJECTED" {
     const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
     if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
+    const signal = execution.signal_id ? this.loadSignal(execution.signal_id) : null;
+    if (!signal) return "NOT_ELIGIBLE";
+    const policyClass = this.buyPolicyClass(signal);
+    const waitingBuyReduced = this.wasWaitingBuyReducedByTargetExit(execution.paper_execution_id);
+    const legacyMinimumLiftEligibility = rules.smallFollowBuyPolicyEnabled
+      ? null
+      : buyMinimumLiftEligibility({
+        database: this.database,
+        mode: "PAPER",
+        accountId: execution.paper_account_id,
+        assetId: execution.asset_id,
+        excludeExecutionId: execution.paper_execution_id,
+      });
     if (
       requiredAmount > rules.buyMarketMinimumAutoLiftCapMicros
-      || this.buyMinimumLiftEligibility(
-        execution.paper_account_id,
-        execution.asset_id,
-        execution.paper_execution_id,
-      ) === "NONE"
+      || waitingBuyReduced
+      || (rules.smallFollowBuyPolicyEnabled
+        ? policyClass !== "SMALL_BUY"
+        : legacyMinimumLiftEligibility === "NONE")
     ) return "NOT_ELIGIBLE";
     if (!execution.signal_id || !execution.risk_decision_id) {
       throw new Error("PAPER_BUY_AUTO_LIFT_CONTEXT_UNAVAILABLE");
@@ -1892,16 +2018,23 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       throw new Error("PAPER_BUY_AUTO_LIFT_SIZING_EVIDENCE_UNAVAILABLE");
     }
     const capitalSizing = JSON.parse(priorRisk.capital_sizing_decision_json) as BuyCapitalSizingDecision;
-    const signal = this.loadSignal(execution.signal_id);
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const minimumLiftEligibility = this.buyMinimumLiftEligibility(
-        execution.paper_account_id,
-        execution.asset_id,
-        execution.paper_execution_id,
-      );
-      if (minimumLiftEligibility === "NONE") {
+      const lockedPolicyClass = this.buyPolicyClass(signal);
+      const lockedLegacyEligibility = rules.smallFollowBuyPolicyEnabled
+        ? null
+        : buyMinimumLiftEligibility({
+          database: this.database,
+          mode: "PAPER",
+          accountId: execution.paper_account_id,
+          assetId: execution.asset_id,
+          excludeExecutionId: execution.paper_execution_id,
+        });
+      if (this.wasWaitingBuyReducedByTargetExit(execution.paper_execution_id)
+        || (rules.smallFollowBuyPolicyEnabled
+          ? lockedPolicyClass !== "SMALL_BUY"
+          : lockedLegacyEligibility === "NONE")) {
         this.database.exec("COMMIT");
         return "NOT_ELIGIBLE";
       }
@@ -1919,13 +2052,21 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         this.database.exec("COMMIT");
         return "NOT_ELIGIBLE";
       }
-      const amountPolicy = applyBuyAmountPolicy({
-        calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros!),
-        minimumLiftEligibility,
-        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
-        marketMinimumAmountMicros: requiredAmount,
-        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
-      });
+      const amountPolicy = rules.smallFollowBuyPolicyEnabled
+        ? applyBuyAmountPolicy({
+          calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros!),
+          policyClass: "SMALL_BUY",
+          firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+          marketMinimumAmountMicros: requiredAmount,
+          marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+        })
+        : applyPriorBuyAmountPolicy({
+          calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros!),
+          minimumLiftEligibility: lockedLegacyEligibility!,
+          firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+          marketMinimumAmountMicros: requiredAmount,
+          marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+        });
       const finalAmount = BigInt(amountPolicy.finalAmountMicros);
       const risk = this.riskManager.evaluate({
         mode: this.mode,
@@ -2510,12 +2651,15 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     age: number,
     evidence: MarketOrderConstraintEvidence,
   ): PaperExecutionState {
+    const rules = registeredExecutionRules(this.database, execution.ruleset_hash);
+    if (!rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${execution.ruleset_hash}`);
     if (
-      execution.execution_type === "TARGET_SELL"
+      !rules.smallFollowBuyPolicyEnabled
+      && execution.execution_type === "TARGET_SELL"
       && evidence.result === "REJECT"
       && TERMINAL_TARGET_SELL_CONSTRAINT_REASONS.has(evidence.reason)
     ) {
-      return this.cancelUntradeableTargetSell(execution, book, fee, age, evidence);
+      return this.cancelUntradeableHistoricalTargetSell(execution, book, fee, age, evidence);
     }
     const matchingEvidence = this.database.prepare(
       `SELECT 1 matching
@@ -2551,7 +2695,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     return execution.state;
   }
 
-  private cancelUntradeableTargetSell(
+  private cancelUntradeableHistoricalTargetSell(
     execution: ExecutionRow,
     book: PaperOrderbookSnapshot,
     fee: PaperFeeSnapshot,

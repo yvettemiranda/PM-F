@@ -596,9 +596,14 @@ function installHistoricalStopRuleset(
   };
   snapshot.versions.rulesetVersion = "test-historical-stop-v1";
   snapshot.versions.configVersion = "test-historical-config-v1";
+  snapshot.rules.buyPriceMinRatioPpm = 980_000;
+  snapshot.rules.buyPriceMaxRatioPpm = 1_020_000;
+  snapshot.rules.buyPriceImprovementAllowed = true;
+  snapshot.rules.buyPriceMinimumTickSteps = 2;
   snapshot.rules.stopTriggerRatioPpm = input.triggerRatioPpm;
   snapshot.rules.liveStopLossRatioPpm = input.triggerRatioPpm;
   snapshot.rules.stopSellMaxSlippagePpm = input.maxSlippagePpm;
+  delete snapshot.rules.smallFollowBuyMaxCount;
   const snapshotJson = stableJson(snapshot);
   const rulesetHash = createHash("sha256").update(snapshotJson).digest("hex");
   const configVersion = "test-historical-config-v1";
@@ -631,8 +636,8 @@ function installHistoricalStopRuleset(
     ) VALUES (?, 'test-historical-stop-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   ).run(
     rulesetHash,
-    RULESET.buyPriceMinRatioPpm,
-    RULESET.buyPriceMaxRatioPpm,
+    980_000,
+    1_020_000,
     input.triggerRatioPpm,
     RULESET.waitRatioPpm,
     RULESET.maxWaitMs,
@@ -1306,7 +1311,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("uses the same two-tick asymmetric BUY window as Paper", async () => {
+  it("uses the same 105 percent BUY ceiling as Paper", async () => {
     const env = setup();
     const signal = insertSignalAndRisk(env.databasePath, env.targetId, {
       signalId: "live-buy-two-ticks-above-target",
@@ -1332,11 +1337,115 @@ describe("LiveExecutor", () => {
       riskDecisionId: "risk-live-buy-two-ticks-above-target",
     });
 
-    expect(result).toMatchObject({ state: "EXECUTED" });
+    expect(result).toMatchObject({ state: "WAITING_EXECUTION" });
     executor.close();
   });
 
-  it("accepts the same BUY price improvement below target as Paper", async () => {
+  it("does not apply the current fee-inclusive price band to a historical Live BUY", async () => {
+    const env = setup({
+      historicalStopRules: { triggerRatioPpm: 600_000, maxSlippagePpm: 200_000 },
+    });
+    const executor = liveExecutor(env.databasePath, {
+      signer: new MutatingFakeSigner((payload) => {
+        const size = (BigInt(String(payload.sizeMicros)) * 99n) / 100n;
+        const amount = (size * BigInt(String(payload.priceUnits))) / 1_000_000_000_000_000_000n;
+        return { orderAmountMicros: amount.toString(), orderSizeMicros: size.toString() };
+      }),
+      marketDataProvider: new NonZeroFeeMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.52", size: "1000" }],
+        bids: [{ price: "0.51", size: "1000" }],
+      }),
+    });
+
+    const result = await executor.executeBuy({
+      accountId,
+      signal: env.signal,
+      context: env.context,
+      riskDecisionId: "risk-live-buy",
+    });
+
+    expect(result.state).toBe("EXECUTED");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT outcome,reason FROM live_market_checks WHERE live_execution_id=?",
+    ).get(result.executionId)).toEqual({
+      outcome: "ALLOW",
+      reason: "LIVE_BUY_MARKET_CHECK_ALLOW",
+    });
+    database.close();
+    executor.close();
+  });
+
+  it("waits when fees push the current Live BUY VWAP above the inclusive 105-percent boundary", async () => {
+    const env = setup();
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new NonZeroFeeMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.525", size: "1000" }],
+        bids: [{ price: "0.51", size: "1000" }],
+        tickSize: "0.001",
+      }),
+    });
+
+    const result = await executor.executeBuy({
+      accountId,
+      signal: env.signal,
+      context: env.context,
+      riskDecisionId: "risk-live-buy",
+    });
+
+    expect(result.state).toBe("WAITING_EXECUTION");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT outcome,reason FROM live_market_checks WHERE live_execution_id=?",
+    ).get(result.executionId)).toEqual({
+      outcome: "WAIT",
+      reason: "BUY_EXECUTION_VWAP_ABOVE_LIMIT",
+    });
+    expect(database.prepare(
+      "SELECT count(*) count FROM live_orders WHERE live_execution_id=?",
+    ).get(result.executionId)).toEqual({ count: 0 });
+    database.close();
+    executor.close();
+  });
+
+  it("uses the tick-rounded BUY ceiling for the Live market-minimum precheck", async () => {
+    const env = setup();
+    const signal = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-tick-rounded-market-minimum",
+      riskDecisionId: "risk-live-tick-rounded-market-minimum",
+      decision: "ALLOW",
+      requestedAmountMicros: "5000000",
+      requestedSizeMicros: null,
+      targetPriceUnits: "100000000000000000",
+    });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.10", size: "4" }, { price: "0.105", size: "6" }],
+        bids: [{ price: "0.09", size: "1000" }],
+        minOrderSize: "10",
+        tickSize: "0.01",
+      }),
+    });
+    const result = await executor.executeBuy({
+      accountId,
+      signal: signal.signal,
+      context: signal.context,
+      riskDecisionId: "risk-live-tick-rounded-market-minimum",
+    });
+    expect(result.state).toBe("WAITING_EXECUTION");
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT reason FROM live_market_checks WHERE live_execution_id=?",
+    ).get(result.executionId)).toEqual({ reason: "BUY_MARKET_MINIMUM_LIQUIDITY_UNAVAILABLE" });
+    expect(database.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 0 });
+    database.close();
+    executor.close();
+  });
+
+  it("abandons the same below-90-percent BUY as Paper", async () => {
     const env = setup();
     const signal = insertSignalAndRisk(env.databasePath, env.targetId, {
       signalId: "live-buy-below-target",
@@ -1362,7 +1471,7 @@ describe("LiveExecutor", () => {
       riskDecisionId: "risk-live-buy-below-target",
     });
 
-    expect(result).toMatchObject({ state: "EXECUTED" });
+    expect(result).toMatchObject({ state: "REJECTED" });
     executor.close();
   });
 
@@ -1433,7 +1542,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("rejects a Live target BUY above 0.95 even if a prebuilt test Risk Decision says ALLOW", async () => {
+  it("allows a target reference above 0.95 when the actual Live execution is at or below 0.95", async () => {
     const env = setup();
     const high = insertSignalAndRisk(env.databasePath, env.targetId, {
       signalId: "live-target-price-over-cap",
@@ -1443,19 +1552,25 @@ describe("LiveExecutor", () => {
       requestedSizeMicros: null,
       targetPriceUnits: "951000000000000000",
     });
-    const executor = liveExecutor(env.databasePath);
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [{ price: "0.94", size: "1000" }],
+        bids: [{ price: "0.93", size: "1000" }],
+      }),
+    });
     const result = await executor.executeBuy({
       accountId,
       signal: high.signal,
       context: high.context,
       riskDecisionId: "risk-live-target-price-over-cap",
     });
-    expect(result.state).toBe("REJECTED");
+    expect(result.state).toBe("EXECUTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     expect(db.prepare("SELECT reason FROM live_executions WHERE live_execution_id=?").get(result.executionId))
-      .toEqual({ reason: "TARGET_BUY_PRICE_ABOVE_MAX" });
+      .toEqual({ reason: "FAK_FILLED" });
     expect(db.prepare("SELECT count(*) count FROM live_orders WHERE live_execution_id=?").get(result.executionId))
-      .toEqual({ count: 0 });
+      .toEqual({ count: 1 });
     db.close();
     executor.close();
   });
@@ -1761,7 +1876,7 @@ describe("LiveExecutor", () => {
     const checks = JSON.parse((db.prepare(
       `SELECT checks_json FROM risk_decisions WHERE risk_decision_id=?`,
     ).get(result!.riskDecisionId) as { checks_json: string }).checks_json) as Array<{ name: string; detail?: string }>;
-    expect(checks.find((check) => check.name === "buy_amount_policy")?.detail).toContain("FIRST_ENTRY_MINIMUM_APPLIED");
+    expect(checks.find((check) => check.name === "buy_amount_policy")?.detail).toContain("SMALL_BUY_MINIMUM_APPLIED");
     db.close();
     consumer.close();
     executor.close();
@@ -1962,7 +2077,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("does not inherit the minimum when the opening Live BUY was not amplified", async () => {
+  it("applies the small-BUY minimum after a proportional opening Live BUY", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -1983,14 +2098,14 @@ describe("LiveExecutor", () => {
 
     const [result] = await consumer.consumeAvailableSignals(accountId);
 
-    expect(result).toMatchObject({ signalId: later.signal.signalId, state: "REJECTED" });
+    expect(result).toMatchObject({ signalId: later.signal.signalId, state: "EXECUTED" });
     const positions = await executor.getPosition({ accountId, assetId }) as unknown[];
-    expect(positions).toHaveLength(1);
+    expect(positions).toHaveLength(2);
     consumer.close();
     executor.close();
   });
 
-  it("inherits the 1-to-5 pUSD minimum policy after an amplified first Live BUY fills", async () => {
+  it("applies the 1-to-5 pUSD policy to every small Live follow BUY", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2022,7 +2137,7 @@ describe("LiveExecutor", () => {
     const policy = JSON.parse(checks.find((check) => check.name === "buy_amount_policy")!.detail!);
     expect(policy).toMatchObject({
       result: "LIFTED",
-      minimumLiftEligibility: "AMPLIFIED_POSITION",
+      policyClass: "SMALL_BUY",
       finalAmountMicros: "2500000",
     });
     expect(await executor.getPosition({ accountId, assetId })).toHaveLength(2);
@@ -2031,7 +2146,47 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("does not auto-lift a second Live BUY while the first entry remains pending", async () => {
+  it("allows nine small Live follow BUY fills and rejects the tenth", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "1",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+
+    for (let index = 1; index <= 10; index += 1) {
+      const inserted = insertSignalAndRisk(env.databasePath, env.targetId, {
+        signalId: `live-small-follow-limit-${index}`,
+        riskDecisionId: `unused-live-small-follow-limit-${index}`,
+        decision: "ALLOW",
+        capitalRatioPpm: "1",
+        createdAt: `2026-07-09T00:00:${String(index).padStart(2, "0")}.000Z`,
+      });
+      const [result] = await consumer.consumeAvailableSignals(accountId);
+      expect(result).toMatchObject({
+        signalId: inserted.signal.signalId,
+        state: index <= 9 ? "EXECUTED" : "REJECTED",
+      });
+      if (index === 10) {
+        const database = new DatabaseSync(env.databasePath, { readOnly: true });
+        expect(database.prepare(
+          "SELECT reason FROM live_executions WHERE live_execution_id=?",
+        ).get(result!.executionId)).toEqual({ reason: "SMALL_FOLLOW_BUY_LIMIT_REACHED" });
+        database.close();
+      }
+    }
+
+    const positions = await executor.getPosition({ accountId, assetId }) as unknown[];
+    expect(positions).toHaveLength(10);
+    consumer.close();
+    executor.close();
+  });
+
+  it("keeps a second small Live BUY independent while the first remains pending", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2053,10 +2208,10 @@ describe("LiveExecutor", () => {
 
     const [result] = await consumer.consumeAvailableSignals(accountId);
 
-    expect(result).toMatchObject({ signalId: second.signal.signalId, state: "REJECTED" });
+    expect(result).toMatchObject({ signalId: second.signal.signalId, state: "WAITING_EXECUTION" });
     expect(await executor.getPosition({ accountId, assetId })).toEqual([]);
     expect(await executor.getBalance({ accountId })).toMatchObject({
-      reservedBalanceMicros: "1000000",
+      reservedBalanceMicros: "2000000",
     });
     consumer.close();
     executor.close();
@@ -2364,7 +2519,7 @@ describe("LiveExecutor", () => {
     const results = await consumer.consumeAvailableSignals(accountId);
     expect(results.map((result) => ({ signalId: result.signalId, state: result.state }))).toEqual([
       { signalId: "live-poison-invalid-size", state: "QUARANTINED" },
-      { signalId: "live-missing-context", state: "REJECTED" },
+      { signalId: "live-missing-context", state: "QUARANTINED" },
       { signalId: valid.signal.signalId, state: "EXECUTED" },
     ]);
     expect(await consumer.consumeAvailableSignals(accountId)).toEqual([]);
@@ -2373,11 +2528,11 @@ describe("LiveExecutor", () => {
       "SELECT reason FROM live_signal_quarantines WHERE signal_id='live-poison-invalid-size'",
     ).get() as { reason: string }).reason).toBe("SIGNAL_TARGET_SIZE_INVALID");
     expect((db.prepare(
-      "SELECT consumption_result FROM live_signal_consumptions WHERE signal_id='live-missing-context'",
-    ).get() as { consumption_result: string }).consumption_result).toBe("REJECTED");
-    expect((db.prepare(
+      "SELECT reason FROM live_signal_quarantines WHERE signal_id='live-missing-context'",
+    ).get() as { reason: string }).reason).toBe("BUY_FOLLOW_RATIO_EVIDENCE_UNAVAILABLE:live-missing-context");
+    expect(db.prepare(
       "SELECT state FROM live_executions WHERE signal_id='live-missing-context'",
-    ).get() as { state: string }).state).toBe("REJECTED");
+    ).get()).toBeUndefined();
     db.close();
     consumer.close();
     executor.close();
@@ -2567,8 +2722,10 @@ describe("LiveExecutor", () => {
       "SELECT signal_id,status,current_size_micros FROM live_positions ORDER BY created_at,live_position_id",
     ).all() as unknown as Array<{ signal_id: string; status: string; current_size_micros: string }>;
     expect(positions[0]).toEqual({ signal_id: "live-buy", status: "CLOSED", current_size_micros: "0" });
-    expect(positions[1]).toMatchObject({ signal_id: "live-runner-buy-after-stop", status: "OPEN" });
-    expect(BigInt(positions[1]!.current_size_micros)).toBeGreaterThan(0n);
+    expect(positions).toHaveLength(1);
+    expect(db.prepare(
+      "SELECT state,reason FROM live_executions WHERE signal_id='live-runner-buy-after-stop'",
+    ).get()).toEqual({ state: "REJECTED", reason: "STOP_LOSS_REENTRY_BLOCKED" });
     db.close();
     consumer.close();
     executor.close();

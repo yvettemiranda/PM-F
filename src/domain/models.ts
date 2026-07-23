@@ -23,6 +23,9 @@ export interface PublicProfile {
 export interface PublicTrade {
   proxyWallet: string;
   transactionHash: string;
+  /** Present only when an official Polygon OrderFilled log proves the maker
+   * order identity. Data API rows do not expose this field. */
+  orderHash?: string;
   conditionId: string;
   asset: string;
   side: "BUY" | "SELL";

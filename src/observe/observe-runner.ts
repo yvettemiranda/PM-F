@@ -5,7 +5,7 @@ import {
   sourceEventOccurrences,
 } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
-import { decimalToScaled, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
+import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import type { PublicTrade } from "../domain/models.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
@@ -46,6 +46,53 @@ function crossSourceTradeLocator(trade: {
     decimalToScaled(trade.size, SHARE_SCALE_DIGITS).toString(),
     String(trade.timestamp),
   ].join("\u001f");
+}
+
+function crossSourceTradeGroupLocator(trade: {
+  transactionHash: string;
+  conditionId: string;
+  asset: string;
+  side: string;
+  timestamp: number;
+}): string {
+  return [
+    trade.transactionHash.toLowerCase(),
+    trade.conditionId.toLowerCase(),
+    trade.asset,
+    trade.side,
+    String(trade.timestamp),
+  ].join("\u001f");
+}
+
+function aggregatedTradeEconomics(trades: readonly PublicTrade[]): {
+  sizeMicros: bigint;
+  priceTenDigits: bigint;
+} {
+  let sizeMicros = 0n;
+  let priceSizeNumerator = 0n;
+  for (const trade of trades) {
+    const size = decimalToScaled(trade.size, SHARE_SCALE_DIGITS);
+    if (size <= 0n) throw new Error("CROSS_SOURCE_TRADE_SIZE_INVALID");
+    sizeMicros += size;
+    priceSizeNumerator += decimalToScaled(trade.price, PRICE_SCALE_DIGITS) * size;
+  }
+  if (sizeMicros <= 0n) throw new Error("CROSS_SOURCE_TRADE_SIZE_INVALID");
+  const priceRoundingDivisor = 10n ** BigInt(PRICE_SCALE_DIGITS - 10);
+  const denominator = sizeMicros * priceRoundingDivisor;
+  return {
+    sizeMicros,
+    priceTenDigits: (priceSizeNumerator + denominator / 2n) / denominator,
+  };
+}
+
+function sameAggregatedTradeEconomics(
+  left: readonly PublicTrade[],
+  right: readonly PublicTrade[],
+): boolean {
+  const leftEconomics = aggregatedTradeEconomics(left);
+  const rightEconomics = aggregatedTradeEconomics(right);
+  return leftEconomics.sizeMicros === rightEconomics.sizeMicros
+    && leftEconomics.priceTenDigits === rightEconomics.priceTenDigits;
 }
 
 function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -292,7 +339,9 @@ export class ObserveOnlyRunner {
       (snapshot.polygonOrderFilled?.trades ?? [])
         .filter((trade) => trade.timestamp > baselineSecond),
     );
-    const polygonIdentities = new Map<string, Array<{ sourceEventKey: string; trade: PublicTrade }>>();
+    type CrossSourceIdentity = { sourceEventKey: string; trade: PublicTrade };
+    const polygonIdentities = new Map<string, CrossSourceIdentity[]>();
+    const polygonGroups = new Map<string, CrossSourceIdentity[]>();
     for (const event of [
       ...storedEvents.filter((item) => item.sourceType === "POLYGON_ORDER_FILLED" && item.trade),
       ...polygonTradeOccurrences.map((occurrence): ObserveEvent => ({
@@ -312,16 +361,15 @@ export class ObserveOnlyRunner {
         group.push({ sourceEventKey: event.sourceEventKey, trade });
       }
       polygonIdentities.set(locator, group);
+      const groupLocator = crossSourceTradeGroupLocator(trade);
+      const transactionGroup = polygonGroups.get(groupLocator) ?? [];
+      if (!transactionGroup.some((item) => item.sourceEventKey === event.sourceEventKey)) {
+        transactionGroup.push({ sourceEventKey: event.sourceEventKey, trade });
+      }
+      polygonGroups.set(groupLocator, transactionGroup);
     }
-    const apiIdentities = new Map<string, { sourceEventKey: string; trade: PublicTrade }>();
-    for (const occurrence of [...multiplicity.trades, ...multiplicity.activityTrades]) {
-      apiIdentities.set(occurrence.sourceEventKey, occurrence);
-    }
-    for (const apiIdentity of apiIdentities.values()) {
-      const polygonGroup = polygonIdentities.get(crossSourceTradeLocator(apiIdentity.trade));
-      if (!polygonGroup || polygonGroup.length === 0) continue;
-      if (polygonGroup.some((item) => item.sourceEventKey === apiIdentity.sourceEventKey)) continue;
-      const polygonIdentity = polygonGroup[0]!;
+    const crossSourceAliases = new Map<string, string>();
+    const failCrossSourceMismatch = (polygonIdentity: CrossSourceIdentity, apiIdentity: CrossSourceIdentity): never => {
       const detectedAt = this.now().toISOString();
       this.store.failCrossSourceTradeIdentityMismatch({
         observeRunId: started.observeRunId,
@@ -333,7 +381,60 @@ export class ObserveOnlyRunner {
         detectedAt,
       });
       throw new Error(`POLYGON_DATA_API_TRADE_IDENTITY_MISMATCH:${apiIdentity.trade.transactionHash}`);
-    }
+    };
+    const reconcileApiSource = (apiOccurrences: readonly CrossSourceIdentity[]): void => {
+      const apiGroups = new Map<string, CrossSourceIdentity[]>();
+      for (const occurrence of apiOccurrences) {
+        const locator = crossSourceTradeGroupLocator(occurrence.trade);
+        const group = apiGroups.get(locator) ?? [];
+        group.push(occurrence);
+        apiGroups.set(locator, group);
+      }
+      for (const [locator, apiGroup] of apiGroups) {
+        const polygonGroup = polygonGroups.get(locator);
+        if (!polygonGroup || polygonGroup.length === 0) continue;
+
+        const allExact = apiGroup.every((apiIdentity) => {
+          const exact = polygonIdentities.get(crossSourceTradeLocator(apiIdentity.trade))
+            ?.find((polygonIdentity) => polygonIdentity.sourceEventKey === apiIdentity.sourceEventKey);
+          if (!exact) return false;
+          crossSourceAliases.set(apiIdentity.sourceEventKey, exact.sourceEventKey);
+          return true;
+        });
+        if (allExact) continue;
+
+        // Polygon can prove that multiple public Data API rows are one economic
+        // execution only when the transaction contains exactly one decoded
+        // target order. Multiple order hashes deliberately remain separate.
+        if (
+          polygonGroup.length === 1
+          && polygonGroup[0]!.trade.orderHash
+          && sameAggregatedTradeEconomics(
+            apiGroup.map((item) => item.trade),
+            [polygonGroup[0]!.trade],
+          )
+        ) {
+          for (const apiIdentity of apiGroup) {
+            crossSourceAliases.set(apiIdentity.sourceEventKey, polygonGroup[0]!.sourceEventKey);
+          }
+          continue;
+        }
+        failCrossSourceMismatch(polygonGroup[0]!, apiGroup.find(
+          (apiIdentity) => !crossSourceAliases.has(apiIdentity.sourceEventKey),
+        ) ?? apiGroup[0]!);
+      }
+    };
+    // Reconcile each public endpoint independently. Trades may expose component
+    // fills while Activity exposes the already-aggregated economic execution.
+    reconcileApiSource(multiplicity.trades);
+    reconcileApiSource(multiplicity.activityTrades);
+
+    const canonicalCrossSourceKey = (key: string): string => crossSourceAliases.get(key) ?? key;
+    const confirmedPolygonKeys = new Set(
+      multiplicity.activityTrades
+        .map((item) => crossSourceAliases.get(item.sourceEventKey))
+        .filter((key): key is string => key !== undefined),
+    );
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
     for (const occurrence of polygonTradeOccurrences) {
       if (occurrence.occurrenceIndex > 0) confirmedRepeatedKeys.add(occurrence.sourceEventKey);
@@ -360,12 +461,12 @@ export class ObserveOnlyRunner {
         sourceTimestamp: trade.timestamp,
         isGap: eventIsGap(trade.timestamp),
         isCombo: false,
-        activityConfirmed: false,
+        activityConfirmed: confirmedPolygonKeys.has(sourceEventKey),
         trade,
       })),
       ...multiplicity.trades
         .map(({ trade, sourceEventKey }): ObserveEvent => ({
-          sourceEventKey,
+          sourceEventKey: canonicalCrossSourceKey(sourceEventKey),
           sourceType: "DATA_API_TRADE",
           sourceTimestamp: trade.timestamp,
           isGap: eventIsGap(trade.timestamp),
@@ -384,7 +485,7 @@ export class ObserveOnlyRunner {
             return [];
           }
           return [{
-            sourceEventKey,
+            sourceEventKey: canonicalCrossSourceKey(sourceEventKey),
             sourceType: "DATA_API_TRADE",
             sourceTimestamp: trade.timestamp,
             isGap: eventIsGap(trade.timestamp),
@@ -520,12 +621,16 @@ export class ObserveOnlyRunner {
     );
     const signalCandidates = projection.signals.filter((candidate) => !existingSignalIds.has(candidate.signalId));
     const currentTradeKeys = new Set([
-      ...multiplicity.trades.map((item) => item.sourceEventKey),
+      ...multiplicity.trades.map((item) => canonicalCrossSourceKey(item.sourceEventKey)),
       ...polygonTradeOccurrences.map((item) => item.sourceEventKey),
     ]);
-    const currentActivityKeys = new Set(multiplicity.activityTrades.map((item) => item.sourceEventKey));
+    const currentActivityKeys = new Set(
+      multiplicity.activityTrades.map((item) => canonicalCrossSourceKey(item.sourceEventKey)),
+    );
     const ambiguousKeys = new Set(
-      multiplicity.ambiguousRepeatedKeys.filter((key) => !confirmedRepeatedKeys.has(key)),
+      multiplicity.ambiguousRepeatedKeys.filter(
+        (key) => !confirmedRepeatedKeys.has(key) && !crossSourceAliases.has(key),
+      ),
     );
     for (const event of allEvents) {
       if (

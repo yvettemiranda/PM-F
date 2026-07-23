@@ -97,6 +97,13 @@ function floorToStep(value: bigint, step: bigint): bigint {
   return (value / step) * step;
 }
 
+export function executableBuyPriceUpperUnits(upperPriceUnits: bigint, tickSizeUnits: bigint): bigint {
+  if (upperPriceUnits <= 0n || tickSizeUnits <= 0n || tickSizeUnits >= PRICE_SCALE) {
+    throw new Error("BUY_LIMIT_PRICE_INPUT_INVALID");
+  }
+  return floorToStep(upperPriceUnits, tickSizeUnits);
+}
+
 function ceilToStep(value: bigint, step: bigint): bigint {
   return ceilDivide(value, step) * step;
 }
@@ -183,7 +190,7 @@ export function evaluateBuyMarketConstraint(input: {
   const cappedUpperPrice = input.upperPriceUnits < maximumBuyPrice
     ? input.upperPriceUnits
     : maximumBuyPrice;
-  const effectivePrice = (cappedUpperPrice / parsed.tickSizeUnits) * parsed.tickSizeUnits;
+  const effectivePrice = executableBuyPriceUpperUnits(cappedUpperPrice, parsed.tickSizeUnits);
   if (effectivePrice <= 0n) return unavailable("BUY_LIMIT_PRICE_BELOW_TICK");
   const sharePrecision = Math.min(SHARE_SCALE_DIGITS, parsed.amountScaleDigits);
   const shareStep = 10n ** BigInt(SHARE_SCALE_DIGITS - sharePrecision);

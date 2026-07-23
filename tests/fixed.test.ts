@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decimalToScaled, PRICE_SCALE_DIGITS, scaledToDecimal } from "../src/domain/fixed.js";
-import { matchPaperBuy } from "../src/paper/matching.js";
+import { feeInclusiveBuyVwapPriceUnits, matchPaperBuy } from "../src/paper/matching.js";
 import { conservativeClobBuyFeeMicros, roundedClobPlatformFeeMicros } from "../src/execution/clob-fee.js";
 
 describe("fixed-point decimals", () => {
@@ -39,6 +39,21 @@ describe("paper buy fixed-point rounding", () => {
       notionalMicros: "1",
     }]);
     expect(matched.complete).toBe(true);
+  });
+
+  it("uses the charged level notionals when computing the fee-inclusive BUY VWAP", () => {
+    const matched = matchPaperBuy({
+      asks: [{ price: "0.525", size: "5.000001" }],
+      reservationMicros: 3_000_000n,
+      lowerPriceUnits: decimalToScaled("0.5", PRICE_SCALE_DIGITS),
+      upperPriceUnits: decimalToScaled("0.53", PRICE_SCALE_DIGITS),
+      feeRatePpm: 0n,
+      feeExponent: 1,
+    });
+    const expected = (2_625_001n * 10n ** 18n + 5_000_001n - 1n) / 5_000_001n;
+    expect(matched.filledNotionalMicros).toBe("2625001");
+    expect(feeInclusiveBuyVwapPriceUnits(matched)).toBe(expected);
+    expect(expected).toBeGreaterThan(decimalToScaled("0.525", PRICE_SCALE_DIGITS));
   });
 });
 

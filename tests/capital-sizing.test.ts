@@ -8,6 +8,7 @@ import {
 import {
   applyBuyAmountPolicy,
   buyAmountPolicyDecisionCarriesAmplifiedLineage,
+  classifyTargetBuyRatio,
 } from "../src/execution/buy-amount-policy.js";
 import { stableJson } from "../src/domain/canonical-json.js";
 
@@ -43,27 +44,73 @@ describe("exact capital sizing", () => {
     expect(BigInt(decision.remainderNumerator!)).toBeGreaterThan(0n);
   });
 
-  it("carries an amplified lineage through later unchanged BUYs but never creates it from an unchanged first entry", () => {
-    const inherited = applyBuyAmountPolicy({
+  it("applies the 1-to-5 pUSD policy to every sub-1% BUY and hard-caps a large proportional result", () => {
+    const minimum = applyBuyAmountPolicy({
       calculatedAmountMicros: 900_000n,
-      minimumLiftEligibility: "AMPLIFIED_POSITION",
+      policyClass: "SMALL_BUY",
       firstEntryMinimumAmountMicros: 1_000_000n,
       marketMinimumAutoLiftCapMicros: 5_000_000n,
     });
-    const ordinaryFirst = applyBuyAmountPolicy({
-      calculatedAmountMicros: 2_000_000n,
-      minimumLiftEligibility: "FIRST_ENTRY",
+    const capped = applyBuyAmountPolicy({
+      calculatedAmountMicros: 7_000_000n,
+      policyClass: "SMALL_BUY",
       firstEntryMinimumAmountMicros: 1_000_000n,
       marketMinimumAutoLiftCapMicros: 5_000_000n,
     });
 
-    expect(inherited).toMatchObject({
+    expect(minimum).toMatchObject({
       result: "LIFTED",
-      reason: "AMPLIFIED_POSITION_MINIMUM_APPLIED",
+      reason: "SMALL_BUY_MINIMUM_APPLIED",
       finalAmountMicros: "1000000",
     });
-    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(inherited)).toBe(true);
-    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(ordinaryFirst)).toBe(false);
+    expect(capped).toMatchObject({
+      result: "CAPPED",
+      reason: "SMALL_BUY_HARD_CAP_APPLIED",
+      finalAmountMicros: "5000000",
+    });
+    expect(buyAmountPolicyDecisionCarriesAmplifiedLineage(minimum)).toBe(false);
+  });
+
+  it("uses the exact ratio boundary so 1% is proportional and a smaller ratio is small", () => {
+    expect(classifyTargetBuyRatio({ ratioNumerator: "1", ratioDenominator: "100" }))
+      .toBe("PROPORTIONAL_BUY");
+    expect(classifyTargetBuyRatio({ ratioNumerator: "999999", ratioDenominator: "100000000" }))
+      .toBe("SMALL_BUY");
+
+    expect(applyBuyAmountPolicy({
+      calculatedAmountMicros: 500_000n,
+      policyClass: "PROPORTIONAL_BUY",
+      firstEntryMinimumAmountMicros: 1_000_000n,
+      marketMinimumAutoLiftCapMicros: 5_000_000n,
+    })).toMatchObject({
+      result: "UNCHANGED",
+      finalAmountMicros: "500000",
+    });
+  });
+
+  it("never cash-caps a small BUY below the 1 pUSD floor", () => {
+    expect(applyBuyAmountPolicy({
+      calculatedAmountMicros: 500_000n,
+      policyClass: "SMALL_BUY",
+      firstEntryMinimumAmountMicros: 1_000_000n,
+      marketMinimumAutoLiftCapMicros: 5_000_000n,
+      availableCashCapMicros: 500_000n,
+    })).toMatchObject({
+      result: "LIFTED",
+      reason: "SMALL_BUY_MINIMUM_APPLIED",
+      finalAmountMicros: "1000000",
+    });
+    expect(applyBuyAmountPolicy({
+      calculatedAmountMicros: 5_000_000n,
+      policyClass: "SMALL_BUY",
+      firstEntryMinimumAmountMicros: 1_000_000n,
+      marketMinimumAutoLiftCapMicros: 5_000_000n,
+      availableCashCapMicros: 2_500_000n,
+    })).toMatchObject({
+      result: "CAPPED",
+      reason: "AVAILABLE_CASH_CAP_APPLIED",
+      finalAmountMicros: "2500000",
+    });
   });
 
   it("recognizes intact v2 first-fill evidence without trusting a tampered historical hash", () => {

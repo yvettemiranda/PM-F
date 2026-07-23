@@ -2,6 +2,7 @@ export {
   bestExecutionAskPriceUnits,
   buyNoFillReason,
   executableSellVwap,
+  feeInclusiveBuyVwapPriceUnits,
   matchExecutionBuy,
   matchExecutionSell,
   matchPaperBuy,

@@ -20,6 +20,22 @@ export interface ExecutionMatchResult {
 const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DIGITS);
 const PPM = 1_000_000n;
 
+function ceilDivide(numerator: bigint, denominator: bigint): bigint {
+  return (numerator + denominator - 1n) / denominator;
+}
+
+/** Average BUY cost per share including the rounded fee charged for the
+ * complete quoted FAK result. The ceiling is deliberate: a sub-unit remainder
+ * must never make an over-limit execution appear safe. */
+export function feeInclusiveBuyVwapPriceUnits(match: Pick<ExecutionMatchResult,
+  "filledSizeMicros" | "filledNotionalMicros" | "feeMicros">): bigint | null {
+  const size = BigInt(match.filledSizeMicros);
+  if (size <= 0n) return null;
+  const totalCostNumerator = (BigInt(match.filledNotionalMicros) + BigInt(match.feeMicros)) * PRICE_SCALE;
+  if (totalCostNumerator <= 0n) return null;
+  return ceilDivide(totalCostNumerator, size);
+}
+
 function notionalMicros(sizeMicros: bigint, priceUnits: bigint): bigint {
   return (sizeMicros * priceUnits) / PRICE_SCALE;
 }

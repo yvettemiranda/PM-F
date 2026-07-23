@@ -42,7 +42,11 @@ export interface RulesetProfileContext<T extends RulesetValues> {
   editableKeys: readonly (keyof T & string)[];
 }
 
-const ZERO_ALLOWED_KEYS = new Set(["maxRetryCount"]);
+const ZERO_ALLOWED_KEYS = new Set([
+  "maxRetryCount",
+  "buyPriceMinimumTickSteps",
+  "smallFollowBuyMaxCount",
+]);
 const PRICE_RATIO_KEYS = new Set(["buyPriceMinRatioPpm", "buyPriceMaxRatioPpm"]);
 const UNIT_RATIO_KEYS = new Set([
   "buyMaximumPricePpm",

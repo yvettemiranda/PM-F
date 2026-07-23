@@ -2,9 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { buyMinimumLiftEligibility } from "../execution/buy-minimum-eligibility.js";
 import type { BuyMinimumLiftEligibility } from "../execution/buy-amount-policy.js";
 
-/** Shared Live definition for initial sizing and the final execution-time
- * recheck. The optional exclusion lets an already-persisted BUY revalidate
- * itself without treating its own reservation as a competing entry. */
+/** Historical v1.8 Live lineage rule. Current rulesets use per-trade classes. */
 export function liveBuyMinimumLiftEligibility(
   database: DatabaseSync,
   accountId: string,

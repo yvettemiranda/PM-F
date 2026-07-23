@@ -8,30 +8,31 @@ export { stableJson } from "./canonical-json.js";
 
 export const DEFAULT_VERSIONS = Object.freeze({
   schemaVersion: "2.29.0",
-  signalVersion: "1.8.0",
-  strategyVersion: "2.6.0",
-  riskVersion: "1.9.0",
-  replayVersion: "2.2.0",
-  paperVersion: "1.13.0",
-  liveVersion: "1.10.0",
+  signalVersion: "1.9.0",
+  strategyVersion: "2.7.0",
+  riskVersion: "1.10.0",
+  replayVersion: "2.3.0",
+  paperVersion: "1.14.0",
+  liveVersion: "1.11.0",
   validationVersion: "1.7.0",
   operationalVersion: "1.7.0",
-  rulesetVersion: "v1.8.0",
+  rulesetVersion: "v1.9.0",
   feeModelVersion: "clob-fd-v1",
-  configVersion: "v1.5.0",
+  configVersion: "v1.6.0",
 });
 
 export const DEFAULT_RULESET = Object.freeze({
   buyExecutionMode: "FAK",
-  buyPriceMinRatioPpm: 980_000,
-  buyPriceMaxRatioPpm: 1_020_000,
-  buyPriceImprovementAllowed: true,
-  buyPriceMinimumTickSteps: 2,
+  buyPriceMinRatioPpm: 900_000,
+  buyPriceMaxRatioPpm: 1_050_000,
+  buyPriceImprovementAllowed: false,
+  buyPriceMinimumTickSteps: 0,
   buyMaximumPricePpm: 950_000,
-  // Historical key name retained for profile compatibility. Once an actually
-  // amplified first BUY fills, the same minimum also follows that asset lineage.
+  // Historical key names are retained for profile compatibility; the amounts
+  // now define the minimum and hard cap for every target BUY below 1%.
   buyFirstEntryMinimumAmountMicros: 1_000_000,
   buyMarketMinimumAutoLiftCapMicros: 5_000_000,
+  smallFollowBuyMaxCount: 9,
   waitRatioPpm: 500_000,
   maxWaitMs: 30 * 60 * 1_000,
   followSellMaxSlippagePpm: 100_000,
@@ -88,6 +89,7 @@ export const PAPER_RULESET_KEYS = Object.freeze([
   "buyMaximumPricePpm",
   "buyFirstEntryMinimumAmountMicros",
   "buyMarketMinimumAutoLiftCapMicros",
+  "smallFollowBuyMaxCount",
   "waitRatioPpm",
   "maxWaitMs",
   "followSellMaxSlippagePpm",
@@ -120,6 +122,7 @@ export const OPERATOR_EDITABLE_RULESET_KEYS = Object.freeze([
   "buyMaximumPricePpm",
   "buyFirstEntryMinimumAmountMicros",
   "buyMarketMinimumAutoLiftCapMicros",
+  "smallFollowBuyMaxCount",
   "waitRatioPpm",
   "maxWaitMs",
   "followSellMaxSlippagePpm",

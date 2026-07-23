@@ -10,8 +10,14 @@ import {
   type BuyCapitalSizingDecision,
   type ExactCapitalRatioSnapshot,
 } from "../execution/capital-sizing.js";
-import { applyBuyAmountPolicy, type BuyAmountPolicyDecision } from "../execution/buy-amount-policy.js";
+import {
+  applyBuyAmountPolicy,
+  applyPriorBuyAmountPolicy,
+  classifyTargetBuyRatio,
+  type BuyAmountPolicyDecision,
+} from "../execution/buy-amount-policy.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
+import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
 import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 
 export interface LiveSignalConsumptionResult {
@@ -154,16 +160,55 @@ export class LiveSignalConsumer {
         });
         continue;
       }
-      const risk = this.riskManager.evaluate({
-        mode: "LIVE",
-        accountId,
-        signal,
-        requestedAmountMicros: requested.amount,
-        requestedSizeMicros: requested.size,
-        capitalSizingDecision: requested.capitalSizingDecision,
-        buyAmountPolicyDecision: requested.buyAmountPolicyDecision,
-        now: this.now().toISOString(),
-      });
+      const executionRules = registeredExecutionRules(this.database, loaded.rulesetHash);
+      if (!executionRules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${loaded.rulesetHash}`);
+      let follow: ReturnType<typeof evaluateBuyFollowPolicy> | null = null;
+      try {
+        follow = signal.signalType === "TARGET_BUY" && executionRules.smallFollowBuyPolicyEnabled
+          ? evaluateBuyFollowPolicy({
+            database: this.database,
+            mode: "LIVE",
+            accountId,
+            signalId: signal.signalId,
+            smallFollowBuyMaxCount: executionRules.smallFollowBuyMaxCount,
+          })
+          : null;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "LIVE_BUY_FOLLOW_POLICY_FAILED";
+        this.recordQuarantine(accountId, row.signal_id, row.signal_sequence, "PRE_RISK_VALIDATION", reason);
+        results.push({
+          signalId: row.signal_id,
+          riskDecisionId: null,
+          executionId: null,
+          state: "QUARANTINED",
+        });
+        continue;
+      }
+      const risk = follow && !follow.allowed
+        ? this.riskManager.recordSystemDecision({
+          mode: "LIVE",
+          accountId,
+          signalId: signal.signalId,
+          contextId: signal.context?.contextId ?? null,
+          entityId: `LIVE_SIGNAL:${signal.signalId}`,
+          executionType: "TARGET_BUY",
+          decision: "REJECT",
+          reason: follow.reason,
+          requestedAmountMicros: requested.amount,
+          requestedSizeMicros: null,
+          rulesetHash: loaded.rulesetHash,
+          now: this.now().toISOString(),
+        })
+        : this.riskManager.evaluate({
+          mode: "LIVE",
+          accountId,
+          signal,
+          requestedAmountMicros: requested.amount,
+          requestedSizeMicros: requested.size,
+          capitalSizingDecision: requested.capitalSizingDecision,
+          buyAmountPolicyDecision: requested.buyAmountPolicyDecision,
+          now: this.now().toISOString(),
+        });
       let result: { executionId: string; state: string };
       if (risk.decision === "REJECT") {
         result = await this.executor.recordRiskRejectedSignal({
@@ -480,16 +525,36 @@ export class LiveSignalConsumer {
       ? registeredExecutionRules(this.database, signal.context.rulesetHash)
       : null;
     if (signal.context && !rules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${signal.context.rulesetHash}`);
+    const policyClass = classifyTargetBuyRatio({
+      ratioNumerator: signal.context?.capitalSizingRatio?.ratioNumerator ?? null,
+      ratioDenominator: signal.context?.capitalSizingRatio?.ratioDenominator ?? null,
+      legacyRatioPpm: signal.context?.targetTradeCapitalRatioPpm
+        ?? signal.capitalDecision?.ratioPpm
+        ?? null,
+      fixedFallback: capitalSizingDecision.capitalMode === "FIXED_FALLBACK",
+    });
     const buyAmountPolicyDecision = calculatedAmount !== null
       && rules !== null
       && rules.buyFirstEntryMinimumAmountMicros > 0n
-      ? applyBuyAmountPolicy({
-        calculatedAmountMicros: calculatedAmount,
-        minimumLiftEligibility: liveBuyMinimumLiftEligibility(this.database, accountId, signal.assetId),
-        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
-        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
-        availableCashCapMicros: available,
-      })
+      ? rules.smallFollowBuyPolicyEnabled
+        ? policyClass === null ? null : applyBuyAmountPolicy({
+          calculatedAmountMicros: calculatedAmount,
+          policyClass,
+          firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+          marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+          availableCashCapMicros: available,
+        })
+        : applyPriorBuyAmountPolicy({
+          calculatedAmountMicros: calculatedAmount,
+          minimumLiftEligibility: liveBuyMinimumLiftEligibility(
+            this.database,
+            accountId,
+            signal.assetId,
+          ),
+          firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+          marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+          availableCashCapMicros: available,
+        })
       : null;
     return {
       amount: buyAmountPolicyDecision

@@ -18,6 +18,7 @@ import {
   bestExecutionAskPriceUnits,
   buyNoFillReason,
   executableSellVwap,
+  feeInclusiveBuyVwapPriceUnits,
   matchExecutionBuy,
   matchExecutionSell,
   quoteExecutionBuySize,
@@ -25,6 +26,7 @@ import {
 } from "../execution/orderbook-matching.js";
 import {
   cappedBuyPriceUpperUnits,
+  executableBuyPriceUpperUnits,
   evaluateBuyMarketConstraint,
   evaluateSellMarketConstraint,
   parseMarketOrderConstraints,
@@ -40,13 +42,18 @@ import { DisabledRedeemAdapter } from "./disabled-redeem-adapter.js";
 import { DisabledSigner } from "./disabled-signer.js";
 import { DisabledWalletProvider } from "./disabled-wallet-provider.js";
 import { DisabledLiveMarketDataProvider, type LiveMarketDataProvider } from "./live-market-data.js";
-import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-adapter.js";
 import type { RedeemAdapter } from "./redeem-adapter.js";
 import type { Signer } from "./signer.js";
 import type { WalletProvider } from "./wallet-provider.js";
 import { RiskManager } from "../risk/risk-manager.js";
-import { applyBuyAmountPolicy } from "../execution/buy-amount-policy.js";
+import {
+  applyBuyAmountPolicy,
+  applyPriorBuyAmountPolicy,
+  classifyTargetBuyRatio,
+} from "../execution/buy-amount-policy.js";
+import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
+import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 import type { BuyCapitalSizingDecision, ExactCapitalRatioSnapshot } from "../execution/capital-sizing.js";
 import { withExternalTimeout } from "./external-timeout.js";
 import { validateLiveOrderFills } from "./fill-validation.js";
@@ -1241,6 +1248,26 @@ export class LiveExecutor implements ExecutorInterface {
     if (execution && !["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) {
       return { mode: "LIVE", executionId: execution.live_execution_id, state: execution.state };
     }
+    const executionRules = registeredExecutionRules(this.database, rulesetHash);
+    if (!executionRules) {
+      return this.reject(input, side, executionIdempotencyKey, liveGateRunId, "EXECUTION_RULESET_NOT_REGISTERED", executionType);
+    }
+    if (side === "BUY" && executionRules.smallFollowBuyPolicyEnabled) {
+      const follow = evaluateBuyFollowPolicy({
+        database: this.database,
+        mode: "LIVE",
+        accountId: input.accountId,
+        signalId: input.signal.signalId,
+        smallFollowBuyMaxCount: executionRules.smallFollowBuyMaxCount,
+      });
+      if (!follow.allowed) {
+        if (execution) {
+          this.store.transaction(() => this.store.rejectPendingExecution(execution!, follow.reason));
+          return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
+        }
+        return this.reject(input, side, executionIdempotencyKey, liveGateRunId, follow.reason, executionType);
+      }
+    }
 
     const requestedSize = side === "BUY"
       ? null
@@ -1710,6 +1737,17 @@ export class LiveExecutor implements ExecutorInterface {
     return new Date(target + wait).toISOString();
   }
 
+  private buyPolicyClass(signal: PaperSignalEnvelope) {
+    return classifyTargetBuyRatio({
+      ratioNumerator: signal.context?.capitalSizingRatio?.ratioNumerator ?? null,
+      ratioDenominator: signal.context?.capitalSizingRatio?.ratioDenominator ?? null,
+      legacyRatioPpm: signal.context?.targetTradeCapitalRatioPpm
+        ?? signal.capitalDecision?.ratioPpm
+        ?? null,
+      fixedFallback: signal.capitalDecision?.confidence === "MEDIUM",
+    });
+  }
+
   private async supersedePendingTargetExits(accountId: string, assetId: string): Promise<void> {
     const rows = this.database.prepare(
       `SELECT live_execution_id FROM live_executions
@@ -1927,20 +1965,10 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const feeRate = BigInt(fee.feeRatePpm);
     if (side === "BUY") {
-      if (target > executionRules.buyMaximumPriceUnits) {
-        return {
-          book,
-          fee,
-          ageMs,
-          match: emptyMatch(),
-          orderMatch: emptyMatch(),
-          lowerPriceUnits: lower!.toString(),
-          upperPriceUnits: upper!.toString(),
-          limitPriceUnits: upper!.toString(),
-          outcome: "REJECT",
-          reason: "TARGET_BUY_PRICE_ABOVE_MAX",
-        };
-      }
+      const executableUpper = parsedConstraints !== null && !("error" in parsedConstraints)
+        ? executableBuyPriceUpperUnits(upper!, parsedConstraints.tickSizeUnits)
+        : upper!;
+      const matchingLower = executionRules.smallFollowBuyPolicyEnabled ? 0n : lower!;
       const bestAsk = bestExecutionAskPriceUnits(book.asks);
       if (bestAsk !== null && bestAsk > executionRules.buyMaximumPriceUnits) {
         return {
@@ -1957,26 +1985,20 @@ export class LiveExecutor implements ExecutorInterface {
         };
       }
       const budget = BigInt(approval.requested_amount_micros!);
-      const minimumLiftEligible = liveBuyMinimumLiftEligibility(
-        this.database,
-        execution.live_account_id,
-        execution.asset_id,
-        execution.live_execution_id,
-      ) !== "NONE";
       const minimumQuote = parsedConstraints !== null && !("error" in parsedConstraints)
         ? quoteExecutionBuySize({
           asks: book.asks,
           requestedSizeMicros: parsedConstraints.normalizedMinOrderSizeMicros,
-          lowerPriceUnits: lower!,
-          upperPriceUnits: upper!,
+          lowerPriceUnits: matchingLower,
+          upperPriceUnits: executableUpper,
           feeRatePpm: feeRate,
           feeExponent: fee.exponent,
         })
         : null;
-      if (minimumQuote && !minimumQuote.complete && minimumLiftEligible) {
+      if (minimumQuote && !minimumQuote.complete) {
         const reason = buyNoFillReason({
           bestAskPriceUnits: bestAsk,
-          lowerPriceUnits: lower!,
+          lowerPriceUnits: matchingLower,
           upperPriceUnits: upper!,
           inRangeReason: "BUY_MARKET_MINIMUM_LIQUIDITY_UNAVAILABLE",
         });
@@ -2024,7 +2046,7 @@ export class LiveExecutor implements ExecutorInterface {
       const match = matchExecutionBuy({
         asks: book.asks,
         reservationMicros: normalizedBudget,
-        lowerPriceUnits: lower!,
+        lowerPriceUnits: matchingLower,
         upperPriceUnits: BigInt(constraint.effectivePriceUnits!),
         feeRatePpm: feeRate,
         feeExponent: fee.exponent,
@@ -2046,6 +2068,34 @@ export class LiveExecutor implements ExecutorInterface {
           limitPriceUnits: upper!.toString(),
           outcome: "WAIT",
           reason,
+        };
+      }
+      const feeInclusiveVwap = executionRules.smallFollowBuyPolicyEnabled
+        ? feeInclusiveBuyVwapPriceUnits(match)
+        : null;
+      if (executionRules.smallFollowBuyPolicyEnabled && feeInclusiveVwap === null) {
+        throw new Error("LIVE_BUY_FEE_INCLUSIVE_VWAP_UNAVAILABLE");
+      }
+      const priceOutcome = !executionRules.smallFollowBuyPolicyEnabled
+        ? null
+        : feeInclusiveVwap! > executionRules.buyMaximumPriceUnits
+          ? { outcome: "REJECT" as const, reason: "BUY_EXECUTION_VWAP_ABOVE_MAX" }
+          : feeInclusiveVwap! > upper!
+            ? { outcome: "WAIT" as const, reason: "BUY_EXECUTION_VWAP_ABOVE_LIMIT" }
+            : feeInclusiveVwap! < lower!
+              ? { outcome: "REJECT" as const, reason: "BUY_EXECUTION_VWAP_BELOW_LIMIT" }
+              : null;
+      if (priceOutcome) {
+        return {
+          book,
+          fee,
+          ageMs,
+          match,
+          orderMatch: emptyMatch(),
+          lowerPriceUnits: lower!.toString(),
+          upperPriceUnits: upper!.toString(),
+          limitPriceUnits: upper!.toString(),
+          ...priceOutcome,
         };
       }
       const observedLimit = BigInt(match.levels.at(-1)!.priceUnits);
@@ -2157,13 +2207,17 @@ export class LiveExecutor implements ExecutorInterface {
       rules.buyFirstEntryMinimumAmountMicros <= 0n
       || rules.buyMarketMinimumAutoLiftCapMicros <= 0n
     ) return { status: "NOT_ELIGIBLE" };
-    const minimumLiftEligibility = liveBuyMinimumLiftEligibility(
-      this.database,
-      execution.live_account_id,
-      execution.asset_id,
-      execution.live_execution_id,
-    );
-    if (minimumLiftEligibility === "NONE") {
+    const legacyMinimumLiftEligibility = rules.smallFollowBuyPolicyEnabled
+      ? null
+      : liveBuyMinimumLiftEligibility(
+        this.database,
+        execution.live_account_id,
+        execution.asset_id,
+        execution.live_execution_id,
+      );
+    if (rules.smallFollowBuyPolicyEnabled
+      ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
+      : legacyMinimumLiftEligibility === "NONE") {
       return { status: "NOT_ELIGIBLE" };
     }
     if (requiredAmountMicros > rules.buyMarketMinimumAutoLiftCapMicros) {
@@ -2175,13 +2229,21 @@ export class LiveExecutor implements ExecutorInterface {
     if (!priorRisk?.capital_sizing_decision_json) return { status: "NOT_ELIGIBLE" };
     const capitalSizing = JSON.parse(priorRisk.capital_sizing_decision_json) as BuyCapitalSizingDecision;
     if (capitalSizing.calculatedAmountMicros === null) return { status: "NOT_ELIGIBLE" };
-    const amountPolicy = applyBuyAmountPolicy({
-      calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros),
-      minimumLiftEligibility,
-      firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
-      marketMinimumAmountMicros: requiredAmountMicros,
-      marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
-    });
+    const amountPolicy = rules.smallFollowBuyPolicyEnabled
+      ? applyBuyAmountPolicy({
+        calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros),
+        policyClass: "SMALL_BUY",
+        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+        marketMinimumAmountMicros: requiredAmountMicros,
+        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+      })
+      : applyPriorBuyAmountPolicy({
+        calculatedAmountMicros: BigInt(capitalSizing.calculatedAmountMicros),
+        minimumLiftEligibility: legacyMinimumLiftEligibility!,
+        firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
+        marketMinimumAmountMicros: requiredAmountMicros,
+        marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+      });
     const finalAmount = BigInt(amountPolicy.finalAmountMicros);
     const currentAmount = BigInt(execution.requested_amount_micros ?? "0");
     if (finalAmount <= currentAmount) return { status: "NOT_ELIGIBLE" };
@@ -2191,12 +2253,17 @@ export class LiveExecutor implements ExecutorInterface {
     let rejectionReason: string | null = null;
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      if (liveBuyMinimumLiftEligibility(
-        this.database,
-        execution.live_account_id,
-        execution.asset_id,
-        execution.live_execution_id,
-      ) === "NONE") {
+      const lockedLegacyEligibility = rules.smallFollowBuyPolicyEnabled
+        ? null
+        : liveBuyMinimumLiftEligibility(
+          this.database,
+          execution.live_account_id,
+          execution.asset_id,
+          execution.live_execution_id,
+        );
+      if (rules.smallFollowBuyPolicyEnabled
+        ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
+        : lockedLegacyEligibility === "NONE") {
         this.database.exec("COMMIT");
         return { status: "NOT_ELIGIBLE" };
       }

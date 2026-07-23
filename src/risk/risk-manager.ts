@@ -46,7 +46,7 @@ export interface SystemRiskDecisionInput {
   signalId: string | null;
   contextId: string | null;
   entityId: string;
-  executionType: "STOP_LOSS" | "SETTLEMENT" | "REDEEM";
+  executionType: "TARGET_BUY" | "STOP_LOSS" | "SETTLEMENT" | "REDEEM";
   decision: RiskDecisionResult;
   reason: string;
   requestedAmountMicros: bigint | null;
@@ -177,10 +177,14 @@ export class RiskManager {
       } catch {
         return fail("target_buy_price", "TARGET_BUY_PRICE_INVALID");
       }
-      if (targetBuyPrice > registeredRules.buyMaximumPriceUnits) {
+      if (targetBuyPrice <= 0n || targetBuyPrice >= 10n ** 18n) {
+        return fail("target_buy_price", "TARGET_BUY_PRICE_INVALID");
+      }
+      if (!registeredRules.smallFollowBuyPolicyEnabled
+        && targetBuyPrice > registeredRules.buyMaximumPriceUnits) {
         return fail("target_buy_price", "TARGET_BUY_PRICE_ABOVE_MAX");
       }
-      pass("target_buy_price", `${targetBuyPrice}/${registeredRules.buyMaximumPriceUnits}`);
+      pass("target_buy_price", targetBuyPrice.toString());
       const capital = input.signal.capitalDecision;
       if (!capital || capital.confidence === "LOW" || capital.status === "FAILED") {
         return fail("capital_decision", "CAPITAL_CONFIDENCE_LOW");

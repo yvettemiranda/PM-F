@@ -39,6 +39,8 @@ export const CORE_COMPATIBILITY_PAPER_FILES = [
 /** Paper execution surface; Live-only CLOB fee/order construction is excluded. */
 export const CORE_COMPATIBILITY_EXECUTION_FILES = [
   "src/execution/buy-amount-policy.ts",
+  "src/execution/buy-follow-policy.ts",
+  "src/execution/buy-minimum-eligibility.ts",
   "src/execution/capital-sizing.ts",
   "src/execution/market-change-feed.ts",
   "src/execution/market-data.ts",

@@ -382,6 +382,80 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("uses one Polygon economic execution when Data API later reports its component fills", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const chainBuy = trade({
+      transactionHash: "0xpolygon-aggregate-buy",
+      orderHash: `0x${"4".repeat(64)}`,
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const chainSnapshot = snapshot([], [position("10")], "2026-07-08T00:01:10.000Z");
+    chainSnapshot.polygonOrderFilled = {
+      status: "AVAILABLE",
+      confirmedHead: "0x65",
+      fromBlock: "0x65",
+      toBlock: "0x65",
+      trades: [chainBuy],
+      capture: null,
+    };
+    const componentFills = [
+      trade({
+        transactionHash: chainBuy.transactionHash,
+        price: "0.4",
+        size: "5",
+        timestamp: chainBuy.timestamp,
+      }),
+      trade({
+        transactionHash: chainBuy.transactionHash,
+        price: "0.6",
+        size: "5",
+        timestamp: chainBuy.timestamp,
+      }),
+    ];
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      chainSnapshot,
+      snapshot(componentFills, [position("10")], "2026-07-08T00:01:20.000Z"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:10.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:20.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 1,
+      finalSyncStatus: "SYNCED",
+    });
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT r.source_type,o.activity_confirmed,
+              CAST(s.target_price_units AS TEXT) target_price_units,
+              CAST(s.target_size_micros AS TEXT) target_size_micros
+       FROM raw_events r
+       JOIN observe_events o USING(source_event_key)
+       JOIN signals s USING(source_event_key)`,
+    ).get()).toEqual({
+      source_type: "POLYGON_ORDER_FILLED",
+      activity_confirmed: 1,
+      target_price_units: "500000000000000000",
+      target_size_micros: "10000000",
+    });
+    check.close();
+  });
+
   it("fails closed before a mismatched Data API row can duplicate a Polygon-confirmed trade", async () => {
     const { databasePath, targetId } = setup([]);
     let now = new Date("2026-07-08T00:01:00.000Z");

@@ -16,6 +16,8 @@ export interface RegisteredExecutionRules extends RegisteredStopLossRules {
   buyMaximumPriceUnits: bigint;
   buyFirstEntryMinimumAmountMicros: bigint;
   buyMarketMinimumAutoLiftCapMicros: bigint;
+  smallFollowBuyMaxCount: number;
+  smallFollowBuyPolicyEnabled: boolean;
   followSellMaxSlippagePpm: number;
   waitRatioPpm: number;
   maxWaitMs: number;
@@ -94,6 +96,8 @@ export function registeredExecutionRules(
     .buyFirstEntryMinimumAmountMicros;
   const snapshotBuyAutoLiftCap = (rules as { buyMarketMinimumAutoLiftCapMicros?: unknown })
     .buyMarketMinimumAutoLiftCapMicros;
+  const snapshotSmallFollowBuyMaxCount = (rules as { smallFollowBuyMaxCount?: unknown })
+    .smallFollowBuyMaxCount;
   const snapshotWaitRatio = (rules as { waitRatioPpm?: unknown }).waitRatioPpm;
   const snapshotMaxWait = (rules as { maxWaitMs?: unknown }).maxWaitMs;
   const snapshotConfig = (versions as { configVersion?: unknown }).configVersion;
@@ -115,13 +119,18 @@ export function registeredExecutionRules(
     || snapshotBuyMin >= snapshotBuyMax
     || (!legacyBuyTickPolicy && (
       typeof snapshotBuyPriceImprovementAllowed !== "boolean"
-      || !validPositiveSafeInteger(snapshotBuyMinimumTickSteps)
+      || !Number.isSafeInteger(snapshotBuyMinimumTickSteps)
+      || Number(snapshotBuyMinimumTickSteps) < 0
     ))
     || (!legacyBuyAmountPolicy && (
       !validRatioPpm(snapshotBuyMaximumPrice)
       || !validPositiveSafeInteger(snapshotBuyFirstEntryMinimum)
       || !validPositiveSafeInteger(snapshotBuyAutoLiftCap)
       || Number(snapshotBuyAutoLiftCap) < Number(snapshotBuyFirstEntryMinimum)
+      || (snapshotSmallFollowBuyMaxCount !== undefined && (
+        !Number.isSafeInteger(snapshotSmallFollowBuyMaxCount)
+        || Number(snapshotSmallFollowBuyMaxCount) < 0
+      ))
     ))
     || row.buy_price_lower_ratio_ppm !== snapshotBuyMin
     || row.buy_price_upper_ratio_ppm !== snapshotBuyMax
@@ -156,6 +165,10 @@ export function registeredExecutionRules(
     buyMarketMinimumAutoLiftCapMicros: legacyBuyAmountPolicy
       ? 0n
       : BigInt(snapshotBuyAutoLiftCap as number),
+    smallFollowBuyMaxCount: legacyBuyAmountPolicy || snapshotSmallFollowBuyMaxCount === undefined
+      ? 0
+      : Number(snapshotSmallFollowBuyMaxCount),
+    smallFollowBuyPolicyEnabled: !legacyBuyAmountPolicy && snapshotSmallFollowBuyMaxCount !== undefined,
     followSellMaxSlippagePpm,
     waitRatioPpm: row.wait_ratio_ppm,
     maxWaitMs: row.max_wait_time_ms,
