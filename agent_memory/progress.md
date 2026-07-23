@@ -1,6 +1,7 @@
 # Progress
 
 ## Current task
+- 第二次安全启动已在创建 Campaign 前被 Phase 0 proof 正确拦住：最新 Capture 的分页歧义已清零，但一笔历史 `MERGE` 因公开历史 offset 截断缺少旧 Yes 腿，被 Replay 误列为 unsupported；当前以 Replay `2.2.0` 的受限 historical-bucket reconciliation 修复，实时 Observe Gate 不放宽。
 - 已按用户确认开始新一轮跟单优化：后续 BUY 改为按完整账户权益缩放、现金作支付上限；MEDIUM 兜底降为 `1 pUSD`；同资产退出/止损与新 BUY 串行协调；报告新增金额和成交覆盖率。
 - 已完成用户要求的数据清理和防复发优化：`data/` 从约 `12 GB` 降到约 `21 MB`，系统盘可用空间从约 `298 GB` 增到约 `310 GB`。
 - 当前主库为全新 Schema `2.29.0` 空白安全库；旧 Campaign 数据只保留在昨晚两份关键 ZIP 及精简后的报告/日志中。下一次测试会从新 Campaign、新 Paper 账户开始。
@@ -8,6 +9,7 @@
 - 迁移备份默认只保留最新且已校验的 `1` 份；已修复原先按含 schema 版本文件名排序、可能留下错误旧副本的问题。
 
 ## Completed implementation
+- Replay `2.2.0`：历史 Trades/Activity 明确截断、官方 CLOB 精确给出两个非空 token 且可见资产不冲突时，MERGE 可把证明上缺失的旧余额只补入 historical bucket 再投影；完整历史、官方集合不匹配、金额异常或 tracked leg 无价格仍 fail closed。
 - Replay `2.1.0` 修复 Data API 相邻页多行重叠：以稳定 JSON 序列识别最长 suffix/prefix overlap，原始 Capture 不删除，只把精确边界重复作为 multiplicity evidence 抵消。
 - Paper `1.12.0` / Risk `1.8.0`：HIGH BUY 在完整可退出估值时使用 `totalEquityMicros`，估值不完整才退回 available cash；新 `BUY_AMOUNT_POLICY_V2` 对最终金额应用可审计的 available-cash cap，不再整单因现金不足而拒绝。
 - Ruleset `v1.8.0`：MEDIUM 资本置信度固定兜底从 `10 pUSD` 收紧为 `1 pUSD`。
@@ -29,6 +31,8 @@
 - Paper `1.11.0` / Risk `1.7.0` 新增 WAITING BUY 缩量 Risk 审计链：验证父决定 scope/ALLOW/amount，强制新金额严格小于父金额，Risk/Execution 当前金额精确一致，并在 Execution Audit 中同时保存父子 Risk Decision ID。
 
 ## Verification completed
+- 真实失败 Capture 已定位到条件 `0x253a...735ba` 的 532.0828 份 MERGE：官方 CLOB 是精确 Yes/No 二元集合；Replay 可见 No 腿 1199.13 份、Yes 腿只有旧 SELL 而无可见 BUY，符合历史截断。新增回归先红后绿；完整历史缺腿和截断历史下官方 token mismatch 的失败关闭测试仍通过。干净提交后的同 Capture 确定性重放待执行。
+- Replay `2.2.0` 修改后全量 `54/54` 文件、`708/708` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过；本地 Standards/Spec 双轴复核未发现需要阻断提交的问题。
 - 2026-07-23 首次启动的三份真实 Phase 0 Capture 稳定复现 2 个 ambiguous event；最小回归确认是相邻 Trades 页重复 2 行。修复后原 Capture 重放得到 `tradeBoundaryOverlapRows=2`、`reconciledPaginationOverlapRows=2`、`onChainProofs=2`、`ambiguousEvents=0`。
 - 分页修复最终全量 `54/54` 文件、`707/707` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
 - 新优化先取得 4 条失败回归，再完成红绿：权益缩放、现金封顶、目标退出优先、同资产 BUY 延后恢复。最终全量 `54/54` 文件、`706/706` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
@@ -42,12 +46,12 @@
 - 首轮全量的 3 个失败均是旧测试仍期待 Data API 每循环请求；已改为显式推进 3 秒后断言，并由最终全量覆盖。
 
 ## Runtime state before final verification
-- 无 Observe/Paper/Supervisor 子进程、无旧数据库业务对象。两个旧 launcher zsh 只停留在终端确认提示且无子进程。
+- 无 Observe/Paper/Supervisor 子进程、无 Campaign；本次两轮启动都在创建 Campaign 前由 Phase 0/isolated proof 安全终止，失败 Capture/ZIP 已保留。
 - 数据目录约 `21 MB`；当前空白业务库 Schema `2.29.0`、Gate 安全。旧 account/campaign pointer 与昨晚前无关日志已删除。
 - 下次启动必须使用最终干净 commit，重新生成 Phase 0/Replay/core 绑定并创建新 Campaign，不得续算旧核心时长。
 
 ## Current identity
-- Paper `1.12.0` / Risk `1.8.0` / Operational `1.7.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
+- Replay `2.2.0` / Paper `1.12.0` / Risk `1.8.0` / Operational `1.7.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
 
 ## Next steps
 1. 完成最终全量测试、双轴代码复核并提交，形成干净 HEAD。

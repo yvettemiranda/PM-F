@@ -246,19 +246,41 @@ export class ReplayEngine {
           } catch {
             amount = null;
           }
-          const assets = conditionId ? [...conditionByAsset.entries()]
+          const visibleAssets = conditionId ? [...conditionByAsset.entries()]
             .filter(([asset, knownConditionId]) => (
               knownConditionId === conditionId
               && (trackedPositions.get(asset) ?? 0n) + (historicalPositions.get(asset) ?? 0n) > 0n
             ))
             .map(([asset]) => asset)
             .sort() : [];
-          const structurallyUnsupported = amount === null || amount <= 0n || assets.length !== 2 || assets.some((asset) => (
-            (trackedPositions.get(asset) ?? 0n) + (historicalPositions.get(asset) ?? 0n) < amount!
-          ));
           const officialAssets = conditionId
             ? input.verifiedMarketOutcomeAssetsByCondition?.[conditionId]
             : undefined;
+          const sortedOfficialAssets = officialAssets === undefined ? undefined : [...officialAssets].sort();
+          const historyTruncated = input.tradeHistoryComplete === false || input.activityHistoryComplete === false;
+          const canReconcileTruncatedHistory = historyTruncated
+            && amount !== null
+            && amount > 0n
+            && sortedOfficialAssets !== undefined
+            && sortedOfficialAssets.length === 2
+            && new Set(sortedOfficialAssets).size === 2
+            && sortedOfficialAssets.every((asset) => asset.trim().length > 0)
+            && visibleAssets.every((asset) => sortedOfficialAssets.includes(asset));
+          const assets = canReconcileTruncatedHistory ? sortedOfficialAssets : visibleAssets;
+          let reconciledTruncatedHistory = false;
+          if (canReconcileTruncatedHistory) {
+            for (const asset of assets) {
+              const tracked = trackedPositions.get(asset) ?? 0n;
+              const historical = historicalPositions.get(asset) ?? 0n;
+              const missingHistorical = amount! - tracked - historical;
+              if (missingHistorical <= 0n) continue;
+              historicalPositions.set(asset, historical + missingHistorical);
+              reconciledTruncatedHistory = true;
+            }
+          }
+          const structurallyUnsupported = amount === null || amount <= 0n || assets.length !== 2 || assets.some((asset) => (
+            (trackedPositions.get(asset) ?? 0n) + (historicalPositions.get(asset) ?? 0n) < amount!
+          ));
           const authoritativeOutcomeSetInvalid = officialAssets === undefined
             || officialAssets.length !== 2
             || [...officialAssets].sort().some((asset, index) => asset !== assets[index]);
@@ -327,7 +349,11 @@ export class ReplayEngine {
                 ? "GAP_MERGE_TRACKED_FIRST_NO_EXECUTION"
                 : authoritativeOutcomeSetInvalid
                   ? "UNVERIFIED_MERGE_OUTCOME_SET_NO_EXECUTION"
-                  : unpricedTrackedExit ? "UNPRICED_MERGE_TRACKED_FIRST_NO_EXECUTION" : "TARGET_MERGE_TRACKED_FIRST",
+                  : unpricedTrackedExit
+                    ? "UNPRICED_MERGE_TRACKED_FIRST_NO_EXECUTION"
+                    : reconciledTruncatedHistory
+                      ? "TARGET_MERGE_TRACKED_FIRST_WITH_TRUNCATED_HISTORY_RECONCILIATION"
+                      : "TARGET_MERGE_TRACKED_FIRST",
             ));
           }
           if (unpricedTrackedExit || authoritativeOutcomeSetInvalid) {

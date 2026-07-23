@@ -22,10 +22,10 @@
 - 同 asset 的 `EXIT_PENDING` / `STOP_EXIT_PENDING` 存在时，新 BUY 保留为 `WAITING_EXECUTION + SAME_ASSET_EXIT_PENDING`，退出完成后自动继续，禁止同一仓位方向相反的任务同时成交。
 - WAITING BUY 每次被目标退出向下缩减时，都会以原 Risk Decision 为父证据生成新的严格向下金额决定，并把 Execution 重新绑定到当前金额；持平、向上、跨账户或非 ALLOW 父决定全部失败关闭。
 - `TARGET_SELL` 小于市场最小下单量，或合法成交后只剩不足 `0.01` 股的执行器尾差时，Paper 不允许放大卖单超卖：保存约束证据、保留真实成交/Position，把不可提交部分从该 Execution 分配中移除并终止为 `CANCELLED`。`STOP_LOSS` 继续保持 pending，但相同约束只记录一次。
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.5.0`、Risk `1.8.0`、Replay `2.1.0`、Paper `1.12.0`、Live `1.9.0`、Validation `1.7.0`、Operational `1.7.0`、Ruleset `v1.8.0`、Config `v1.5.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.5.0`、Risk `1.8.0`、Replay `2.2.0`、Paper `1.12.0`、Live `1.9.0`、Validation `1.7.0`、Operational `1.7.0`、Ruleset `v1.8.0`、Config `v1.5.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
 - Signal Context 将官方市场结束时间分为 `VERIFIED` / `UNAVAILABLE`；Paper 对后者只使用不可变、有限时长的 `execution_deadline_at`，Live 继续拒绝该状态。
 - Observe 先提交事件/projection/checkpoint，再逐个富化 Signal；单市场元数据失败只记 warning 并在后续轮询重试，不能再制造连接 gap 或污染其它市场 Signal。
-- 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成两个独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。无法证明完整 outcome set、余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
+- 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。仅历史 Replay 明确遭官方 offset 截断时，可按已验证二元 token set 把缺失旧腿补入 historical bucket 后投影，不生成虚假 BUY；Observe 实时路径仍以完整启动 baseline/启动后成交为准。无法证明完整 outcome set、实时余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
 - 新的市场 WebSocket、Polygon `OrderFilled` 快速源、Campaign 安全退出 helper 和测试均纳入 `coreCompatibilityHash` / verification suite；本核心不能续用旧 Campaign 时间。
 
 ## Confirmed BUY policy

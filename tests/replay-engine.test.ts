@@ -399,7 +399,7 @@ describe("ReplayEngine", () => {
       .toHaveLength(2);
   });
 
-  it("projects known MERGE legs but emits no exits without an exact official outcome set", () => {
+  it("projects known MERGE legs but emits no exits without an exact official outcome set even when history is truncated", () => {
     const merge = {
       proxyWallet: wallet,
       transactionHash: "0xmerge-official-mismatch",
@@ -418,6 +418,7 @@ describe("ReplayEngine", () => {
       ],
       activity: [merge],
       verifiedMarketOutcomeAssetsByCondition: { "0xcondition": ["asset-no", "asset-other"] },
+      tradeHistoryComplete: false,
       hasCapitalSnapshots: true,
       hasGoldenExpectations: true,
     });
@@ -457,6 +458,56 @@ describe("ReplayEngine", () => {
       reason: "MERGE_UNSUPPORTED_TARGET_ACTIVITY",
     });
     expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT")).toHaveLength(0);
+  });
+
+  it("reconciles an official binary MERGE when truncated history omitted an old leg", () => {
+    const merge = {
+      proxyWallet: wallet,
+      transactionHash: "0xmerge-truncated-history",
+      conditionId: "0xcondition",
+      type: "MERGE",
+      size: "10",
+      timestamp: 101,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [trade({
+        transactionHash: "0xvisible-no-leg",
+        asset: "asset-no",
+        size: "10",
+        timestamp: 100,
+      })],
+      activity: [merge],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      tradeHistoryComplete: false,
+      activityHistoryComplete: false,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toEqual([
+      "TRADE_HISTORY_TRUNCATED",
+      "ACTIVITY_HISTORY_TRUNCATED",
+    ]);
+    expect(report.eventOutcomes[activityEventKey(merge)]).toMatchObject({
+      eventClassification: "COMBO_ACTIVITY",
+      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+    });
+    expect(report.signals.filter((signal) => signal.reason === "TARGET_MERGE_EQUIVALENT_EXIT"))
+      .toMatchObject([{
+        asset: "asset-no",
+        sellRatioNumerator: "10000000",
+        sellRatioDenominator: "10000000",
+      }]);
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.metrics.finalHistoricalPositions).toEqual({});
+    expect(report.positionLedger.filter((entry) => (
+      entry.sourceEventKey === activityEventKey(merge)
+      && entry.reason === "TARGET_MERGE_TRACKED_FIRST_WITH_TRUNCATED_HISTORY_RECONCILIATION"
+    ))).toHaveLength(2);
   });
 
   it("projects REDEEM after tracked buys without inventing an executable sell", () => {
