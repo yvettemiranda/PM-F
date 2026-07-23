@@ -30,9 +30,10 @@
 - 当前全量为 `54/54` 测试文件、`746/746` 测试通过；新增 Live SELL/等待 BUY 的完整退出、部分退出、Gate 阻断、原子回滚、损坏 Reservation 关闭 Gate 和不反向抬升测试，“同 orderHash 跨 transaction 独立经济成交”、PAUSED 同 core 隔离证据刷新，以及死 TTY 收尾和安全锁竞态回归。TypeScript 与 `git diff --check` 通过。
 
 ## Runtime state
-- Campaign `PC-1F69671B63722CC4E3EC` 已安全暂停并保全两个一致性通过 Session，累计约 `0.55 h`、最长连续约 `0.38 h`；当前没有 Observe/Paper/Supervisor 或任何 Live 进程，安全锁已清理。
+- 已安全暂停并完成 final drain；当前没有 Observe/Paper/Supervisor 或任何 Live 进程，安全锁已清理。
+- 已按用户授权永久删除混合旧规则数据库和旧运行产物，只保留当前提交、当前目标配置，以及清理前最后一份新版脱敏 ZIP。仓库从约 `1.2 GB` 降至约 `232 MB`；旧数据库不可恢复，清理前时长不再累计。
 - 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；收尾前仍需再次只读核对进程、Git、数据库、Gate、Campaign、磁盘和 Live 零记录。
 
 ## Next steps
-1. 提交 Operational `1.9.0` 的死 TTY 与安全锁竞态修复。
-2. 用最终干净提交刷新隔离 proof并继续同 Paper core Campaign，重点观察自然 BUY/SELL、聚合去重、9 次计数、止损锁、延迟、RPC degraded 和数据库增长。
+1. 从空白数据库通过安全入口重建 Schema、Phase 0/Replay和隔离 proof，创建只含当前规则的新 Campaign。
+2. 确认 `PAPER + LIVE_DISABLED`、Git 干净、Observe/Paper/Supervisor独立运行，再按半小时巡检自然 BUY/SELL、聚合去重、9 次计数、止损锁、延迟、RPC degraded 和数据库增长。

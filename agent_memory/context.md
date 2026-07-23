@@ -37,14 +37,12 @@
 - 本次没有数据库结构变更，也没有修改扫描频率、账本边界或安全 Gate。任何新 Campaign 必须使用最终干净提交生成的新 core compatibility hash。
 
 ## Current runtime and evidence
-- 历史 Campaign `PC-105EC3F76A2AC49D59E6` 为 `PAUSED`；旧核心累计 `4.84 h`，只作诊断证据，不能计入当前新核心验收。
-- 新规则 Campaign `PC-1F69671B63722CC4E3EC` 已完成两个一致性通过的安全停止 Session，累计有效运行 `1985098 ms`（约 `0.55 h`），最长连续 `1382080 ms`（约 `0.38 h`）。最新 Session `PS-C39472847DB20C4E7B4B` 有 `891/0` 次 Observe 成功/失败轮询、3 个运行期自然 SELL、8 个停机 gap 信号正确禁止追补，仍无可执行自然 BUY、Order 或 Fill。
-- 历史结果：`15605` 次成功轮询、`11` 次已恢复 timeout、`30` 个目标事件、`9 BUY / 21 SELL`、gap `0`、最终 `SYNCED`；9 个 BUY 为 `1 FAK_FILLED / 5 BELOW_MARKET_MIN_ORDER_SIZE / 3 WAIT_TIMEOUT`。
-- 当前无 Observe/Paper/Supervisor 子进程，安全锁已由修复后的暂停入口清理；数据库与报告已完成 final drain/估值且一致性通过。目标仍正确，数据库 Schema `2.29.0`，最近 `quick_check=ok`、外键失败 `0`，Gate 为 `PAPER + LIVE_DISABLED`，Live Execution/Order/Fill 均为 `0`。
-- `data/` 最近约 `908 MB`、主库约 `878 MiB`；增长主要来自不可变 Phase 0/Replay 和运行证据，不是 Paper 成交。旧多代迁移备份已按用户授权清理，迁移备份默认只保留最新校验通过的 `1` 份。
+- 用户已授权只保留当前规则版本。2026-07-23 23:45 安全停止后永久删除混合旧规则数据库、全部旧 Campaign/Capture/Replay/日志、旧 `work/`、`outputs/` 和历史 ZIP；仓库由约 `1.2 GB` 降至约 `232 MB`。
+- 清理前最后一份新版报告 `Paper累计验证_PC-1F69671B63722CC4E3EC_PS-2E60CA25BFAAF53F0489_20260723-234415-40339.zip` 及 SHA-256 `fb976dd7e05d9525b4a081c68599c37cab888d6e0b0f0fd8e0699c81f13ec90e` 保留在 `交给Codex/`；它只作脱敏审计证据，不可恢复数据库，也不继续累计原约 `0.55 h` 时长。
+- 当前源码提交为 `4f60d95695a19633cfb8f4b080d541a27c500dc4`；清理后尚未重新初始化 `data/`。下一次安全启动必须从空白 Schema `2.29.0` 重新抓取 Phase 0/Replay、创建新 Campaign，并验证 `PAPER + LIVE_DISABLED`。
 
 ## Remaining blockers before small Live
-- 新核心已有约 `0.55 h` 自然短测，但尚无可执行自然 BUY/Order/Fill，也未满足 `4 h` 连续和 `24 h` 累计门槛；历史 `4.84 h` 不计入。
+- 清理后新版 Campaign 时长从零重新累计；清理前约 `0.55 h` 和更早 `4.84 h` 均只作诊断证据，不再进入 Gate。
 - SPLIT 和 tracked negative-risk conversion 仍无可执行复制语义；无法证明完整集合的 MERGE 仍硬阻断。
 - 官方结束时间缺失的 Live 策略、自然 SELL/REALIZED_PNL、最终 Observe 时长、合规/geoblock、隔离钱包、signer 和 Live arming 尚未完成。
 
