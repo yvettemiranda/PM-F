@@ -5,7 +5,7 @@
 - SPLIT 仍没有安全的 position projection/copy 语义，会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明恰好两个完整 outcome、余额不足或缺少 tracked leg 价格的 MERGE 会立即硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间缺失时只允许 bounded Paper；Live Gate 继续拒绝，尚未形成可接受的真实资金 deadline 策略。
-- Paper `1.11.0` / Risk `1.7.0` 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
+- Paper `1.12.0` / Risk `1.8.0` 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
@@ -22,6 +22,10 @@
 - 不可变审计库仍会随运行缓慢增长，不能宣称永久零增长。当前无变化重型证据约降为原来的 `1/15`，迁移整库副本只保留 `1` 份；长期无人值守前仍应设计按 Campaign 归档/轮换，并在 UI 显示数据库增长率和剩余空间，不能静默删除当前 Campaign 证据。
 
 ## Resolved in current implementation
+- 后续 BUY 曾以剩余可用现金继续乘目标比例，已买入越多就越机械缩单；当前完整估值时改用账户总权益，可用现金只封顶实际支付，估值不完整则安全退回现金口径。
+- MEDIUM 资本证据曾固定放大到 `10 pUSD`；当前新 ruleset 固定兜底为 `1 pUSD`，不会因置信度下降而增加风险。
+- 同一轮曾可能先生成 STOP 再消费目标 SELL，且退出 pending 时新 BUY 仍可成交；当前目标 Signal 先固化、止损只看剩余仓位，同资产 BUY 等待退出完成后再继续。
+- 旧报告只能数 Signal/Order/Fill，无法量化应跟和实跟差异；当前 Funnel 记录理论金额、申请金额、实际支出及 BUY/SELL 覆盖率。
 - Observe 加速到每秒后曾在每次成功 Poll 无条件写入完整 API Capture、Capital、Reconciliation 和 Checkpoint；旧库因此数小时增长数 GB。当前每秒只保留轻量 Poll/心跳，无变化且 `ONLINE + SYNCED` 时完整证据每 `15 s` 采样，状态变化、新事件、新 Signal 和 gap 恢复立即全量保存。
 - Runtime migration 曾默认保留 `3` 份整库备份，且按含 schema 版本的文件名排序，既放大空间又可能误判新旧。当前默认只保留刚生成、完整校验通过的最新 `1` 份，其余按 mtime 排序。
 - 2026-07-23 用户授权清理后，约 `12 GB` 的 `data/` 已降到约 `21 MB`；多代备份、旧主库、旧验证副本和昨晚前无关输出已永久删除，当前只保留空白安全库、目标配置和昨晚精简证据。

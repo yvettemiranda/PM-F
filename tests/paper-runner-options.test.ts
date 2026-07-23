@@ -63,6 +63,7 @@ const acceptanceSummary: PaperAcceptanceSummary = {
     signals: { buy: 0, sell: 0, conversion: 0, published: 0, executionEligible: 0, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
     capital: { high: 0, medium: 0, low: 0, unknown: 0, sizingDecisionCount: 0, sizingRejectReasons: {}, sizingEvidence: [] },
     risk: { allow: 0, reject: 0, rejectReasons: {} },
+    copy: { targetBuyNotionalMicros: "0", desiredBuyAmountMicros: "0", requestedBuyAmountMicros: "0", filledBuySpendMicros: "0", buyRequestedCoveragePpm: null, buyFillCoveragePpm: null, requestedSellSizeMicros: "0", filledSellSizeMicros: "0", sellFillCoveragePpm: null },
     execution: { total: 0, waiting: 0, rejectedBeforeOrder: 0, rejectedBeforeOrderReasons: {}, marketConstraintRejects: 0, marketConstraintRejectReasons: {}, expired: 0, cancelled: 0, exitPending: 0, stopExitPending: 0, orders: 0, zeroFillOrders: 0, partialFillOrders: 0, fullFillOrders: 0, fills: 0 },
     positions: { total: 0, open: 0, partiallyClosed: 0, frozen: 0, settlementPending: 0, closed: 0, redeemed: 0 },
     reservations: { total: 0, active: 0, consumed: 0, released: 0, activeMicros: "0", releasedMicros: "0" },
@@ -194,7 +195,7 @@ describe("PaperRunner options", () => {
     expect(report.errors.every((error) => error.message === "ORDERBOOK_UNAVAILABLE")).toBe(true);
   });
 
-  it("runs market recovery and risk exits before staging new signals ahead of pending retries", async () => {
+  it("stages target exits before stop-loss evaluation and pending retries", async () => {
     const calls: string[] = [];
     let clock = new Date("2026-07-15T00:00:00.000Z");
     const executor = {
@@ -214,7 +215,7 @@ describe("PaperRunner options", () => {
       wait: async (milliseconds) => { clock = new Date(clock.valueOf() + milliseconds); },
     }).run();
 
-    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
+    expect(calls).toEqual(["recover", "settlement", "signals", "stop", "pending"]);
   });
 
   it("uses market changes to wake pending BUY retries while retaining a REST fallback", async () => {
@@ -352,7 +353,7 @@ describe("PaperRunner options", () => {
       wait: async (milliseconds) => { clock = new Date(clock.valueOf() + milliseconds); },
     }).run();
 
-    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
+    expect(calls).toEqual(["recover", "settlement", "signals", "stop", "pending"]);
     expect(report.errorCount).toBe(1);
     expect(report.errors[0]?.message).toBe("RECOVERY_FAILED");
   });
@@ -370,7 +371,7 @@ describe("PaperRunner options", () => {
     const runner = new PaperRunner(executor, { accountId: "paper" });
 
     await expect(runner.finalDrain()).resolves.toBe(2);
-    expect(calls).toEqual(["recover", "settlement", "stop", "signals", "pending"]);
+    expect(calls).toEqual(["recover", "settlement", "signals", "stop", "pending"]);
   });
 
   it("rejects a final drain that is aborted before every stage completes", async () => {

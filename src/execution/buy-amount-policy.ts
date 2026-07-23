@@ -1,18 +1,23 @@
 import { createHash } from "node:crypto";
 import { stableJson } from "../domain/versioning.js";
 
-export const BUY_AMOUNT_POLICY_VERSION = "BUY_AMOUNT_POLICY_V1";
+export const BUY_AMOUNT_POLICY_VERSION = "BUY_AMOUNT_POLICY_V2";
 
 export interface BuyAmountPolicyDecision {
   version: typeof BUY_AMOUNT_POLICY_VERSION;
-  result: "UNCHANGED" | "LIFTED";
-  reason: "CALCULATED_AMOUNT_RETAINED" | "FIRST_ENTRY_MINIMUM_APPLIED" | "MARKET_MINIMUM_APPLIED";
+  result: "UNCHANGED" | "LIFTED" | "CAPPED";
+  reason:
+    | "CALCULATED_AMOUNT_RETAINED"
+    | "FIRST_ENTRY_MINIMUM_APPLIED"
+    | "MARKET_MINIMUM_APPLIED"
+    | "AVAILABLE_CASH_CAP_APPLIED";
   calculatedAmountMicros: string;
   finalAmountMicros: string;
   firstEntryEligible: boolean;
   firstEntryMinimumAmountMicros: string;
   marketMinimumAmountMicros: string | null;
   marketMinimumAutoLiftCapMicros: string;
+  availableCashCapMicros: string | null;
   evidenceHash: string;
 }
 
@@ -29,6 +34,7 @@ export function applyBuyAmountPolicy(input: {
   firstEntryMinimumAmountMicros: bigint;
   marketMinimumAmountMicros?: bigint | null;
   marketMinimumAutoLiftCapMicros: bigint;
+  availableCashCapMicros?: bigint | null;
 }): BuyAmountPolicyDecision {
   if (
     input.calculatedAmountMicros < 0n
@@ -37,6 +43,9 @@ export function applyBuyAmountPolicy(input: {
     || (input.marketMinimumAmountMicros !== undefined
       && input.marketMinimumAmountMicros !== null
       && input.marketMinimumAmountMicros <= 0n)
+    || (input.availableCashCapMicros !== undefined
+      && input.availableCashCapMicros !== null
+      && input.availableCashCapMicros < 0n)
   ) throw new Error("BUY_AMOUNT_POLICY_INPUT_INVALID");
 
   let finalAmount = input.calculatedAmountMicros;
@@ -55,9 +64,18 @@ export function applyBuyAmountPolicy(input: {
     finalAmount = marketMinimum;
     reason = "MARKET_MINIMUM_APPLIED";
   }
+  const availableCashCap = input.availableCashCapMicros ?? null;
+  if (availableCashCap !== null && finalAmount > availableCashCap) {
+    finalAmount = availableCashCap;
+    reason = "AVAILABLE_CASH_CAP_APPLIED";
+  }
   return finish({
     version: BUY_AMOUNT_POLICY_VERSION,
-    result: finalAmount === input.calculatedAmountMicros ? "UNCHANGED" : "LIFTED",
+    result: reason === "AVAILABLE_CASH_CAP_APPLIED"
+      ? "CAPPED"
+      : finalAmount === input.calculatedAmountMicros
+        ? "UNCHANGED"
+        : "LIFTED",
     reason,
     calculatedAmountMicros: input.calculatedAmountMicros.toString(),
     finalAmountMicros: finalAmount.toString(),
@@ -65,6 +83,7 @@ export function applyBuyAmountPolicy(input: {
     firstEntryMinimumAmountMicros: input.firstEntryMinimumAmountMicros.toString(),
     marketMinimumAmountMicros: marketMinimum?.toString() ?? null,
     marketMinimumAutoLiftCapMicros: input.marketMinimumAutoLiftCapMicros.toString(),
+    availableCashCapMicros: availableCashCap?.toString() ?? null,
   });
 }
 
@@ -78,6 +97,9 @@ export function isBuyAmountPolicyDecisionValid(value: BuyAmountPolicyDecision): 
         ? null
         : BigInt(value.marketMinimumAmountMicros),
       marketMinimumAutoLiftCapMicros: BigInt(value.marketMinimumAutoLiftCapMicros),
+      availableCashCapMicros: value.availableCashCapMicros === null
+        ? null
+        : BigInt(value.availableCashCapMicros),
     });
     return stableJson(expected) === stableJson(value);
   } catch {

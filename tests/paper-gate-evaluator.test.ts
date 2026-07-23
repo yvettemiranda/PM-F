@@ -24,6 +24,7 @@ function acceptance(stage: PaperAcceptanceSummary["funnel"]["stage"]["BUY"]): Pa
       signals: { buy: 1, sell: 0, conversion: 0, published: 1, executionEligible: 1, ineligible: 0, gap: 0, unconsumedEligible: 0, ineligibleReasons: {} },
       capital: { high: 1, medium: 0, low: 0, unknown: 0, sizingDecisionCount: 0, sizingRejectReasons: {}, sizingEvidence: [] },
       risk: { allow: 1, reject: 0, rejectReasons: {} },
+      copy: { targetBuyNotionalMicros: "0", desiredBuyAmountMicros: "0", requestedBuyAmountMicros: "0", filledBuySpendMicros: "0", buyRequestedCoveragePpm: null, buyFillCoveragePpm: null, requestedSellSizeMicros: "0", filledSellSizeMicros: "0", sellFillCoveragePpm: null },
       execution: { total: 1, waiting: 0, rejectedBeforeOrder: 0, rejectedBeforeOrderReasons: {}, marketConstraintRejects: 0, marketConstraintRejectReasons: {}, expired: 0, cancelled: 0, exitPending: 0, stopExitPending: 0, orders: 1, zeroFillOrders: 0, partialFillOrders: 0, fullFillOrders: stage === "FULL_FILL" ? 1 : 0, fills: stage === "FULL_FILL" ? 1 : 0 },
       positions: { total: 0, open: 0, partiallyClosed: 0, frozen: 0, settlementPending: 0, closed: 0, redeemed: 0 },
       reservations: { total: 0, active: 0, consumed: 0, released: 0, activeMicros: "0", releasedMicros: "0" },

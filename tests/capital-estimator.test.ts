@@ -30,7 +30,7 @@ describe("capital estimator", () => {
     expect(estimate.targetTradeCapitalRatioPpm).toBe("50000");
   });
 
-  it("returns MEDIUM with the fixed fallback when a source is missing", () => {
+  it("limits a MEDIUM-confidence fallback to the one-pUSD test amount", () => {
     const estimate = estimateTargetCapital({
       walletAddress: wallet,
       identityStatus: "IDENTITY_CONFIRMED",
@@ -42,7 +42,7 @@ describe("capital estimator", () => {
     });
     expect(estimate.capitalEstimateStatus).toBe("INCOMPLETE");
     expect(estimate.capitalConfidence).toBe("MEDIUM");
-    expect(estimate.fallbackAmountMicros).toBe("10000000");
+    expect(estimate.fallbackAmountMicros).toBe("1000000");
   });
 
   it("returns LOW for MAJOR_DESYNC", () => {

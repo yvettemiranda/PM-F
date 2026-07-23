@@ -166,7 +166,6 @@ export class PaperRunner {
     };
     await runStage(async () => this.executor.recoverMarketData(this.options.accountId, signal));
     await runStage(async () => { await this.executor.processSettlements(this.options.accountId, signal); });
-    await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
     await runStage(async () => {
       consumedSignals += (await this.executor.consumeAvailableSignals(
         this.options.accountId,
@@ -175,6 +174,10 @@ export class PaperRunner {
         { deferAttempts: true },
       )).length;
     });
+    // Apply the target's current exits before deriving a protective STOP from
+    // the remaining position. Otherwise one cycle can create two competing
+    // exits for the same shares.
+    await runStage(async () => { await this.executor.checkStopLosses(this.options.accountId, signal); });
     let retryOptions: PaperPendingRetryOptions | undefined;
     if (this.options.marketChangeFeed && !forceAllPending) {
       let pendingAssetIds = new Set<string>();

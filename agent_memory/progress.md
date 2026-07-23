@@ -1,12 +1,17 @@
 # Progress
 
 ## Current task
+- 已按用户确认开始新一轮跟单优化：后续 BUY 改为按完整账户权益缩放、现金作支付上限；MEDIUM 兜底降为 `1 pUSD`；同资产退出/止损与新 BUY 串行协调；报告新增金额和成交覆盖率。
 - 已完成用户要求的数据清理和防复发优化：`data/` 从约 `12 GB` 降到约 `21 MB`，系统盘可用空间从约 `298 GB` 增到约 `310 GB`。
 - 当前主库为全新 Schema `2.29.0` 空白安全库；旧 Campaign 数据只保留在昨晚两份关键 ZIP 及精简后的报告/日志中。下一次测试会从新 Campaign、新 Paper 账户开始。
 - Observe 保持 `1 s` Polygon 发现、`3 s` Data API、`15 s` Positions/pUSD；只把无变化 `ONLINE + SYNCED` 的重型不可变证据降为 `15 s` 采样。状态变化、新事件、新 Signal 和 gap 恢复立即落全量证据。
 - 迁移备份默认只保留最新且已校验的 `1` 份；已修复原先按含 schema 版本文件名排序、可能留下错误旧副本的问题。
 
 ## Completed implementation
+- Paper `1.12.0` / Risk `1.8.0`：HIGH BUY 在完整可退出估值时使用 `totalEquityMicros`，估值不完整才退回 available cash；新 `BUY_AMOUNT_POLICY_V2` 对最终金额应用可审计的 available-cash cap，不再整单因现金不足而拒绝。
+- Ruleset `v1.8.0`：MEDIUM 资本置信度固定兜底从 `10 pUSD` 收紧为 `1 pUSD`。
+- Paper cycle 先固化目标 Signal、再检查止损；同资产退出 pending 时后到 BUY 以 `SAME_ASSET_EXIT_PENDING` 等待，退出在 retry 顺序中完成后 BUY 自动继续。
+- Paper Funnel 新增理论 BUY、申请 BUY、实际 BUY 支出、BUY request/fill coverage、SELL request/fill coverage，按同一 execution cohort 统计。
 - Observe 成功轮询拆分为轻量每秒记录和有条件完整证据；仓位投影仍每轮更新，轮询/心跳/计数不丢失。
 - 最终状态从 `MAJOR_DESYNC/MINOR_DIFF/GAP_RECOVERED` 恢复为正常时也立即保存完整 checkpoint；Final Validation 改为验证 checkpoint 所属成功 Poll，不再错误要求最后一个轻量 Poll 必须自带 checkpoint。
 - Runtime migration backup 默认 retention 从 `3` 改为 `1`，新生成备份固定优先保留，其余按 mtime 排序。
@@ -23,6 +28,7 @@
 - Paper `1.11.0` / Risk `1.7.0` 新增 WAITING BUY 缩量 Risk 审计链：验证父决定 scope/ALLOW/amount，强制新金额严格小于父金额，Risk/Execution 当前金额精确一致，并在 Execution Audit 中同时保存父子 Risk Decision ID。
 
 ## Verification completed
+- 新优化先取得 4 条失败回归，再完成红绿：权益缩放、现金封顶、目标退出优先、同资产 BUY 延后恢复。最终全量 `54/54` 文件、`706/706` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
 - 清理后主库确认 Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`、Gate `PAPER + LIVE_DISABLED`；Target/Campaign/Live Execution/Order/Fill 均为 `0`。
 - 两份昨晚关键 ZIP 均通过 `unzip -t`；目标配置仍为 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`。
 - 新存储/备份/验证规则相关 `95/95` 测试通过。首次全量运行暴露 1 条过时 Final Validation checkpoint 假设，修复后最终全量 `54/54` 文件、`703/703` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
@@ -38,9 +44,9 @@
 - 下次启动必须使用最终干净 commit，重新生成 Phase 0/Replay/core 绑定并创建新 Campaign，不得续算旧核心时长。
 
 ## Current identity
-- Paper `1.11.0` / Risk `1.7.0` / Operational `1.6.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
+- Paper `1.12.0` / Risk `1.8.0` / Operational `1.7.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
 
 ## Next steps
-1. 完成全量测试、提交存储治理修复，形成干净 HEAD。
-2. 用户确认下一轮测试窗口后，从空白安全库创建新 Campaign；先完成隔离验证、Phase 0/Replay，再重新累计资格和 4 小时自然验证。
+1. 完成最终全量测试、双轴代码复核并提交，形成干净 HEAD。
+2. 从空白安全库创建新 Campaign；先完成隔离验证、Phase 0/Replay，再持续运行到 2026-07-23 17:15，并每 30 分钟巡检。
 3. 小额 Live 前继续处理 SPLIT/negative-risk conversion、结束时间缺失策略、Live 小额 SELL 约束终止、合规/geoblock、隔离钱包与 signer 授权；当前不得开启 Live。

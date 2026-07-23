@@ -488,6 +488,7 @@ export class LiveSignalConsumer {
         firstEntryEligible: isLiveFirstEntryBuyEligible(this.database, accountId, signal.assetId),
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+        availableCashCapMicros: available,
       })
       : null;
     return {

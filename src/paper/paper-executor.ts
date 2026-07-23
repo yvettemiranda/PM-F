@@ -331,7 +331,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (!envelope.executionEligible) {
       throw new Error(envelope.executionBlockReason ?? "SIGNAL_NOT_EXECUTION_ELIGIBLE");
     }
-    const executionId = this.createExecutionForSignal(accountId, envelope);
+    const executionId = await this.createExecutionForSignal(accountId, envelope, undefined, signal);
     const row = this.execution(executionId);
     if (
       attemptImmediately
@@ -579,13 +579,13 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
 
   async executeBuy(input: ExecutorSignalInput): Promise<ExecutorExecutionResult> {
     if (input.signal.signalType !== "TARGET_BUY") throw new Error("EXECUTOR_INPUT_NOT_BUY");
-    const executionId = this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
+    const executionId = await this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
     return { mode: this.mode, executionId, state: this.executionState(executionId) };
   }
 
   async executeSell(input: ExecutorSignalInput): Promise<ExecutorExecutionResult> {
     if (input.signal.signalType !== "TARGET_SELL") throw new Error("EXECUTOR_INPUT_NOT_SELL");
-    const executionId = this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
+    const executionId = await this.createExecutionForSignal(input.accountId, input.signal, this.approvedRisk(input));
     return { mode: this.mode, executionId, state: this.executionState(executionId) };
   }
 
@@ -749,6 +749,13 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     if (execution.execution_type === "TARGET_BUY" && execution.deadline_at && this.marketNowMs() > Date.parse(execution.deadline_at)) {
       this.expireBuy(execution);
       return "EXPIRED";
+    }
+    if (
+      execution.execution_type === "TARGET_BUY"
+      && this.hasPendingSameAssetExit(execution)
+    ) {
+      this.updatePendingReason(execution, "SAME_ASSET_EXIT_PENDING");
+      return "WAITING_EXECUTION";
     }
     if (!this.marketDataRetryDue(execution.paper_account_id, execution.asset_id, execution.condition_id)) {
       return execution.state;
@@ -1258,7 +1265,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     this.database.close();
   }
 
-  private createExecutionForSignal(accountId: string, signal: PaperSignalEnvelope, preapprovedRisk?: RiskDecision): string {
+  private async createExecutionForSignal(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    preapprovedRisk?: RiskDecision,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
     if (signal.signalType === "TARGET_CONVERSION") {
       throw new Error("NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE");
     }
@@ -1270,8 +1282,18 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       throw new Error(`PAPER_SIGNAL_CONTEXT_TARGET_MISMATCH:${signal.signalId}`);
     }
     if (signalTargetId !== account.target_id) throw new Error(`PAPER_SIGNAL_TARGET_MISMATCH:${signal.signalId}`);
+    const existing = this.database.prepare(
+      "SELECT paper_execution_id FROM paper_signal_consumptions WHERE paper_account_id=? AND signal_id=?",
+    ).get(accountId, signal.signalId) as { paper_execution_id: string | null } | undefined;
+    if (existing?.paper_execution_id) return existing.paper_execution_id;
     const idempotency = hash(["PAPER", accountId, signal.signalId]);
     const executionId = hash([idempotency, signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId)]);
+    // Executable-equity valuation may require public orderbook I/O. Resolve it
+    // before opening the SQLite transaction so a slow market-data call never
+    // holds the writer lock.
+    const buyCapital = signal.signalType === "TARGET_BUY"
+      ? await this.buyCapitalDecision(accountId, account, signal, abortSignal)
+      : null;
     const now = this.now().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -1282,9 +1304,16 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         this.database.exec("COMMIT");
         return duplicate.paper_execution_id;
       }
+      if (signal.signalType === "TARGET_BUY") {
+        const currentAccount = this.accountRow(accountId);
+        if (
+          currentAccount.cash_balance_micros !== account.cash_balance_micros
+          || currentAccount.reserved_balance_micros !== account.reserved_balance_micros
+        ) throw new Error("PAPER_ACCOUNT_BALANCE_CHANGED_DURING_SIZING");
+      }
       this.audit("SIGNAL", signal.signalId, "RECEIVED", "PAPER_CONSUME_SIGNAL", now, { accountId });
       if (signal.signalType === "TARGET_BUY") {
-        const capital = this.buyCapitalDecision(accountId, account, signal);
+        const capital = buyCapital!;
         if (preapprovedRisk) {
           this.assertPreapprovedBuyRiskAmount(preapprovedRisk.riskDecisionId, capital.amount);
         }
@@ -1392,21 +1421,37 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     }
   }
 
-  private buyCapitalDecision(
+  private async buyCapitalDecision(
     accountId: string,
     account: ReturnType<PaperExecutor["accountRow"]>,
     signal: PaperSignalEnvelope,
-  ): {
+    abortSignal?: AbortSignal,
+  ): Promise<{
     amount: bigint | null;
     mode: "PROPORTIONAL" | "FIXED_FALLBACK" | null;
     rejectReason: string | null;
     evidence: BuyCapitalSizingDecision;
     amountPolicy: BuyAmountPolicyDecision | null;
-  } {
+  }> {
     const capital = signal.capitalDecision;
     const available = BigInt(account.cash_balance_micros) - BigInt(account.reserved_balance_micros);
+    const hasOpenPosition = Boolean(this.database.prepare(
+      `SELECT 1 present FROM paper_positions
+       WHERE paper_account_id=?
+         AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')
+         AND CAST(current_size_micros AS INTEGER)>0
+       LIMIT 1`,
+    ).get(accountId));
+    const snapshot = hasOpenPosition
+      ? await this.accountSnapshot(accountId, abortSignal)
+      : null;
+    const sizingCapital = snapshot === null
+      ? BigInt(account.cash_balance_micros)
+      : snapshot.valuationStatus === "COMPLETE"
+        ? BigInt(snapshot.totalEquityMicros)
+        : available;
     const evidence = calculateBuyCapitalSizing({
-      accountCapitalMicros: available,
+      accountCapitalMicros: sizingCapital,
       capitalDecision: capital,
       exactRatio: signal.context?.capitalSizingRatio ?? null,
       exactRatioHash: signal.context?.capitalSizingRatioHash ?? null,
@@ -1430,6 +1475,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         firstEntryEligible: this.firstEntryMinimumEligible(accountId, signal.assetId),
         firstEntryMinimumAmountMicros: rules.buyFirstEntryMinimumAmountMicros,
         marketMinimumAutoLiftCapMicros: rules.buyMarketMinimumAutoLiftCapMicros,
+        availableCashCapMicros: available,
       })
       : null;
     return {
@@ -2687,6 +2733,20 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private updatePendingReason(execution: ExecutionRow, reason: string): void {
     this.database.prepare("UPDATE paper_executions SET reason=?,updated_at=? WHERE paper_execution_id=?")
       .run(reason, this.now().toISOString(), execution.paper_execution_id);
+  }
+
+  private hasPendingSameAssetExit(execution: ExecutionRow): boolean {
+    return Boolean(this.database.prepare(
+      `SELECT 1 present FROM paper_executions
+       WHERE paper_account_id=? AND asset_id=?
+         AND state IN ('EXIT_PENDING','STOP_EXIT_PENDING')
+         AND paper_execution_id<>?
+       LIMIT 1`,
+    ).get(
+      execution.paper_account_id,
+      execution.asset_id,
+      execution.paper_execution_id,
+    ));
   }
 
   private saveMarketSnapshots(book: PaperOrderbookSnapshot, fee: PaperFeeSnapshot, age: number): void {

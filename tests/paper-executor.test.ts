@@ -832,6 +832,98 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("sizes later BUYs from complete account equity instead of shrinking with available cash", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "equity-sized-first-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "800000000",
+        targetVisibleCapitalMicros: "1000000000",
+      },
+    });
+    expect(env.executor.executionState(
+      await env.executor.consumeSignal(env.accountId, "equity-sized-first-buy"),
+    )).toBe("EXECUTED");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "equity-sized-second-buy",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "200000000",
+        targetVisibleCapitalMicros: "1000000000",
+      },
+    });
+    expect(env.executor.executionState(
+      await env.executor.consumeSignal(env.accountId, "equity-sized-second-buy"),
+    )).toBe("EXECUTED");
+
+    const snapshot = await env.executor.accountSnapshot(env.accountId);
+    expect(snapshot.valuationStatus).toBe("COMPLETE");
+    expect(snapshot.totalEquityMicros).toBe("1000000000");
+    expect(snapshot.cashBalanceMicros).toBe("500000000");
+    expect(env.executor.acceptanceSummary(env.accountId, {
+      startAt: "2026-07-08T00:00:00.000Z",
+      endAt: "2026-07-08T00:00:02.000Z",
+    }).funnel.copy).toEqual({
+      targetBuyNotionalMicros: "500000000",
+      desiredBuyAmountMicros: "500000000",
+      requestedBuyAmountMicros: "500000000",
+      filledBuySpendMicros: "500000000",
+      buyRequestedCoveragePpm: "1000000",
+      buyFillCoveragePpm: "1000000",
+      requestedSellSizeMicros: "0",
+      filledSellSizeMicros: "0",
+      sellFillCoveragePpm: null,
+    });
+    env.executor.close();
+  });
+
+  it("caps equity-sized BUYs at available cash instead of rejecting the whole copy", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "equity-cap-first-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "1800000000",
+        targetVisibleCapitalMicros: "1000000000",
+      },
+    });
+    expect(env.executor.executionState(
+      await env.executor.consumeSignal(env.accountId, "equity-cap-first-buy"),
+    )).toBe("EXECUTED");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "equity-cap-second-buy",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      exactSizing: {
+        targetPriceUnits: "500000000000000000",
+        targetSizeMicros: "400000000",
+        targetVisibleCapitalMicros: "1000000000",
+      },
+    });
+    const secondExecutionId = await env.executor.consumeSignal(env.accountId, "equity-cap-second-buy");
+    expect(env.executor.executionState(secondExecutionId)).toBe("EXECUTED");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_amount_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(secondExecutionId)).toEqual({ requested_amount_micros: "100000000" });
+    db.close();
+    env.executor.close();
+  });
+
   it("uses the first-entry minimum when a positive exact ratio rounds below one pUSD micro", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = env.market.makeBook(
@@ -1649,8 +1741,8 @@ describe("PaperExecutor", () => {
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "r1", createdAt: "2026-07-08T00:00:01.000Z", confidence: "MEDIUM", capitalStatus: "INCOMPLETE" });
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "r2", createdAt: "2026-07-08T00:00:02.000Z", confidence: "MEDIUM", capitalStatus: "INCOMPLETE" });
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "r1"))).toBe("WAITING_EXECUTION");
-    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "r2"))).toBe("REJECTED");
-    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("10000000");
+    expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "r2"))).toBe("WAITING_EXECUTION");
+    expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("15000000");
     env.executor.close();
   });
 
@@ -1665,8 +1757,56 @@ describe("PaperExecutor", () => {
     expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, "sell-half"))).toBe("EXECUTED");
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const sizes = (db.prepare("SELECT current_size_micros FROM paper_positions ORDER BY created_at,paper_position_id").all() as Array<{ current_size_micros: string }>).map((row) => row.current_size_micros);
-    expect(sizes.sort()).toEqual(["100000000", "90000000"].sort());
+    expect(sizes.sort()).toEqual(["100000000", "100000000"].sort());
     db.close();
+    env.executor.close();
+  });
+
+  it("defers a new same-asset BUY until an older exit intent is resolved", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "same-asset-open",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "same-asset-open");
+
+    env.market.book = env.market.makeBook([{ price: "0.5", size: "1000" }], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "same-asset-exit",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      signalType: "TARGET_SELL",
+      sellNumerator: "1",
+      sellDenominator: "1",
+    });
+    const exitId = await env.executor.consumeSignal(env.accountId, "same-asset-exit");
+    expect(env.executor.executionState(exitId)).toBe("EXIT_PENDING");
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "same-asset-rebuy",
+      createdAt: "2026-07-08T00:00:03.000Z",
+    });
+    const rebuyId = await env.executor.consumeSignal(env.accountId, "same-asset-rebuy");
+
+    expect(env.executor.executionState(rebuyId)).toBe("WAITING_EXECUTION");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT reason,attempt_count FROM paper_executions WHERE paper_execution_id=?",
+    ).get(rebuyId)).toEqual({ reason: "SAME_ASSET_EXIT_PENDING", attempt_count: 0 });
+    db.close();
+
+    env.market.book = env.market.makeBook(
+      [{ price: "0.5", size: "1000" }],
+      [{ price: "0.5", size: "1000" }],
+    );
+    await env.executor.retryPending(env.accountId);
+    expect(env.executor.executionState(exitId)).toBe("EXECUTED");
+    expect(env.executor.executionState(rebuyId)).toBe("EXECUTED");
     env.executor.close();
   });
 
@@ -1751,7 +1891,7 @@ describe("PaperExecutor", () => {
     const sizes = (db.prepare(
       "SELECT current_size_micros FROM paper_positions ORDER BY created_at,paper_position_id",
     ).all() as Array<{ current_size_micros: string }>).map((row) => row.current_size_micros);
-    expect(sizes.sort()).toEqual(["135000000", "150000000"]);
+    expect(sizes.sort()).toEqual(["152500000", "152500000"]);
     const allocations = (db.prepare(
       `SELECT filled_size_micros FROM paper_execution_positions
        WHERE paper_execution_id=? ORDER BY paper_position_id`,
@@ -1789,8 +1929,8 @@ describe("PaperExecutor", () => {
 
     const snapshot = await env.executor.accountSnapshot(env.accountId);
 
-    expect(snapshot.positionValueMicros).toBe("145000000");
-    expect(snapshot.unrealizedPnlMicros).toBe("-45000000");
+    expect(snapshot.positionValueMicros).toBe("150000000");
+    expect(snapshot.unrealizedPnlMicros).toBe("-50000000");
     env.executor.close();
   });
 

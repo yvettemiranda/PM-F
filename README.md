@@ -85,9 +85,9 @@ Data API 不提供逐 fill ID。同一交易哈希内出现完全相同的多行
 
 用户已将 8 小时 Observe soak 延期到 Live Gate 前，因此短时 `SHORT_SOAK_PASSED` 允许开发 Phase 1A，但不允许据此进入 Live。`paper:run` 默认在主数据库使用 `data/operator/paper-account-id.txt` 持久化 1000 pUSD 模拟账户 ID，重启时恢复账户、待处理 execution 和 consumer checkpoint；每次 session 还会在 Observe 启动前事务化前移消费 cutoff，因此不会补停机期间的历史 Signal。自定义数据库使用数据库旁的独立 account-id 文件。传入 `--account-id=<id>` 可明确选择现有账户，只有显式传入 `--new-account` 才会新建并替换持久账户。Paper 只读取 `PUBLISHED && executionEligible=true` 的 Signal 和不可变 execution context；待成交 BUY 使用公开、无认证的 CLOB Market WebSocket 作为盘口变化唤醒信号，但每次执行判断仍重新读取完整 REST 盘口，并保留 15 秒兜底检查。WebSocket 不参与签名、下单或链上写入。
 
-每个 Paper cycle 会先消费已到达的新 Signal，再重试旧的待执行任务，避免目标已经退出时旧 BUY 抢先成交。目标 `TARGET_SELL` 会同时作用于现有 Paper Position 和同一 asset/condition 的待成交 BUY：全量退出直接取消待买并释放全部 Reservation，部分退出按同一比例缩减待买金额；缩减后的金额不会再被首开最低额规则反向放大。只有完整 Signal/Risk 校验通过后才允许改变待买，所有调整都写入 Reservation、Cash 和 Audit 账本。若退出只抵消了尚未成交的 BUY，不会伪造 SELL 订单或成交，而是记录为已处理的 `TARGET_EXIT_APPLIED_TO_WAITING_BUY`。
+每个 Paper cycle 会先消费已到达的新 Signal，再检查止损并统一重试旧任务，避免目标已经退出时旧 BUY 抢先成交，也避免同一批仓位同时生成目标退出和止损。目标 `TARGET_SELL` 会同时作用于现有 Paper Position 和同一 asset/condition 的待成交 BUY：全量退出直接取消待买并释放全部 Reservation，部分退出按同一比例缩减待买金额；缩减后的金额不会再被首开最低额规则反向放大。只有完整 Signal/Risk 校验通过后才允许改变待买，所有调整都写入 Reservation、Cash 和 Audit 账本。若退出只抵消了尚未成交的 BUY，不会伪造 SELL 订单或成交，而是记录为已处理的 `TARGET_EXIT_APPLIED_TO_WAITING_BUY`。同一资产仍有 `EXIT_PENDING` 或 `STOP_EXIT_PENDING` 时，后到的 BUY 保留 Reservation 并标记 `SAME_ASSET_EXIT_PENDING`；退出完成后按既有优先级自动继续，不会与卖出同时成交。
 
-BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。首开最低仍为 1 pUSD；若真实市场最小单更高，只在首开时精确抬升且不超过 5 pUSD。SELL、止损和结算不受这条 BUY 上限影响。
+BUY 允许以低于目标成交价的更优价格成交；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。HIGH 置信度下，后续 BUY 以可完整退出估值的账户总权益计算比例，可用现金只作为最终支付上限；不会因为资金已变成仓位就机械缩小后续跟单。估值不完整时安全退回可用现金口径。MEDIUM 置信度的固定兜底从 10 pUSD 收紧为 1 pUSD，不能因为资本证据变差反而放大交易。首开最低仍为 1 pUSD；若真实市场最小单更高，只在首开时精确抬升且不超过 5 pUSD。SELL、止损和结算不受这条 BUY 上限影响。Paper 报告同时输出理论 BUY 金额、申请金额、实际成交支出和 BUY/SELL 覆盖率，便于区分“策略缩放”和“盘口没跟上”。
 
 `TARGET_SELL` 若小于 CLOB 最小下单量，或成交后只剩不足执行器 `0.01` 股精度的尾差，不能通过放大卖单来“凑单”，否则会超过目标退出比例。Paper 会保存市场约束证据，把无法提交的剩余量从该 Execution 的待执行分配中移除并明确标记为 `CANCELLED`；已发生的部分成交、真实剩余 Position 和原始 Signal 都继续保留。`STOP_LOSS` 不采用这条终止规则，仍保持 `STOP_EXIT_PENDING`，但相同约束状态只记录一次，避免每秒重复写库。
 

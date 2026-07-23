@@ -50,6 +50,17 @@ export interface PaperExecutionFunnel {
     reject: number;
     rejectReasons: Record<string, number>;
   };
+  copy: {
+    targetBuyNotionalMicros: string;
+    desiredBuyAmountMicros: string;
+    requestedBuyAmountMicros: string;
+    filledBuySpendMicros: string;
+    buyRequestedCoveragePpm: string | null;
+    buyFillCoveragePpm: string | null;
+    requestedSellSizeMicros: string;
+    filledSellSizeMicros: string;
+    sellFillCoveragePpm: string | null;
+  };
   execution: {
     total: number;
     waiting: number;
@@ -106,6 +117,7 @@ interface SignalRow {
   execution_eligible: number;
   execution_block_reason: string | null;
   capital_confidence: string | null;
+  target_trade_amount_micros: string | null;
   consumed: number;
 }
 
@@ -113,6 +125,8 @@ interface ExecutionRow {
   execution_type: string;
   state: string;
   reason: string;
+  requested_amount_micros: string | null;
+  requested_size_micros: string | null;
 }
 
 function grouped(values: Array<string | null>): Record<string, number> {
@@ -131,6 +145,11 @@ function sumIntegerRows(rows: Array<{ value: string }>, absolute = false): strin
     total += absolute && value < 0n ? -value : value;
   }
   return total.toString();
+}
+
+function coveragePpm(numerator: bigint, denominator: bigint): string | null {
+  if (denominator <= 0n) return null;
+  return ((numerator * 1_000_000n) / denominator).toString();
 }
 
 function lifecycleStage(input: {
@@ -172,7 +191,7 @@ export function buildPaperExecutionFunnel(
   if (Date.parse(windowEndAt) < Date.parse(startAt)) throw new Error("PAPER_FUNNEL_WINDOW_REVERSED");
   const signals = database.prepare(
     `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-            ce.capital_confidence,
+            ce.capital_confidence,ce.target_trade_amount_micros,
             CASE WHEN pc.signal_id IS NULL THEN 0 ELSE 1 END consumed
      FROM signals s
      LEFT JOIN capital_estimates ce ON ce.capital_estimate_id=s.capital_estimate_id
@@ -205,7 +224,7 @@ export function buildPaperExecutionFunnel(
   const riskRejectRows = riskRows.filter((row) => row.decision === "REJECT");
 
   const executions = database.prepare(
-    `SELECT execution_type,state,reason
+    `SELECT execution_type,state,reason,requested_amount_micros,requested_size_micros
      FROM paper_executions WHERE paper_account_id=? AND created_at>=? AND created_at<=?
      ORDER BY created_at,paper_execution_id`,
   ).all(paperAccountId, startAt, windowEndAt) as unknown as ExecutionRow[];
@@ -217,11 +236,17 @@ export function buildPaperExecutionFunnel(
      ORDER BY o.created_at,o.paper_order_id`,
   ).all(paperAccountId, startAt, windowEndAt) as unknown as Array<{ side: "BUY" | "SELL"; state: string }>;
   const fills = database.prepare(
-    `SELECT f.side
+    `SELECT f.side,f.size_micros,f.notional_micros,f.fee_micros
      FROM paper_fill_ledger f
      JOIN paper_executions e ON e.paper_execution_id=f.paper_execution_id
-     WHERE e.paper_account_id=? AND f.created_at>=? AND f.created_at<=?`,
-  ).all(paperAccountId, startAt, windowEndAt) as unknown as Array<{ side: "BUY" | "SELL" }>;
+     WHERE e.paper_account_id=? AND e.created_at>=? AND e.created_at<=?
+       AND f.created_at<=?`,
+  ).all(paperAccountId, startAt, windowEndAt, windowEndAt) as unknown as Array<{
+    side: "BUY" | "SELL";
+    size_micros: string;
+    notional_micros: string;
+    fee_micros: string;
+  }>;
   const constraintRows = database.prepare(
     `SELECT m.check_result,m.reason
      FROM paper_market_constraint_evidence m
@@ -321,6 +346,30 @@ export function buildPaperExecutionFunnel(
   const sizingRejectReasons = grouped(sizingEvidence.filter((item) => item.result === "REJECTED").map((item) => item.reason));
   const executionRejectRows = executions.filter((row) => row.state === "REJECTED");
   const constraintRejectRows = constraintRows.filter((row) => row.check_result === "REJECT");
+  const targetBuyNotional = buySignals.reduce(
+    (total, row) => total + BigInt(row.target_trade_amount_micros ?? "0"),
+    0n,
+  );
+  const desiredBuyAmount = sizingEvidence.reduce(
+    (total, row) => total + BigInt(row.calculatedAmountMicros ?? "0"),
+    0n,
+  );
+  const requestedBuyAmount = buyExecutions.reduce(
+    (total, row) => total + BigInt(row.requested_amount_micros ?? "0"),
+    0n,
+  );
+  const requestedSellSize = sellExecutions.reduce(
+    (total, row) => total + BigInt(row.requested_size_micros ?? "0"),
+    0n,
+  );
+  const filledBuySpend = fills.filter((row) => row.side === "BUY").reduce(
+    (total, row) => total + BigInt(row.notional_micros) + BigInt(row.fee_micros),
+    0n,
+  );
+  const filledSellSize = fills.filter((row) => row.side === "SELL").reduce(
+    (total, row) => total + BigInt(row.size_micros),
+    0n,
+  );
 
   return {
     signals: {
@@ -344,6 +393,17 @@ export function buildPaperExecutionFunnel(
       allow: riskAllow,
       reject: riskRejectRows.length,
       rejectReasons: grouped(riskRejectRows.map((row) => row.risk_reject_reason)),
+    },
+    copy: {
+      targetBuyNotionalMicros: targetBuyNotional.toString(),
+      desiredBuyAmountMicros: desiredBuyAmount.toString(),
+      requestedBuyAmountMicros: requestedBuyAmount.toString(),
+      filledBuySpendMicros: filledBuySpend.toString(),
+      buyRequestedCoveragePpm: coveragePpm(requestedBuyAmount, desiredBuyAmount),
+      buyFillCoveragePpm: coveragePpm(filledBuySpend, desiredBuyAmount),
+      requestedSellSizeMicros: requestedSellSize.toString(),
+      filledSellSizeMicros: filledSellSize.toString(),
+      sellFillCoveragePpm: coveragePpm(filledSellSize, requestedSellSize),
     },
     execution: {
       total: executions.length,

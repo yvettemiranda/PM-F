@@ -18,10 +18,11 @@
 - Paper：不可变 Signal/Execution Context、Risk、Reservation、完整 REST 盘口、VWAP/FAK、Execution/Position/Ledger、Fee/PnL、Settlement 与恢复。
 - 待成交 BUY 使用公开无认证 CLOB Market WebSocket 作为盘口变化唤醒；执行前仍读取完整 REST 盘口，断线或无事件时每 `15 s` 兜底。STOP/SELL 安全退出仍按每个 Paper cycle 处理。
 - 完全相同的待成交盘口和 fee 不重复写完整订单尝试；盘口变化后才产生新尝试。等待原因拆分为 `BUY_NO_ASK`、`BUY_BEST_ASK_ABOVE_LIMIT`、`BUY_ZERO_EXECUTABLE_LIQUIDITY` 等。
-- Paper 每轮先消费并固化已到达的新 Signal，再重试旧执行；后续 `TARGET_SELL` 会按同一比例同时减少现有 Position 和同 asset/condition 的 WAITING BUY，完整退出取消待买，部分退出缩减 Reservation，且只有 Risk 通过后才改账。被缩减的待买禁止被首开最低额重新放大。
+- Paper 每轮先消费并固化已到达的新 Signal，再检查止损和重试旧执行；目标退出先于止损，止损只作用于剩余仓位。后续 `TARGET_SELL` 会按同一比例同时减少现有 Position 和同 asset/condition 的 WAITING BUY，完整退出取消待买，部分退出缩减 Reservation，且只有 Risk 通过后才改账。被缩减的待买禁止被首开最低额重新放大。
+- 同 asset 的 `EXIT_PENDING` / `STOP_EXIT_PENDING` 存在时，新 BUY 保留为 `WAITING_EXECUTION + SAME_ASSET_EXIT_PENDING`，退出完成后自动继续，禁止同一仓位方向相反的任务同时成交。
 - WAITING BUY 每次被目标退出向下缩减时，都会以原 Risk Decision 为父证据生成新的严格向下金额决定，并把 Execution 重新绑定到当前金额；持平、向上、跨账户或非 ALLOW 父决定全部失败关闭。
 - `TARGET_SELL` 小于市场最小下单量，或合法成交后只剩不足 `0.01` 股的执行器尾差时，Paper 不允许放大卖单超卖：保存约束证据、保留真实成交/Position，把不可提交部分从该 Execution 分配中移除并终止为 `CANCELLED`。`STOP_LOSS` 继续保持 pending，但相同约束只记录一次。
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.4.0`、Risk `1.7.0`、Replay `2.0.0`、Paper `1.11.0`、Live `1.8.0`、Validation `1.6.0`、Operational `1.6.0`、Ruleset `v1.7.0`、Config `v1.4.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.8.0`、Strategy `2.5.0`、Risk `1.8.0`、Replay `2.0.0`、Paper `1.12.0`、Live `1.9.0`、Validation `1.7.0`、Operational `1.7.0`、Ruleset `v1.8.0`、Config `v1.5.0`；Observe Signal 内部版本为 `observe-v1.3.0`。
 - Signal Context 将官方市场结束时间分为 `VERIFIED` / `UNAVAILABLE`；Paper 对后者只使用不可变、有限时长的 `execution_deadline_at`，Live 继续拒绝该状态。
 - Observe 先提交事件/projection/checkpoint，再逐个富化 Signal；单市场元数据失败只记 warning 并在后续轮询重试，不能再制造连接 gap 或污染其它市场 Signal。
 - 标准二元完整集合 MERGE 必须先由官方 CLOB market token 列表精确证明两个 outcome asset，再按最近目标成交价归一到 `1.0`，生成两个独立、按 tracked 仓位比例的等价 `TARGET_SELL`；Phase 0/Replay 保存并复核同一官方证据。无法证明完整 outcome set、余额不足或缺少 tracked leg 定价时立即 fail closed。REDEEM 只投影归零，不伪造 SELL。
@@ -29,6 +30,7 @@
 
 ## Confirmed BUY policy
 - 当前默认继续保持首开最低 `1 pUSD`、市场最低额首开自动抬升上限 `5 pUSD`、BUY 绝对最高价 `0.95`。
+- HIGH 置信度 BUY 按完整可退出估值的账户总权益计算目标比例，可用现金仅作为最终支付上限；估值不完整时退回可用现金。MEDIUM 置信度固定兜底为 `1 pUSD`，不再因证据变差放大到 `10 pUSD`。
 - BUY 接受低于目标成交价的更优价格；追高上限为 `min(0.95, target + max(target * 2%, 2 * tick))`。
 - 比例金额足够时按原值执行；不足时只允许当前资产无仓位的首开抬到 `1 pUSD`。若市场最小单更高，可精确抬升但不得超过 `5 pUSD`；完全平仓后下一次 BUY 可重新视为首开。
 - 市场最低额按当前可成交深度和 fee 精确计算，不按最坏追价上限放大。例如目标价 `0.50`、当前可成交价 `0.50`、市场最小 `5` 份时为 `2.50 pUSD`；若更优盘口已让 `1 pUSD` 满足最低份额，则保持 `1 pUSD`，不自动放大。
@@ -46,7 +48,7 @@
 - 新目标最近抽样中频繁出现标准二元 `MERGE`；Paper 已有等价双腿退出语义，但仍须用新核心短测取得自然 MERGE/成交证据。无法证明完整集合的 MERGE 继续硬阻断。
 - 官方结束时间缺失的市场只允许 bounded Paper；Live 继续失败关闭，后续须决定是否接受独立的 Live deadline 风险策略。
 - tracked negative-risk conversion 仍只形成不可执行义务并硬阻断；没有受控 Paper 语义和未来明确授权的链上适配器。
-- Paper `1.11.0` / Risk `1.7.0` / Operational `1.6.0` 改变核心兼容性，仍需从新干净核心重新累计 40 分钟资格、连续 4 小时、累计 24 小时及最终 8 小时 Observe；旧核心的自然 BUY/SELL/Fill/PnL 证据只在昨晚文件/ZIP 中保留，时长不能混算。
+- Paper `1.12.0` / Risk `1.8.0` / Operational `1.7.0` 改变核心兼容性，仍需从新干净核心重新累计 40 分钟资格、连续 4 小时、累计 24 小时及最终 8 小时 Observe；旧核心的自然 BUY/SELL/Fill/PnL 证据只在昨晚文件/ZIP 中保留，时长不能混算。
 - geoblock/compliance、隔离钱包、真实 signer 和小额 Live 的再次明确授权均未完成。
 
 ## Operator workflow
