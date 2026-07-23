@@ -56,6 +56,16 @@ export interface SystemRiskDecisionInput {
   now: string;
 }
 
+export interface DownwardAmountRiskAdjustmentInput {
+  mode: ExecutorMode;
+  accountId: string;
+  entityId: string;
+  priorRiskDecisionId: string;
+  requestedAmountMicros: bigint;
+  reason: string;
+  now: string;
+}
+
 interface RiskAccount {
   status: string;
   walletStatus: string | null;
@@ -278,6 +288,78 @@ export class RiskManager {
       requestedSizeMicros: input.requestedSizeMicros,
       checks,
       rulesetHash,
+      configVersion: registeredRuleset.config_version,
+      now: input.now,
+    });
+  }
+
+  recordDownwardAmountAdjustment(input: DownwardAmountRiskAdjustmentInput): RiskDecision {
+    const prior = this.database.prepare(
+      `SELECT executor_mode,account_id,signal_id,context_id,decision,
+              requested_amount_micros,requested_size_micros,ruleset_hash
+       FROM risk_decisions WHERE risk_decision_id=?`,
+    ).get(input.priorRiskDecisionId) as {
+      executor_mode: string;
+      account_id: string;
+      signal_id: string | null;
+      context_id: string | null;
+      decision: string;
+      requested_amount_micros: string | null;
+      requested_size_micros: string | null;
+      ruleset_hash: string;
+    } | undefined;
+    if (!prior) throw new Error("PRIOR_RISK_DECISION_NOT_FOUND");
+    if (prior.executor_mode !== input.mode || prior.account_id !== input.accountId) {
+      throw new Error("PRIOR_RISK_DECISION_SCOPE_MISMATCH");
+    }
+    if (prior.decision !== "ALLOW" || prior.requested_amount_micros === null) {
+      throw new Error("PRIOR_RISK_DECISION_NOT_AMOUNT_ALLOW");
+    }
+    if (prior.requested_size_micros !== null) {
+      throw new Error("PRIOR_RISK_DECISION_AMOUNT_SIZE_CONFLICT");
+    }
+    const priorAmount = BigInt(prior.requested_amount_micros);
+    if (input.requestedAmountMicros < 0n || input.requestedAmountMicros >= priorAmount) {
+      throw new Error("RISK_AMOUNT_ADJUSTMENT_NOT_DOWNWARD");
+    }
+    const registeredRuleset = this.database.prepare(
+      "SELECT config_version FROM ruleset_registry WHERE ruleset_hash=?",
+    ).get(prior.ruleset_hash) as { config_version: string } | undefined;
+    if (!registeredRuleset) throw new Error(`RISK_RULESET_NOT_REGISTERED:${prior.ruleset_hash}`);
+    const checks: RiskDecision["checks"] = [
+      { name: "prior_risk_decision", result: "PASS", detail: input.priorRiskDecisionId },
+      {
+        name: "downward_amount_adjustment",
+        result: "PASS",
+        detail: `${priorAmount.toString()}->${input.requestedAmountMicros.toString()}`,
+      },
+    ];
+    const riskDecisionId = hash([
+      "RISK",
+      input.mode,
+      input.accountId,
+      "DOWNWARD_AMOUNT_ADJUSTMENT",
+      input.entityId,
+      input.priorRiskDecisionId,
+      input.requestedAmountMicros.toString(),
+      input.reason,
+      prior.ruleset_hash,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+    ]);
+    return this.insertDecision({
+      riskDecisionId,
+      mode: input.mode,
+      accountId: input.accountId,
+      signalId: prior.signal_id,
+      contextId: prior.context_id,
+      decision: "ALLOW",
+      riskReason: input.reason,
+      riskRejectReason: null,
+      requestedAmountMicros: input.requestedAmountMicros,
+      requestedSizeMicros: null,
+      checks,
+      rulesetHash: prior.ruleset_hash,
       configVersion: registeredRuleset.config_version,
       now: input.now,
     });

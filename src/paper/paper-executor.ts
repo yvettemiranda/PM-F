@@ -3213,6 +3213,21 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     for (const adjustment of adjustments) {
       const { released, retained } = adjustment;
       const execution = this.execution(adjustment.paperExecutionId);
+      const priorRequestedAmount = BigInt(execution.requested_amount_micros ?? "-1");
+      if (priorRequestedAmount !== released + retained || !execution.risk_decision_id) {
+        throw new Error("PAPER_WAITING_BUY_RISK_AMOUNT_MISMATCH");
+      }
+      const adjustedRisk = this.riskManager.recordDownwardAmountAdjustment({
+        mode: this.mode,
+        accountId,
+        entityId: execution.paper_execution_id,
+        priorRiskDecisionId: execution.risk_decision_id,
+        requestedAmountMicros: retained,
+        reason: retained === 0n
+          ? "TARGET_SELL_SUPERSEDED_WAITING_BUY"
+          : "TARGET_SELL_REDUCED_WAITING_BUY",
+        now,
+      });
       const account = this.accountRow(accountId);
       const reservedAfter = BigInt(account.reserved_balance_micros) - released;
       if (reservedAfter < 0n) throw new Error("PAPER_RESERVATION_INVARIANT");
@@ -3265,9 +3280,17 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         : "TARGET_SELL_REDUCED_WAITING_BUY";
       this.database.prepare(
         `UPDATE paper_executions
-         SET requested_amount_micros=?,state=?,reason=?,updated_at=?
+         SET requested_amount_micros=?,state=?,reason=?,risk_decision_id=?,
+             risk_reject_reason=NULL,updated_at=?
          WHERE paper_execution_id=?`,
-      ).run(retained.toString(), nextState, reason, now, execution.paper_execution_id);
+      ).run(
+        retained.toString(),
+        nextState,
+        reason,
+        adjustedRisk.riskDecisionId,
+        now,
+        execution.paper_execution_id,
+      );
       this.transition(
         "PAPER_EXECUTION",
         execution.paper_execution_id,
@@ -3286,6 +3309,8 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           targetExitSignalId: signal.signalId,
           releasedAmountMicros: released.toString(),
           retainedAmountMicros: retained.toString(),
+          priorRiskDecisionId: execution.risk_decision_id,
+          riskDecisionId: adjustedRisk.riskDecisionId,
         },
       );
     }

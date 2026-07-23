@@ -2703,6 +2703,16 @@ describe("PaperExecutor", () => {
     expect(db.prepare(
       "SELECT reserved_balance_micros FROM paper_accounts WHERE paper_account_id=?",
     ).get(env.accountId)).toEqual({ reserved_balance_micros: "0" });
+    expect(db.prepare(
+      `SELECT e.requested_amount_micros,r.requested_amount_micros risk_amount,r.risk_reason
+       FROM paper_executions e
+       JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(buyExecutionId)).toEqual({
+      requested_amount_micros: "0",
+      risk_amount: "0",
+      risk_reason: "TARGET_SELL_SUPERSEDED_WAITING_BUY",
+    });
     db.close();
     env.executor.close();
   });
@@ -2720,6 +2730,11 @@ describe("PaperExecutor", () => {
       env.accountId,
       "waiting-before-partial-exit",
     );
+    const initialDb = new DatabaseSync(env.databasePath, { readOnly: true });
+    const initialRisk = initialDb.prepare(
+      "SELECT risk_decision_id FROM paper_executions WHERE paper_execution_id=?",
+    ).get(buyExecutionId) as { risk_decision_id: string };
+    initialDb.close();
 
     insertSignal({
       databasePath: env.databasePath,
@@ -2750,6 +2765,18 @@ describe("PaperExecutor", () => {
     expect(db.prepare(
       "SELECT reserved_balance_micros FROM paper_accounts WHERE paper_account_id=?",
     ).get(env.accountId)).toEqual({ reserved_balance_micros: "75000000" });
+    expect(db.prepare(
+      `SELECT e.requested_amount_micros,e.risk_decision_id,
+              r.requested_amount_micros risk_amount,r.risk_reason
+       FROM paper_executions e
+       JOIN risk_decisions r ON r.risk_decision_id=e.risk_decision_id
+       WHERE e.paper_execution_id=?`,
+    ).get(buyExecutionId)).toEqual({
+      requested_amount_micros: "75000000",
+      risk_decision_id: expect.not.stringMatching(initialRisk.risk_decision_id),
+      risk_amount: "75000000",
+      risk_reason: "TARGET_SELL_REDUCED_WAITING_BUY",
+    });
     expect(db.prepare(
       `SELECT entry_type,delta_micros,remaining_after_micros
        FROM paper_reservation_ledger
@@ -3197,6 +3224,36 @@ describe("PaperExecutor", () => {
     expect(decision.risk_reject_reason).toBeNull();
     expect(decision.risk_decision_id).toBeTruthy();
     db.close();
+    env.executor.close();
+  });
+
+  it("rejects a risk amount adjustment unless it is strictly downward", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "risk-downward-only",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    const executionId = await env.executor.consumeSignal(env.accountId, "risk-downward-only");
+    const database = new DatabaseSync(env.databasePath);
+    const execution = database.prepare(
+      "SELECT risk_decision_id,requested_amount_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId) as { risk_decision_id: string; requested_amount_micros: string };
+    const risk = new RiskManager(database, sourceVersion);
+
+    expect(() => risk.recordDownwardAmountAdjustment({
+      mode: "PAPER",
+      accountId: env.accountId,
+      entityId: executionId,
+      priorRiskDecisionId: execution.risk_decision_id,
+      requestedAmountMicros: BigInt(execution.requested_amount_micros),
+      reason: "INVALID_NON_DOWNWARD_ADJUSTMENT",
+      now: "2026-07-08T00:00:02.000Z",
+    })).toThrow("RISK_AMOUNT_ADJUSTMENT_NOT_DOWNWARD");
+
+    database.close();
     env.executor.close();
   });
 

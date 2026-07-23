@@ -5,7 +5,7 @@
 - SPLIT 仍没有安全的 position projection/copy 语义，会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明恰好两个完整 outcome、余额不足或缺少 tracked leg 价格的 MERGE 会立即硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间缺失时只允许 bounded Paper；Live Gate 继续拒绝，尚未形成可接受的真实资金 deadline 策略。
-- 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
+- Paper `1.11.0` / Risk `1.7.0` 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
@@ -18,10 +18,11 @@
 - `node:sqlite` 在 Node 24 仍有 experimental warning；长期稳定性需新核心 Campaign 验证。
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - Data API offset、分页边界和短暂 Positions/Trades/Activity 不同步仍可能触发 gap recovery 或 reconciliation；不得以“尽量成交”为由降低这些数据完整性 Gate。
-- Live 当前对低于市场最小量的 TARGET_SELL 仍保持 `EXIT_PENDING`；Live 运行尚未启用，真实资金前必须把该路径与 Paper `1.10.0` 的“不超卖、明确终止或聚合策略”对齐并完成隔离测试，不能直接照搬 Paper 的账本写法。
-- 数据目录和迁移备份较大。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
+- Live 当前对低于市场最小量的 TARGET_SELL 仍保持 `EXIT_PENDING`；Live 运行尚未启用，真实资金前必须把该路径与 Paper 的“不超卖、明确终止或聚合策略”对齐并完成隔离测试，不能直接照搬 Paper 的账本写法。
+- 数据目录约 `12 GB`，迁移备份约 `7.2 GB`。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
 
 ## Resolved in current implementation
+- Paper `1.10.0` 的 WAITING BUY 在目标部分/完整退出后会安全缩减 Execution/Reservation，但仍绑定缩减前的 Risk Decision，导致最终 scoped integrity 出现两个 `RISK_REQUESTED_AMOUNT_MISMATCH` 并使 4 小时 Session 作废。Paper `1.11.0` / Risk `1.7.0` 现在以父 Risk Decision 为证据生成严格向下的新决定，重新绑定当前金额；完整取消为 `0`，持平或向上调整失败关闭。
 - Paper TARGET_SELL 低于市场最小单量，或成交后只剩不足 `0.01` 股的尾差时，旧实现会永久保持 `EXIT_PENDING`，每秒重复写同一约束、状态和审计；当前保存一次证据后将不可提交部分从 Execution allocation 移除并 `CANCELLED`，已成交部分和真实 Position 不变。STOP_LOSS 继续等待，但相同 constraint hash/reason 不再重复写。
 - 目标完整 SELL/MERGE 已到达时，旧 Paper cycle 会先重试 WAITING BUY，再消费退出，可能买入目标已经退出的陈旧仓位；当前先固化新 Signal，再重试 pending，并按 sell ratio 对同 asset/condition 的待买执行完整取消或部分缩量。Risk 拒绝不会改账，只抵消待买时也不会伪造 SELL 成交。
 - 部分目标退出缩减 Reservation 后，首开市场最低额 auto-lift 可能把金额重新放大；当前以不可变 Audit 标记该 Execution，后续只能按缩减金额执行或失败关闭。
