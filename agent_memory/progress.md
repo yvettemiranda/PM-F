@@ -16,18 +16,21 @@
 - 市场最低量预检改为使用 tick 向下取整后的可执行 BUY 上限，避免预检看到 10 份、实际 FAK 只能成交 4 份却错误放行。
 - 当前 Ruleset 下，低于市场最低量的 TARGET_SELL 保持 `EXIT_PENDING`，不因 BUY deadline 或等待时间取消；旧 Ruleset 继续保留旧金额、价格、lineage 和 SELL 终止语义。
 - 新文件和执行依赖已纳入 core compatibility；README 已更新当前规则。
+- 补齐隔离 Live 的目标 SELL/等待 BUY 对齐：完整退出取消等待 BUY，部分退出同比例缩减，先调整等待 BUY 再卖真实持仓；释放 Reservation/Cash、向下 Risk 决策、Transition 和 Audit 全部可追溯。
+- 只抵消等待 BUY 且没有真实持仓时，Live 记录 `TARGET_EXIT_APPLIED_TO_WAITING_BUY` 而不伪造 SELL 订单；调整与该目标退出执行原子提交，记录失败会整笔回滚并关闭 Gate。
+- Live 中被目标 SELL 缩减的等待 BUY 不会在后续重试时被市场最低额规则反向抬升；Gate 拒绝时等待 BUY 不发生改变。
 
 ## Verification
 - TDD/回归覆盖：小额最低1/最高5、比例结果超过5仍封顶、市场最低额超过5、精确1%边界、9次与第10次、`>=1%` 不限、部分成交计一次、零成交/取消/过期不计、未清义务不重置、完整新周期重置。
 - 覆盖同 orderHash 多 fill VWAP、不同订单不合并、Polygon/Data API 聚合去重、无法证明时失败关闭。
 - 覆盖 90%、105%、0.95 边界、目标参考价高于0.95但实际价合法、FAK 部分成交、tick-rounded 市场最低量、等待/过期/释放资金、SELL 调整等待 BUY、SELL 持续退出、止损锁和新周期解锁。
 - 覆盖真实缺少 `smallFollowBuyMaxCount` 的历史 Ruleset，确认不会被 V4 重解释；MEDIUM 无 ratio 的 1U fallback 已覆盖。
-- 最终全量：`54/54` 测试文件、`737/737` 测试通过；包含 Live 手续费价格边界与小额第 9/10 次集成路径。
+- 最终全量为 `54/54` 测试文件、`743/743` 测试通过；新增 Live SELL/等待 BUY 的完整退出、部分退出、Gate 阻断、原子回滚、损坏 Reservation 关闭 Gate 和不反向抬升测试，以及“同 orderHash 跨 transaction 独立经济成交”测试。TypeScript、`git diff --check` 和调试痕迹检查均通过。
 
 ## Runtime state
-- 没有启动新测试或任何 Live 进程。历史 Campaign `PC-105EC3F76A2AC49D59E6` 保持 `PAUSED`，旧核心 `4.84 h` 不得混入新核心。
+- Campaign `PC-1F69671B63722CC4E3EC` 已安全暂停并保全 `0.17 h` 诊断证据；当前没有 Observe/Paper/Supervisor 或任何 Live 进程。修复后的最终干净提交必须创建全新 Campaign，旧时长不得混入。
 - 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；收尾前仍需再次只读核对进程、Git、数据库、Gate、Campaign、磁盘和 Live 零记录。
 
 ## Next steps
-1. 完成安全复核并提交当前实现。
+1. 跑完类型检查、精确回归和全量测试，完成安全复核并提交当前实现。
 2. 用最终干净提交开启全新 Paper，重点观察自然 BUY/SELL、聚合去重、9 次计数、止损锁、延迟、RPC degraded 和数据库增长。

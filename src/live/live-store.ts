@@ -126,6 +126,13 @@ export function liveExecutionIdempotencyKey(accountId: string, signalId: string)
   return `LIVE_EXECUTION:${accountId}:${signalId}`;
 }
 
+export function liveTargetSellWaitingBuyAdjustmentIdempotencyKey(
+  buyExecutionId: string,
+  targetSellSignalId: string,
+): string {
+  return `LIVE_TARGET_SELL_WAITING_BUY_ADJUSTMENT:${buyExecutionId}:${targetSellSignalId}`;
+}
+
 export function liveOrderIdempotencyKey(executionId: string, side: LiveOrderSide, assetId: string, priceUnits: string, sizeMicros: string, attempt = 1): string {
   return `LIVE_ORDER:${executionId}:${side}:${assetId}:${priceUnits}:${sizeMicros}:${attempt}`;
 }
@@ -682,6 +689,140 @@ export class LiveStore {
     } else if (current.execution_type === "TARGET_SELL" || current.execution_type === "STOP_LOSS") {
       this.releaseAssetReservation(current, null, reason);
     }
+  }
+
+  adjustWaitingBuyForTargetExit(input: {
+    buyExecutionId: string;
+    targetSellSignalId: string;
+    retainedAmountMicros: bigint;
+    adjustedRiskDecisionId: string;
+  }): boolean {
+    return this.transaction(() => {
+      const idempotencyKey = liveTargetSellWaitingBuyAdjustmentIdempotencyKey(
+        input.buyExecutionId,
+        input.targetSellSignalId,
+      );
+      if (this.database.prepare(
+        "SELECT 1 present FROM live_reservation_ledger WHERE idempotency_key=?",
+      ).get(idempotencyKey)) return false;
+      const execution = this.executionById(input.buyExecutionId);
+      if (!execution) throw new Error("LIVE_WAITING_BUY_EXECUTION_NOT_FOUND");
+      if (execution.execution_type !== "TARGET_BUY" || execution.state !== "WAITING_EXECUTION") {
+        throw new Error("LIVE_WAITING_BUY_EXECUTION_STATE_MISMATCH");
+      }
+      if (execution.requested_amount_micros === null) {
+        throw new Error("LIVE_WAITING_BUY_REQUESTED_AMOUNT_MISSING");
+      }
+      if (
+        BigInt(execution.filled_size_micros) !== 0n
+        || BigInt(execution.filled_notional_micros) !== 0n
+        || BigInt(execution.fee_micros) !== 0n
+      ) throw new Error("LIVE_WAITING_BUY_ALREADY_FILLED");
+      if (this.hasNonTerminalOrder(execution.live_execution_id)) {
+        throw new Error("LIVE_WAITING_BUY_HAS_NON_TERMINAL_ORDER");
+      }
+      const currentAmount = BigInt(execution.requested_amount_micros);
+      const reservation = this.reservationBalance(execution.live_execution_id);
+      if (currentAmount <= 0n || reservation !== currentAmount) {
+        throw new Error("LIVE_WAITING_BUY_RESERVATION_MISMATCH");
+      }
+      if (input.retainedAmountMicros < 0n || input.retainedAmountMicros >= currentAmount) {
+        throw new Error("LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_INVALID");
+      }
+      const adjustedRisk = this.database.prepare(
+        `SELECT executor_mode,account_id,decision,requested_amount_micros,
+                requested_size_micros,ruleset_hash
+         FROM risk_decisions WHERE risk_decision_id=?`,
+      ).get(input.adjustedRiskDecisionId) as {
+        executor_mode: string;
+        account_id: string | null;
+        decision: string;
+        requested_amount_micros: string | null;
+        requested_size_micros: string | null;
+        ruleset_hash: string;
+      } | undefined;
+      if (
+        !adjustedRisk
+        || adjustedRisk.executor_mode !== "LIVE"
+        || adjustedRisk.account_id !== execution.live_account_id
+        || adjustedRisk.decision !== "ALLOW"
+        || adjustedRisk.requested_amount_micros !== input.retainedAmountMicros.toString()
+        || adjustedRisk.requested_size_micros !== null
+        || adjustedRisk.ruleset_hash !== execution.ruleset_hash
+      ) throw new Error("LIVE_WAITING_BUY_ADJUSTED_RISK_MISMATCH");
+
+      const released = currentAmount - input.retainedAmountMicros;
+      const now = this.now().toISOString();
+      const nextState: LiveExecutionState = input.retainedAmountMicros === 0n
+        ? "CANCELLED"
+        : "WAITING_EXECUTION";
+      const reason = input.retainedAmountMicros === 0n
+        ? "TARGET_SELL_SUPERSEDED_WAITING_BUY"
+        : "TARGET_SELL_REDUCED_WAITING_BUY";
+      this.database.prepare(
+        `INSERT INTO live_reservation_ledger(
+          reservation_ledger_id,live_execution_id,live_order_id,entry_type,delta_micros,
+          remaining_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, NULL, 'RELEASE', ?, ?, ?, ?)`,
+      ).run(
+        hash(["LIVE_RESERVATION", execution.live_execution_id, input.targetSellSignalId, "TARGET_SELL_RELEASE"]),
+        execution.live_execution_id,
+        (-released).toString(),
+        input.retainedAmountMicros.toString(),
+        idempotencyKey,
+        now,
+      );
+      const cashIdempotencyKey = `LIVE_CASH_TARGET_SELL_WAITING_BUY_ADJUSTMENT:${execution.live_execution_id}:${input.targetSellSignalId}`;
+      this.database.prepare(
+        `INSERT INTO live_cash_ledger(
+          cash_ledger_id,live_account_id,live_execution_id,entry_type,cash_delta_micros,
+          reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+        ) VALUES (?, ?, ?, ?, '0', ?, NULL, NULL, ?, ?)`,
+      ).run(
+        hash(["LIVE_CASH", execution.live_execution_id, input.targetSellSignalId, "TARGET_SELL_RELEASE"]),
+        execution.live_account_id,
+        execution.live_execution_id,
+        `RELEASE:${reason}`,
+        (-released).toString(),
+        cashIdempotencyKey,
+        now,
+      );
+      this.database.prepare(
+        `UPDATE live_executions
+         SET requested_amount_micros=?,state=?,reason=?,risk_decision_id=?,updated_at=?
+         WHERE live_execution_id=?`,
+      ).run(
+        input.retainedAmountMicros.toString(),
+        nextState,
+        reason,
+        input.adjustedRiskDecisionId,
+        now,
+        execution.live_execution_id,
+      );
+      this.transition(
+        "LIVE_EXECUTION",
+        execution.live_execution_id,
+        execution.state,
+        nextState,
+        reason,
+        execution.ruleset_hash,
+        now,
+      );
+      this.audit(
+        "LIVE_EXECUTION",
+        execution.live_execution_id,
+        input.retainedAmountMicros === 0n ? "reservation_cancelled" : "reservation_reduced",
+        reason,
+        {
+          targetExitSignalId: input.targetSellSignalId,
+          releasedAmountMicros: released.toString(),
+          retainedAmountMicros: input.retainedAmountMicros.toString(),
+          priorRiskDecisionId: execution.risk_decision_id,
+          riskDecisionId: input.adjustedRiskDecisionId,
+        },
+      );
+      return true;
+    });
   }
 
   reserve(execution: LiveExecutionRow, amountMicros: bigint): void {

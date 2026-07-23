@@ -162,6 +162,10 @@ export class LiveSignalConsumer {
       }
       const executionRules = registeredExecutionRules(this.database, loaded.rulesetHash);
       if (!executionRules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${loaded.rulesetHash}`);
+      const targetExitSupersession = signal.signalType === "TARGET_SELL"
+        && requested.size === null
+        && executionRules.smallFollowBuyPolicyEnabled
+        && this.hasWaitingBuyTargetExitAdjustment(accountId, signal);
       let follow: ReturnType<typeof evaluateBuyFollowPolicy> | null = null;
       try {
         follow = signal.signalType === "TARGET_BUY" && executionRules.smallFollowBuyPolicyEnabled
@@ -207,6 +211,7 @@ export class LiveSignalConsumer {
           requestedSizeMicros: requested.size,
           capitalSizingDecision: requested.capitalSizingDecision,
           buyAmountPolicyDecision: requested.buyAmountPolicyDecision,
+          targetExitSupersession,
           now: this.now().toISOString(),
         });
       let result: { executionId: string; state: string };
@@ -577,14 +582,66 @@ export class LiveSignalConsumer {
     if (denominator <= 0n || numerator <= 0n) return null;
     const rows = this.database.prepare(
       `SELECT current_size_micros FROM live_positions
-       WHERE live_account_id=? AND asset_id=? AND status IN ('OPEN','PARTIALLY_CLOSED')
+       WHERE live_account_id=? AND asset_id=? AND condition_id=?
+         AND status IN ('OPEN','PARTIALLY_CLOSED')
        ORDER BY created_at,live_position_id`,
-    ).all(accountId, signal.assetId) as unknown as Array<{ current_size_micros: string }>;
+    ).all(accountId, signal.assetId, signal.conditionId) as unknown as Array<{ current_size_micros: string }>;
     const total = rows.reduce((sum, row) => sum + BigInt(row.current_size_micros), 0n);
     if (total <= 0n) return null;
     const requested = (total * numerator) / denominator;
     if (requested <= 0n) return null;
     return requested < total ? requested : total;
+  }
+
+  private hasWaitingBuyTargetExitAdjustment(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+  ): boolean {
+    if (
+      signal.sellRatioNumerator === null
+      || signal.sellRatioDenominator === null
+      || !/^\d+$/.test(signal.sellRatioNumerator)
+      || !/^\d+$/.test(signal.sellRatioDenominator)
+    ) return false;
+    const numerator = BigInt(signal.sellRatioNumerator);
+    const denominator = BigInt(signal.sellRatioDenominator);
+    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return false;
+    const rows = this.database.prepare(
+      `SELECT e.live_execution_id,e.requested_amount_micros,r.delta_micros
+       FROM live_executions e
+       JOIN live_reservation_ledger r ON r.live_execution_id=e.live_execution_id
+       WHERE e.live_account_id=? AND e.asset_id=? AND e.condition_id=?
+         AND e.execution_type='TARGET_BUY' AND e.state='WAITING_EXECUTION'
+       ORDER BY e.created_at,e.live_execution_id,r.created_at,r.reservation_ledger_id`,
+    ).all(accountId, signal.assetId, signal.conditionId) as unknown as Array<{
+      live_execution_id: string;
+      requested_amount_micros: string | null;
+      delta_micros: string;
+    }>;
+    const totals = new Map<string, { requested: bigint | null; reserved: bigint }>();
+    try {
+      for (const row of rows) {
+        const current = totals.get(row.live_execution_id) ?? {
+          requested: row.requested_amount_micros === null ? null : BigInt(row.requested_amount_micros),
+          reserved: 0n,
+        };
+        current.reserved += BigInt(row.delta_micros);
+        totals.set(row.live_execution_id, current);
+      }
+    } catch {
+      // Let the executor's invariant check disable the Live Gate durably.
+      return rows.length > 0;
+    }
+    for (const value of totals.values()) {
+      if (value.requested === null || value.requested !== value.reserved || value.reserved <= 0n) {
+        // A waiting execution exists, but its ledger is unsafe. Risk may only
+        // route the target exit to the executor; execution will fail closed
+        // before any order and persistently disable the Live Gate.
+        return true;
+      }
+      if ((value.reserved * numerator) / denominator > 0n) return true;
+    }
+    return false;
   }
 
   private recordConsumption(

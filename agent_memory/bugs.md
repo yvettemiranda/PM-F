@@ -29,6 +29,7 @@
 - TARGET_SELL 在新规则下曾因低于市场最小量被终止为 `CANCELLED`；当前 Ruleset 改为持续 `EXIT_PENDING`、保留真实尾仓且对相同约束证据去重。
 - Polygon 同一 orderHash 的多个 fill 曾各自触发 Signal；当前在快速源先按 transaction+orderHash 聚合，并在唯一经济证据匹配时消除 Data API 重复。
 - BUY 原先允许所有低价改善且使用 `2%/2 tick` 上限；当前新 Ruleset 严格执行目标价 90%—105%及实际价0.95上限，历史价格规则不变。
+- Live `TARGET_SELL` 原先只按真实 Position 计算卖出量，没有像 Paper 一样先取消或同比例缩减同 asset/condition 的等待 BUY；当前已补齐 Reservation/Cash/Risk/Audit、Gate 前置、原子回滚、幂等、损坏账本时持久关闭 Gate 和禁止最低额反向抬升的完整路径。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

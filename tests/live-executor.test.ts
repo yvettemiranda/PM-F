@@ -2259,6 +2259,345 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("cancels a waiting Live BUY before applying a complete target exit", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [waitingBuy] = await consumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ signalId: env.signal.signalId, state: "WAITING_EXECUTION" });
+    const exit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-full-exit-cancels-waiting-buy",
+      riskDecisionId: "unused-live-full-exit-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "1",
+      requestedAmountMicros: null,
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: exit.signal.signalId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "CANCELLED",
+      requested_amount_micros: "0",
+      reason: "TARGET_SELL_SUPERSEDED_WAITING_BUY",
+    });
+    expect(db.prepare(
+      "SELECT state,requested_size_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(result!.executionId!)).toEqual({
+      state: "EXECUTED",
+      requested_size_micros: null,
+      reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+    });
+    expect(db.prepare(
+      "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) remaining FROM live_reservation_ledger WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({ remaining: 0 });
+    expect(db.prepare(
+      "SELECT COALESCE(SUM(CAST(reserved_delta_micros AS INTEGER)),0) remaining FROM live_cash_ledger WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({ remaining: 0 });
+    expect((db.prepare("SELECT COUNT(*) count FROM live_orders").get() as { count: number }).count).toBe(0);
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("rolls back a waiting Live BUY adjustment when the matching target exit cannot be recorded", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const [waitingBuy] = await consumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    const exit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-target-exit-recording-failure",
+      riskDecisionId: "unused-live-target-exit-recording-failure-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "1",
+      requestedAmountMicros: null,
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+    const fault = new DatabaseSync(env.databasePath);
+    fault.exec(`CREATE TRIGGER fail_target_exit_recording
+      BEFORE INSERT ON live_executions
+      WHEN NEW.signal_id='${exit.signal.signalId}'
+      BEGIN SELECT RAISE(ABORT, 'TARGET_EXIT_RECORDING_FAULT'); END;`);
+    fault.close();
+
+    await expect(consumer.consumeAvailableSignals(accountId)).rejects.toThrow("TARGET_EXIT_RECORDING_FAULT");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "1000000",
+      reason: "LIVE_BUY_WAITING_MARKET",
+    });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_reservation_ledger WHERE live_execution_id=? AND entry_type='RELEASE'",
+    ).get(waitingBuy!.executionId!)).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_executions WHERE signal_id=?",
+    ).get(exit.signal.signalId)).toEqual({ count: 0 });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("disables the Live Gate before a target exit can touch a corrupt waiting BUY reservation", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const [waitingBuy] = await consumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    const corrupt = new DatabaseSync(env.databasePath);
+    corrupt.prepare(
+      "UPDATE live_executions SET requested_amount_micros='999999' WHERE live_execution_id=?",
+    ).run(waitingBuy!.executionId!);
+    corrupt.close();
+    const exit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-target-exit-corrupt-waiting-reservation",
+      riskDecisionId: "unused-live-target-exit-corrupt-waiting-reservation-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "1",
+      requestedAmountMicros: null,
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    await expect(consumer.consumeAvailableSignals(accountId))
+      .rejects.toThrow("LIVE_WAITING_BUY_RESERVATION_MISMATCH");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "999999",
+    });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_reservation_ledger WHERE live_execution_id=? AND entry_type='RELEASE'",
+    ).get(waitingBuy!.executionId!)).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_executions WHERE signal_id=?",
+    ).get(exit.signal.signalId)).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT execution_mode,live_gate_state,state_reason FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({
+      execution_mode: "PAPER",
+      live_gate_state: "LIVE_DISABLED",
+      state_reason: "LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_FAILED:LIVE_WAITING_BUY_RESERVATION_MISMATCH",
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("reduces a waiting Live BUY before selling the same ratio of an open position", async () => {
+    const env = setup();
+    const openingExecutor = liveExecutor(env.databasePath);
+    const openingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      openingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    const [opening] = await openingConsumer.consumeAvailableSignals(accountId);
+    expect(opening).toMatchObject({ state: "EXECUTED" });
+    openingConsumer.close();
+    openingExecutor.close();
+
+    const pending = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-pending-buy-before-partial-exit",
+      riskDecisionId: "unused-live-pending-buy-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "1",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+    const waitingExecutor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const waitingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      waitingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    const [waitingBuy] = await waitingConsumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ signalId: pending.signal.signalId, state: "WAITING_EXECUTION" });
+    waitingConsumer.close();
+    waitingExecutor.close();
+
+    const exit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-half-exit-reduces-waiting-buy",
+      riskDecisionId: "unused-live-half-exit-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "2",
+      createdAt: "2026-07-09T00:00:02.000Z",
+    });
+    const sellingExecutor = liveExecutor(env.databasePath);
+    const sellingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      sellingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+
+    const [result] = await sellingConsumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: exit.signal.signalId, state: "EXECUTED" });
+    expect(await sellingExecutor.executeSell({
+      accountId,
+      signal: exit.signal,
+      context: exit.context,
+      riskDecisionId: result!.riskDecisionId!,
+    })).toMatchObject({ executionId: result!.executionId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "500000",
+      reason: "TARGET_SELL_REDUCED_WAITING_BUY",
+    });
+    expect(db.prepare(
+      "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) remaining FROM live_reservation_ledger WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({ remaining: 500000 });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_reservation_ledger WHERE live_execution_id=? AND entry_type='RELEASE'",
+    ).get(waitingBuy!.executionId!)).toEqual({ count: 1 });
+    expect(db.prepare(
+      "SELECT requested_size_micros FROM live_executions WHERE live_execution_id=?",
+    ).get(result!.executionId!)).toEqual({ requested_size_micros: "100000000" });
+    expect(db.prepare(
+      "SELECT current_size_micros,status FROM live_positions WHERE live_account_id=? AND asset_id=?",
+    ).get(accountId, assetId)).toEqual({ current_size_micros: "100000000", status: "PARTIALLY_CLOSED" });
+    const adjustmentTransition = db.prepare(
+      `SELECT rowid FROM live_state_transitions
+       WHERE entity_id=? AND reason='TARGET_SELL_REDUCED_WAITING_BUY'
+       ORDER BY rowid DESC LIMIT 1`,
+    ).get(waitingBuy!.executionId!) as { rowid: number };
+    const sellTransition = db.prepare(
+      `SELECT rowid FROM live_state_transitions
+       WHERE entity_id=? ORDER BY rowid LIMIT 1`,
+    ).get(result!.executionId!) as { rowid: number };
+    expect(adjustmentTransition.rowid).toBeLessThan(sellTransition.rowid);
+    db.close();
+    sellingConsumer.close();
+    sellingExecutor.close();
+
+    const retryExecutor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    expect(await retryExecutor.retryPending(accountId, "BUYS_ONLY"))
+      .toContain(waitingBuy!.executionId!);
+    const retryCheck = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(retryCheck.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "REJECTED",
+      requested_amount_micros: "500000",
+      reason: "BELOW_MARKET_MIN_ORDER_SIZE",
+    });
+    expect(retryCheck.prepare(
+      "SELECT COUNT(*) count FROM live_reservation_ledger WHERE live_execution_id=? AND entry_type='RELEASE'",
+    ).get(waitingBuy!.executionId!)).toEqual({ count: 2 });
+    retryCheck.close();
+    retryExecutor.close();
+  });
+
+  it("does not adjust a waiting Live BUY when the target exit fails the Live Gate", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const waitingExecutor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const waitingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      waitingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    const [waitingBuy] = await waitingConsumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    waitingConsumer.close();
+    waitingExecutor.close();
+
+    const exit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-gate-blocked-exit-keeps-waiting-buy",
+      riskDecisionId: "unused-live-gate-blocked-exit-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      sellRatioNumerator: "1",
+      sellRatioDenominator: "1",
+      requestedAmountMicros: null,
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+    const blockedExecutor = liveExecutor(env.databasePath, { liveGate: new FakeGate(false) });
+    const blockedConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      blockedExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+
+    const [result] = await blockedConsumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: exit.signal.signalId, state: "REJECTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "1000000",
+      reason: "LIVE_BUY_WAITING_MARKET",
+    });
+    expect(db.prepare(
+      "SELECT COUNT(*) count FROM live_reservation_ledger WHERE live_execution_id=? AND entry_type='RELEASE'",
+    ).get(waitingBuy!.executionId!)).toEqual({ count: 0 });
+    db.close();
+    blockedConsumer.close();
+    blockedExecutor.close();
+  });
+
   it("keeps a sufficient proportional Live BUY unchanged even when it is above the auto-lift cap", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     const executor = liveExecutor(env.databasePath, {

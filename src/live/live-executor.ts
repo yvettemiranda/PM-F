@@ -62,6 +62,7 @@ import { LiveReconciliation } from "./live-reconciliation.js";
 import {
   cancelIdempotencyKey,
   liveExecutionIdempotencyKey,
+  liveTargetSellWaitingBuyAdjustmentIdempotencyKey,
   liveOrderIdempotencyKey,
   LiveStore,
   redeemIdempotencyKey,
@@ -90,6 +91,7 @@ interface ApprovedRiskDecisionRow {
   requested_size_micros: string | null;
   ruleset_hash: string;
   risk_reason: string | null;
+  checks_json: string;
 }
 
 interface LiveSignalExecutionOptions {
@@ -1269,6 +1271,63 @@ export class LiveExecutor implements ExecutorInterface {
       }
     }
 
+    if (
+      side === "SELL"
+      && executionType === "TARGET_SELL"
+      && executionRules.smallFollowBuyPolicyEnabled
+    ) {
+      try {
+        if (approval.requested_size_micros === null) {
+          const supersession = this.store.transaction(() => {
+            const adjustedWaitingBuyCount = this.applyWaitingBuyTargetExitAdjustments(
+              input.accountId,
+              input.signal,
+            );
+            if (adjustedWaitingBuyCount === 0) return null;
+            const created = this.store.createExecution({
+              liveAccountId: input.accountId,
+              signalId: input.signal.signalId,
+              contextId: input.context.contextId,
+              riskDecisionId: input.riskDecisionId,
+              liveGateRunId,
+              executionIdempotencyKey,
+              executionType: "TARGET_SELL",
+              state: "EXECUTED",
+              assetId: input.signal.assetId,
+              conditionId: input.signal.conditionId,
+              requestedAmountMicros: null,
+              requestedSizeMicros: null,
+              targetPriceUnits: input.signal.targetPriceUnits,
+              deadlineAt: null,
+              reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+              rulesetHash,
+            });
+            this.store.updateCheckpoint(input.accountId, { executionId: created.live_execution_id });
+            return created;
+          });
+          if (!supersession) {
+            return this.reject(
+              input,
+              side,
+              executionIdempotencyKey,
+              liveGateRunId,
+              "TARGET_EXIT_SUPERSESSION_NO_WAITING_BUY",
+              executionType,
+            );
+          }
+          return { mode: "LIVE", executionId: supersession.live_execution_id, state: supersession.state };
+        }
+        this.applyWaitingBuyTargetExitAdjustments(input.accountId, input.signal);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_FAILED";
+        this.store.transaction(() => this.store.forceGateDisabled(
+          `LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_FAILED:${reason}`,
+          "SYSTEM",
+        ));
+        throw error;
+      }
+    }
+
     const requestedSize = side === "BUY"
       ? null
       : BigInt(approval.requested_size_micros!) - BigInt(execution?.filled_size_micros ?? "0");
@@ -1748,6 +1807,93 @@ export class LiveExecutor implements ExecutorInterface {
     });
   }
 
+  private applyWaitingBuyTargetExitAdjustments(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+  ): number {
+    if (
+      signal.sellRatioNumerator === null
+      || signal.sellRatioDenominator === null
+      || !/^\d+$/.test(signal.sellRatioNumerator)
+      || !/^\d+$/.test(signal.sellRatioDenominator)
+    ) return 0;
+    const numerator = BigInt(signal.sellRatioNumerator);
+    const denominator = BigInt(signal.sellRatioDenominator);
+    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return 0;
+    const rows = this.database.prepare(
+      `SELECT live_execution_id,risk_decision_id,requested_amount_micros
+       FROM live_executions
+       WHERE live_account_id=? AND asset_id=? AND condition_id=?
+         AND execution_type='TARGET_BUY' AND state='WAITING_EXECUTION'
+       ORDER BY created_at,live_execution_id`,
+    ).all(accountId, signal.assetId, signal.conditionId) as unknown as Array<{
+      live_execution_id: string;
+      risk_decision_id: string;
+      requested_amount_micros: string | null;
+    }>;
+    const riskManager = new RiskManager(this.database, this.sourceVersion);
+    return this.store.transaction(() => {
+      let adjustedCount = 0;
+      for (const row of rows) {
+        const adjustmentIdempotencyKey = liveTargetSellWaitingBuyAdjustmentIdempotencyKey(
+          row.live_execution_id,
+          signal.signalId,
+        );
+        if (this.database.prepare(
+          "SELECT 1 present FROM live_reservation_ledger WHERE idempotency_key=?",
+        ).get(adjustmentIdempotencyKey)) continue;
+        if (row.requested_amount_micros === null) {
+          throw new Error("LIVE_WAITING_BUY_REQUESTED_AMOUNT_MISSING");
+        }
+        const reservationRows = this.database.prepare(
+          "SELECT delta_micros FROM live_reservation_ledger WHERE live_execution_id=?",
+        ).all(row.live_execution_id) as unknown as Array<{ delta_micros: string }>;
+        const reserved = reservationRows.reduce(
+          (total, entry) => total + BigInt(entry.delta_micros),
+          0n,
+        );
+        if (reserved !== BigInt(row.requested_amount_micros) || reserved <= 0n) {
+          throw new Error("LIVE_WAITING_BUY_RESERVATION_MISMATCH");
+        }
+        const released = (reserved * numerator) / denominator;
+        if (released <= 0n) continue;
+        const retained = reserved - released;
+        const reason = retained === 0n
+          ? "TARGET_SELL_SUPERSEDED_WAITING_BUY"
+          : "TARGET_SELL_REDUCED_WAITING_BUY";
+        const adjustedRisk = riskManager.recordDownwardAmountAdjustment({
+          mode: "LIVE",
+          accountId,
+          entityId: `${row.live_execution_id}:TARGET_SELL:${signal.signalId}`,
+          priorRiskDecisionId: row.risk_decision_id,
+          requestedAmountMicros: retained,
+          reason,
+          now: this.now().toISOString(),
+        });
+        if (!this.store.adjustWaitingBuyForTargetExit({
+          buyExecutionId: row.live_execution_id,
+          targetSellSignalId: signal.signalId,
+          retainedAmountMicros: retained,
+          adjustedRiskDecisionId: adjustedRisk.riskDecisionId,
+        })) throw new Error("LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_RACE");
+        adjustedCount += 1;
+      }
+      return adjustedCount;
+    });
+  }
+
+  private wasWaitingBuyReducedByTargetExit(executionId: string): boolean {
+    return Boolean(this.database.prepare(
+      `SELECT 1 reduced FROM live_reservation_ledger
+       WHERE live_execution_id=? AND entry_type='RELEASE'
+         AND idempotency_key LIKE ? ESCAPE '\\'
+       LIMIT 1`,
+    ).get(
+      executionId,
+      `LIVE\_TARGET\_SELL\_WAITING\_BUY\_ADJUSTMENT:${executionId}:%`,
+    ));
+  }
+
   private async supersedePendingTargetExits(accountId: string, assetId: string): Promise<void> {
     const rows = this.database.prepare(
       `SELECT live_execution_id FROM live_executions
@@ -2215,9 +2361,12 @@ export class LiveExecutor implements ExecutorInterface {
         execution.asset_id,
         execution.live_execution_id,
       );
-    if (rules.smallFollowBuyPolicyEnabled
-      ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
-      : legacyMinimumLiftEligibility === "NONE") {
+    if (
+      this.wasWaitingBuyReducedByTargetExit(execution.live_execution_id)
+      || (rules.smallFollowBuyPolicyEnabled
+        ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
+        : legacyMinimumLiftEligibility === "NONE")
+    ) {
       return { status: "NOT_ELIGIBLE" };
     }
     if (requiredAmountMicros > rules.buyMarketMinimumAutoLiftCapMicros) {
@@ -2261,9 +2410,12 @@ export class LiveExecutor implements ExecutorInterface {
           execution.asset_id,
           execution.live_execution_id,
         );
-      if (rules.smallFollowBuyPolicyEnabled
-        ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
-        : lockedLegacyEligibility === "NONE") {
+      if (
+        this.wasWaitingBuyReducedByTargetExit(execution.live_execution_id)
+        || (rules.smallFollowBuyPolicyEnabled
+          ? this.buyPolicyClass(input.signal) !== "SMALL_BUY"
+          : lockedLegacyEligibility === "NONE")
+      ) {
         this.database.exec("COMMIT");
         return { status: "NOT_ELIGIBLE" };
       }
@@ -2569,7 +2721,7 @@ export class LiveExecutor implements ExecutorInterface {
   ): ApprovedRiskDecisionRow | string {
     const row = this.database.prepare(
       `SELECT risk_decision_id,executor_mode,paper_account_id,account_id,signal_id,context_id,decision,
-              requested_amount_micros,requested_size_micros,ruleset_hash,risk_reason
+              requested_amount_micros,requested_size_micros,ruleset_hash,risk_reason,checks_json
        FROM risk_decisions WHERE risk_decision_id=?`,
     ).get(input.riskDecisionId) as ApprovedRiskDecisionRow | undefined;
     if (!row) return "RISK_DECISION_NOT_FOUND";
@@ -2588,7 +2740,18 @@ export class LiveExecutor implements ExecutorInterface {
         return "RISK_APPROVED_BUY_AMOUNT_INVALID";
       }
     } else if (row.requested_size_micros === null || BigInt(row.requested_size_micros) <= 0n) {
-      return "RISK_APPROVED_SELL_SIZE_INVALID";
+      let targetExitSupersession = false;
+      try {
+        const checks = JSON.parse(row.checks_json) as Array<{
+          name?: unknown;
+          result?: unknown;
+        }>;
+        targetExitSupersession = executionType === "TARGET_SELL"
+          && checks.some((check) => check.name === "target_exit_supersession" && check.result === "PASS");
+      } catch {
+        return "RISK_CHECKS_JSON_INVALID";
+      }
+      if (!targetExitSupersession) return "RISK_APPROVED_SELL_SIZE_INVALID";
     }
     return row;
   }

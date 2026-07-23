@@ -233,6 +233,70 @@ describe("PolygonOrderFilledTradeFeed", () => {
     expect(detected.capture?.data.logs).toHaveLength(3);
   });
 
+  it("keeps the same order hash in separate transactions as independent economic executions", async () => {
+    const secondTransactionHash = `0x${"d".repeat(64)}`;
+    const first = targetBuyLog({
+      orderHashDigit: "4",
+      logIndex: 1,
+      collateralMicros: 1_000_000n,
+      sizeMicros: 2_000_000n,
+    });
+    const second = {
+      ...targetBuyLog({
+        orderHashDigit: "4",
+        logIndex: 2,
+        collateralMicros: 3_000_000n,
+        sizeMicros: 4_000_000n,
+      }),
+      transactionHash: secondTransactionHash,
+      transactionIndex: "0x2",
+    };
+    const blockNumbers = ["0x66", "0x67"];
+    const provider: PolygonOrderFilledFeedProvider = {
+      async polygonBlockNumber(): Promise<ApiCapture<PolygonBlockNumberResponse>> {
+        return capture({ jsonrpc: "2.0", id: 10, result: blockNumbers.shift()! });
+      },
+      async polygonBlock(blockNumber): Promise<ApiCapture<PolygonBlockResponse>> {
+        return capture(blockNumber === "0x64"
+          ? block("0x64", "a", 1_774_172_560)
+          : block("0x65", "b", 1_774_172_562));
+      },
+      async polygonOrderFilledLogs(exchange, _maker, fromBlock): Promise<ApiCapture<PolygonLogsResponse>> {
+        return capture({
+          jsonrpc: "2.0",
+          id: 11,
+          result: exchange === POLYMARKET_CTF_EXCHANGES[0] && fromBlock === "0x65" ? [first, second] : [],
+        });
+      },
+      async clobMarketByToken(): Promise<ApiCapture<ClobMarketByToken>> {
+        return capture({
+          condition_id: conditionId,
+          primary_token_id: asset,
+          secondary_token_id: "42",
+        });
+      },
+    };
+    const feed = new PolygonOrderFilledTradeFeed(provider, { confirmationDepth: 2 });
+
+    await feed.poll(wallet);
+    const detected = await feed.poll(wallet);
+
+    expect(detected.trades).toEqual([
+      expect.objectContaining({
+        transactionHash,
+        orderHash: `0x${"4".repeat(64)}`,
+        price: "0.5",
+        size: "2",
+      }),
+      expect.objectContaining({
+        transactionHash: secondTransactionHash,
+        orderHash: `0x${"4".repeat(64)}`,
+        price: "0.75",
+        size: "4",
+      }),
+    ]);
+  });
+
   it("subscribes to only the target maker logs and treats the public WebSocket message as a wake hint", async () => {
     class FakeSocket implements PolygonWakeWebSocket {
       readyState = 0;
