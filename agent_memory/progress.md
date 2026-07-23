@@ -8,6 +8,7 @@
 - 迁移备份默认只保留最新且已校验的 `1` 份；已修复原先按含 schema 版本文件名排序、可能留下错误旧副本的问题。
 
 ## Completed implementation
+- Replay `2.1.0` 修复 Data API 相邻页多行重叠：以稳定 JSON 序列识别最长 suffix/prefix overlap，原始 Capture 不删除，只把精确边界重复作为 multiplicity evidence 抵消。
 - Paper `1.12.0` / Risk `1.8.0`：HIGH BUY 在完整可退出估值时使用 `totalEquityMicros`，估值不完整才退回 available cash；新 `BUY_AMOUNT_POLICY_V2` 对最终金额应用可审计的 available-cash cap，不再整单因现金不足而拒绝。
 - Ruleset `v1.8.0`：MEDIUM 资本置信度固定兜底从 `10 pUSD` 收紧为 `1 pUSD`。
 - Paper cycle 先固化目标 Signal、再检查止损；同资产退出 pending 时后到 BUY 以 `SAME_ASSET_EXIT_PENDING` 等待，退出在 retry 顺序中完成后 BUY 自动继续。
@@ -28,6 +29,8 @@
 - Paper `1.11.0` / Risk `1.7.0` 新增 WAITING BUY 缩量 Risk 审计链：验证父决定 scope/ALLOW/amount，强制新金额严格小于父金额，Risk/Execution 当前金额精确一致，并在 Execution Audit 中同时保存父子 Risk Decision ID。
 
 ## Verification completed
+- 2026-07-23 首次启动的三份真实 Phase 0 Capture 稳定复现 2 个 ambiguous event；最小回归确认是相邻 Trades 页重复 2 行。修复后原 Capture 重放得到 `tradeBoundaryOverlapRows=2`、`reconciledPaginationOverlapRows=2`、`onChainProofs=2`、`ambiguousEvents=0`。
+- 分页修复最终全量 `54/54` 文件、`707/707` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
 - 新优化先取得 4 条失败回归，再完成红绿：权益缩放、现金封顶、目标退出优先、同资产 BUY 延后恢复。最终全量 `54/54` 文件、`706/706` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
 - 清理后主库确认 Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`、Gate `PAPER + LIVE_DISABLED`；Target/Campaign/Live Execution/Order/Fill 均为 `0`。
 - 两份昨晚关键 ZIP 均通过 `unzip -t`；目标配置仍为 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`。

@@ -127,16 +127,29 @@ export function exactPaginationBoundaryOverlaps<T>(
   pages: readonly (readonly T[])[],
 ): T[] {
   const overlaps: T[] = [];
+  const serializedPages = pages.map((page) => page.map((row) => stableJson(row)));
   for (let index = 1; index < pages.length; index += 1) {
-    const previous = pages[index - 1]?.at(-1);
-    const current = pages[index]?.[0];
-    if (
-      previous !== undefined
-      && current !== undefined
-      && stableJson(previous) === stableJson(current)
-    ) {
-      overlaps.push(current);
+    const previous = serializedPages[index - 1] ?? [];
+    const current = serializedPages[index] ?? [];
+    const maximum = Math.min(previous.length, current.length);
+    if (maximum === 0) continue;
+    const separator = Symbol("PAGINATION_BOUNDARY");
+    const sequence: Array<string | symbol> = [
+      ...current.slice(0, maximum),
+      separator,
+      ...previous.slice(-maximum),
+    ];
+    const prefixLengths = new Array<number>(sequence.length).fill(0);
+    for (let cursor = 1; cursor < sequence.length; cursor += 1) {
+      let candidate = prefixLengths[cursor - 1]!;
+      while (candidate > 0 && sequence[cursor] !== sequence[candidate]) {
+        candidate = prefixLengths[candidate - 1]!;
+      }
+      if (sequence[cursor] === sequence[candidate]) candidate += 1;
+      prefixLengths[cursor] = candidate;
     }
+    const overlapLength = prefixLengths.at(-1) ?? 0;
+    if (overlapLength > 0) overlaps.push(...pages[index]!.slice(0, overlapLength));
   }
   return overlaps;
 }

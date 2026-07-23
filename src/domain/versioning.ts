@@ -11,7 +11,7 @@ export const DEFAULT_VERSIONS = Object.freeze({
   signalVersion: "1.8.0",
   strategyVersion: "2.5.0",
   riskVersion: "1.8.0",
-  replayVersion: "2.0.0",
+  replayVersion: "2.1.0",
   paperVersion: "1.12.0",
   liveVersion: "1.9.0",
   validationVersion: "1.7.0",

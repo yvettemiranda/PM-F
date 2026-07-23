@@ -22,6 +22,7 @@
 - 不可变审计库仍会随运行缓慢增长，不能宣称永久零增长。当前无变化重型证据约降为原来的 `1/15`，迁移整库副本只保留 `1` 份；长期无人值守前仍应设计按 Campaign 归档/轮换，并在 UI 显示数据库增长率和剩余空间，不能静默删除当前 Campaign 证据。
 
 ## Resolved in current implementation
+- Data API offset 分页可能让下一页重复上一页最后多行；旧实现只识别恰好 1 行 overlap，真实 Capture 因 2 行边界重复连续三次产生 `AMBIGUOUS_DUPLICATE_EVENTS` 并安全阻断启动。Replay `2.1.0` 现在识别相邻页最长完整 suffix/prefix overlap，保留原始行和证据，只抵消可精确证明的边界重复。
 - 后续 BUY 曾以剩余可用现金继续乘目标比例，已买入越多就越机械缩单；当前完整估值时改用账户总权益，可用现金只封顶实际支付，估值不完整则安全退回现金口径。
 - MEDIUM 资本证据曾固定放大到 `10 pUSD`；当前新 ruleset 固定兜底为 `1 pUSD`，不会因置信度下降而增加风险。
 - 同一轮曾可能先生成 STOP 再消费目标 SELL，且退出 pending 时新 BUY 仍可成交；当前目标 Signal 先固化、止损只看剩余仓位，同资产 BUY 等待退出完成后再继续。

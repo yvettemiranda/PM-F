@@ -93,6 +93,31 @@ describe("Polymarket public API pagination", () => {
     expect(result.boundaryOverlapRows).toEqual([boundary]);
   });
 
+  it("records the longest multi-row overlap across adjacent trade pages", async () => {
+    const wallet = "0x0000000000000000000000000000000000000001";
+    const trade = (index: number) => ({
+      proxyWallet: wallet,
+      transactionHash: `0x${index.toString(16).padStart(64, "0")}`,
+      conditionId,
+      asset: String(200_000 + index),
+      side: "BUY" as const,
+      price: "0.5",
+      size: "1",
+      timestamp: 1_700_100_000 + index,
+    });
+    const firstPage = Array.from({ length: 1_000 }, (_, index) => trade(index));
+    const overlap = firstPage.slice(-2);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const offset = Number(new URL(String(input)).searchParams.get("offset"));
+      return new Response(JSON.stringify(offset === 0 ? firstPage : [...overlap, trade(1_000)]), { status: 200 });
+    }));
+
+    const result = await new PolymarketPublicApi({ maxRetries: 0 }).trades(wallet);
+
+    expect(result.rows).toHaveLength(1_003);
+    expect(result.boundaryOverlapRows).toEqual(overlap);
+  });
+
   it("stops recovery trade pagination once the persisted cursor is covered", async () => {
     const wallet = "0x0000000000000000000000000000000000000001";
     const requests: string[] = [];
