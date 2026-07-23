@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { VERSIONS } from "../../domain/versioning.js";
@@ -346,11 +346,21 @@ function verifyDatabase(
   }
 }
 
-function pruneBackups(directory: string, retain: number, databasePrefix: string): void {
+function pruneBackups(
+  directory: string,
+  retain: number,
+  databasePrefix: string,
+  currentBackupName: string,
+): void {
   const backups = readdirSync(directory)
     .filter((name) => name.startsWith(databasePrefix) && name.endsWith(".sqlite"))
-    .sort()
-    .reverse();
+    .sort((left, right) => {
+      if (left === currentBackupName) return -1;
+      if (right === currentBackupName) return 1;
+      const modifiedDifference = statSync(join(directory, right)).mtimeMs
+        - statSync(join(directory, left)).mtimeMs;
+      return modifiedDifference !== 0 ? modifiedDifference : right.localeCompare(left);
+    });
   for (const stale of backups.slice(retain)) rmSync(join(directory, stale), { force: true });
 }
 
@@ -361,7 +371,7 @@ export async function prepareRuntimeDatabase(input: {
   backupDirectory?: string;
   retainBackups?: number;
 }): Promise<RuntimeDatabasePreparationResult> {
-  const retainBackups = input.retainBackups ?? 3;
+  const retainBackups = input.retainBackups ?? 1;
   if (!Number.isSafeInteger(retainBackups) || retainBackups < 1) {
     throw new Error(`INVALID_RUNTIME_BACKUP_RETENTION:${retainBackups}`);
   }
@@ -402,7 +412,12 @@ export async function prepareRuntimeDatabase(input: {
     }
     verifyDatabase(backupPath, "VALID_PREFIX");
     await sha256(backupPath); // force a complete readable-file pass before migration
-    pruneBackups(backupDirectory, retainBackups, `${basename(databasePath, ".sqlite")}-before-`);
+    pruneBackups(
+      backupDirectory,
+      retainBackups,
+      `${basename(databasePath, ".sqlite")}-before-`,
+      basename(backupPath),
+    );
   }
 
   const migrations = new Phase0Database(databasePath, input.sourceVersion);

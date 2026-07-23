@@ -1,4 +1,13 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -517,5 +526,22 @@ describe("runtime database preparation", () => {
       retainBackups: 0,
       sourceVersion,
     })).rejects.toThrow("INVALID_RUNTIME_BACKUP_RETENTION:0");
+  });
+
+  it("retains only the newest migration backup by default", async () => {
+    const root = directory();
+    const backupDirectory = join(root, "backups");
+    const databasePath = join(root, "phase0.sqlite");
+    createPreviousSchema(databasePath);
+    mkdirSync(backupDirectory, { recursive: true });
+    writeFileSync(join(backupDirectory, "phase0-before-20200101-000000.sqlite"), "stale-1");
+    writeFileSync(join(backupDirectory, "phase0-before-20210101-000000.sqlite"), "stale-2");
+
+    const result = await prepareRuntimeDatabase({ databasePath, backupDirectory, sourceVersion });
+    const retained = readdirSync(backupDirectory)
+      .filter((name) => name.startsWith("phase0-before-") && name.endsWith(".sqlite"));
+
+    expect(result.backupPath).not.toBeNull();
+    expect(retained).toEqual([result.backupPath!.split("/").at(-1)]);
   });
 });

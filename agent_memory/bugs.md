@@ -19,9 +19,12 @@
 - CLOB `/time` 偏移在 Session 内固定；系统时钟继续漂移时订单簿检查必须失败关闭。
 - Data API offset、分页边界和短暂 Positions/Trades/Activity 不同步仍可能触发 gap recovery 或 reconciliation；不得以“尽量成交”为由降低这些数据完整性 Gate。
 - Live 当前对低于市场最小量的 TARGET_SELL 仍保持 `EXIT_PENDING`；Live 运行尚未启用，真实资金前必须把该路径与 Paper 的“不超卖、明确终止或聚合策略”对齐并完成隔离测试，不能直接照搬 Paper 的账本写法。
-- 数据目录约 `12 GB`，迁移备份约 `7.2 GB`。业务 Campaign/Session/capture 有审计价值，不直接删除；若整理空间，先哈希校验、恢复验证并只归档明确冗余的旧迁移备份。
+- 不可变审计库仍会随运行缓慢增长，不能宣称永久零增长。当前无变化重型证据约降为原来的 `1/15`，迁移整库副本只保留 `1` 份；长期无人值守前仍应设计按 Campaign 归档/轮换，并在 UI 显示数据库增长率和剩余空间，不能静默删除当前 Campaign 证据。
 
 ## Resolved in current implementation
+- Observe 加速到每秒后曾在每次成功 Poll 无条件写入完整 API Capture、Capital、Reconciliation 和 Checkpoint；旧库因此数小时增长数 GB。当前每秒只保留轻量 Poll/心跳，无变化且 `ONLINE + SYNCED` 时完整证据每 `15 s` 采样，状态变化、新事件、新 Signal 和 gap 恢复立即全量保存。
+- Runtime migration 曾默认保留 `3` 份整库备份，且按含 schema 版本的文件名排序，既放大空间又可能误判新旧。当前默认只保留刚生成、完整校验通过的最新 `1` 份，其余按 mtime 排序。
+- 2026-07-23 用户授权清理后，约 `12 GB` 的 `data/` 已降到约 `21 MB`；多代备份、旧主库、旧验证副本和昨晚前无关输出已永久删除，当前只保留空白安全库、目标配置和昨晚精简证据。
 - Paper `1.10.0` 的 WAITING BUY 在目标部分/完整退出后会安全缩减 Execution/Reservation，但仍绑定缩减前的 Risk Decision，导致最终 scoped integrity 出现两个 `RISK_REQUESTED_AMOUNT_MISMATCH` 并使 4 小时 Session 作废。Paper `1.11.0` / Risk `1.7.0` 现在以父 Risk Decision 为证据生成严格向下的新决定，重新绑定当前金额；完整取消为 `0`，持平或向上调整失败关闭。
 - Paper TARGET_SELL 低于市场最小单量，或成交后只剩不足 `0.01` 股的尾差时，旧实现会永久保持 `EXIT_PENDING`，每秒重复写同一约束、状态和审计；当前保存一次证据后将不可提交部分从 Execution allocation 移除并 `CANCELLED`，已成交部分和真实 Position 不变。STOP_LOSS 继续等待，但相同 constraint hash/reason 不再重复写。
 - 目标完整 SELL/MERGE 已到达时，旧 Paper cycle 会先重试 WAITING BUY，再消费退出，可能买入目标已经退出的陈旧仓位；当前先固化新 Signal，再重试 pending，并按 sell ratio 对同 asset/condition 的待买执行完整取消或部分缩量。Risk 拒绝不会改账，只抵消待买时也不会伪造 SELL 成交。

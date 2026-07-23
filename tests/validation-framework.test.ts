@@ -1133,6 +1133,7 @@ describe("Final validation framework", () => {
         observeSnapshot([position("200")], "2026-07-08T00:02:00.000Z"),
         observeSnapshot([position("200")], "2026-07-08T00:03:00.000Z"),
         observeSnapshot([position("100")], "2026-07-08T00:03:10.000Z"),
+        observeSnapshot([position("100")], "2026-07-08T00:03:11.000Z"),
       ]),
       {
         walletAddress: wallet,
@@ -1147,6 +1148,7 @@ describe("Final validation framework", () => {
       "2026-07-08T00:02:00.000Z",
       "2026-07-08T00:03:00.000Z",
       "2026-07-08T00:03:10.000Z",
+      "2026-07-08T00:03:11.000Z",
     ]) {
       clock = new Date(pollAt);
       expect(await runner.pollOnce()).toBe(true);

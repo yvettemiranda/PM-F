@@ -66,10 +66,14 @@ export class ObserveOnlyValidation implements ValidationValidator {
            ON s.projection_snapshot_hash=c.projection_snapshot_hash
          WHERE c.observe_run_id=? ORDER BY c.created_at DESC,c.checkpoint_id DESC LIMIT 1`,
       ).get(latest.observe_run_id) as ObserveCheckpointRow | undefined;
-      const successfulPoll = database.prepare(
-        `SELECT poll_id,checkpoint_id FROM observe_polls
-         WHERE observe_run_id=? AND status='SUCCESS' ORDER BY sequence DESC LIMIT 1`,
-      ).get(latest.observe_run_id) as { poll_id: string; checkpoint_id: string | null } | undefined;
+      const checkpointPoll = database.prepare(
+        `SELECT poll_id,checkpoint_id,status FROM observe_polls
+         WHERE observe_run_id=? AND poll_id=?`,
+      ).get(latest.observe_run_id, checkpoint?.poll_id ?? "") as {
+        poll_id: string;
+        checkpoint_id: string | null;
+        status: string;
+      } | undefined;
       const successfulPollCount = (database.prepare(
         "SELECT count(*) count FROM observe_polls WHERE observe_run_id=? AND status='SUCCESS'",
       ).get(latest.observe_run_id) as { count: number }).count;
@@ -94,9 +98,10 @@ export class ObserveOnlyValidation implements ValidationValidator {
       ).all(latest.observe_run_id) as unknown[];
       const pollCountersConsistent = successfulPollCount > 0 && successfulPollCount === latest.successful_polls;
       const checkpointConsistent = checkpoint !== undefined
-        && successfulPoll !== undefined
-        && checkpoint.checkpoint_id === successfulPoll.checkpoint_id
-        && checkpoint.poll_id === successfulPoll.poll_id
+        && checkpointPoll !== undefined
+        && checkpointPoll.status === "SUCCESS"
+        && checkpoint.checkpoint_id === checkpointPoll.checkpoint_id
+        && checkpoint.poll_id === checkpointPoll.poll_id
         && checkpoint.position_projection_hash === projectionHash(checkpoint.position_projection_json);
       const finalSync = latestReconciliation?.sync_status === "SYNCED";
       return [
@@ -149,7 +154,7 @@ export class ObserveOnlyValidation implements ValidationValidator {
           checkName: "observe_checkpoint",
           status: checkpointConsistent ? "PASS" : "FAIL",
           reason: checkpointConsistent ? "OK" : checkpoint ? "OBSERVE_CHECKPOINT_INCONSISTENT" : "OBSERVE_CHECKPOINT_MISSING",
-          metrics: { checkpoint, successfulPoll },
+          metrics: { checkpoint, checkpointPoll },
           now: context.now,
         }),
         check({

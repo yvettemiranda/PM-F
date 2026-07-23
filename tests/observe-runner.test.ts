@@ -537,12 +537,127 @@ describe("ObserveOnlyRunner", () => {
     ).all() as Array<{ projection_snapshot_hash: string; projection_json: string }>;
     check.close();
 
-    expect(checkpoints).toHaveLength(3);
+    expect(checkpoints).toHaveLength(2);
     expect(new Set(checkpoints.map((row) => row.position_projection_hash)).size).toBe(1);
     expect(checkpoints.every((row) => row.position_projection_json === "")).toBe(true);
     expect(checkpoints.every((row) => row.projection_snapshot_hash === row.position_projection_hash)).toBe(true);
     expect(snapshots).toHaveLength(1);
     expect(JSON.parse(snapshots[0]!.projection_json)).toBeInstanceOf(Array);
+  });
+
+  it("records every poll while sampling unchanged recovery evidence every fifteen seconds", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const source = new QueueSource([
+      snapshot([], [position("100")], "2026-07-08T00:01:00.000Z"),
+      snapshot([], [position("100")], "2026-07-08T00:01:01.000Z"),
+      snapshot([], [position("100")], "2026-07-08T00:01:02.000Z"),
+      snapshot([], [position("100")], "2026-07-08T00:01:16.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:01.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:02.000Z");
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:16.000Z");
+    await runner.pollOnce();
+    const observeRunId = runner.start().observeRunId;
+    store.stopRun(observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT count(*) count FROM observe_polls WHERE observe_run_id=?",
+    ).get(observeRunId)).toEqual({ count: 4 });
+    expect(check.prepare(
+      `SELECT c.created_at,c.replay_state,r.sync_status
+       FROM observe_checkpoints c
+       JOIN reconciliation_reports r ON r.poll_id=c.poll_id
+       WHERE c.observe_run_id=? ORDER BY c.created_at`,
+    ).all(observeRunId)).toEqual([
+      { created_at: "2026-07-08T00:01:00.000Z", replay_state: "GAP_RECOVERED", sync_status: "SYNCED" },
+      { created_at: "2026-07-08T00:01:01.000Z", replay_state: "ONLINE", sync_status: "SYNCED" },
+      { created_at: "2026-07-08T00:01:16.000Z", replay_state: "ONLINE", sync_status: "SYNCED" },
+    ]);
+    expect(check.prepare(
+      "SELECT count(*) count FROM reconciliation_reports WHERE observe_run_id=?",
+    ).get(observeRunId)).toEqual({ count: 3 });
+    expect(check.prepare(
+      `SELECT count(*) count FROM observe_poll_captures c
+       JOIN observe_polls p ON p.poll_id=c.poll_id
+       WHERE p.observe_run_id=?`,
+    ).get(observeRunId)).toEqual({ count: 12 });
+    check.close();
+  });
+
+  it("persists a new target event immediately inside the sampling interval", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const targetBuy = trade({
+      transactionHash: "0ximmediate-storage-event",
+      timestamp: baselineSecond + 70,
+    });
+    const source = new QueueSource([
+      snapshot([], [position("100")], "2026-07-08T00:01:00.000Z"),
+      snapshot([targetBuy], [position("110")], "2026-07-08T00:01:01.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:01.000Z");
+    await runner.pollOnce();
+    const observeRunId = runner.start().observeRunId;
+    store.stopRun(observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT count(*) count FROM observe_checkpoints WHERE observe_run_id=?",
+    ).get(observeRunId)).toEqual({ count: 2 });
+    expect(check.prepare(
+      "SELECT count(*) count FROM observe_events WHERE first_observe_run_id=?",
+    ).get(observeRunId)).toEqual({ count: 1 });
+    check.close();
+  });
+
+  it("persists every non-synced reconciliation inside the sampling interval", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const source = new QueueSource([
+      snapshot([], [position("99")], "2026-07-08T00:01:00.000Z"),
+      snapshot([], [position("99")], "2026-07-08T00:01:01.000Z"),
+    ]);
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, source, {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:01.000Z");
+    await runner.pollOnce();
+    const observeRunId = runner.start().observeRunId;
+    store.stopRun(observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT count(*) count FROM reconciliation_reports WHERE observe_run_id=? AND sync_status='MINOR_DIFF'",
+    ).get(observeRunId)).toEqual({ count: 2 });
+    check.close();
   });
 
   it("anchors the Activity cursor at the position baseline when no events exist", async () => {

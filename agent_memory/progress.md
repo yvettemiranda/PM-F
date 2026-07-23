@@ -1,12 +1,15 @@
 # Progress
 
 ## Current task
-- 截止 2026-07-23 08:00 的夜间 Paper 监测已结束，30 分钟维护自动化已删除；系统不再自动重启。
-- Paper `1.10.0` Campaign `PC-0F5C35EEA77131BFFD70` 完整跑满 `4 h`，Observe `11675/4`、36 个事件、21 个 Signal（18 BUY/3 SELL）、20 个可执行 Signal 全部消费，5 次 Paper Fill（4 full/1 partial），最终 `SYNCED`，无运行错误、无 Major Desync。
-- 最终 scoped integrity 发现 2 个 `RISK_REQUESTED_AMOUNT_MISMATCH`：WAITING BUY 被目标退出安全缩量后，Execution 当前金额与原 Risk Decision 金额不再相等。因此 Session 被正确标记 `FAILED`、不计入 Campaign 时长，原报告与数据库未改写。
-- 已按 TDD 完成 Paper `1.11.0` / Risk `1.7.0` 修复：每次目标退出缩减待买都生成并绑定新的严格向下 Risk Decision，完整取消绑定金额 `0`，非向下调整拒绝。
+- 已完成用户要求的数据清理和防复发优化：`data/` 从约 `12 GB` 降到约 `21 MB`，系统盘可用空间从约 `298 GB` 增到约 `310 GB`。
+- 当前主库为全新 Schema `2.29.0` 空白安全库；旧 Campaign 数据只保留在昨晚两份关键 ZIP 及精简后的报告/日志中。下一次测试会从新 Campaign、新 Paper 账户开始。
+- Observe 保持 `1 s` Polygon 发现、`3 s` Data API、`15 s` Positions/pUSD；只把无变化 `ONLINE + SYNCED` 的重型不可变证据降为 `15 s` 采样。状态变化、新事件、新 Signal 和 gap 恢复立即落全量证据。
+- 迁移备份默认只保留最新且已校验的 `1` 份；已修复原先按含 schema 版本文件名排序、可能留下错误旧副本的问题。
 
 ## Completed implementation
+- Observe 成功轮询拆分为轻量每秒记录和有条件完整证据；仓位投影仍每轮更新，轮询/心跳/计数不丢失。
+- 最终状态从 `MAJOR_DESYNC/MINOR_DIFF/GAP_RECOVERED` 恢复为正常时也立即保存完整 checkpoint；Final Validation 改为验证 checkpoint 所属成功 Poll，不再错误要求最后一个轻量 Poll 必须自带 checkpoint。
+- Runtime migration backup 默认 retention 从 `3` 改为 `1`，新生成备份固定优先保留，其余按 mtime 排序。
 - 新增只读 Polygon 适配器：`eth_blockNumber`、`eth_getBlockByNumber`、分别查询两个官方 Exchange 的 `eth_getLogs`，以及公开 CLOB `markets-by-token`；无 signer、无认证请求、无链上写入。
 - 新增 `PolygonOrderFilledTradeFeed`：2 个确认区块、1 秒 poll、target-maker 精确过滤、block/log hash 校验、token/condition 官方绑定、价格按 Data API 10 位 round-half-up 归一、微单位 size 精确重建。
 - Observe 同轮先消费 Polygon 事件并生成 Paper Signal，Data API 3 秒后只做同 identity 确认，不重复 Signal；Positions/pUSD 仍为 15 秒并在事件变化时提前刷新。
@@ -20,6 +23,9 @@
 - Paper `1.11.0` / Risk `1.7.0` 新增 WAITING BUY 缩量 Risk 审计链：验证父决定 scope/ALLOW/amount，强制新金额严格小于父金额，Risk/Execution 当前金额精确一致，并在 Execution Audit 中同时保存父子 Risk Decision ID。
 
 ## Verification completed
+- 清理后主库确认 Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`、Gate `PAPER + LIVE_DISABLED`；Target/Campaign/Live Execution/Order/Fill 均为 `0`。
+- 两份昨晚关键 ZIP 均通过 `unzip -t`；目标配置仍为 `0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`。
+- 新存储/备份/验证规则相关 `95/95` 测试通过。首次全量运行暴露 1 条过时 Final Validation checkpoint 假设，修复后最终全量 `54/54` 文件、`703/703` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
 - TDD 红绿覆盖：链上 BUY 早于 Data API 发布且后续不重复；确认区块重组 fail closed；跨源 identity 不一致 fail closed；1 秒 Campaign 参数；Data API 3 秒缓存；读接口白名单；supervisor 输出 flush 后在残留 handle 存在时仍按状态码退出。
 - 真实只读短探针已通过：Polygon 状态从 `INITIALIZING` 转为连续 `AVAILABLE`，新区块 cursor 正常推进；Data API Trades/Activity、Positions 和 pUSD 公共读取成功，没有 signer/订单/链写入。
 - Paper `1.11.0` 先取得失败回归，再验证部分缩量、完整取消和禁止非向下调整；最终全量 `54/54` 文件、`699/699` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过。
@@ -27,14 +33,14 @@
 - 首轮全量的 3 个失败均是旧测试仍期待 Data API 每循环请求；已改为显式推进 3 秒后断言，并由最终全量覆盖。
 
 ## Runtime state before final verification
-- Campaign `PC-0F5C35EEA77131BFFD70` 已结束且最终阻断；无 Observe/Paper/Supervisor 子进程、无 Active Reservation。两个旧 launcher zsh 只停留在终端确认提示且无子进程。
-- 业务库仍为 Schema `2.29.0`，本批不需要 migration；数据目录约 `12 GB`，其中迁移备份约 `7.2 GB`，暂不删除审计证据。
-- 下次启动必须使用包含 Paper `1.11.0` / Risk `1.7.0` 的最终干净 commit，重新生成 Phase 0/Replay/core 绑定并创建 replacement Campaign，不得续算旧核心时长。
+- 无 Observe/Paper/Supervisor 子进程、无旧数据库业务对象。两个旧 launcher zsh 只停留在终端确认提示且无子进程。
+- 数据目录约 `21 MB`；当前空白业务库 Schema `2.29.0`、Gate 安全。旧 account/campaign pointer 与昨晚前无关日志已删除。
+- 下次启动必须使用最终干净 commit，重新生成 Phase 0/Replay/core 绑定并创建新 Campaign，不得续算旧核心时长。
 
 ## Current identity
-- Paper `1.11.0` / Risk `1.7.0` 修复已完成隔离验证；精确 commit/core hash 以最终提交和下一次 replacement Campaign 的 Operator 输出为准。
+- Paper `1.11.0` / Risk `1.7.0` / Operational `1.6.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
 
 ## Next steps
-1. 形成 Paper `1.11.0` / Risk `1.7.0` 干净 HEAD。
-2. 用户确认下一轮测试窗口后，从新核心创建 replacement Campaign；先完成隔离验证、Phase 0/Replay，再重新累计资格和 4 小时自然验证。
+1. 完成全量测试、提交存储治理修复，形成干净 HEAD。
+2. 用户确认下一轮测试窗口后，从空白安全库创建新 Campaign；先完成隔离验证、Phase 0/Replay，再重新累计资格和 4 小时自然验证。
 3. 小额 Live 前继续处理 SPLIT/negative-risk conversion、结束时间缺失策略、Live 小额 SELL 约束终止、合规/geoblock、隔离钱包与 signer 授权；当前不得开启 Live。

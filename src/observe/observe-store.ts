@@ -27,6 +27,8 @@ import type {
   ReconciliationResult,
 } from "./types.js";
 
+const UNCHANGED_EVIDENCE_SAMPLE_INTERVAL_MS = 15_000;
+
 export interface ObserveCheckpoint {
   checkpointId: string;
   createdAt: string;
@@ -549,10 +551,11 @@ export class ObserveStore {
     }
   }
 
-  commitSuccessfulPoll(input: CommitPollInput): string {
+  commitSuccessfulPoll(input: CommitPollInput): string | null {
     const pollId = randomUUID();
-    const checkpointId = randomUUID();
-    const reconciliationId = randomUUID();
+    const persistFullEvidence = this.shouldPersistFullEvidence(input);
+    const checkpointId = persistFullEvidence ? randomUUID() : null;
+    const reconciliationId = persistFullEvidence ? randomUUID() : null;
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database
@@ -586,43 +589,45 @@ export class ObserveStore {
             })
             : null,
         );
-      this.savePollCaptures(pollId, input.snapshot);
-      for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
-      for (const confirmation of input.eventConfirmations) {
-        if (confirmation.isCombo) {
-          const existingSignal = this.database.prepare(
-            "SELECT signal_id FROM signals WHERE source_event_key=? AND producer_mode='OBSERVE_ONLY' LIMIT 1",
-          ).get(confirmation.sourceEventKey) as { signal_id: string } | undefined;
-          if (existingSignal) throw new Error(`COMBO_SIGNAL_CONFLICT:${existingSignal.signal_id}`);
+      if (persistFullEvidence) {
+        this.savePollCaptures(pollId, input.snapshot);
+        for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
+        for (const confirmation of input.eventConfirmations) {
+          if (confirmation.isCombo) {
+            const existingSignal = this.database.prepare(
+              "SELECT signal_id FROM signals WHERE source_event_key=? AND producer_mode='OBSERVE_ONLY' LIMIT 1",
+            ).get(confirmation.sourceEventKey) as { signal_id: string } | undefined;
+            if (existingSignal) throw new Error(`COMBO_SIGNAL_CONFLICT:${existingSignal.signal_id}`);
+            this.database.prepare(
+              "UPDATE raw_events SET is_combo=1,event_classification='COMBO_ACTIVITY' WHERE source_event_key=?",
+            ).run(confirmation.sourceEventKey);
+          }
+          if (confirmation.isGap) {
+            this.database.prepare(
+              `UPDATE raw_events
+               SET gap_event=1,
+                   event_classification=CASE WHEN is_combo=1 THEN 'COMBO_ACTIVITY' ELSE 'GAP_TRADE' END
+               WHERE source_event_key=?`,
+            ).run(confirmation.sourceEventKey);
+          }
           this.database.prepare(
-            "UPDATE raw_events SET is_combo=1,event_classification='COMBO_ACTIVITY' WHERE source_event_key=?",
-          ).run(confirmation.sourceEventKey);
+            `UPDATE observe_events
+             SET activity_confirmed=1,is_gap=CASE WHEN is_gap=1 OR ?=1 THEN 1 ELSE 0 END
+             WHERE baseline_run_id=? AND source_event_key=?`,
+          ).run(confirmation.isGap ? 1 : 0, input.baseline.baselineRunId, confirmation.sourceEventKey);
         }
-        if (confirmation.isGap) {
-          this.database.prepare(
-            `UPDATE raw_events
-             SET gap_event=1,
-                 event_classification=CASE WHEN is_combo=1 THEN 'COMBO_ACTIVITY' ELSE 'GAP_TRADE' END
-             WHERE source_event_key=?`,
-          ).run(confirmation.sourceEventKey);
+        for (const evidence of input.conversionEvidence) {
+          this.insertNegativeRiskConversionEvidence(input, pollId, evidence);
         }
-        this.database.prepare(
-          `UPDATE observe_events
-           SET activity_confirmed=1,is_gap=CASE WHEN is_gap=1 OR ?=1 THEN 1 ELSE 0 END
-           WHERE baseline_run_id=? AND source_event_key=?`,
-        ).run(confirmation.isGap ? 1 : 0, input.baseline.baselineRunId, confirmation.sourceEventKey);
-      }
-      for (const evidence of input.conversionEvidence) {
-        this.insertNegativeRiskConversionEvidence(input, pollId, evidence);
-      }
-      this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
-      for (const bundle of input.signalContexts) {
-        if (bundle.capitalDecision) {
-          this.insertCapitalEstimate(input.baseline.targetId, bundle.signal.sourceEventKey, bundle.capitalDecision, input.completedAt);
+        this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
+        for (const bundle of input.signalContexts) {
+          if (bundle.capitalDecision) {
+            this.insertCapitalEstimate(input.baseline.targetId, bundle.signal.sourceEventKey, bundle.capitalDecision, input.completedAt);
+          }
         }
+        for (const signal of input.signalsToEmit) this.insertObserveSignal(input, pollId, signal);
+        for (const bundle of input.signalContexts) this.insertSignalExecutionContext(bundle);
       }
-      for (const signal of input.signalsToEmit) this.insertObserveSignal(input, pollId, signal);
-      for (const bundle of input.signalContexts) this.insertSignalExecutionContext(bundle);
 
       this.database.prepare("DELETE FROM observe_position_projection WHERE baseline_run_id=?").run(input.baseline.baselineRunId);
       const insertProjection = this.database.prepare(
@@ -642,107 +647,109 @@ export class ObserveStore {
           input.completedAt,
         );
       }
-      this.database
-        .prepare(
-          `INSERT INTO reconciliation_reports(
-            reconciliation_report_id,target_id,baseline_run_id,observe_run_id,poll_id,
-            sync_status,issue_count,expected_projection_hash,observed_positions_hash,
-            detail_json,created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          reconciliationId,
-          input.baseline.targetId,
-          input.baseline.baselineRunId,
-          input.observeRunId,
-          pollId,
-          input.reconciliation.syncStatus,
-          input.reconciliation.issueCount,
-          input.projection.projectionHash,
-          input.reconciliation.observedPositionsHash,
-          JSON.stringify(input.reconciliation.details),
-          input.completedAt,
-        );
-      const projectionJson = stableJson(input.projection.projection);
-      this.database
-        .prepare(
-          `INSERT OR IGNORE INTO observe_projection_snapshots(
-            projection_snapshot_hash,projection_json,created_at
-          ) VALUES (?, ?, ?)`,
-        )
-        .run(input.projection.projectionHash, projectionJson, input.completedAt);
-      const storedProjection = this.database
-        .prepare(
-          `SELECT projection_json FROM observe_projection_snapshots
-           WHERE projection_snapshot_hash=?`,
-        )
-        .get(input.projection.projectionHash) as { projection_json: string } | undefined;
-      let storedProjectionCanonical: string | null = null;
-      try {
-        storedProjectionCanonical = storedProjection
-          ? stableJson(JSON.parse(storedProjection.projection_json) as unknown)
-          : null;
-      } catch {
-        storedProjectionCanonical = null;
+      if (checkpointId !== null && reconciliationId !== null) {
+        this.database
+          .prepare(
+            `INSERT INTO reconciliation_reports(
+              reconciliation_report_id,target_id,baseline_run_id,observe_run_id,poll_id,
+              sync_status,issue_count,expected_projection_hash,observed_positions_hash,
+              detail_json,created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            reconciliationId,
+            input.baseline.targetId,
+            input.baseline.baselineRunId,
+            input.observeRunId,
+            pollId,
+            input.reconciliation.syncStatus,
+            input.reconciliation.issueCount,
+            input.projection.projectionHash,
+            input.reconciliation.observedPositionsHash,
+            JSON.stringify(input.reconciliation.details),
+            input.completedAt,
+          );
+        const projectionJson = stableJson(input.projection.projection);
+        this.database
+          .prepare(
+            `INSERT OR IGNORE INTO observe_projection_snapshots(
+              projection_snapshot_hash,projection_json,created_at
+            ) VALUES (?, ?, ?)`,
+          )
+          .run(input.projection.projectionHash, projectionJson, input.completedAt);
+        const storedProjection = this.database
+          .prepare(
+            `SELECT projection_json FROM observe_projection_snapshots
+             WHERE projection_snapshot_hash=?`,
+          )
+          .get(input.projection.projectionHash) as { projection_json: string } | undefined;
+        let storedProjectionCanonical: string | null = null;
+        try {
+          storedProjectionCanonical = storedProjection
+            ? stableJson(JSON.parse(storedProjection.projection_json) as unknown)
+            : null;
+        } catch {
+          storedProjectionCanonical = null;
+        }
+        if (storedProjectionCanonical !== projectionJson) {
+          throw new Error(`OBSERVE_PROJECTION_SNAPSHOT_HASH_COLLISION:${input.projection.projectionHash}`);
+        }
+        this.database
+          .prepare(
+            `INSERT INTO observe_checkpoints(
+              checkpoint_id,target_id,baseline_run_id,observe_run_id,poll_id,
+              last_processed_timestamp,last_processed_event_id,replay_state,
+              position_projection_json,position_projection_hash,capital_snapshot_id,created_at,
+              projection_snapshot_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`,
+          )
+          .run(
+            checkpointId,
+            input.baseline.targetId,
+            input.baseline.baselineRunId,
+            input.observeRunId,
+            pollId,
+            input.projection.lastProcessedTimestamp,
+            input.projection.lastProcessedEventId,
+            input.replayState,
+            input.projection.projectionHash,
+            input.capitalEstimate.capitalEstimateId,
+            input.completedAt,
+            input.projection.projectionHash,
+          );
+        this.database
+          .prepare(
+            `INSERT INTO monitor_checkpoints(
+              target_id,last_trade_timestamp,last_success_at,last_source_event_key,
+              history_complete,updated_at,checkpoint_id,baseline_run_id,observe_run_id,
+              replay_state,position_projection_hash,capital_snapshot_id
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(target_id) DO UPDATE SET
+              last_trade_timestamp=excluded.last_trade_timestamp,
+              last_success_at=excluded.last_success_at,
+              last_source_event_key=excluded.last_source_event_key,
+              updated_at=excluded.updated_at,
+              checkpoint_id=excluded.checkpoint_id,
+              baseline_run_id=excluded.baseline_run_id,
+              observe_run_id=excluded.observe_run_id,
+              replay_state=excluded.replay_state,
+              position_projection_hash=excluded.position_projection_hash,
+              capital_snapshot_id=excluded.capital_snapshot_id`,
+          )
+          .run(
+            input.baseline.targetId,
+            input.projection.lastProcessedTimestamp,
+            input.completedAt,
+            input.projection.lastProcessedEventId,
+            input.completedAt,
+            checkpointId,
+            input.baseline.baselineRunId,
+            input.observeRunId,
+            input.replayState,
+            input.projection.projectionHash,
+            input.capitalEstimate.capitalEstimateId,
+          );
       }
-      if (storedProjectionCanonical !== projectionJson) {
-        throw new Error(`OBSERVE_PROJECTION_SNAPSHOT_HASH_COLLISION:${input.projection.projectionHash}`);
-      }
-      this.database
-        .prepare(
-          `INSERT INTO observe_checkpoints(
-            checkpoint_id,target_id,baseline_run_id,observe_run_id,poll_id,
-            last_processed_timestamp,last_processed_event_id,replay_state,
-            position_projection_json,position_projection_hash,capital_snapshot_id,created_at,
-            projection_snapshot_hash
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`,
-        )
-        .run(
-          checkpointId,
-          input.baseline.targetId,
-          input.baseline.baselineRunId,
-          input.observeRunId,
-          pollId,
-          input.projection.lastProcessedTimestamp,
-          input.projection.lastProcessedEventId,
-          input.replayState,
-          input.projection.projectionHash,
-          input.capitalEstimate.capitalEstimateId,
-          input.completedAt,
-          input.projection.projectionHash,
-        );
-      this.database
-        .prepare(
-          `INSERT INTO monitor_checkpoints(
-            target_id,last_trade_timestamp,last_success_at,last_source_event_key,
-            history_complete,updated_at,checkpoint_id,baseline_run_id,observe_run_id,
-            replay_state,position_projection_hash,capital_snapshot_id
-          ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(target_id) DO UPDATE SET
-            last_trade_timestamp=excluded.last_trade_timestamp,
-            last_success_at=excluded.last_success_at,
-            last_source_event_key=excluded.last_source_event_key,
-            updated_at=excluded.updated_at,
-            checkpoint_id=excluded.checkpoint_id,
-            baseline_run_id=excluded.baseline_run_id,
-            observe_run_id=excluded.observe_run_id,
-            replay_state=excluded.replay_state,
-            position_projection_hash=excluded.position_projection_hash,
-            capital_snapshot_id=excluded.capital_snapshot_id`,
-        )
-        .run(
-          input.baseline.targetId,
-          input.projection.lastProcessedTimestamp,
-          input.completedAt,
-          input.projection.lastProcessedEventId,
-          input.completedAt,
-          checkpointId,
-          input.baseline.baselineRunId,
-          input.observeRunId,
-          input.replayState,
-          input.projection.projectionHash,
-          input.capitalEstimate.capitalEstimateId,
-        );
       this.database
         .prepare("UPDATE monitor_targets SET sync_status=?,updated_at=? WHERE target_id=?")
         .run(input.reconciliation.syncStatus, input.completedAt, input.baseline.targetId);
@@ -882,6 +889,37 @@ export class ObserveStore {
       polygonTradeFeedDegradedPolls: polygonHealth.degraded_polls ?? 0,
       polygonOrderFilledEvents: polygonEvents.count,
     };
+  }
+
+  private shouldPersistFullEvidence(input: CommitPollInput): boolean {
+    if (
+      input.newEvents.length > 0
+      || input.eventConfirmations.length > 0
+      || input.conversionEvidence.length > 0
+      || input.signalsToEmit.length > 0
+      || input.gapRecovered
+      || input.replayState !== "ONLINE"
+      || input.reconciliation.syncStatus !== "SYNCED"
+    ) return true;
+    const latest = this.database.prepare(
+      `SELECT c.created_at,c.replay_state,r.sync_status
+       FROM observe_checkpoints c
+       LEFT JOIN reconciliation_reports r ON r.poll_id=c.poll_id
+       WHERE c.observe_run_id=? ORDER BY c.created_at DESC,c.checkpoint_id DESC LIMIT 1`,
+    ).get(input.observeRunId) as {
+      created_at: string;
+      replay_state: string;
+      sync_status: string | null;
+    } | undefined;
+    if (!latest) return true;
+    if (
+      latest.replay_state !== input.replayState
+      || latest.sync_status !== input.reconciliation.syncStatus
+    ) return true;
+    const currentMs = Date.parse(input.completedAt);
+    const latestMs = Date.parse(latest.created_at);
+    if (!Number.isFinite(currentMs) || !Number.isFinite(latestMs) || currentMs < latestMs) return true;
+    return currentMs - latestMs >= UNCHANGED_EVIDENCE_SAMPLE_INTERVAL_MS;
   }
 
   close(): void {
