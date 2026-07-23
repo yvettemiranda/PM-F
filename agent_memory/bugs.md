@@ -5,10 +5,13 @@
 - SPLIT 仍没有安全的 position projection/copy 语义，会立即 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明恰好两个完整 outcome、余额不足或缺少 tracked leg 价格的 MERGE 会立即硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间缺失时只允许 bounded Paper；Live Gate 继续拒绝，尚未形成可接受的真实资金 deadline 策略。
-- Paper `1.12.0` / Risk `1.8.0` 新核心仍需从 0 完成 40 分钟资格、连续 4 小时、累计 24 小时、自然 BUY/SELL/Fill/PnL 和最终 8 小时 Observe。
+- Strategy `2.6.0` / Paper `1.13.0` / Risk `1.9.0` 是新的行为核心，尚无干净 Campaign 时长；旧核心累计 `4.84 h` 只能作诊断证据。自然 SELL/REALIZED_PNL 与最终 8 小时 Observe 仍未完成。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
+- “首笔放大成交后，后续 BUY 继承 1—5 pUSD”会把同 asset 的每个微小目标追加放大为至少 1 pUSD。当前已限制为实际成交后才激活、完全清仓清除，并保留现金、Risk、价格和市场最低额 Gate；仍需自然短测统计放大次数、累计敞口和收益/误差，不能仅凭单元测试判断策略收益更好。
+- 当前 `5 pUSD` 是“首次市场最低额自动补齐上限”，不是普通单笔绝对上限；比例金额本身高于 5 pUSD 时当前实现可继续申请更高金额。未来 UI/Live 配置不得把两者混称；若用户要真正的单笔绝对上限，必须新增独立规则和测试。
+- Polygon WebSocket wake 已实现，但真实公网连接/订阅响应、断线重连和端到端延迟尚未用新 core 自然短测；`1 s` poll、REST/Activity 确认和 reorg Gate 仍是完整性兜底。不得因有 WebSocket 就缩到 `0.2 s` REST 或直接信任通知。
 - Polygon 每秒快速源单个有效区块会读取 block head、cursor header、两个官方 Exchange log range 和 confirmed header；请求均只读但频率高于原 Data API，需观察 RPC 限流、poll 实际延迟和 degraded 比例。RPC 失败时 Data API 3 秒兜底，不得把 degraded 误报为无交易。
 - 当前使用 2 个确认区块以平衡速度和重组风险；深度重组会在 cursor hash 复核时 `MAJOR_DESYNC`，但确认深度是否足够仍需长测数据支持，不能在 Live 前凭单次短测下结论。
 - 当前只查询 target 作为 maker 的 canonical `OrderFilled`。最近 100 条 Data API Trade 与 97 份链上 receipt 抽样均可逐条找到 target-maker canonical log，但仍需自然长测继续交叉确认特殊撮合路径。
@@ -22,6 +25,8 @@
 - 不可变审计库仍会随运行缓慢增长，不能宣称永久零增长。当前无变化重型证据约降为原来的 `1/15`，迁移整库副本只保留 `1` 份；长期无人值守前仍应设计按 Campaign 归档/轮换，并在 UI 显示数据库增长率和剩余空间，不能静默删除当前 Campaign 证据。
 
 ## Resolved in current implementation
+- 首笔被 `1—5 pUSD` 规则放大并成交后，旧实现会把后续同 asset 小 BUY 当普通追单拒绝。当前以 opening Risk 哈希证据建立 asset lineage，Paper 与隔离 Live 规划均继承；首笔等待/拒绝/未放大不激活，完全清仓重置，V2 证据兼容且篡改 fail closed。
+- Observe 原本只能等待下一个 `1 s` Polygon poll。当前公开 Polygon WebSocket 只订阅两个官方 Exchange 的 target-maker `OrderFilled` 并提前唤醒已确认区块扫描；断线/异常按剩余时间恢复 poll cadence，不把通知当 Signal 或成交证据。
 - Phase 0 在官方 offset 截断历史里遇到可验证二元 MERGE 时，曾因旧腿买入落在截断区间外而报 `UNSUPPORTED_TARGET_ACTIVITY:MERGE`，即使官方 token set、金额和当前可识别腿均有效。Replay `2.2.0` 仅在历史明确截断且官方两个非空 token 精确匹配时，把证明缺口补入 historical bucket 后投影；不会伪造 BUY，也不放宽 Observe 实时缺腿/缺价/集合不符的硬阻断。
 - Data API offset 分页可能让下一页重复上一页最后多行；旧实现只识别恰好 1 行 overlap，真实 Capture 因 2 行边界重复连续三次产生 `AMBIGUOUS_DUPLICATE_EVENTS` 并安全阻断启动。Replay `2.1.0` 现在识别相邻页最长完整 suffix/prefix overlap，保留原始行和证据，只抵消可精确证明的边界重复。
 - 后续 BUY 曾以剩余可用现金继续乘目标比例，已买入越多就越机械缩单；当前完整估值时改用账户总权益，可用现金只封顶实际支付，估值不完整则安全退回现金口径。

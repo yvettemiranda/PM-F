@@ -1,14 +1,14 @@
 # Progress
 
 ## Current task
-- 第二次安全启动已在创建 Campaign 前被 Phase 0 proof 正确拦住：最新 Capture 的分页歧义已清零，但一笔历史 `MERGE` 因公开历史 offset 截断缺少旧 Yes 腿，被 Replay 误列为 unsupported；当前以 Replay `2.2.0` 的受限 historical-bucket reconciliation 修复，实时 Observe Gate 不放宽。
-- 已按用户确认开始新一轮跟单优化：后续 BUY 改为按完整账户权益缩放、现金作支付上限；MEDIUM 兜底降为 `1 pUSD`；同资产退出/止损与新 BUY 串行协调；报告新增金额和成交覆盖率。
-- 已完成用户要求的数据清理和防复发优化：`data/` 从约 `12 GB` 降到约 `21 MB`，系统盘可用空间从约 `298 GB` 增到约 `310 GB`。
-- 当前主库为全新 Schema `2.29.0` 空白安全库；旧 Campaign 数据只保留在昨晚两份关键 ZIP 及精简后的报告/日志中。下一次测试会从新 Campaign、新 Paper 账户开始。
-- Observe 保持 `1 s` Polygon 发现、`3 s` Data API、`15 s` Positions/pUSD；只把无变化 `ONLINE + SYNCED` 的重型不可变证据降为 `15 s` 采样。状态变化、新事件、新 Signal 和 gap 恢复立即落全量证据。
-- 迁移备份默认只保留最新且已校验的 `1` 份；已修复原先按含 schema 版本文件名排序、可能留下错误旧副本的问题。
+- 用户已确认并授权实现：首笔实际放大且成交后，同 asset 后续 BUY 继承 `1—5 pUSD` 最低额规则；Polygon WebSocket target-maker log 提前唤醒 Observe，`1 s` poll 保持兜底。
+- 运行时代码、README 和测试已完成并提交为 `339f369e42aa90c32f003b703c1ec0419a2eb0c5`，版本为 Strategy `2.6.0` / Risk `1.9.0` / Paper `1.13.0` / Live `1.10.0`。
+- 历史 Campaign `PC-105EC3F76A2AC49D59E6` 保持 `PAUSED`；旧核心 `4.84 h` 不得混入新核心验收。
 
 ## Completed implementation
+- `BUY_AMOUNT_POLICY_V3` 将最低额资格显式拆为 `FIRST_ENTRY / AMPLIFIED_POSITION / NONE`。只有首笔金额策略被实际放大且形成正持仓才建立 lineage；未成交等待、拒绝和普通未放大首单不继承，完全清仓自动恢复首单判定。
+- Paper 与隔离 Live 规划共用已成交持仓 → opening execution → Risk checks 的证据链；不扩表、不重写历史账本。完整 V2 哈希证据可跨核心延续 lineage，损坏证据 fail closed。所有现金、Risk、价格窗口、市场最小额和 `5 pUSD` auto-lift cap 保持生效。
+- 新增只读 Polygon WebSocket `eth_subscribe logs` target-maker wake。通知只提前触发既有已确认区块 poll，不直接生成 Signal；断线或 helper 异常时按剩余时间恢复 `1 s` cadence，不记录假 API failure/gap。Observe 结束时关闭 socket/reconnect timer。
 - Replay `2.2.0`：历史 Trades/Activity 明确截断、官方 CLOB 精确给出两个非空 token 且可见资产不冲突时，MERGE 可把证明上缺失的旧余额只补入 historical bucket 再投影；完整历史、官方集合不匹配、金额异常或 tracked leg 无价格仍 fail closed。
 - Replay `2.1.0` 修复 Data API 相邻页多行重叠：以稳定 JSON 序列识别最长 suffix/prefix overlap，原始 Capture 不删除，只把精确边界重复作为 multiplicity evidence 抵消。
 - Paper `1.12.0` / Risk `1.8.0`：HIGH BUY 在完整可退出估值时使用 `totalEquityMicros`，估值不完整才退回 available cash；新 `BUY_AMOUNT_POLICY_V2` 对最终金额应用可审计的 available-cash cap，不再整单因现金不足而拒绝。
@@ -31,6 +31,13 @@
 - Paper `1.11.0` / Risk `1.7.0` 新增 WAITING BUY 缩量 Risk 审计链：验证父决定 scope/ALLOW/amount，强制新金额严格小于父金额，Risk/Execution 当前金额精确一致，并在 Execution Audit 中同时保存父子 Risk Decision ID。
 
 ## Verification completed
+- TDD 已先复现 Paper/Live 后续小 BUY 被拒绝，再完成实现；最终全量 `54/54` 文件、`715/715` 测试通过，覆盖成交后继承、未放大不继承、未成交不激活、清仓重置、`5 pUSD` 上限、V2 哈希兼容、WebSocket 提前唤醒和断线 `1 s` fallback。`tsc --noEmit` 与 `git diff --check` 通过。重型 core compatibility 测试在一次并行全量中超过原固定 `5 s`，单独复现 `2.14 s`、无断言错误；只把该条局部时限调为 `15 s` 后全量稳定通过，未放宽全局标准。
+- Polygon 公网只读探针使用实际 `OrderFilled` topic、两个官方 Exchange 和目标 maker 成功取得 `wss://polygon.drpc.org` subscription ID；未发送交易、未认证、未写链。
+- 收尾只读复核：Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`、目标 `IDENTITY_CONFIRMED + SYNCED`；Campaign 仍 `PAUSED`，Live Execution/Order/Fill 均 `0`，无 Observe/Paper/Supervisor 进程，Gate 为 `PAPER + LIVE_DISABLED + liveAllowed=false`。
+- 2026-07-23 新核心 Campaign 最终证据：`15605` 次成功轮询、`11` 次已恢复 timeout、`30` 个目标事件、`9` 个 BUY Signal、gap `0`、最终 `SYNCED`；两次 Session consistency 均通过，checkpoint recovery、API recovery、safe stop 和 restart recovery 取得自然证据。
+- 9 个自然 BUY 全部被发现并通过 Risk；执行结果为 `1 FAK_FILLED / 5 BELOW_MARKET_MIN_ORDER_SIZE / 3 WAIT_TIMEOUT`。唯一成交为 15.8 份、总成本 `1 pUSD`；最终可退出估值 `0.91236 pUSD`，未实现 PnL `-0.08764 pUSD`，Reservation `0`。
+- 最终数据库 Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`、异常 `0`、reconciliation issue `0`；`PAPER + LIVE_DISABLED`，private key 未加载、认证交易客户端不存在、真实订单与链上写入为 `0`。
+- 两份新 Campaign ZIP 已生成并计算 SHA-256：首个 4 小时包 `2f70d7ff...72f08`，17:15 安全暂停包 `4dc0cd95...0c49c`。
 - 真实失败 Capture 已定位到条件 `0x253a...735ba` 的 532.0828 份 MERGE：官方 CLOB 是精确 Yes/No 二元集合；Replay 可见 No 腿 1199.13 份、Yes 腿只有旧 SELL 而无可见 BUY，符合历史截断。新增回归先红后绿；完整历史缺腿和截断历史下官方 token mismatch 的失败关闭测试仍通过。干净提交后的同 Capture 确定性重放待执行。
 - Replay `2.2.0` 修改后全量 `54/54` 文件、`708/708` 测试通过，`tsc --noEmit` 与 `git diff --check` 通过；本地 Standards/Spec 双轴复核未发现需要阻断提交的问题。
 - 2026-07-23 首次启动的三份真实 Phase 0 Capture 稳定复现 2 个 ambiguous event；最小回归确认是相邻 Trades 页重复 2 行。修复后原 Capture 重放得到 `tradeBoundaryOverlapRows=2`、`reconciledPaginationOverlapRows=2`、`onChainProofs=2`、`ambiguousEvents=0`。
@@ -45,15 +52,14 @@
 - 真实数据库 Schema `2.29.0`、`integrity_check=ok`、外键失败 `0`，Gate 为 `PAPER + LIVE_DISABLED`，Live Execution/Order/Fill/Redeem/Settlement Ledger 均为 `0`；最终报告确认未加载 private key、无认证交易客户端、真实订单 `0`、链上写入 `0`。
 - 首轮全量的 3 个失败均是旧测试仍期待 Data API 每循环请求；已改为显式推进 3 秒后断言，并由最终全量覆盖。
 
-## Runtime state before final verification
-- 无 Observe/Paper/Supervisor 子进程、无 Campaign；本次两轮启动都在创建 Campaign 前由 Phase 0/isolated proof 安全终止，失败 Capture/ZIP 已保留。
-- 数据目录约 `21 MB`；当前空白业务库 Schema `2.29.0`、Gate 安全。旧 account/campaign pointer 与昨晚前无关日志已删除。
-- 下次启动必须使用最终干净 commit，重新生成 Phase 0/Replay/core 绑定并创建新 Campaign，不得续算旧核心时长。
+## Runtime state after 17:15 final drain
+- Campaign `PC-105EC3F76A2AC49D59E6` 为 `PAUSED`，无 Observe/Paper/Supervisor/launcher 进程；17:15 自动巡检已删除。
+- 数据目录约 `598 MB`，主库约 `577 MB`，系统盘约 `309 GiB` 可用。账户现金 `999 pUSD`、预留 `0`、1 个 OPEN Position（15.8 份，成本 `1 pUSD`）。
+- 当前累计 `4.84 / 24 h`，最长连续 `4.00 / 4 h`，唯一缺失 Campaign coverage 为 `REALIZED_PNL`。
 
 ## Current identity
-- Replay `2.2.0` / Paper `1.12.0` / Risk `1.8.0` / Operational `1.7.0` 已进入最终验证；精确 commit/core hash 以最终提交和下一次新 Campaign 的 Operator 输出为准。
+- 实现提交 `339f369e42aa90c32f003b703c1ec0419a2eb0c5`；新 core compatibility hash `89bf36ace9276263a0ec69c2b5f64e82f3e586ecb95addb02a1ef9fedd31e21a`，verification suite hash `e985674ff0d7beb1ae20fc8edc81e6126395b10b8055ff652e93e33c625dd5b6`。Replay `2.2.0` / Strategy `2.6.0` / Paper `1.13.0` / Risk `1.9.0` / Live `1.10.0` / Operational `1.7.0`。
 
 ## Next steps
-1. 完成最终全量测试、双轴代码复核并提交，形成干净 HEAD。
-2. 从空白安全库创建新 Campaign；先完成隔离验证、Phase 0/Replay，再持续运行到 2026-07-23 17:15，并每 30 分钟巡检。
-3. 小额 Live 前继续处理 SPLIT/negative-risk conversion、结束时间缺失策略、Live 小额 SELL 约束终止、合规/geoblock、隔离钱包与 signer 授权；当前不得开启 Live。
+1. 用新干净 core 做短时自然 Paper 验证，重点测 WebSocket 实际连接/重连、发现延迟、RPC degraded、继承 BUY 和数据库增长；通过后再重启最终 Campaign，旧 `4.84 h` 不混算。
+2. 小额 Live 前继续处理 SPLIT/negative-risk conversion、结束时间缺失策略、Live 小额 SELL 约束终止、合规/geoblock、隔离钱包与 signer 授权；当前不得开启 Live。
