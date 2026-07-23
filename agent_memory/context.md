@@ -41,12 +41,15 @@
 - 用户已授权只保留当前规则版本。2026-07-23 23:45 已永久删除更早的混合旧规则数据库、旧 Campaign/Capture/Replay/日志、`work/`、`outputs/` 和旧 ZIP。
 - 新版 Campaign `PC-9CE4EA3EBBE605DF9E54` 自然暴露 `SAME_ASSET_EXIT_PENDING` 阻塞独立 BUY：一个 `0.096538` 股尾仓退出使后续 1 pUSD BUY 等到过期。2026-07-24 05:51 已安全暂停，累计约 `5.99 h`、11 个 BUY Signal、3 个 BUY Fill、3 个持仓、0 个 Live 记录。
 - 诊断报告 `Paper累计验证_PC-9CE4EA3EBBE605DF9E54_PS-DD61330BCD0C886521F7_20260724-055146-58952.zip` 的 SHA-256 为 `ea14fbc1df00114aa350b910e517553dbdbc43b175ce24d8bd199235315fa88f`。该旧 Paper `1.14.0` Campaign 只作问题证据，不与修复后的 Paper `1.15.0` 累计时长。
-- 修复提交完成后从空白 Schema `2.29.0` 重新启动新 Campaign；必须再次验证 `PAPER + LIVE_DISABLED`，且不追补暂停期间交易。
+- 旧 Paper `1.14.0` 运行库和冗余报告已移至系统废纸篓 `/Users/d4clt/.Trash/ni-k-old-core-20260724-0557/`，可恢复；仓库清理后一度降至约 `232 MB`。只保留上述问题诊断 ZIP 和当前新版报告。
+- 修复代码提交 `7a640a71a384e8ad02cb9c36046496daaf4538a8` 从空白 Schema `2.29.0` 创建 Campaign `PC-305046D47E89A5529CDA`。用户将截止时间提前到 2026-07-24 07:30，07:36 已安全暂停并完成 final drain：有效运行 `1.63 h`，Observe 成功 `5556`、失败 `0`、Gap `0`，3 个 BUY Signal、1 个 SELL Signal、2 个 Fill、1 个 Realized PnL、无活动 Reservation。
+- 新版自然成交为小额 BUY 申请 `4.14 pUSD`、实际买入 `5.003743` 股，随后 TARGET_SELL 成交 `5` 股并保留 `0.003743` 股真实精度尾仓 `EXIT_PENDING`；两笔高价等待 BUY 正常过期并释放 `2 pUSD`。
+- 当前报告 `Paper累计验证_PC-305046D47E89A5529CDA_PS-2CD692D49B8A067668BE_20260724-073627-69773.zip` 的 SHA-256 为 `f4dd4c4dd578896416b614cfaecec605fbf8f1748adb2888e38eac2e4dde3eea`；ZIP 校验通过。最终状态 `PAUSED + PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Fill/Attempt 均为 `0`，数据库 integrity/foreign key 正常。
 
 ## Remaining blockers before small Live
-- 清理后新版 Campaign 时长从零重新累计；清理前约 `0.55 h` 和更早 `4.84 h` 均只作诊断证据，不再进入 Gate。
+- 当前 Paper `1.15.0` Campaign 只有 `1.63 h`，尚未满足累计 `24 h` 和连续 `4 h`；旧 core 时长只作诊断证据，不能进入 Gate。当前未覆盖场景只剩 `API_RECOVERY`。
 - SPLIT 和 tracked negative-risk conversion 仍无可执行复制语义；无法证明完整集合的 MERGE 仍硬阻断。
-- 官方结束时间缺失的 Live 策略、自然 SELL/REALIZED_PNL、最终 Observe 时长、合规/geoblock、隔离钱包、signer 和 Live arming 尚未完成。
+- 官方结束时间缺失的 Live 策略、合规/geoblock、隔离钱包、signer、真实 Live runtime 接线和 Live arming 尚未完成；自然 BUY/SELL/Fill/Fee/Realized PnL 已在 Paper 覆盖，但不能替代 Live 验证。
 
 ## Operator workflow
 - 桌面入口：`/Users/d4clt/Desktop/Polymarket验证_点这里`；目标文件：`data/operator/target-wallet.txt`。运行锁存在时禁止切换目标。

@@ -5,7 +5,7 @@
 - SPLIT 没有安全的 position projection/copy 语义，会触发 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明完整 outcome set、余额或定价的 MERGE 继续硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 旧数据库和混合 Campaign 已按用户授权永久清理；新版 Campaign 必须从零累计。可执行自然 BUY/Order/Fill、自然 SELL/REALIZED_PNL 与最终 Observe 时长仍未完成。
+- 旧数据库和混合 Campaign 已按用户授权清理；Paper `1.15.0` 新 Campaign 已自然覆盖 BUY/Order/Fill、SELL/Fee/REALIZED_PNL，但仅运行 `1.63 h`，未满足累计 `24 h`、连续 `4 h`，且 `API_RECOVERY` 未覆盖。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks

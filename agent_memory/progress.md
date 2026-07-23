@@ -31,11 +31,12 @@
 - 当前全量为 `54/54` 测试文件、`747/747` 测试通过；新增普通尾仓退出待处理时后续独立 BUY 的 Paper/Live 对齐回归。既有 Live SELL/等待 BUY、经济成交、启动恢复和收尾竞态覆盖继续通过；TypeScript 与 `git diff --check` 通过。
 
 ## Runtime state
-- 发现交错规则问题后已于 2026-07-24 05:51 安全暂停并完成 final drain；Observe/Paper/Supervisor 已退出，安全锁已清理，报告 ZIP 已生成并校验哈希。
-- 旧 Campaign 累计约 `5.99 h`，包含 11 个 BUY Signal、3 个自然 BUY Fill 和 3 个持仓；它使用 Paper `1.14.0`，修复后不得继续混算。
-- 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；提交修复后需清空旧运行数据库并从新 core 自动启动 Paper。
+- Paper `1.15.0` 修复已提交为 `7a640a71a384e8ad02cb9c36046496daaf4538a8`；旧运行库和冗余报告已移至系统废纸篓，只保留问题诊断 ZIP。
+- 从空白数据库创建的 Campaign `PC-305046D47E89A5529CDA` 已按用户提前后的 07:30 截止安全暂停并完成 final drain。Session `PS-2CD692D49B8A067668BE` 有效运行 `1.63 h`，Observe `5556/0`、Gap `0`、最终 `SYNCED`，3 BUY Signal、1 SELL Signal、2 Fill、1 Realized PnL。
+- 两笔等待 BUY 均正常过期并释放资金；自然 SELL 成交后保留 `0.003743` 股精度尾仓 `EXIT_PENDING`。当前无活动 Reservation、无 Observe/Paper/Supervisor、安全锁已清理。
+- 最终报告 ZIP 与哈希已校验；数据库 integrity/foreign key 正常，Live Execution/Order/Fill/Attempt 全为 `0`，安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
 
 ## Next steps
-1. 提交 Paper `1.15.0` 修复，清除旧 core 运行数据库，只保留诊断 ZIP。
-2. 从空白数据库通过安全入口重建 Schema、Phase 0/Replay 和隔离 proof，创建只含当前规则的新 Campaign。
-3. 确认 `PAPER + LIVE_DISABLED`、Git 干净、Observe/Paper/Supervisor独立运行，再继续巡检至 08:00。
+1. 当前自动测试与巡检任务已经结束；除非用户明确要求，不自动重启。
+2. 后续若继续实盘前验证，先从当前报告复核尾仓、等待过期和实际盈亏，再累计 Paper `24 h`/连续 `4 h` 并覆盖 `API_RECOVERY`。
+3. Live runtime、合规、隔离钱包和 signer 未完成且未获授权，继续固定 `LIVE_DISABLED`。
