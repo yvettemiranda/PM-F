@@ -35,6 +35,11 @@ import {
 import { buyMinimumLiftEligibility } from "../execution/buy-minimum-eligibility.js";
 import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
 import {
+  fullExitThresholdForTargetSell,
+  parseEffectiveTargetSellRatio,
+  type EffectiveTargetSellRatio,
+} from "../execution/target-sell-policy.js";
+import {
   calculateBuyCapitalSizing,
   type BuyCapitalSizingDecision,
   type ExactCapitalRatioSnapshot,
@@ -1397,8 +1402,9 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           this.audit("SIGNAL", signal.signalId, "ACCEPTED", "RISK_ALLOW", now, { accountId, riskDecisionId: risk.riskDecisionId });
         }
       } else {
-        const waitingBuyAdjustments = this.waitingBuyTargetExitAdjustments(accountId, signal);
-        const allocations = this.sellAllocations(accountId, signal);
+        const sellRatio = this.targetSellRatio(signal);
+        const waitingBuyAdjustments = this.waitingBuyTargetExitAdjustments(accountId, signal, sellRatio);
+        const allocations = this.sellAllocations(accountId, signal, sellRatio);
         const requested = allocations.reduce((sum, item) => sum + item.size, 0n);
         const risk = preapprovedRisk ?? this.riskManager.evaluate({
           mode: this.mode,
@@ -3297,11 +3303,28 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     ).run(hash([accountId, signalId, "CONSUMPTION"]), accountId, signalId, idempotency, result, rejectReason, executionId, now);
   }
 
-  private sellAllocations(accountId: string, signal: PaperSignalEnvelope): Array<{ positionId: string; size: bigint }> {
-    if (!signal.sellRatioNumerator || !signal.sellRatioDenominator) return [];
-    const numerator = BigInt(signal.sellRatioNumerator);
-    const denominator = BigInt(signal.sellRatioDenominator);
-    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return [];
+  private targetSellRatio(signal: PaperSignalEnvelope): EffectiveTargetSellRatio | null {
+    const rules = signal.context
+      ? registeredExecutionRules(this.database, signal.context.rulesetHash)
+      : null;
+    if (signal.context && !rules) throw new Error(`PAPER_RULESET_UNAVAILABLE:${signal.context.rulesetHash}`);
+    return parseEffectiveTargetSellRatio({
+      numerator: signal.sellRatioNumerator,
+      denominator: signal.sellRatioDenominator,
+      fullExitThresholdPpm: fullExitThresholdForTargetSell(
+        signal.eventClassification,
+        rules?.followSellFullExitThresholdPpm ?? 1_000_000,
+      ),
+    });
+  }
+
+  private sellAllocations(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    ratio: EffectiveTargetSellRatio | null,
+  ): Array<{ positionId: string; size: bigint }> {
+    if (!ratio) return [];
+    const { numerator, denominator } = ratio;
     const positions = this.database.prepare(
       `SELECT * FROM paper_positions
        WHERE paper_account_id=? AND asset_id=? AND condition_id=?
@@ -3341,16 +3364,15 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private waitingBuyTargetExitAdjustments(
     accountId: string,
     signal: PaperSignalEnvelope,
+    ratio: EffectiveTargetSellRatio | null,
   ): Array<{
     paperExecutionId: string;
     reservationId: string;
     released: bigint;
     retained: bigint;
   }> {
-    if (!signal.sellRatioNumerator || !signal.sellRatioDenominator) return [];
-    const numerator = BigInt(signal.sellRatioNumerator);
-    const denominator = BigInt(signal.sellRatioDenominator);
-    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return [];
+    if (!ratio) return [];
+    const { numerator, denominator } = ratio;
     const rows = this.database.prepare(
       `SELECT e.paper_execution_id,r.reservation_id,r.original_amount_micros,
               r.remaining_amount_micros
@@ -3705,7 +3727,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
   private loadSignal(signalId: string): PaperSignalEnvelope {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,s.event_classification,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
@@ -3728,6 +3750,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       signalId: row.signal_id as string,
       targetId: row.target_id as string,
       signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION",
+      eventClassification: row.event_classification as PaperSignalEnvelope["eventClassification"],
       status: row.status as string,
       executionEligible: (row.execution_eligible as number) !== 0,
       executionBlockReason: row.execution_block_reason as string | null,

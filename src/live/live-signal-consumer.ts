@@ -18,6 +18,10 @@ import {
 } from "../execution/buy-amount-policy.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
+import {
+  fullExitThresholdForTargetSell,
+  parseEffectiveTargetSellRatio,
+} from "../execution/target-sell-policy.js";
 import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 
 export interface LiveSignalConsumptionResult {
@@ -134,6 +138,12 @@ export class LiveSignalConsumer {
         results.push(this.finishConsumption(accountId, loaded, existing.live_execution_id));
         continue;
       }
+      const executionRules = registeredExecutionRules(this.database, loaded.rulesetHash);
+      if (!executionRules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${loaded.rulesetHash}`);
+      const sellFullExitThresholdPpm = fullExitThresholdForTargetSell(
+        signal.eventClassification,
+        executionRules.followSellFullExitThresholdPpm,
+      );
       let requested: {
         amount: bigint | null;
         size: bigint | null;
@@ -145,7 +155,11 @@ export class LiveSignalConsumer {
           ? { ...this.buyAmount(accountId, signal), size: null }
           : {
             amount: null,
-            size: this.sellSize(accountId, signal),
+            size: this.sellSize(
+              accountId,
+              signal,
+              sellFullExitThresholdPpm,
+            ),
             capitalSizingDecision: null,
             buyAmountPolicyDecision: null,
           };
@@ -160,12 +174,14 @@ export class LiveSignalConsumer {
         });
         continue;
       }
-      const executionRules = registeredExecutionRules(this.database, loaded.rulesetHash);
-      if (!executionRules) throw new Error(`LIVE_RULESET_UNAVAILABLE:${loaded.rulesetHash}`);
       const targetExitSupersession = signal.signalType === "TARGET_SELL"
         && requested.size === null
         && executionRules.smallFollowBuyPolicyEnabled
-        && this.hasWaitingBuyTargetExitAdjustment(accountId, signal);
+        && this.hasWaitingBuyTargetExitAdjustment(
+          accountId,
+          signal,
+          sellFullExitThresholdPpm,
+        );
       let follow: ReturnType<typeof evaluateBuyFollowPolicy> | null = null;
       try {
         follow = signal.signalType === "TARGET_BUY" && executionRules.smallFollowBuyPolicyEnabled
@@ -570,16 +586,17 @@ export class LiveSignalConsumer {
     };
   }
 
-  private sellSize(accountId: string, signal: PaperSignalEnvelope): bigint | null {
-    if (
-      signal.sellRatioNumerator === null
-      || signal.sellRatioDenominator === null
-      || !/^\d+$/.test(signal.sellRatioNumerator)
-      || !/^\d+$/.test(signal.sellRatioDenominator)
-    ) return null;
-    const numerator = BigInt(signal.sellRatioNumerator);
-    const denominator = BigInt(signal.sellRatioDenominator);
-    if (denominator <= 0n || numerator <= 0n) return null;
+  private sellSize(
+    accountId: string,
+    signal: PaperSignalEnvelope,
+    fullExitThresholdPpm: number,
+  ): bigint | null {
+    const ratio = parseEffectiveTargetSellRatio({
+      numerator: signal.sellRatioNumerator,
+      denominator: signal.sellRatioDenominator,
+      fullExitThresholdPpm,
+    });
+    if (!ratio) return null;
     const rows = this.database.prepare(
       `SELECT current_size_micros FROM live_positions
        WHERE live_account_id=? AND asset_id=? AND condition_id=?
@@ -588,7 +605,7 @@ export class LiveSignalConsumer {
     ).all(accountId, signal.assetId, signal.conditionId) as unknown as Array<{ current_size_micros: string }>;
     const total = rows.reduce((sum, row) => sum + BigInt(row.current_size_micros), 0n);
     if (total <= 0n) return null;
-    const requested = (total * numerator) / denominator;
+    const requested = (total * ratio.numerator) / ratio.denominator;
     if (requested <= 0n) return null;
     return requested < total ? requested : total;
   }
@@ -596,16 +613,14 @@ export class LiveSignalConsumer {
   private hasWaitingBuyTargetExitAdjustment(
     accountId: string,
     signal: PaperSignalEnvelope,
+    fullExitThresholdPpm: number,
   ): boolean {
-    if (
-      signal.sellRatioNumerator === null
-      || signal.sellRatioDenominator === null
-      || !/^\d+$/.test(signal.sellRatioNumerator)
-      || !/^\d+$/.test(signal.sellRatioDenominator)
-    ) return false;
-    const numerator = BigInt(signal.sellRatioNumerator);
-    const denominator = BigInt(signal.sellRatioDenominator);
-    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return false;
+    const ratio = parseEffectiveTargetSellRatio({
+      numerator: signal.sellRatioNumerator,
+      denominator: signal.sellRatioDenominator,
+      fullExitThresholdPpm,
+    });
+    if (!ratio) return false;
     const rows = this.database.prepare(
       `SELECT e.live_execution_id,e.requested_amount_micros,r.delta_micros
        FROM live_executions e
@@ -639,7 +654,7 @@ export class LiveSignalConsumer {
         // before any order and persistently disable the Live Gate.
         return true;
       }
-      if ((value.reserved * numerator) / denominator > 0n) return true;
+      if ((value.reserved * ratio.numerator) / ratio.denominator > 0n) return true;
     }
     return false;
   }
@@ -843,7 +858,7 @@ export class LiveSignalConsumer {
   private loadSignal(signalId: string, signalSequence: number): LoadedLiveSignal {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,s.event_classification,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               s.ruleset_hash signal_ruleset_hash,
               c.context_id,c.target_id context_target_id,c.signal_id context_signal_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
@@ -930,6 +945,7 @@ export class LiveSignalConsumer {
       signalId: row.signal_id as string,
       targetId: row.target_id as string,
       signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
+      eventClassification: row.event_classification as PaperSignalEnvelope["eventClassification"],
       status: row.status as string,
       executionEligible: (row.execution_eligible as number) !== 0,
       executionBlockReason: row.execution_block_reason as string | null,

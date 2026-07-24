@@ -16,6 +16,7 @@
 - 无变化且 `ONLINE + SYNCED` 时每 `15 s` 保存一次完整 Capture/Capital/Reconciliation/Checkpoint；事件、Signal、gap 恢复和状态变化立即保存完整证据。
 - Paper/隔离 Live 共享不可变 Signal/Context、Risk、完整 REST 盘口、含手续费 VWAP、FAK、Reservation、Position/Ledger 和恢复语义。待买由盘口 WebSocket 唤醒，无消息时每 `15 s` REST 兜底。
 - 每个 cycle 先固化新 Signal，再处理目标退出、止损和 pending retry。目标 SELL 先取消或同比例缩减等待 BUY，再按目标减仓比例处理自身真实持仓；不超卖、不为最低量放大。
+- SELL 比例只以启动后实际跟随的本轮目标仓位为分母，不追补启动前历史仓位；普通 `STANDARD_TRADE` SELL 低于 `95%` 时按比例退出，达到或超过 `95%` 时把本轮跟单仓位判定为完整退出。目标仍持有的比例尾部转回 historical bucket，不再形成后续跟单义务。`COMBO_ACTIVITY`/MERGE 不应用该阈值，继续使用原有比例语义。
 - 当前 Ruleset 下，低于最低卖出量的真实尾仓保持 `EXIT_PENDING`，不因时间过期取消；旧 Ruleset 继续保留其原有 terminal-cancel 行为，历史执行不被新规则重解释。
 
 ## Current execution rules
@@ -32,8 +33,9 @@
 - MEDIUM 资本证据缺少比例时保留既有 `1 pUSD` fixed fallback，并归为小额 BUY；HIGH 使用精确比例，完整估值时按账户总权益计算。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.29.0`、Signal `1.9.0`、Strategy `2.7.0`、Risk `1.10.0`、Replay `2.3.0`、Paper `1.15.0`、Live `1.12.0`、Validation `1.7.0`、Operational `1.9.0`、Ruleset `v1.9.0`、Config `v1.6.0`。
+- 当前源码目标版本：Schema `2.29.0`、Signal `1.10.0`、Strategy `2.8.0`、Risk `1.10.0`、Replay `2.4.0`、Paper `1.16.0`、Live `1.13.0`、Validation `1.7.0`、Operational `1.9.0`、Ruleset `v1.10.0`、Config `v1.7.0`。
 - `BUY_AMOUNT_POLICY_V4` 只用于包含 `smallFollowBuyMaxCount` 的新 Ruleset。v1.8/V3 与 v1.7/V2 历史证据继续按不可变旧语义验证，不能套用新金额、价格或 SELL 规则。
+- `followSellFullExitThresholdPpm=950000` 只由新 Ruleset 解释；缺少该字段的历史 Ruleset 固定回退为 `1000000`，不会把旧的比例 SELL 重解释为完整退出。
 - 本次没有数据库结构变更，也没有修改扫描频率、账本边界或安全 Gate。任何新 Campaign 必须使用最终干净提交生成的新 core compatibility hash。
 - 普通 `TARGET_SELL` 的 `EXIT_PENDING` 与后续真实到达的 BUY 是两笔独立义务：旧退出继续保留和重试，但不得阻塞后续 BUY。`STOP_EXIT_PENDING` 仍由止损重开锁拒绝本轮后续 BUY。
 
@@ -45,9 +47,10 @@
 - 修复代码提交 `7a640a71a384e8ad02cb9c36046496daaf4538a8` 从空白 Schema `2.29.0` 创建 Campaign `PC-305046D47E89A5529CDA`。用户将截止时间提前到 2026-07-24 07:30，07:36 已安全暂停并完成 final drain：有效运行 `1.63 h`，Observe 成功 `5556`、失败 `0`、Gap `0`，3 个 BUY Signal、1 个 SELL Signal、2 个 Fill、1 个 Realized PnL、无活动 Reservation。
 - 新版自然成交为小额 BUY 申请 `4.14 pUSD`、实际买入 `5.003743` 股，随后 TARGET_SELL 成交 `5` 股并保留 `0.003743` 股真实精度尾仓 `EXIT_PENDING`；两笔高价等待 BUY 正常过期并释放 `2 pUSD`。
 - 当前报告 `Paper累计验证_PC-305046D47E89A5529CDA_PS-2CD692D49B8A067668BE_20260724-073627-69773.zip` 的 SHA-256 为 `f4dd4c4dd578896416b614cfaecec605fbf8f1748adb2888e38eac2e4dde3eea`；ZIP 校验通过。最终状态 `PAUSED + PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Fill/Attempt 均为 `0`，数据库 integrity/foreign key 正常。
+- 上述 `1.63 h` Campaign 属于旧 Paper `1.15.0`/Ruleset `v1.9.0` 核心，只保留为自然成交证据；95%全退的新核心尚未启动 Campaign，不能继承旧核心累计时长。
 
 ## Remaining blockers before small Live
-- 当前 Paper `1.15.0` Campaign 只有 `1.63 h`，尚未满足累计 `24 h` 和连续 `4 h`；旧 core 时长只作诊断证据，不能进入 Gate。当前未覆盖场景只剩 `API_RECOVERY`。
+- 95%全退新核心尚无自然运行时长；旧 Paper `1.15.0` Campaign 的 `1.63 h` 只作诊断证据，不能进入新核心 Gate。累计 `24 h`、连续 `4 h` 和 `API_RECOVERY` 仍未满足。
 - SPLIT 和 tracked negative-risk conversion 仍无可执行复制语义；无法证明完整集合的 MERGE 仍硬阻断。
 - 官方结束时间缺失的 Live 策略、合规/geoblock、隔离钱包、signer、真实 Live runtime 接线和 Live arming 尚未完成；自然 BUY/SELL/Fill/Fee/Realized PnL 已在 Paper 覆盖，但不能替代 Live 验证。
 

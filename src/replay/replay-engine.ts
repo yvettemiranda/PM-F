@@ -7,7 +7,8 @@ import {
 } from "../domain/idempotency.js";
 import type { EventClassification, IdentityStatus, PublicActivity, PublicTrade, Signal, SourceEvent } from "../domain/models.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
-import { VERSIONS, stableJson } from "../domain/versioning.js";
+import { RULESET, VERSIONS, stableJson } from "../domain/versioning.js";
+import { effectiveTargetSellRatio } from "../execution/target-sell-policy.js";
 import { mergeExitPrices } from "../observe/position-projector.js";
 
 export interface ReplayGap {
@@ -442,11 +443,20 @@ export class ReplayEngine {
       }
 
       const recognizedSell = event.sizeMicros < beforeTracked ? event.sizeMicros : beforeTracked;
-      trackedPositions.set(event.trade.asset, beforeTracked - recognizedSell);
+      const followedSell = beforeTracked > 0n
+        ? effectiveTargetSellRatio({
+          numerator: recognizedSell,
+          denominator: beforeTracked,
+          fullExitThresholdPpm: RULESET.followSellFullExitThresholdPpm,
+        }).numerator
+        : 0n;
+      const reclassifiedResidual = followedSell - recognizedSell;
+      trackedPositions.set(event.trade.asset, beforeTracked - followedSell);
       const historicalSell = event.sizeMicros - recognizedSell < beforeHistorical
         ? event.sizeMicros - recognizedSell
         : beforeHistorical;
-      historicalPositions.set(event.trade.asset, beforeHistorical - historicalSell);
+      const historicalAfter = beforeHistorical - historicalSell + reclassifiedResidual;
+      historicalPositions.set(event.trade.asset, historicalAfter);
       if (event.gapEvent) {
         const signal = this.signal(
           input.targetId,
@@ -456,7 +466,7 @@ export class ReplayEngine {
           "GAP_TRADE",
           false,
           "GAP_EVENT",
-          beforeTracked === 0n ? undefined : recognizedSell,
+          beforeTracked === 0n ? undefined : followedSell,
           beforeTracked === 0n ? undefined : beforeTracked,
         );
         signals.push(signal);
@@ -476,7 +486,7 @@ export class ReplayEngine {
           "STANDARD_TRADE",
           true,
           undefined,
-          recognizedSell,
+          followedSell,
           beforeTracked,
         );
         signals.push(signal);
@@ -485,11 +495,17 @@ export class ReplayEngine {
       positionLedger.push(this.ledger(
         event,
         beforeHistorical,
-        beforeHistorical - historicalSell,
+        historicalAfter,
         beforeTracked,
-        beforeTracked - recognizedSell,
+        beforeTracked - followedSell,
         recognizedSell,
-        event.gapEvent ? "GAP_SELL_TRACKED_FIRST_NO_EXECUTION" : beforeTracked === 0n ? "HISTORICAL_SELL_ONLY" : "TRACKED_FIRST_SELL",
+        event.gapEvent
+          ? "GAP_SELL_TRACKED_FIRST_NO_EXECUTION"
+          : beforeTracked === 0n
+            ? "HISTORICAL_SELL_ONLY"
+            : reclassifiedResidual > 0n
+              ? "TRACKED_SELL_FULL_EXIT_THRESHOLD"
+              : "TRACKED_FIRST_SELL",
       ));
     }
 

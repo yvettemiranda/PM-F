@@ -1,5 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { EventClassification } from "../domain/models.js";
 import { classifyTargetBuyRatio, type BuyAmountPolicyClass } from "./buy-amount-policy.js";
+import { registeredExecutionRules } from "../domain/ruleset-registry.js";
+import {
+  fullExitThresholdForTargetSell,
+  parseEffectiveTargetSellRatio,
+} from "./target-sell-policy.js";
 
 type BuyFollowMode = "PAPER" | "LIVE";
 
@@ -95,7 +101,8 @@ function signalEvidence(database: DatabaseSync, signalId: string): SignalEvidenc
 function latestFullExit(database: DatabaseSync, signal: SignalEvidence): EventOrder | null {
   const candidates: EventOrder[] = [];
   const sells = database.prepare(
-    `SELECT r.source_timestamp,r.source_event_key,s.sell_ratio_numerator,s.sell_ratio_denominator
+    `SELECT r.source_timestamp,r.source_event_key,s.sell_ratio_numerator,s.sell_ratio_denominator,
+            s.ruleset_hash,s.event_classification
      FROM signals s JOIN raw_events r ON r.source_event_key=s.source_event_key
      WHERE s.target_id=? AND s.asset_id=?
        AND s.signal_type='TARGET_SELL'`,
@@ -104,14 +111,23 @@ function latestFullExit(database: DatabaseSync, signal: SignalEvidence): EventOr
     source_event_key: string;
     sell_ratio_numerator: string | null;
     sell_ratio_denominator: string | null;
+    ruleset_hash: string;
+    event_classification: EventClassification;
   }>;
   for (const row of sells) {
     if (row.sell_ratio_numerator === null || row.sell_ratio_denominator === null) continue;
     let full = false;
     try {
-      const numerator = BigInt(row.sell_ratio_numerator);
-      const denominator = BigInt(row.sell_ratio_denominator);
-      full = denominator > 0n && numerator === denominator;
+      const rules = registeredExecutionRules(database, row.ruleset_hash);
+      if (!rules) continue;
+      full = parseEffectiveTargetSellRatio({
+        numerator: row.sell_ratio_numerator,
+        denominator: row.sell_ratio_denominator,
+        fullExitThresholdPpm: fullExitThresholdForTargetSell(
+          row.event_classification,
+          rules.followSellFullExitThresholdPpm,
+        ),
+      })?.fullExit ?? false;
     } catch {
       full = false;
     }

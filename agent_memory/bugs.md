@@ -5,10 +5,11 @@
 - SPLIT 没有安全的 position projection/copy 语义，会触发 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
 - 无法证明完整 outcome set、余额或定价的 MERGE 继续硬阻断；不会猜测资产集合或价格。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 旧数据库和混合 Campaign 已按用户授权清理；Paper `1.15.0` 新 Campaign 已自然覆盖 BUY/Order/Fill、SELL/Fee/REALIZED_PNL，但仅运行 `1.63 h`，未满足累计 `24 h`、连续 `4 h`，且 `API_RECOVERY` 未覆盖。
+- 旧数据库和混合 Campaign 已按用户授权清理；旧 Paper `1.15.0` Campaign 已自然覆盖 BUY/Order/Fill、SELL/Fee/REALIZED_PNL，但95%全退新核心尚无自然运行时长，未满足累计 `24 h`、连续 `4 h`，且 `API_RECOVERY` 未覆盖。
 - geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
+- `>=95%` 普通 `STANDARD_TRADE` SELL 会主动结束本轮跟单周期，并把目标仍持有的比例尾部转回 historical bucket；这是用户确认的“不追补旧仓、避免跟单尾仓长期残留”策略取舍。若目标随后只操作该被忽略尾部，不再生成本轮执行 Signal；需用新核心自然 Paper 验证频繁小额调仓下的收益和换手成本。`COMBO_ACTIVITY`/MERGE 已明确排除在该阈值之外。
 - 同一 `orderHash` 可跨多笔 Polygon 交易长期部分成交；昨晚 16 个目标 orderHash 中有 8 个跨交易，最长间隔约 2 小时 43 分。用户已确认按 `transactionHash + orderHash` 定义一次经济成交：同交易多 fill 合并，跨交易后续 fill 独立继续跟，以免等待订单终结导致数小时延迟或漏单。UI/报告必须明确这是经济成交次数，不是原始订单数。
 - 小额追单次数、持仓周期和止损锁由现有不可变证据推导而不扩表。完整 SELL/等价 MERGE/REDEEM 只有在自身旧义务全部归零后才成为重置边界；无法证明时保守不重置。需要自然短测验证复杂交错顺序。
 - Data API 不提供 `orderHash`。多 fill 归并以 Polygon 官方日志为准；跨源只在 transaction/asset/side/timestamp、总 size 和加权价格精确一致且只有一个 Polygon 订单候选时去重。API 时间或精度若不一致会 fail closed，可能牺牲跟单覆盖率但不会猜测合并。

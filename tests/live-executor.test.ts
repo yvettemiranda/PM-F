@@ -679,6 +679,7 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   riskDecisionId: string;
   decision: "ALLOW" | "REJECT";
   signalType?: "TARGET_BUY" | "TARGET_SELL";
+  eventClassification?: "STANDARD_TRADE" | "COMBO_ACTIVITY";
   sellRatioNumerator?: string | null;
   sellRatioDenominator?: string | null;
   requestedAmountMicros?: string | null;
@@ -697,14 +698,16 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
   const rulesetSnapshotJson = input.ruleset?.snapshotJson ?? RULESET_SNAPSHOT_JSON;
   const configVersion = input.ruleset?.configVersion ?? VERSIONS.configVersion;
   const targetPriceUnits = input.targetPriceUnits ?? "500000000000000000";
+  const eventClassification = input.eventClassification ?? "STANDARD_TRADE";
+  const isCombo = eventClassification === "COMBO_ACTIVITY" ? 1 : 0;
   db.prepare(
     `INSERT INTO raw_events(
       source_event_key,target_id,identity_version,source_type,source_transaction_hash,
       source_timestamp,asset_id,condition_id,side,price_units,size_micros,gap_event,
       is_combo,raw_json,created_at,event_classification
     ) VALUES (?, ?, 'test', 'DATA_API_TRADE', ?, 1773014400, ?, ?, 'BUY',
-      '500000000000000000', '10000000', 0, 0, '{}', ?, 'STANDARD_TRADE')`,
-  ).run(sourceKey, targetId, `tx-${input.signalId}`, assetId, conditionId, createdAt);
+      '500000000000000000', '10000000', 0, ?, '{}', ?, ?)`,
+  ).run(sourceKey, targetId, `tx-${input.signalId}`, assetId, conditionId, isCombo, createdAt, eventClassification);
   const effectiveCapitalRatio = input.capitalRatioPpm
     ?? ((input.signalType ?? "TARGET_BUY") === "TARGET_BUY" ? "100000" : null);
   const capitalId = effectiveCapitalRatio ? `capital-${input.signalId}` : null;
@@ -746,7 +749,7 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
       capital_estimate_id,source_code_dirty,producer_mode
     ) VALUES (?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?,
       '10000000', ?, ?, 'TEST', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL,
-      'STANDARD_TRADE', ?, 0, 'OBSERVE_ONLY')`,
+      ?, ?, 0, 'OBSERVE_ONLY')`,
   ).run(
     input.signalId,
     targetId,
@@ -767,6 +770,7 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
     rulesetHash,
     sourceVersion.commit,
     createdAt,
+    eventClassification,
     capitalId,
   );
   const contextId = `context-${input.signalId}`;
@@ -845,6 +849,7 @@ function insertSignalAndRisk(databasePath: string, targetId: string, input: {
     signalId: input.signalId,
     targetId,
     signalType: input.signalType ?? "TARGET_BUY",
+    eventClassification,
     status: "PUBLISHED",
     executionEligible: true,
     executionBlockReason: null,
@@ -2280,7 +2285,7 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("restores Live first-entry auto-lift eligibility after a complete close", async () => {
+  it("restores Live first-entry auto-lift eligibility after a 95% close", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2296,8 +2301,8 @@ describe("LiveExecutor", () => {
       riskDecisionId: "unused-live-close-risk",
       decision: "ALLOW",
       signalType: "TARGET_SELL",
-      sellRatioNumerator: "1",
-      sellRatioDenominator: "1",
+      sellRatioNumerator: "95",
+      sellRatioDenominator: "100",
       createdAt: "2026-07-09T00:00:01.000Z",
     });
     expect((await consumer.consumeAvailableSignals(accountId))[0])
@@ -2322,7 +2327,47 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
-  it("cancels a waiting Live BUY before applying a complete target exit", async () => {
+  it("keeps a 95% MERGE-equivalent TARGET_SELL proportional in Live", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        minOrderSize: "5",
+        tickSize: "0.01",
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    expect((await consumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+    const mergeExit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-merge-equivalent-sell-95-percent",
+      riskDecisionId: "unused-live-merge-equivalent-sell-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      eventClassification: "COMBO_ACTIVITY",
+      sellRatioNumerator: "95",
+      sellRatioDenominator: "100",
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: mergeExit.signal.signalId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_size_micros,filled_size_micros FROM live_executions WHERE live_execution_id=?",
+    ).get(result!.executionId!)).toEqual({
+      requested_size_micros: "190000000",
+      filled_size_micros: "190000000",
+    });
+    expect(db.prepare(
+      "SELECT current_size_micros,status FROM live_positions WHERE live_account_id=?",
+    ).get(accountId)).toEqual({ current_size_micros: "10000000", status: "PARTIALLY_CLOSED" });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("cancels a waiting Live BUY before applying a 95% target exit", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const executor = liveExecutor(env.databasePath, {
       marketDataProvider: new FakeLiveMarketDataProvider({
@@ -2339,8 +2384,8 @@ describe("LiveExecutor", () => {
       riskDecisionId: "unused-live-full-exit-risk",
       decision: "ALLOW",
       signalType: "TARGET_SELL",
-      sellRatioNumerator: "1",
-      sellRatioDenominator: "1",
+      sellRatioNumerator: "95",
+      sellRatioDenominator: "100",
       requestedAmountMicros: null,
       requestedSizeMicros: null,
       createdAt: "2026-07-09T00:00:01.000Z",
@@ -2371,6 +2416,56 @@ describe("LiveExecutor", () => {
       "SELECT COALESCE(SUM(CAST(reserved_delta_micros AS INTEGER)),0) remaining FROM live_cash_ledger WHERE live_execution_id=?",
     ).get(waitingBuy!.executionId!)).toEqual({ remaining: 0 });
     expect((db.prepare("SELECT COUNT(*) count FROM live_orders").get() as { count: number }).count).toBe(0);
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("reduces rather than cancels a waiting Live BUY for a 95% MERGE-equivalent exit", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const executor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const [waitingBuy] = await consumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    const mergeExit = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-merge-exit-reduces-waiting-buy",
+      riskDecisionId: "unused-live-merge-exit-waiting-risk",
+      decision: "ALLOW",
+      signalType: "TARGET_SELL",
+      eventClassification: "COMBO_ACTIVITY",
+      sellRatioNumerator: "95",
+      sellRatioDenominator: "100",
+      requestedAmountMicros: null,
+      requestedSizeMicros: null,
+      createdAt: "2026-07-09T00:00:01.000Z",
+    });
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: mergeExit.signal.signalId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,requested_amount_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      requested_amount_micros: "50000",
+      reason: "TARGET_SELL_REDUCED_WAITING_BUY",
+    });
+    expect(db.prepare(
+      "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) remaining FROM live_reservation_ledger WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({ remaining: 50000 });
+    expect(db.prepare(
+      "SELECT state,requested_size_micros,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(result!.executionId!)).toEqual({
+      state: "EXECUTED",
+      requested_size_micros: null,
+      reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+    });
     db.close();
     consumer.close();
     executor.close();

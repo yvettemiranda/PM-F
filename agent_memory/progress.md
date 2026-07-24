@@ -1,12 +1,14 @@
 # Progress
 
 ## Current task
-- 用户已确认用逐笔新规则替换“首笔放大后继承”：`<1%` 每笔硬性 `1—5 pUSD`，`>=1%` 只按比例；首次实际开仓不计，小额后续最多 `9` 次；止损触发后锁定重新 BUY。
-- BUY 使用目标 VWAP和最新 REST 盘口的含手续费实际 VWAP，价格区间为 `90%—105%` 且不超过 `0.95`。
-- 用户已明确确认经济成交口径：同一 `transactionHash + orderHash` 的多个 fill 合并；同一订单跨交易的后续 fill 作为新的实际经济成交继续跟。
-- 范围保持：不改数据库结构、扫描频率、账本、安全 Gate 和 Paper/Live 边界。
+- 用户确认 SELL 继续以启动后实际跟随的本轮目标仓位为分母，不追补目标历史旧仓；比例达到或超过 `95%` 时按本轮全部退出，低于阈值仍按比例处理。
+- 范围保持：不改扫描频率、数据库结构、账本、安全 Gate 和 Paper/Live 边界。
 
 ## Implemented
+- 新增不可变 `followSellFullExitThresholdPpm=950000`：Observe 与 Replay 在达到阈值时生成完整退出比例，把目标未卖的本轮比例尾部转回 historical bucket，既不抹掉目标实际余额，也不继续形成跟单义务。
+- Paper 与隔离 Live 共用同一阈值函数；普通 `STANDARD_TRADE` SELL 下，实际 Position、等待 BUY、Reservation/Cash/Risk/Audit 和持仓周期重置均把 `>=95%` 视为完整退出。`COMBO_ACTIVITY`/MERGE 不应用该阈值并继续按原比例处理；低于市场最小量的自身真实尾仓仍保持 `EXIT_PENDING`。
+- 历史 Ruleset 缺少新字段时固定按 `100%` 阈值解释，避免重解释旧 Signal/Execution；Observe checkpoint 和 Campaign crash recovery 按各自已注册 Ruleset 重建投影。
+- Signal/Strategy/Replay/Paper/Live/Ruleset/Config 已同步升版，README 和隔离验证文件清单已更新；Schema、Risk、安全 Gate 与扫描配置未改变。
 - Ruleset 升至 `v1.9.0`，新增可配置 `smallFollowBuyMaxCount=9`；Signal/Strategy/Risk/Replay/Paper/Live/Config 同步升版。
 - `BUY_AMOUNT_POLICY_V4` 精确区分 `<1%` 与 `>=1%`：小额每笔最低 `1`、市场最低额抬升、硬上限 `5`；比例 BUY 不抬升。小额可用现金不足 `1` 时由 Risk 拒绝，不降到 `1` 以下成交。
 - 新增无 schema 的 `buy-follow-policy`：从不可变 Signal/Execution/Fill/Position/Order 证据推导持仓周期、首次实际开仓、9 次小额成交和止损锁；只有目标完整退出且自身义务归零才重置。
@@ -24,6 +26,8 @@
 - 自然 Paper 暴露普通尾仓 `EXIT_PENDING` 阻塞后续独立 BUY，而隔离 Live 已允许继续 BUY。已移除 Paper 的旧阻塞分支；普通退出义务继续独立保留，后续 BUY 正常逐笔判断，止损重开锁不变；Paper 版本升至 `1.15.0`。
 
 ## Verification
+- 新增 `94.9999%`/`95%` 精确边界、Observe 持久化与 residual reclassification、Replay 对齐、Paper 全仓退出/取消等待 BUY、Live 全仓退出/取消等待 BUY/新周期恢复，以及 Paper/Live 的 `95%` MERGE 仍按比例处理和 Live 等待 BUY 只缩减不取消测试。
+- 定向相关回归通过；全量 `55/55` 测试文件、`754/754` 测试和 TypeScript 检查通过。
 - TDD/回归覆盖：小额最低1/最高5、比例结果超过5仍封顶、市场最低额超过5、精确1%边界、9次与第10次、`>=1%` 不限、部分成交计一次、零成交/取消/过期不计、未清义务不重置、完整新周期重置。
 - 覆盖同 orderHash 多 fill VWAP、不同订单不合并、Polygon/Data API 聚合去重、无法证明时失败关闭。
 - 覆盖 90%、105%、0.95 边界、目标参考价高于0.95但实际价合法、FAK 部分成交、tick-rounded 市场最低量、等待/过期/释放资金、SELL 调整等待 BUY、SELL 持续退出、止损锁和新周期解锁。
@@ -35,8 +39,9 @@
 - 从空白数据库创建的 Campaign `PC-305046D47E89A5529CDA` 已按用户提前后的 07:30 截止安全暂停并完成 final drain。Session `PS-2CD692D49B8A067668BE` 有效运行 `1.63 h`，Observe `5556/0`、Gap `0`、最终 `SYNCED`，3 BUY Signal、1 SELL Signal、2 Fill、1 Realized PnL。
 - 两笔等待 BUY 均正常过期并释放资金；自然 SELL 成交后保留 `0.003743` 股精度尾仓 `EXIT_PENDING`。当前无活动 Reservation、无 Observe/Paper/Supervisor、安全锁已清理。
 - 最终报告 ZIP 与哈希已校验；数据库 integrity/foreign key 正常，Live Execution/Order/Fill/Attempt 全为 `0`，安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
+- 95%全退的新核心尚未启动运行；上一 Campaign 仍是暂停状态且没有后台进程，不自动继承旧核心时长。
 
 ## Next steps
-1. 当前自动测试与巡检任务已经结束；除非用户明确要求，不自动重启。
-2. 后续若继续实盘前验证，先从当前报告复核尾仓、等待过期和实际盈亏，再累计 Paper `24 h`/连续 `4 h` 并覆盖 `API_RECOVERY`。
+1. 当前自动测试与巡检任务已经结束；除非用户明确要求，不自动启动新核心。
+2. 后续若继续实盘前验证，从95%全退的新核心创建新 Campaign，重新累计 Paper `24 h`/连续 `4 h` 并覆盖 `API_RECOVERY`。
 3. Live runtime、合规、隔离钱包和 signer 未完成且未获授权，继续固定 `LIVE_DISABLED`。

@@ -53,6 +53,10 @@ import {
   classifyTargetBuyRatio,
 } from "../execution/buy-amount-policy.js";
 import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
+import {
+  fullExitThresholdForTargetSell,
+  parseEffectiveTargetSellRatio,
+} from "../execution/target-sell-policy.js";
 import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 import type { BuyCapitalSizingDecision, ExactCapitalRatioSnapshot } from "../execution/capital-sizing.js";
 import { withExternalTimeout } from "./external-timeout.js";
@@ -1282,6 +1286,10 @@ export class LiveExecutor implements ExecutorInterface {
             const adjustedWaitingBuyCount = this.applyWaitingBuyTargetExitAdjustments(
               input.accountId,
               input.signal,
+              fullExitThresholdForTargetSell(
+                input.signal.eventClassification,
+                executionRules.followSellFullExitThresholdPpm,
+              ),
             );
             if (adjustedWaitingBuyCount === 0) return null;
             const created = this.store.createExecution({
@@ -1317,7 +1325,14 @@ export class LiveExecutor implements ExecutorInterface {
           }
           return { mode: "LIVE", executionId: supersession.live_execution_id, state: supersession.state };
         }
-        this.applyWaitingBuyTargetExitAdjustments(input.accountId, input.signal);
+        this.applyWaitingBuyTargetExitAdjustments(
+          input.accountId,
+          input.signal,
+          fullExitThresholdForTargetSell(
+            input.signal.eventClassification,
+            executionRules.followSellFullExitThresholdPpm,
+          ),
+        );
       } catch (error) {
         const reason = error instanceof Error ? error.message : "LIVE_WAITING_BUY_TARGET_EXIT_ADJUSTMENT_FAILED";
         this.store.transaction(() => this.store.forceGateDisabled(
@@ -1810,16 +1825,14 @@ export class LiveExecutor implements ExecutorInterface {
   private applyWaitingBuyTargetExitAdjustments(
     accountId: string,
     signal: PaperSignalEnvelope,
+    fullExitThresholdPpm: number,
   ): number {
-    if (
-      signal.sellRatioNumerator === null
-      || signal.sellRatioDenominator === null
-      || !/^\d+$/.test(signal.sellRatioNumerator)
-      || !/^\d+$/.test(signal.sellRatioDenominator)
-    ) return 0;
-    const numerator = BigInt(signal.sellRatioNumerator);
-    const denominator = BigInt(signal.sellRatioDenominator);
-    if (numerator <= 0n || denominator <= 0n || numerator > denominator) return 0;
+    const ratio = parseEffectiveTargetSellRatio({
+      numerator: signal.sellRatioNumerator,
+      denominator: signal.sellRatioDenominator,
+      fullExitThresholdPpm,
+    });
+    if (!ratio) return 0;
     const rows = this.database.prepare(
       `SELECT live_execution_id,risk_decision_id,requested_amount_micros
        FROM live_executions
@@ -1855,7 +1868,7 @@ export class LiveExecutor implements ExecutorInterface {
         if (reserved !== BigInt(row.requested_amount_micros) || reserved <= 0n) {
           throw new Error("LIVE_WAITING_BUY_RESERVATION_MISMATCH");
         }
-        const released = (reserved * numerator) / denominator;
+        const released = (reserved * ratio.numerator) / ratio.denominator;
         if (released <= 0n) continue;
         const retained = reserved - released;
         const reason = retained === 0n
@@ -1910,7 +1923,7 @@ export class LiveExecutor implements ExecutorInterface {
   } {
     const row = this.database.prepare(
       `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+              s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,s.event_classification,
               s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
               c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
               c.capital_sizing_ratio_json,c.capital_sizing_ratio_hash,
@@ -1931,6 +1944,7 @@ export class LiveExecutor implements ExecutorInterface {
       status: string;
       execution_eligible: number;
       execution_block_reason: string | null;
+      event_classification: PaperSignalEnvelope["eventClassification"];
       asset_id: string;
       condition_id: string;
       target_price_units: string;
@@ -1993,6 +2007,7 @@ export class LiveExecutor implements ExecutorInterface {
         signalId: row.signal_id,
         targetId: row.target_id,
         signalType: row.signal_type,
+        eventClassification: row.event_classification,
         status: row.status,
         executionEligible: row.execution_eligible === 1,
         executionBlockReason: row.execution_block_reason,

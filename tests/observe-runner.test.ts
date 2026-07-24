@@ -1851,6 +1851,55 @@ describe("ObserveOnlyRunner", () => {
     check.close();
   });
 
+  it("persists a 95% followed SELL as a complete exit while preserving target residual evidence", async () => {
+    const { databasePath } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const buy = trade({
+      transactionHash: "0xbuy-before-95-percent-sell",
+      side: "BUY",
+      size: "100",
+      timestamp: baselineSecond + 70,
+    });
+    const sell = trade({
+      transactionHash: "0xsell-at-95-percent",
+      side: "SELL",
+      size: "95",
+      timestamp: baselineSecond + 71,
+    });
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      snapshot([sell, buy], [position("5")], "2026-07-08T00:01:11.000Z"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+    });
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:11.000Z");
+    await runner.pollOnce();
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT sell_ratio_numerator,sell_ratio_denominator
+       FROM signals WHERE signal_type='TARGET_SELL'`,
+    ).get()).toEqual({
+      sell_ratio_numerator: "100000000",
+      sell_ratio_denominator: "100000000",
+    });
+    expect(check.prepare(
+      `SELECT historical_micros,tracked_micros,expected_total_micros
+       FROM observe_position_projection WHERE asset_id='asset-1'`,
+    ).get()).toEqual({
+      historical_micros: "5000000",
+      tracked_micros: "0",
+      expected_total_micros: "5000000",
+    });
+    check.close();
+  });
+
   it("projects a redeem activity to zero without emitting an execution signal", async () => {
     const { databasePath } = setup();
     const now = new Date("2026-07-08T00:01:00.000Z");

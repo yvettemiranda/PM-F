@@ -1,6 +1,7 @@
 import type { CapitalConfidence, CapitalEstimateStatus } from "../services/capital-estimator.js";
 import type { ExactCapitalRatioSnapshot } from "../execution/capital-sizing.js";
 import type { PublicMarketDataCapture } from "../execution/market-data.js";
+import type { EventClassification } from "../domain/models.js";
 
 export type PaperExecutionState =
   | "WAITING_EXECUTION"
@@ -59,6 +60,7 @@ export interface PaperSignalEnvelope {
   signalId: string;
   targetId: string;
   signalType: "TARGET_BUY" | "TARGET_SELL" | "TARGET_CONVERSION";
+  eventClassification: EventClassification;
   status: string;
   executionEligible: boolean;
   executionBlockReason: string | null;

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { sourceEventKey } from "../domain/idempotency.js";
 import { stableJson } from "../domain/versioning.js";
+import { effectiveTargetSellRatio } from "../execution/target-sell-policy.js";
 import type { ObserveBaseline, ObserveEvent, ObserveProjectionEntry, ObserveProjectionResult, ObserveSignal } from "./types.js";
 
-export const OBSERVE_SIGNAL_VERSION = "observe-v1.3.0";
+export const OBSERVE_SIGNAL_VERSION = "observe-v1.4.0";
 
 function signalKey(baselineRunId: string, sourceEventKey: string, type: string, asset = ""): string {
   const identity = [OBSERVE_SIGNAL_VERSION, baselineRunId, sourceEventKey, type];
@@ -50,8 +51,15 @@ export function projectObserveEvents(
     requireVerifiedConversions?: boolean;
     mergeOutcomeAssetsByCondition?: ReadonlyMap<string, readonly string[]>;
     pendingMergeConditions?: ReadonlySet<string>;
+    followSellFullExitThresholdPpm?: number;
   } = {},
 ): ObserveProjectionResult {
+  const followSellFullExitThresholdPpm = options.followSellFullExitThresholdPpm ?? 1_000_000;
+  if (
+    !Number.isSafeInteger(followSellFullExitThresholdPpm)
+    || followSellFullExitThresholdPpm <= 0
+    || followSellFullExitThresholdPpm > 1_000_000
+  ) throw new Error("FOLLOW_SELL_FULL_EXIT_THRESHOLD_INVALID");
   const historical = new Map(baseline.items.map((item) => [item.asset, BigInt(item.sizeMicros)]));
   const tracked = new Map<string, bigint>();
   const conditionByAsset = new Map(baseline.items.map((item) => [item.asset, item.conditionId.toLowerCase()]));
@@ -267,10 +275,18 @@ export function projectObserveEvents(
     }
 
     const recognizedSell = size < beforeTracked ? size : beforeTracked;
-    tracked.set(trade.asset, beforeTracked - recognizedSell);
+    const followedSell = beforeTracked > 0n
+      ? effectiveTargetSellRatio({
+        numerator: recognizedSell,
+        denominator: beforeTracked,
+        fullExitThresholdPpm: followSellFullExitThresholdPpm,
+      }).numerator
+      : 0n;
+    const reclassifiedResidual = followedSell - recognizedSell;
+    tracked.set(trade.asset, beforeTracked - followedSell);
     const remaining = size - recognizedSell;
     const historicalSell = remaining < beforeHistorical ? remaining : beforeHistorical;
-    historical.set(trade.asset, beforeHistorical - historicalSell);
+    historical.set(trade.asset, beforeHistorical - historicalSell + reclassifiedResidual);
     if (!tradeExecutionConfirmed) continue;
     if (event.isGap || beforeTracked > 0n) {
       const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_SELL");
@@ -284,7 +300,7 @@ export function projectObserveEvents(
         conditionId: trade.conditionId.toLowerCase(),
         targetPriceUnits: decimalToScaled(trade.price, PRICE_SCALE_DIGITS).toString(),
         targetSizeMicros: size.toString(),
-        sellRatioNumerator: beforeTracked > 0n ? recognizedSell.toString() : null,
+        sellRatioNumerator: beforeTracked > 0n ? followedSell.toString() : null,
         sellRatioDenominator: beforeTracked > 0n ? beforeTracked.toString() : null,
         reason: event.isGap ? "GAP_EVENT_RECORDED" : "RECOGNIZED_POSITION_SELL",
         eventClassification: event.isGap ? "GAP_TRADE" : "STANDARD_TRADE",

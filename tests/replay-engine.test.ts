@@ -277,6 +277,29 @@ describe("ReplayEngine", () => {
     expect(report.metrics.finalRecognizedPositions["asset-1"]).toBe("70000000");
   });
 
+  it("replays a 95% followed SELL as a complete exit without erasing the target residual", () => {
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [
+        trade({ transactionHash: "0xbuy-before-95-percent-replay-sell", size: "100", timestamp: 100 }),
+        trade({ transactionHash: "0xsell-at-95-percent-replay", side: "SELL", size: "95", timestamp: 101 }),
+      ],
+      activity: [],
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    const sell = report.signals.find((signal) => signal.signalType === "TARGET_SELL");
+    expect(sell).toMatchObject({
+      sellRatioNumerator: "100000000",
+      sellRatioDenominator: "100000000",
+    });
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.metrics.finalHistoricalPositions).toEqual({ "asset-1": "5000000" });
+  });
+
   it("replays a complete-set MERGE as two proportional equivalent exits", () => {
     const report = new ReplayEngine().run({
       targetId: "target-1",

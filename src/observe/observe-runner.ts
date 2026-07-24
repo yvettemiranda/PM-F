@@ -6,6 +6,7 @@ import {
 } from "../domain/idempotency.js";
 import { activityAsTrade } from "../domain/activity-trade.js";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
+import { RULESET } from "../domain/versioning.js";
 import type { PublicTrade } from "../domain/models.js";
 import { estimateTargetCapital } from "../services/capital-estimator.js";
 import { projectObserveEvents } from "./position-projector.js";
@@ -202,7 +203,9 @@ export class ObserveOnlyRunner {
     );
     const existing = this.store.loadObservedEvents(this.started.baseline.baselineRunId);
     if (this.started.checkpoint) {
-      const projection = projectObserveEvents(this.started.baseline, existing);
+      const projection = projectObserveEvents(this.started.baseline, existing, {
+        followSellFullExitThresholdPpm: RULESET.followSellFullExitThresholdPpm,
+      });
       this.checkpointHashMismatch = projection.projectionHash !== this.started.checkpoint.positionProjectionHash;
       if (this.checkpointHashMismatch) {
         this.store.failCheckpointProjectionMismatch({
@@ -608,6 +611,7 @@ export class ObserveOnlyRunner {
           requireVerifiedConversions: true,
           mergeOutcomeAssetsByCondition,
           pendingMergeConditions,
+          followSellFullExitThresholdPpm: RULESET.followSellFullExitThresholdPpm,
         },
       );
     } catch (error) {

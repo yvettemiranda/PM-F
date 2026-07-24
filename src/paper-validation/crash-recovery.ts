@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
+import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import { projectObserveEvents } from "../observe/position-projector.js";
 import type { ObserveBaseline, ObserveEvent } from "../observe/types.js";
 import type { PaperAcceptanceSummary } from "../paper/paper-acceptance-summary.js";
@@ -165,7 +166,16 @@ function observeProjection(database: DatabaseSync, baselineRunId: string): {
       ? { trade: JSON.parse(row.raw_json) }
       : { activity: JSON.parse(row.raw_json) }),
   }));
-  const projection = projectObserveEvents(baseline, events);
+  const observeRun = database.prepare(
+    `SELECT ruleset_hash FROM observe_runs
+     WHERE baseline_run_id=? ORDER BY started_at DESC,observe_run_id DESC LIMIT 1`,
+  ).get(baselineRunId) as { ruleset_hash: string } | undefined;
+  const executionRules = observeRun
+    ? registeredExecutionRules(database, observeRun.ruleset_hash)
+    : null;
+  const projection = projectObserveEvents(baseline, events, {
+    followSellFullExitThresholdPpm: executionRules?.followSellFullExitThresholdPpm ?? 1_000_000,
+  });
   return {
     baseline,
     projectionHash: projection.projectionHash,

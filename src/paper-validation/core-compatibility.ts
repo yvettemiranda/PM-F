@@ -215,6 +215,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/polymarket-clob-adapter.test.ts",
   "tests/polygon-order-filled-feed.test.ts",
   "tests/position-baseline.test.ts",
+  "tests/position-projector-sell-threshold.test.ts",
   "tests/public-api-pagination.test.ts",
   "tests/public-api-safety.test.ts",
   "tests/replay-engine.test.ts",

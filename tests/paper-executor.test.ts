@@ -24,6 +24,7 @@ import type {
   PaperMarketDataProvider,
   PaperOrderbookSnapshot,
   PaperResolutionSnapshot,
+  PaperSignalEnvelope,
 } from "../src/paper/types.js";
 import { calculateUnrealizedPnl } from "../src/pnl/pnl-model.js";
 import { RiskManager } from "../src/risk/risk-manager.js";
@@ -115,6 +116,7 @@ function installHistoricalPaperRuleset(databasePath: string): TestRuleset {
   snapshot.rules.stopTriggerRatioPpm = 600_000;
   snapshot.rules.stopSellMaxSlippagePpm = 200_000;
   delete snapshot.rules.smallFollowBuyMaxCount;
+  delete snapshot.rules.followSellFullExitThresholdPpm;
   const snapshotJson = stableJson(snapshot);
   const hash = createHash("sha256").update(snapshotJson).digest("hex");
   const configVersion = "test-paper-historical-config-v1";
@@ -539,7 +541,7 @@ function loadPaperSignal(databasePath: string, signalId: string) {
   const db = new DatabaseSync(databasePath, { readOnly: true });
   const row = db.prepare(
     `SELECT s.signal_id,s.signal_type,s.status,s.execution_eligible,s.execution_block_reason,
-            s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,
+            s.target_id,s.asset_id,s.condition_id,s.target_price_units,s.target_size_micros,s.event_classification,
             s.sell_ratio_numerator,s.sell_ratio_denominator,s.created_at,
             c.context_id,c.target_id context_target_id,c.capital_decision_id,c.target_trade_capital_ratio_ppm,
             c.target_trade_timestamp,c.market_end_time,c.market_end_time_status,c.execution_deadline_at,
@@ -576,6 +578,7 @@ function loadPaperSignal(databasePath: string, signalId: string) {
     signalId: row.signal_id as string,
     targetId: row.target_id as string,
     signalType: row.signal_type as "TARGET_BUY" | "TARGET_SELL",
+    eventClassification: row.event_classification as PaperSignalEnvelope["eventClassification"],
     status: row.status as string,
     executionEligible: (row.execution_eligible as number) !== 0,
     executionBlockReason: row.execution_block_reason as string | null,
@@ -613,6 +616,7 @@ describe("PaperExecutor", () => {
       buyPriceImprovementAllowed: true,
       buyPriceMinimumTickSteps: 2,
       smallFollowBuyPolicyEnabled: false,
+      followSellFullExitThresholdPpm: 1_000_000,
     });
 
     database.close();
@@ -2262,6 +2266,79 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("treats a 95% TARGET_SELL as a complete exit of the followed Paper position", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-before-95-percent-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "buy-before-95-percent-exit");
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "sell-95-percent",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      signalType: "TARGET_SELL",
+      sellNumerator: "95",
+      sellDenominator: "100",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "sell-95-percent");
+
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_size_micros,filled_size_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({
+      requested_size_micros: "200000000",
+      filled_size_micros: "200000000",
+    });
+    expect(db.prepare(
+      "SELECT current_size_micros,status FROM paper_positions WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ current_size_micros: "0", status: "CLOSED" });
+    db.close();
+    env.executor.close();
+  });
+
+  it("keeps a 95% MERGE-equivalent TARGET_SELL proportional", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "buy-before-partial-merge-exit",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    await env.executor.consumeSignal(env.accountId, "buy-before-partial-merge-exit");
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "merge-equivalent-sell-95-percent",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      signalType: "TARGET_SELL",
+      sellNumerator: "95",
+      sellDenominator: "100",
+      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
+      eventClassification: "COMBO_ACTIVITY",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "merge-equivalent-sell-95-percent");
+
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT requested_size_micros,filled_size_micros FROM paper_executions WHERE paper_execution_id=?",
+    ).get(executionId)).toEqual({
+      requested_size_micros: "190000000",
+      filled_size_micros: "190000000",
+    });
+    expect(db.prepare(
+      "SELECT current_size_micros,status FROM paper_positions WHERE paper_account_id=?",
+    ).get(env.accountId)).toEqual({ current_size_micros: "10000000", status: "PARTIALLY_CLOSED" });
+    db.close();
+    env.executor.close();
+  });
+
   it("executes a new independent same-asset BUY while an undersized target exit remains pending", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({
@@ -3346,7 +3423,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("cancels a waiting BUY before retry when a full target exit is already available", async () => {
+  it("cancels a waiting BUY before retry when a 95% target exit is already available", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.book = env.market.makeBook([], []);
     insertSignal({
@@ -3367,10 +3444,10 @@ describe("PaperExecutor", () => {
       signalId: "target-exited-before-retry",
       signalType: "TARGET_SELL",
       createdAt: "2026-07-08T00:00:02.000Z",
-      sellNumerator: "1",
-      sellDenominator: "1",
-      reason: "TARGET_MERGE_EQUIVALENT_EXIT",
-      eventClassification: "COMBO_ACTIVITY",
+      sellNumerator: "95",
+      sellDenominator: "100",
+      reason: "RECOGNIZED_POSITION_SELL",
+      eventClassification: "STANDARD_TRADE",
     });
     env.setClock(new Date("2026-07-08T00:00:03.000Z"));
     env.market.book = env.market.makeBook(
@@ -3772,6 +3849,7 @@ describe("PaperExecutor", () => {
         signalId: "contract",
         targetId: env.targetId,
         signalType: "TARGET_BUY",
+        eventClassification: "STANDARD_TRADE",
         status: "PUBLISHED",
         executionEligible: true,
         executionBlockReason: null,

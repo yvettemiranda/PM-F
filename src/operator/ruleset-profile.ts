@@ -51,6 +51,7 @@ const PRICE_RATIO_KEYS = new Set(["buyPriceMinRatioPpm", "buyPriceMaxRatioPpm"])
 const UNIT_RATIO_KEYS = new Set([
   "buyMaximumPricePpm",
   "waitRatioPpm",
+  "followSellFullExitThresholdPpm",
   "followSellMaxSlippagePpm",
   "stopSellMaxSlippagePpm",
   "stopTriggerRatioPpm",

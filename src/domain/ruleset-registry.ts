@@ -18,6 +18,7 @@ export interface RegisteredExecutionRules extends RegisteredStopLossRules {
   buyMarketMinimumAutoLiftCapMicros: bigint;
   smallFollowBuyMaxCount: number;
   smallFollowBuyPolicyEnabled: boolean;
+  followSellFullExitThresholdPpm: number;
   followSellMaxSlippagePpm: number;
   waitRatioPpm: number;
   maxWaitMs: number;
@@ -43,6 +44,10 @@ function validRatioPpm(value: unknown): value is number {
 
 function validPriceRatioPpm(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0 && Number(value) < 2_000_000;
+}
+
+function validUnitRatioPpm(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 1_000_000;
 }
 
 function validPositiveSafeInteger(value: unknown): value is number {
@@ -98,6 +103,8 @@ export function registeredExecutionRules(
     .buyMarketMinimumAutoLiftCapMicros;
   const snapshotSmallFollowBuyMaxCount = (rules as { smallFollowBuyMaxCount?: unknown })
     .smallFollowBuyMaxCount;
+  const snapshotFollowSellFullExitThreshold = (rules as { followSellFullExitThresholdPpm?: unknown })
+    .followSellFullExitThresholdPpm;
   const snapshotWaitRatio = (rules as { waitRatioPpm?: unknown }).waitRatioPpm;
   const snapshotMaxWait = (rules as { maxWaitMs?: unknown }).maxWaitMs;
   const snapshotConfig = (versions as { configVersion?: unknown }).configVersion;
@@ -114,6 +121,8 @@ export function registeredExecutionRules(
     || row.stop_loss_ratio_ppm !== snapshotTrigger
     || !validRatioPpm(maxSlippagePpm)
     || !validRatioPpm(followSellMaxSlippagePpm)
+    || (snapshotFollowSellFullExitThreshold !== undefined
+      && !validUnitRatioPpm(snapshotFollowSellFullExitThreshold))
     || !validPriceRatioPpm(snapshotBuyMin)
     || !validPriceRatioPpm(snapshotBuyMax)
     || snapshotBuyMin >= snapshotBuyMax
@@ -169,6 +178,9 @@ export function registeredExecutionRules(
       ? 0
       : Number(snapshotSmallFollowBuyMaxCount),
     smallFollowBuyPolicyEnabled: !legacyBuyAmountPolicy && snapshotSmallFollowBuyMaxCount !== undefined,
+    followSellFullExitThresholdPpm: snapshotFollowSellFullExitThreshold === undefined
+      ? 1_000_000
+      : Number(snapshotFollowSellFullExitThreshold),
     followSellMaxSlippagePpm,
     waitRatioPpm: row.wait_ratio_ppm,
     maxWaitMs: row.max_wait_time_ms,

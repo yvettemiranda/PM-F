@@ -8,17 +8,17 @@ export { stableJson } from "./canonical-json.js";
 
 export const DEFAULT_VERSIONS = Object.freeze({
   schemaVersion: "2.29.0",
-  signalVersion: "1.9.0",
-  strategyVersion: "2.7.0",
+  signalVersion: "1.10.0",
+  strategyVersion: "2.8.0",
   riskVersion: "1.10.0",
-  replayVersion: "2.3.0",
-  paperVersion: "1.15.0",
-  liveVersion: "1.12.0",
+  replayVersion: "2.4.0",
+  paperVersion: "1.16.0",
+  liveVersion: "1.13.0",
   validationVersion: "1.7.0",
   operationalVersion: "1.9.0",
-  rulesetVersion: "v1.9.0",
+  rulesetVersion: "v1.10.0",
   feeModelVersion: "clob-fd-v1",
-  configVersion: "v1.6.0",
+  configVersion: "v1.7.0",
 });
 
 export const DEFAULT_RULESET = Object.freeze({
@@ -35,6 +35,7 @@ export const DEFAULT_RULESET = Object.freeze({
   smallFollowBuyMaxCount: 9,
   waitRatioPpm: 500_000,
   maxWaitMs: 30 * 60 * 1_000,
+  followSellFullExitThresholdPpm: 950_000,
   followSellMaxSlippagePpm: 100_000,
   stopSellMaxSlippagePpm: 150_000,
   stopTriggerRatioPpm: 500_000,
@@ -92,6 +93,7 @@ export const PAPER_RULESET_KEYS = Object.freeze([
   "smallFollowBuyMaxCount",
   "waitRatioPpm",
   "maxWaitMs",
+  "followSellFullExitThresholdPpm",
   "followSellMaxSlippagePpm",
   "stopSellMaxSlippagePpm",
   "stopTriggerRatioPpm",

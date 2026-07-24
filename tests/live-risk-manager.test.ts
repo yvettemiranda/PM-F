@@ -197,6 +197,7 @@ function insertSignal(
     signalId,
     targetId,
     signalType: "TARGET_BUY",
+    eventClassification: "STANDARD_TRADE",
     status: "PUBLISHED",
     executionEligible: true,
     executionBlockReason: null,
