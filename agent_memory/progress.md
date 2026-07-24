@@ -1,34 +1,27 @@
 # Progress
 
 ## Current task
-- 用户要求先修复全程序审计确认的四项问题，并在新一轮自然 Paper 前先处理特殊操作：
-  1. Live 比例 BUY 错用可用现金而不是完整总权益；
-  2. Live 同轮旧等待 BUY 可能早于新目标 SELL 重试；
-  3. Campaign crash recovery 不能还原 Polygon `OrderFilled`；
-  4. Core compatibility hash 漏掉共享 SELL policy。
-- 特殊操作必须坚持无 signer、无真实资金、无认证订单、无链上写入；证据不足 fail closed。
+- 修复本轮 macOS TCC 导致的 Paper 异常退出、失败原因被覆盖和 Campaign 遗留 `RUNNING` 状态。
+- 审计当前 Session 数据，保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，不启动新 Paper。
 
 ## Implemented
-- Live BUY sizing 改为读取统一账户估值：`COMPLETE` 时以 `totalEquityMicros` 计算比例，`availableBalanceMicros` 只作为支付上限；估值不完整时回退可用现金。
-- Live cycle 改为“队首目标退出 → 止损 → pending exit → 晚到队首退出 → 按原序消费新 Signal → 旧 waiting BUY”；新 Signal 消费抛错时旧 BUY 不会继续重试。
-- `ObserveStore` 提供共享持久化事件 decoder，正常恢复和 Campaign crash recovery 都能识别并校验 Data API trade/activity、Polygon `OrderFilled`、conversion 和 SPLIT 证据。
-- Core compatibility 的执行和验证清单纳入 `src/execution/target-sell-policy.ts`，Schema 清单纳入迁移 035。
-- 新增 Schema `2.30.0` 的不可变 `split_projection_evidence`：保存 Activity 关联、官方市场、同轮 Positions 原文/时间/哈希和来源版本。缺少完整证据时 Observe 整轮不提交、游标不前移。
-- SPLIT 的目标 outcome 腿只投影到 historical bucket，不生成 BUY；negative-risk CONVERSION 的 destination 腿进入 historical bucket，tracked source 生成 `TARGET_SELL` 等价退出。
-- Replay 只接受按 `source_event_key` 传入且哈希/Activity/市场/Positions 一致的特殊操作证明；无证明保持 `INCOMPLETE`。CONVERSION Replay 已与 Observe 对齐 source exit 和 destination isolation。
-- README、版本、迁移注册、运行时 Schema 合同和 core compatibility 清单已同步。
+- `src/paper-validation/campaign-child-result.ts` 区分正常 Paper 报告与 Paper 失败 JSON；失败结果不会再被当作正常 `paper.report` 使用。
+- supervisor 收尾路径识别失败/无效 Paper 与 Observe 报告，进入失败收尾并把 Paper 原始失败信息写入报告 payload。
+- supervisor catch 对 pointer 写入失败做 best effort，保留原始错误并记录 `PAPER_CAMPAIGN_RECOVERY_POINTER_WRITE_FAILED`。
+- 启动顺序先回收或安全冻结旧 core 的遗留 `RUNNING` Session，再按 core hash 创建 replacement，避免重复点击和残留 `RUNNING`。
+- 新源码与回归测试已纳入 Core compatibility manifest。
 
 ## Verification
-- TDD/回归覆盖：Live 总权益资金比例、可用现金支付上限、新 SELL 优先取消旧等待 BUY、同轮 BUY→SELL 原序、Signal 消费失败不重试旧 BUY、Polygon crash recovery、共享 SELL policy 纳入 core hash。
-- 特殊操作覆盖：SPLIT 缺证据失败关闭、完整证据投影/持久化/恢复、Replay 弱证据拒绝、Replay 完整 SPLIT、CONVERSION source SELL 与 destination historical projection。
-- 最终验证：TypeScript 通过；全量 `55/55` 测试文件、`767/767` 测试通过；`git diff --check` 通过。
-- Schema 035 额外覆盖缺索引、缺不可变触发器时拒绝且不登记版本，以及完整既存对象的幂等补登记。
+- 失败测试先红：缺失 child-result 模块。
+- 当前通过：TypeScript；相关测试 `5 files / 53 tests`。
+- 尚未运行全量 `55+` 文件测试，也尚未提交。
 
 ## Runtime state
-- 当前无 Observe/Paper/Supervisor/launcher 进程；未启动 Campaign，未迁移运行数据库。
-- 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；本轮没有 signer、认证 CLOB、真实订单、真实资金或链上写入。
-- 运行数据库仍为 `2.29.0`，源码目标 `2.30.0`；下次新核心启动必须走既有备份优先迁移入口。
+- 当前无 Observe/Paper/Supervisor/launcher 进程。
+- `PC-2EB95BD31A8EB9693837 / PS-58AB7048A91D8264E009` 运行约 2 小时 52 分后异常结束：Observe 结果最终 `SYNCED`，Paper 失败为 `unable to open database file`；macOS System Policy/TCC 同时拒绝 WAL 与 operator pointer 访问。
+- 正式 Session/Campaign 报告和 ZIP 未生成；数据库仍为 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`，安全 Gate 未变化。
 
 ## Next steps
-1. 提交当前实现；不自动启动 Paper。
-2. 用户确认后从最终干净提交和新 core hash 创建新 Campaign，先备份迁移到 Schema `2.30.0`，再重新累计自然验证时长。
+1. 完成全量测试、`git diff --check` 和静态审查，提交当前修复。
+2. 先让启动程序获得 macOS `Documents` 访问权限，再安全回收本次遗留 Session；不把这次时长计入新 core 的 4 小时门槛。
+3. 从干净新提交创建新 Campaign，重新累计自然 Paper。

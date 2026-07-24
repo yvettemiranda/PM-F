@@ -1,6 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
+- 本轮 Campaign 因 macOS System Policy/TCC 在 16:45 CST 拒绝 Node 读取 `phase0.sqlite-wal`、删除 WAL/SHM 和更新 pointer，Paper 失败为 `unable to open database file`；需先恢复启动程序的 Documents 访问并安全回收遗留 `RUNNING` Session。
 - 新 Core 尚未开始自然 Paper；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 与特殊操作自然样本未覆盖。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
@@ -20,6 +21,7 @@
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
+- Paper child 失败 JSON 曾被 supervisor 当成正常报告，导致原始错误被二次异常和 pointer `EPERM` 覆盖；现在显式分流失败 payload、保留失败原因并在 core 变更前先处理遗留 Session。
 - Live 比例 BUY 曾以 available cash 作为资金比例基数，持仓后会系统性低估后续跟单；现在完整估值用 total equity，available cash 只作支付 cap。
 - Live runner 曾先重试旧 waiting BUY，再消费新目标 SELL；现在新退出先处理，完整新 Signal 序列成功后才允许旧 BUY 重试，异常时跳过该轮 BUY。
 - Campaign crash recovery 曾把持久化 Polygon `OrderFilled` 当 Activity 解码；现在正常恢复与 crash recovery 共用 source-aware decoder。

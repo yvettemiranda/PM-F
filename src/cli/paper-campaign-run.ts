@@ -45,6 +45,11 @@ import {
   type ObserveCampaignReport,
   type PaperCampaignReport,
 } from "../paper-validation/operator-evidence.js";
+import {
+  isObserveCampaignReport,
+  parsePaperCampaignChildResult,
+  type PaperCampaignChildFailure,
+} from "../paper-validation/campaign-child-result.js";
 import { collectCheckpointEvidence } from "../paper-validation/checkpoint-evidence.js";
 import { validateFinalCampaignIntegrity } from "../paper-validation/final-integrity.js";
 import {
@@ -617,6 +622,24 @@ async function main(): Promise<void> {
     if (snapshot.targetId !== targetBinding.targetId) {
       throw new Error(`PAPER_CAMPAIGN_TARGET_BINDING_MISMATCH:${snapshot.campaignId}`);
     }
+    let interruptedSessionHandled = false;
+    if (service.store.runningSession(snapshot.campaignId)) {
+      try {
+        await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.startsWith("PAPER_VALIDATION_CAMPAIGN_FROZEN:CORE_COMPATIBILITY_MISMATCH:")) {
+          throw error;
+        }
+        console.log(JSON.stringify({
+          event: "PAPER_CAMPAIGN_INTERRUPTED_SESSION_FROZEN_AFTER_CORE_CHANGE",
+          campaignId: snapshot.campaignId,
+          reason: message,
+        }));
+      }
+      interruptedSessionHandled = true;
+      snapshot = service.campaignSnapshot(snapshot.campaignId);
+    }
     const startDisposition = paperCampaignStartDisposition(
       snapshot,
       coreCompatibilityHash,
@@ -647,7 +670,9 @@ async function main(): Promise<void> {
         campaignState: snapshot.state,
       }));
     }
-    await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);
+    if (!interruptedSessionHandled) {
+      await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);
+    }
     snapshot = service.campaignSnapshot(snapshot.campaignId);
     if (!snapshot.canContinue && startDisposition !== "REVALIDATE_TERMINAL") {
       throw new Error(`PAPER_CAMPAIGN_CANNOT_CONTINUE:${snapshot.state}`);
@@ -892,14 +917,24 @@ async function main(): Promise<void> {
     ];
 
     let paperReport: PaperCampaignReport | null = null;
+    let paperFailure: PaperCampaignChildFailure | null = null;
     let observeReport: ObserveCampaignReport | null = null;
     try {
-      paperReport = await readJson<PaperCampaignReport>(paperReportFile);
+      const parsed = parsePaperCampaignChildResult(await readJson<unknown>(paperReportFile));
+      if (parsed.kind === "REPORT") paperReport = parsed.report;
+      else if (parsed.kind === "FAILURE") {
+        paperFailure = parsed.failure;
+        processBlockers.push(`PAPER_CHILD_FAILED:${parsed.failure.error}`);
+      } else {
+        processBlockers.push(parsed.reason);
+      }
     } catch {
       processBlockers.push("PAPER_REPORT_MISSING_OR_INVALID");
     }
     try {
-      observeReport = await readJson<ObserveCampaignReport>(observeReportFile);
+      const candidate = await readJson<unknown>(observeReportFile);
+      if (isObserveCampaignReport(candidate)) observeReport = candidate;
+      else processBlockers.push("OBSERVE_REPORT_MISSING_OR_INVALID");
     } catch {
       processBlockers.push("OBSERVE_REPORT_MISSING_OR_INVALID");
     }
@@ -1079,6 +1114,7 @@ async function main(): Promise<void> {
       session: finalized.session,
       shortGate: gate,
       paper: paperReport,
+      paperFailure,
       observe: observeReport,
       integrity,
       coverage,
@@ -1108,6 +1144,7 @@ async function main(): Promise<void> {
       campaign: finalized.campaign,
       latestSessionReportId: finalized.session.reportId,
       currentFunnel: paperReport?.report.acceptance.funnel ?? null,
+      paperFailure,
       cumulativeOperationalMetrics: finalized.campaign.operationalMetrics,
       latestIntegrity: integrity,
       latestPaperAcceptance: paperReport?.report.acceptance ?? null,
@@ -1170,16 +1207,27 @@ async function main(): Promise<void> {
         // A malformed pointer is replaced, while process recovery still scans
         // command lines independently of persisted PIDs.
       }
-      await writeJsonAtomically(latestPointerPath, {
-        ...previousPointer,
-        campaignId: session.campaignId,
-        sessionId: session.sessionId,
-        state: "RECOVERY_REQUIRED",
-        supervisorPid: process.pid,
-        operatorOwnerToken,
-        error: error instanceof Error ? error.message : String(error),
-        updatedAt: new Date().toISOString(),
-      });
+      const originalError = error instanceof Error ? error.message : String(error);
+      try {
+        await writeJsonAtomically(latestPointerPath, {
+          ...previousPointer,
+          campaignId: session.campaignId,
+          sessionId: session.sessionId,
+          state: "RECOVERY_REQUIRED",
+          supervisorPid: process.pid,
+          operatorOwnerToken,
+          error: originalError,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (pointerError) {
+        console.error(JSON.stringify({
+          event: "PAPER_CAMPAIGN_RECOVERY_POINTER_WRITE_FAILED",
+          campaignId: session.campaignId,
+          sessionId: session.sessionId,
+          originalError,
+          pointerError: pointerError instanceof Error ? pointerError.message : String(pointerError),
+        }));
+      }
     }
     throw error;
   } finally {

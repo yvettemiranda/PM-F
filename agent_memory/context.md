@@ -36,14 +36,14 @@
 
 ## Version and compatibility
 - 当前源码目标版本：Schema `2.30.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.17.0`、Live `1.14.0`、Validation `1.8.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
-- 当前运行数据库仍是 Schema `2.29.0`；本轮未启动运行、未迁移数据库。下次安全启动必须先备份，再通过既有入口迁移到 `2.30.0`。
+- 当前运行数据库是 Schema `2.30.0`；本轮已完成迁移但异常 Session 未生成正式报告。后续启动仍必须沿用备份优先和既有入口。
 - `BUY_AMOUNT_POLICY_V4` 与 `followSellFullExitThresholdPpm=950000` 只由包含相应字段的新 Ruleset 解释；旧 Ruleset 固定按旧语义恢复，不得重解释历史执行。
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign，旧时长不能继承。
 
 ## Current runtime and evidence
-- 当前没有 Observe/Paper/Supervisor/launcher 后台进程；未自动启动新测试。
+- 当前没有 Observe/Paper/Supervisor/launcher 后台进程；`PC-2EB95BD31A8EB9693837 / PS-58AB7048A91D8264E009` 于 2026-07-24 16:45 CST 因 macOS System Policy/TCC 同时拒绝 `phase0.sqlite-wal` 与 operator pointer 访问而异常结束，正式报告/ZIP 未生成；数据库仍为 `PAPER + LIVE_DISABLED`、quick_check=ok、foreign_key_check=0，遗留运行锁和 `RUNNING` transition 必须先走安全回收。
 - 上一自然 Campaign `PC-305046D47E89A5529CDA` 已安全暂停：有效运行 `1.63 h`，Observe `5556/0`、Gap `0`、3 BUY Signal、1 SELL Signal、2 Fill、1 Realized PnL；它属于旧核心，只保留为自然路径证据。
-- 本轮改动起点 HEAD 为 `ba6999dc9392febbf7a02f1a01b69c16ad9bfa10`；完成提交前工作树为预期 dirty。
+- 当前已在 `781dbc5ffcc10575b728f2640051a09dc94da090` 上加入失败子进程结果分流、pointer 写入失败保真和 core 变更前遗留 Session 回收逻辑；提交前工作树为预期 dirty，未启动新 Paper。
 - 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，历史 Live Execution/Order/Fill/Attempt 为 `0`。
 
 ## Remaining blockers before small Live

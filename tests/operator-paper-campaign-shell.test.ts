@@ -322,6 +322,10 @@ describe("Paper Campaign operator shell", () => {
     expect(phase0).not.toContain("database.initialize()");
     expect(campaignRunner.match(/isolatedEvidence: summarizeIsolatedEvidence\(isolated\)/g)).toHaveLength(4);
     expect(campaignRunner).toContain("acceptedIncompleteReasons: isolated.proofs.acceptedIncompleteReasons");
+    expect(campaignRunner).toContain("parsePaperCampaignChildResult");
+    expect(campaignRunner).toContain("PAPER_CAMPAIGN_RECOVERY_POINTER_WRITE_FAILED");
+    expect(campaignRunner.indexOf("service.store.runningSession(snapshot.campaignId)"))
+      .toBeLessThan(campaignRunner.indexOf("const startDisposition = paperCampaignStartDisposition("));
     expect(campaignEvidence).toContain("phase0ReplayStatus: evidence.proofs.phase0ReplayStatus");
     const firstOrphanCleanup = launcher.indexOf('if ! operator_stop_campaign_processes_from_pointer "$POINTER_FILE"');
     expect(firstOrphanCleanup).toBeGreaterThanOrEqual(0);

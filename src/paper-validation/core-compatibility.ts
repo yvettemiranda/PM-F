@@ -62,6 +62,7 @@ export const CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES = [
   "src/operator/target-wallet.ts",
   "src/live/clob-clock-safety-provider.ts",
   "src/paper-validation/campaign-session-runtime.ts",
+  "src/paper-validation/campaign-child-result.ts",
   "src/paper-validation/checkpoint-evidence.ts",
   "src/paper-validation/clock-safety.ts",
   "src/paper-validation/crash-recovery.ts",
@@ -146,6 +147,7 @@ export const OPERATOR_BUILD_FILES = [
   "src/cli/paper-campaign-run.ts",
   "src/cli/paper-campaign-status.ts",
   "src/cli/paper-run.ts",
+  "src/paper-validation/campaign-child-result.ts",
   "src/cli/process-exit.ts",
   "src/cli/paper-replay-evidence.ts",
   "src/cli/redact-diagnostic.ts",
@@ -179,6 +181,7 @@ export interface CompatibilityEvidenceHashes extends CompatibilityIdentity {
 
 export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/api-contract.test.ts",
+  "tests/paper-campaign-child-result.test.ts",
   "tests/campaign-session-runtime.test.ts",
   "tests/capital-estimator.test.ts",
   "tests/capital-sizing.test.ts",
