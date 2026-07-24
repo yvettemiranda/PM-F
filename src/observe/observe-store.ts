@@ -14,6 +14,10 @@ import {
   negativeRiskConversionEvidenceHash,
   type VerifiedNegativeRiskConversion,
 } from "./negative-risk-conversion.js";
+import {
+  splitProjectionEvidenceHash,
+  type VerifiedSplitProjection,
+} from "./split-projection.js";
 import { deriveObserveSchedulingMetrics } from "./scheduling.js";
 import { storeCompressedCapturePayload } from "../infra/sqlite/capture-payload.js";
 import type {
@@ -60,6 +64,10 @@ export interface CommitPollInput {
     conversion: VerifiedNegativeRiskConversion;
     receipt: ApiCapture<PolygonTransactionReceiptResponse>;
   }>;
+  splitEvidence: Array<{
+    sourceEventKey: string;
+    split: VerifiedSplitProjection;
+  }>;
   duplicateEvents: number;
   projection: ObserveProjectionResult;
   signalsToEmit: ObserveSignal[];
@@ -75,6 +83,121 @@ export interface CommitPollInput {
   reconciliation: ReconciliationResult;
   replayState: string;
   gapRecovered: boolean;
+}
+
+export interface PersistedObserveEventRow {
+  source_event_key: string;
+  source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY" | "POLYGON_ORDER_FILLED";
+  source_timestamp: number;
+  is_gap: number;
+  activity_confirmed: number;
+  is_combo: number;
+  raw_json: string;
+  conversion_transaction_hash: string | null;
+  conversion_group_condition_id: string | null;
+  conversion_event_slug: string | null;
+  conversion_source_asset_id: string | null;
+  conversion_destination_legs_json: string | null;
+  conversion_amount_micros: string | null;
+  conversion_receipt_block_number: string | null;
+  conversion_receipt_payload_hash: string | null;
+  conversion_evidence_hash: string | null;
+  split_transaction_hash: string | null;
+  split_condition_id: string | null;
+  split_outcome_assets_json: string | null;
+  split_amount_micros: string | null;
+  split_market_source_url: string | null;
+  split_market_fetched_at: string | null;
+  split_market_snapshot_json: string | null;
+  split_market_snapshot_hash: string | null;
+  split_positions_snapshot_time: string | null;
+  split_positions_snapshot_json: string | null;
+  split_positions_snapshot_hash: string | null;
+  split_evidence_hash: string | null;
+}
+
+/** Shared decoder for normal Observe resume and Campaign crash recovery. */
+export function decodePersistedObserveEvent(row: PersistedObserveEventRow): ObserveEvent {
+  let conversion: VerifiedNegativeRiskConversion | undefined;
+  if (row.conversion_evidence_hash !== null) {
+    if (
+      row.conversion_transaction_hash === null
+      || row.conversion_group_condition_id === null
+      || row.conversion_event_slug === null
+      || row.conversion_source_asset_id === null
+      || row.conversion_destination_legs_json === null
+      || row.conversion_amount_micros === null
+      || row.conversion_receipt_payload_hash === null
+    ) throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_INCOMPLETE:${row.source_event_key}`);
+    const withoutHash = {
+      transactionHash: row.conversion_transaction_hash,
+      groupConditionId: row.conversion_group_condition_id,
+      eventSlug: row.conversion_event_slug,
+      sourceAsset: row.conversion_source_asset_id,
+      destinationAssets: JSON.parse(
+        row.conversion_destination_legs_json,
+      ) as VerifiedNegativeRiskConversion["destinationAssets"],
+      amountMicros: row.conversion_amount_micros,
+      receiptBlockNumber: row.conversion_receipt_block_number,
+      receiptPayloadHash: row.conversion_receipt_payload_hash,
+    };
+    if (negativeRiskConversionEvidenceHash(withoutHash) !== row.conversion_evidence_hash) {
+      throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_HASH_MISMATCH:${row.source_event_key}`);
+    }
+    conversion = { ...withoutHash, evidenceHash: row.conversion_evidence_hash };
+  }
+  let split: VerifiedSplitProjection | undefined;
+  if (row.split_evidence_hash !== null) {
+    if (
+      row.split_transaction_hash === null
+      || row.split_condition_id === null
+      || row.split_outcome_assets_json === null
+      || row.split_amount_micros === null
+      || row.split_market_source_url === null
+      || row.split_market_fetched_at === null
+      || row.split_market_snapshot_json === null
+      || row.split_market_snapshot_hash === null
+      || row.split_positions_snapshot_time === null
+      || row.split_positions_snapshot_json === null
+      || row.split_positions_snapshot_hash === null
+    ) throw new Error(`SPLIT_PROJECTION_EVIDENCE_INCOMPLETE:${row.source_event_key}`);
+    if (createHash("sha256").update(row.split_market_snapshot_json).digest("hex") !== row.split_market_snapshot_hash) {
+      throw new Error(`SPLIT_PROJECTION_MARKET_SNAPSHOT_HASH_MISMATCH:${row.source_event_key}`);
+    }
+    if (createHash("sha256").update(row.split_positions_snapshot_json).digest("hex") !== row.split_positions_snapshot_hash) {
+      throw new Error(`SPLIT_PROJECTION_POSITIONS_SNAPSHOT_HASH_MISMATCH:${row.source_event_key}`);
+    }
+    const withoutHash = {
+      transactionHash: row.split_transaction_hash,
+      conditionId: row.split_condition_id,
+      outcomeAssets: JSON.parse(row.split_outcome_assets_json) as string[],
+      amountMicros: row.split_amount_micros,
+      marketSourceUrl: row.split_market_source_url,
+      marketFetchedAt: row.split_market_fetched_at,
+      marketSnapshotJson: row.split_market_snapshot_json,
+      marketSnapshotHash: row.split_market_snapshot_hash,
+      positionsSnapshotTime: row.split_positions_snapshot_time,
+      positionsSnapshotJson: row.split_positions_snapshot_json,
+      positionsSnapshotHash: row.split_positions_snapshot_hash,
+    };
+    if (splitProjectionEvidenceHash(withoutHash) !== row.split_evidence_hash) {
+      throw new Error(`SPLIT_PROJECTION_EVIDENCE_HASH_MISMATCH:${row.source_event_key}`);
+    }
+    split = { ...withoutHash, evidenceHash: row.split_evidence_hash };
+  }
+  return {
+    sourceEventKey: row.source_event_key,
+    sourceType: row.source_type,
+    sourceTimestamp: row.source_timestamp,
+    isGap: row.is_gap !== 0,
+    isCombo: row.is_combo !== 0,
+    activityConfirmed: row.activity_confirmed !== 0,
+    ...(row.source_type === "DATA_API_TRADE" || row.source_type === "POLYGON_ORDER_FILLED"
+      ? { trade: JSON.parse(row.raw_json) }
+      : { activity: JSON.parse(row.raw_json) }),
+    ...(conversion ? { conversion } : {}),
+    ...(split ? { split } : {}),
+  };
 }
 
 export class ObserveStore {
@@ -248,69 +371,26 @@ export class ObserveStore {
                 c.amount_micros conversion_amount_micros,
                 c.receipt_block_number conversion_receipt_block_number,
                 c.receipt_payload_hash conversion_receipt_payload_hash,
-                c.evidence_hash conversion_evidence_hash
+                c.evidence_hash conversion_evidence_hash,
+                sp.transaction_hash split_transaction_hash,
+                sp.condition_id split_condition_id,
+                sp.outcome_assets_json split_outcome_assets_json,
+                sp.amount_micros split_amount_micros,
+                sp.market_source_url split_market_source_url,
+                sp.market_fetched_at split_market_fetched_at,
+                sp.market_snapshot_json split_market_snapshot_json,
+                sp.market_snapshot_hash split_market_snapshot_hash,
+                sp.positions_snapshot_time split_positions_snapshot_time,
+                sp.positions_snapshot_json split_positions_snapshot_json,
+                sp.positions_snapshot_hash split_positions_snapshot_hash,
+                sp.evidence_hash split_evidence_hash
          FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
          LEFT JOIN negative_risk_conversion_evidence c ON c.source_event_key=o.source_event_key
+         LEFT JOIN split_projection_evidence sp ON sp.source_event_key=o.source_event_key
          WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,
       )
-      .all(baselineRunId) as Array<{
-        source_event_key: string;
-        source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY" | "POLYGON_ORDER_FILLED";
-        source_timestamp: number;
-        is_gap: number;
-        activity_confirmed: number;
-        is_combo: number;
-        raw_json: string;
-        conversion_transaction_hash: string | null;
-        conversion_group_condition_id: string | null;
-        conversion_event_slug: string | null;
-        conversion_source_asset_id: string | null;
-        conversion_destination_legs_json: string | null;
-        conversion_amount_micros: string | null;
-        conversion_receipt_block_number: string | null;
-        conversion_receipt_payload_hash: string | null;
-        conversion_evidence_hash: string | null;
-      }>;
-    return rows.map((row) => {
-      let conversion: VerifiedNegativeRiskConversion | undefined;
-      if (row.conversion_evidence_hash !== null) {
-        if (
-          row.conversion_transaction_hash === null
-          || row.conversion_group_condition_id === null
-          || row.conversion_event_slug === null
-          || row.conversion_source_asset_id === null
-          || row.conversion_destination_legs_json === null
-          || row.conversion_amount_micros === null
-          || row.conversion_receipt_payload_hash === null
-        ) throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_INCOMPLETE:${row.source_event_key}`);
-        const withoutHash = {
-          transactionHash: row.conversion_transaction_hash,
-          groupConditionId: row.conversion_group_condition_id,
-          eventSlug: row.conversion_event_slug,
-          sourceAsset: row.conversion_source_asset_id,
-          destinationAssets: JSON.parse(row.conversion_destination_legs_json) as VerifiedNegativeRiskConversion["destinationAssets"],
-          amountMicros: row.conversion_amount_micros,
-          receiptBlockNumber: row.conversion_receipt_block_number,
-          receiptPayloadHash: row.conversion_receipt_payload_hash,
-        };
-        if (negativeRiskConversionEvidenceHash(withoutHash) !== row.conversion_evidence_hash) {
-          throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_HASH_MISMATCH:${row.source_event_key}`);
-        }
-        conversion = { ...withoutHash, evidenceHash: row.conversion_evidence_hash };
-      }
-      return {
-        sourceEventKey: row.source_event_key,
-        sourceType: row.source_type,
-        sourceTimestamp: row.source_timestamp,
-        isGap: row.is_gap !== 0,
-        isCombo: row.is_combo !== 0,
-        activityConfirmed: row.activity_confirmed !== 0,
-        ...(row.source_type === "DATA_API_TRADE" || row.source_type === "POLYGON_ORDER_FILLED"
-          ? { trade: JSON.parse(row.raw_json) }
-          : { activity: JSON.parse(row.raw_json) }),
-        ...(conversion ? { conversion } : {}),
-      };
-    });
+      .all(baselineRunId) as unknown as PersistedObserveEventRow[];
+    return rows.map(decodePersistedObserveEvent);
   }
 
   existingEventKeys(baselineRunId: string, keys: string[]): Set<string> {
@@ -619,6 +699,9 @@ export class ObserveStore {
         for (const evidence of input.conversionEvidence) {
           this.insertNegativeRiskConversionEvidence(input, pollId, evidence);
         }
+        for (const evidence of input.splitEvidence) {
+          this.insertSplitProjectionEvidence(input, pollId, evidence);
+        }
         this.insertCapitalEstimate(input.baseline.targetId, null, input.capitalEstimate, input.completedAt);
         for (const bundle of input.signalContexts) {
           if (bundle.capitalDecision) {
@@ -896,6 +979,7 @@ export class ObserveStore {
       input.newEvents.length > 0
       || input.eventConfirmations.length > 0
       || input.conversionEvidence.length > 0
+      || input.splitEvidence.length > 0
       || input.signalsToEmit.length > 0
       || input.gapRecovered
       || input.replayState !== "ONLINE"
@@ -1043,6 +1127,67 @@ export class ObserveStore {
     };
     if (!stored || stableJson(stored) !== stableJson(expected)) {
       throw new Error(`NEGATIVE_RISK_CONVERSION_EVIDENCE_CONFLICT:${evidence.sourceEventKey}`);
+    }
+  }
+
+  private insertSplitProjectionEvidence(
+    input: CommitPollInput,
+    pollId: string,
+    evidence: CommitPollInput["splitEvidence"][number],
+  ): void {
+    const split = evidence.split;
+    this.database.prepare(
+      `INSERT OR IGNORE INTO split_projection_evidence(
+        source_event_key,observe_run_id,poll_id,transaction_hash,condition_id,
+        outcome_assets_json,amount_micros,market_source_url,market_fetched_at,
+        market_snapshot_json,market_snapshot_hash,positions_snapshot_time,
+        positions_snapshot_json,positions_snapshot_hash,evidence_hash,
+        schema_version,signal_version,source_code_commit,source_code_dirty,verified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      evidence.sourceEventKey,
+      input.observeRunId,
+      pollId,
+      split.transactionHash,
+      split.conditionId,
+      stableJson(split.outcomeAssets),
+      split.amountMicros,
+      split.marketSourceUrl,
+      split.marketFetchedAt,
+      split.marketSnapshotJson,
+      split.marketSnapshotHash,
+      split.positionsSnapshotTime,
+      split.positionsSnapshotJson,
+      split.positionsSnapshotHash,
+      split.evidenceHash,
+      VERSIONS.schemaVersion,
+      OBSERVE_SIGNAL_VERSION,
+      this.sourceVersion.commit,
+      this.sourceVersion.dirty ? 1 : 0,
+      input.completedAt,
+    );
+    const stored = this.database.prepare(
+      `SELECT transaction_hash,condition_id,outcome_assets_json,amount_micros,
+              market_source_url,market_fetched_at,market_snapshot_json,market_snapshot_hash,
+              positions_snapshot_time,positions_snapshot_json,positions_snapshot_hash,evidence_hash
+       FROM split_projection_evidence WHERE source_event_key=?`,
+    ).get(evidence.sourceEventKey) as Record<string, unknown> | undefined;
+    const expected = {
+      transaction_hash: split.transactionHash,
+      condition_id: split.conditionId,
+      outcome_assets_json: stableJson(split.outcomeAssets),
+      amount_micros: split.amountMicros,
+      market_source_url: split.marketSourceUrl,
+      market_fetched_at: split.marketFetchedAt,
+      market_snapshot_json: split.marketSnapshotJson,
+      market_snapshot_hash: split.marketSnapshotHash,
+      positions_snapshot_time: split.positionsSnapshotTime,
+      positions_snapshot_json: split.positionsSnapshotJson,
+      positions_snapshot_hash: split.positionsSnapshotHash,
+      evidence_hash: split.evidenceHash,
+    };
+    if (!stored || stableJson(stored) !== stableJson(expected)) {
+      throw new Error(`SPLIT_PROJECTION_EVIDENCE_CONFLICT:${evidence.sourceEventKey}`);
     }
   }
 

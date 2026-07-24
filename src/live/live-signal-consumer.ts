@@ -31,6 +31,12 @@ export interface LiveSignalConsumptionResult {
   state: string;
 }
 
+export type LiveSignalConsumptionScope =
+  | "ALL"
+  | "LEADING_TARGET_SELLS"
+  | "TARGET_SELLS"
+  | "TARGET_BUYS";
+
 interface LoadedLiveSignal {
   signal: PaperSignalEnvelope;
   signalSequence: number;
@@ -64,12 +70,19 @@ export class LiveSignalConsumer {
     this.riskManager = new RiskManager(this.database, sourceVersion);
   }
 
-  async consumeAvailableSignals(accountId: string, limit = 100): Promise<LiveSignalConsumptionResult[]> {
+  async consumeAvailableSignals(
+    accountId: string,
+    limit = 100,
+    scope: LiveSignalConsumptionScope = "ALL",
+  ): Promise<LiveSignalConsumptionResult[]> {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) throw new Error("LIVE_SIGNAL_CONSUMER_LIMIT_INVALID");
+    if (!["ALL", "LEADING_TARGET_SELLS", "TARGET_SELLS", "TARGET_BUYS"].includes(scope)) {
+      throw new Error("LIVE_SIGNAL_CONSUMER_SCOPE_INVALID");
+    }
     const checkpoint = this.ensureCheckpoint(accountId);
     await this.assertNoBlockingTargetConversion(accountId, checkpoint);
     const rows = this.database.prepare(
-      `SELECT s.signal_id,q.signal_sequence
+      `SELECT s.signal_id,s.signal_type,q.signal_sequence
        FROM signals s
        JOIN signal_ingest_sequences q ON q.signal_id=s.signal_id
        LEFT JOIN live_signal_consumptions c
@@ -78,14 +91,32 @@ export class LiveSignalConsumer {
          ON x.live_account_id=? AND x.signal_id=s.signal_id
        WHERE s.status='PUBLISHED' AND s.execution_eligible=1
          AND q.signal_sequence>? AND c.signal_id IS NULL AND x.signal_id IS NULL
+         AND (
+           ? IN ('ALL','LEADING_TARGET_SELLS')
+           OR (?='TARGET_SELLS' AND s.signal_type='TARGET_SELL')
+           OR (?='TARGET_BUYS' AND s.signal_type='TARGET_BUY')
+         )
        ORDER BY q.signal_sequence
        LIMIT ?`,
-    ).all(accountId, accountId, checkpoint.cutoff_signal_sequence, limit) as unknown as Array<{
+    ).all(
+      accountId,
+      accountId,
+      checkpoint.cutoff_signal_sequence,
+      scope,
+      scope,
+      scope,
+      limit,
+    ) as unknown as Array<{
       signal_id: string;
+      signal_type: "TARGET_BUY" | "TARGET_SELL";
       signal_sequence: number;
     }>;
     const results: LiveSignalConsumptionResult[] = [];
-    for (const row of rows) {
+    const firstNonSellIndex = rows.findIndex((row) => row.signal_type !== "TARGET_SELL");
+    const selectedRows = scope === "LEADING_TARGET_SELLS"
+      ? rows.slice(0, firstNonSellIndex < 0 ? rows.length : firstNonSellIndex)
+      : rows;
+    for (const row of selectedRows) {
       await this.assertNoBlockingTargetConversion(accountId, checkpoint);
       let loaded: LoadedLiveSignal;
       try {
@@ -152,7 +183,7 @@ export class LiveSignalConsumer {
       };
       try {
         requested = signal.signalType === "TARGET_BUY"
-          ? { ...this.buyAmount(accountId, signal), size: null }
+          ? { ...await this.buyAmount(accountId, signal), size: null }
           : {
             amount: null,
             size: this.sellSize(
@@ -512,25 +543,18 @@ export class LiveSignalConsumer {
     }
   }
 
-  private buyAmount(accountId: string, signal: PaperSignalEnvelope): {
+  private async buyAmount(accountId: string, signal: PaperSignalEnvelope): Promise<{
     amount: bigint | null;
     capitalSizingDecision: BuyCapitalSizingDecision;
     buyAmountPolicyDecision: BuyAmountPolicyDecision | null;
-  } {
-    const account = this.database.prepare(
-      "SELECT initial_bankroll_micros FROM live_accounts WHERE live_account_id=?",
-    ).get(accountId) as { initial_bankroll_micros: string } | undefined;
-    if (!account) throw new Error(`LIVE_ACCOUNT_NOT_FOUND:${accountId}`);
-    const cashRows = this.database.prepare(
-      "SELECT cash_delta_micros,reserved_delta_micros FROM live_cash_ledger WHERE live_account_id=?",
-    ).all(accountId) as unknown as Array<{ cash_delta_micros: string; reserved_delta_micros: string }>;
-    const projection = cashRows.reduce((total, row) => ({
-      cash: total.cash + BigInt(row.cash_delta_micros),
-      reserved: total.reserved + BigInt(row.reserved_delta_micros),
-    }), { cash: BigInt(account.initial_bankroll_micros), reserved: 0n });
-    const available = projection.cash > projection.reserved ? projection.cash - projection.reserved : 0n;
+  }> {
+    const snapshot = await this.executor.getBalance({ accountId });
+    const available = BigInt(snapshot.availableBalanceMicros);
+    const sizingCapital = snapshot.valuationStatus === "COMPLETE"
+      ? BigInt(snapshot.totalEquityMicros)
+      : available;
     const capitalSizingDecision = calculateBuyCapitalSizing({
-      accountCapitalMicros: available,
+      accountCapitalMicros: sizingCapital,
       capitalDecision: signal.capitalDecision,
       exactRatio: signal.context?.capitalSizingRatio ?? null,
       exactRatioHash: signal.context?.capitalSizingRatioHash ?? null,

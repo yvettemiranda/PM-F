@@ -550,11 +550,37 @@ describe("PaperValidationCampaignService", () => {
       status: 200,
       data,
     });
+    const polygonTrade = {
+      proxyWallet: wallet,
+      transactionHash: "0xpolygon-recovery-buy",
+      orderHash: `0x${"7".repeat(64)}`,
+      conditionId: `0x${"4".repeat(64)}`,
+      asset: "polygon-recovery-asset",
+      side: "BUY" as const,
+      price: "0.5",
+      size: "10",
+      timestamp: Math.floor(Date.parse(fetchedAt) / 1_000),
+    };
     const snapshot: ObservePollSnapshot = {
       trades: capture("trades", []),
       activity: capture("activity", []),
-      positions: capture("positions", []),
+      positions: capture("positions", [{
+        proxyWallet: wallet,
+        asset: polygonTrade.asset,
+        conditionId: polygonTrade.conditionId,
+        size: "10",
+        avgPrice: "0.5",
+        currentValue: "5",
+      }]),
       pUsdBalance: capture("balance", { jsonrpc: "2.0", id: 1, result: "0x0" }),
+      polygonOrderFilled: {
+        status: "AVAILABLE",
+        confirmedHead: "0x65",
+        fromBlock: "0x65",
+        toBlock: "0x65",
+        trades: [polygonTrade],
+        capture: null,
+      },
     };
     const source: ObserveDataSource = { poll: async () => snapshot };
     const observeStore = new ObserveStore(input.databasePath, sourceVersion);

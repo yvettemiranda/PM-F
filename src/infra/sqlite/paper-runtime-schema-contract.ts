@@ -27,10 +27,12 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.26.0",
   "2.27.0",
   "2.29.0",
+  "2.30.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
   "negative_risk_conversion_evidence",
+  "split_projection_evidence",
   "observe_projection_snapshots",
   "paper_market_constraint_evidence",
   "paper_settlement_retry_state",
@@ -55,6 +57,15 @@ export const PAPER_RUNTIME_REQUIRED_COLUMNS = Object.freeze({
     "execution_deadline_at",
   ],
   observe_polls: ["signal_enrichment_failures", "warning_detail"],
+  split_projection_evidence: [
+    "market_source_url",
+    "market_fetched_at",
+    "market_snapshot_json",
+    "market_snapshot_hash",
+    "positions_snapshot_time",
+    "positions_snapshot_json",
+    "positions_snapshot_hash",
+  ],
   risk_decisions: ["capital_sizing_decision_json", "capital_sizing_decision_hash"],
   paper_orderbook_snapshots: [
     "min_order_size",
@@ -85,6 +96,8 @@ export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
   "observe_runs_campaign_binding_pair",
   "negative_risk_conversion_evidence_no_delete",
   "negative_risk_conversion_evidence_no_update",
+  "split_projection_evidence_no_delete",
+  "split_projection_evidence_no_update",
   "paper_accounts_target_id_immutable",
   "paper_cash_ledger_no_delete",
   "paper_cash_ledger_no_update",

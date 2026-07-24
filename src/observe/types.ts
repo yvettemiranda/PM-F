@@ -1,6 +1,7 @@
 import type { ApiCapture } from "../adapters/polymarket-public.js";
 import type { EventClassification, PublicActivity, PublicPosition, PublicTrade, SyncStatus } from "../domain/models.js";
 import type { VerifiedNegativeRiskConversion } from "./negative-risk-conversion.js";
+import type { VerifiedSplitProjection } from "./split-projection.js";
 import type {
   PolygonOrderFilledTradeBatch,
   PolygonOrderFilledEvidence,
@@ -30,6 +31,7 @@ export interface ObserveEvent {
   trade?: PublicTrade;
   activity?: PublicActivity;
   conversion?: VerifiedNegativeRiskConversion;
+  split?: VerifiedSplitProjection;
 }
 
 export interface ObserveSignal {

@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { PublicTrade } from "../src/domain/models.js";
 import { activityEventKey } from "../src/domain/idempotency.js";
+import { stableJson } from "../src/domain/versioning.js";
+import { negativeRiskConversionEvidenceHash } from "../src/observe/negative-risk-conversion.js";
+import { splitProjectionEvidenceHash } from "../src/observe/split-projection.js";
 import { ReplayEngine } from "../src/replay/replay-engine.js";
 
 const wallet = "0x0000000000000000000000000000000000000001";
@@ -350,6 +354,155 @@ describe("ReplayEngine", () => {
       timestamp: 102,
     })]?.signalIds).toHaveLength(2);
     expect(report.metrics.finalRecognizedPositions).toEqual({});
+  });
+
+  it("projects an officially verified SPLIT into historical outcome buckets without a copy signal", () => {
+    const split = {
+      proxyWallet: wallet,
+      transactionHash: "0xverified-replay-split",
+      conditionId: "0xcondition",
+      type: "SPLIT",
+      size: "10",
+      timestamp: 102,
+    };
+    const marketSnapshotJson = stableJson({
+      condition_id: "0xcondition",
+      tokens: [
+        { token_id: "asset-yes", outcome: "Yes" },
+        { token_id: "asset-no", outcome: "No" },
+      ],
+    });
+    const positionsSnapshotJson = stableJson([
+      { asset: "asset-no", size: "10" },
+      { asset: "asset-yes", size: "10" },
+    ]);
+    const splitWithoutHash = {
+      transactionHash: split.transactionHash,
+      conditionId: split.conditionId,
+      outcomeAssets: ["asset-no", "asset-yes"],
+      amountMicros: "10000000",
+      marketSourceUrl: "https://clob.test/markets/0xcondition",
+      marketFetchedAt: "1970-01-01T00:01:42.000Z",
+      marketSnapshotJson,
+      marketSnapshotHash: createHash("sha256").update(marketSnapshotJson).digest("hex"),
+      positionsSnapshotTime: "1970-01-01T00:01:42.000Z",
+      positionsSnapshotJson,
+      positionsSnapshotHash: createHash("sha256").update(positionsSnapshotJson).digest("hex"),
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [],
+      activity: [split],
+      verifiedSplitProjectionsBySourceEventKey: {
+        [activityEventKey(split)]: {
+          ...splitWithoutHash,
+          evidenceHash: splitProjectionEvidenceHash(splitWithoutHash),
+        },
+      },
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.signals).toEqual([]);
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.metrics.finalHistoricalPositions).toEqual({
+      "asset-no": "10000000",
+      "asset-yes": "10000000",
+    });
+    expect(report.eventOutcomes[activityEventKey(split)]).toEqual({
+      eventClassification: "COMBO_ACTIVITY",
+      reason: "VERIFIED_SPLIT_PROJECTED_TO_HISTORICAL",
+    });
+  });
+
+  it("fails closed for SPLIT when Replay has market metadata but no committed positions proof", () => {
+    const split = {
+      proxyWallet: wallet,
+      transactionHash: "0xunproven-replay-split",
+      conditionId: "0xcondition",
+      type: "SPLIT",
+      size: "10",
+      timestamp: 102,
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [],
+      activity: [split],
+      verifiedMarketOutcomeAssetsByCondition: verifiedMergeOutcomeAssets,
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("INCOMPLETE");
+    expect(report.incompleteReasons).toContain("UNSUPPORTED_TARGET_ACTIVITY:SPLIT");
+    expect(report.metrics.finalHistoricalPositions).toEqual({});
+  });
+
+  it("replays a receipt-verified conversion as a source exit and historical destination legs", () => {
+    const conversion = {
+      proxyWallet: wallet,
+      transactionHash: "0xverified-replay-conversion",
+      conditionId: "0xgroup-condition",
+      type: "CONVERSION",
+      size: "10",
+      timestamp: 102,
+      eventSlug: "negative-risk-event",
+    };
+    const conversionWithoutHash = {
+      transactionHash: conversion.transactionHash,
+      groupConditionId: conversion.conditionId,
+      eventSlug: conversion.eventSlug,
+      sourceAsset: "asset-source",
+      destinationAssets: [
+        { asset: "asset-destination-1", conditionId: "0xdestination-1", amountMicros: "10000000" },
+        { asset: "asset-destination-2", conditionId: "0xdestination-2", amountMicros: "10000000" },
+      ],
+      amountMicros: "10000000",
+      receiptBlockNumber: "0x123",
+      receiptPayloadHash: "a".repeat(64),
+    };
+    const report = new ReplayEngine().run({
+      targetId: "target-1",
+      walletAddress: wallet,
+      identityStatus: "IDENTITY_CONFIRMED",
+      trades: [trade({
+        transactionHash: "0xsource-buy",
+        conditionId: "0xsource-condition",
+        asset: "asset-source",
+        price: "0.4",
+        size: "10",
+        timestamp: 100,
+      })],
+      activity: [conversion],
+      verifiedNegativeRiskConversionsBySourceEventKey: {
+        [activityEventKey(conversion)]: {
+          ...conversionWithoutHash,
+          evidenceHash: negativeRiskConversionEvidenceHash(conversionWithoutHash),
+        },
+      },
+      hasCapitalSnapshots: true,
+      hasGoldenExpectations: true,
+    });
+
+    expect(report.status).toBe("PASSED");
+    expect(report.signals.map((signal) => signal.signalType)).toEqual(["TARGET_BUY", "TARGET_SELL"]);
+    expect(report.signals[1]).toMatchObject({
+      asset: "asset-source",
+      reason: "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
+      targetPriceUnits: "400000000000000000",
+      sellRatioNumerator: "10000000",
+      sellRatioDenominator: "10000000",
+    });
+    expect(report.metrics.finalRecognizedPositions).toEqual({});
+    expect(report.metrics.finalHistoricalPositions).toEqual({
+      "asset-destination-1": "10000000",
+      "asset-destination-2": "10000000",
+    });
   });
 
   it("deduplicates a non-trade MERGE before applying its position effect", () => {

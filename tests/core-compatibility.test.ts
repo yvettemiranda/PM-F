@@ -30,6 +30,7 @@ import {
   CORE_COMPATIBILITY_CAMPAIGN_RUNTIME_FILES,
   CORE_COMPATIBILITY_EXECUTION_FILES,
   CORE_COMPATIBILITY_PAPER_FILES,
+  VALIDATION_POLICY_FILES,
   computeCoreCompatibilityHash,
   computeOperatorBuildHash,
   computeValidationPolicyHash,
@@ -51,6 +52,11 @@ function createProjectFixture(): string {
 }
 
 describe("Paper Campaign core compatibility", () => {
+  it("binds the shared target SELL policy into both Campaign core and validation identities", () => {
+    expect(CORE_COMPATIBILITY_EXECUTION_FILES).toContain("src/execution/target-sell-policy.ts");
+    expect(VALIDATION_POLICY_FILES).toContain("src/execution/target-sell-policy.ts");
+  });
+
   it("captures the complete current core as stable component hashes", () => {
     const first = buildCurrentCoreCompatibilityManifest(projectRoot);
     const second = buildCurrentCoreCompatibilityManifest(projectRoot);

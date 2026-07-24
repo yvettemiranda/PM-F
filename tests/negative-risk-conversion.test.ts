@@ -248,7 +248,7 @@ describe("negative-risk conversion", () => {
     })));
   });
 
-  it("preserves historical/tracked buckets and emits a fail-closed tracked conversion obligation", () => {
+  it("retires the converted tracked cycle into historical destinations and emits a source exit", () => {
     const conversion = verifyNegativeRiskConversion({
       activity: conversionActivity(),
       walletAddress: wallet,
@@ -288,17 +288,19 @@ describe("negative-risk conversion", () => {
 
     const result = projectObserveEvents(baseline(4_000_000n), events, { requireVerifiedConversions: true });
     expect(result.projection.every((entry) => (
-      entry.historicalMicros === "4000000" && entry.trackedMicros === "6000000"
+      entry.historicalMicros === "10000000" && entry.trackedMicros === "0"
     ))).toBe(true);
     expect(result.signals).toHaveLength(2);
     expect(result.signals[1]).toMatchObject({
-      signalType: "TARGET_CONVERSION",
+      signalType: "TARGET_SELL",
       asset: sourceAsset,
       targetSizeMicros: amount.toString(),
       sellRatioNumerator: "6000000",
       sellRatioDenominator: "6000000",
-      executionEligible: false,
-      executionBlockReason: "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+      reason: "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
+      targetPriceUnits: "500000000000000000",
+      executionEligible: true,
+      executionBlockReason: null,
       eventClassification: "NEGATIVE_RISK_CONVERSION",
     });
   });

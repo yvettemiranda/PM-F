@@ -3,6 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import { projectObserveEvents } from "../observe/position-projector.js";
+import {
+  decodePersistedObserveEvent,
+  type PersistedObserveEventRow,
+} from "../observe/observe-store.js";
 import type { ObserveBaseline, ObserveEvent } from "../observe/types.js";
 import type { PaperAcceptanceSummary } from "../paper/paper-acceptance-summary.js";
 import { PAPER_CONSUMER_CUTOFF_SIGNAL_SENTINEL } from "../paper/paper-executor.js";
@@ -143,29 +147,34 @@ function observeProjection(database: DatabaseSync, baselineRunId: string): {
   };
   const rows = database.prepare(
     `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,
-            o.activity_confirmed,r.is_combo,r.raw_json
+            o.activity_confirmed,r.is_combo,r.raw_json,
+            c.transaction_hash conversion_transaction_hash,
+            c.group_condition_id conversion_group_condition_id,
+            c.event_slug conversion_event_slug,
+            c.source_asset_id conversion_source_asset_id,
+            c.destination_legs_json conversion_destination_legs_json,
+            c.amount_micros conversion_amount_micros,
+            c.receipt_block_number conversion_receipt_block_number,
+            c.receipt_payload_hash conversion_receipt_payload_hash,
+            c.evidence_hash conversion_evidence_hash,
+            sp.transaction_hash split_transaction_hash,
+            sp.condition_id split_condition_id,
+            sp.outcome_assets_json split_outcome_assets_json,
+            sp.amount_micros split_amount_micros,
+            sp.market_source_url split_market_source_url,
+            sp.market_fetched_at split_market_fetched_at,
+            sp.market_snapshot_json split_market_snapshot_json,
+            sp.market_snapshot_hash split_market_snapshot_hash,
+            sp.positions_snapshot_time split_positions_snapshot_time,
+            sp.positions_snapshot_json split_positions_snapshot_json,
+            sp.positions_snapshot_hash split_positions_snapshot_hash,
+            sp.evidence_hash split_evidence_hash
      FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
+     LEFT JOIN negative_risk_conversion_evidence c ON c.source_event_key=o.source_event_key
+     LEFT JOIN split_projection_evidence sp ON sp.source_event_key=o.source_event_key
      WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,
-  ).all(baselineRunId) as Array<{
-    source_event_key: string;
-    source_type: "DATA_API_TRADE" | "DATA_API_ACTIVITY";
-    source_timestamp: number;
-    is_gap: number;
-    activity_confirmed: number;
-    is_combo: number;
-    raw_json: string;
-  }>;
-  const events: ObserveEvent[] = rows.map((row) => ({
-    sourceEventKey: row.source_event_key,
-    sourceType: row.source_type,
-    sourceTimestamp: row.source_timestamp,
-    isGap: row.is_gap !== 0,
-    isCombo: row.is_combo !== 0,
-    activityConfirmed: row.activity_confirmed !== 0,
-    ...(row.source_type === "DATA_API_TRADE"
-      ? { trade: JSON.parse(row.raw_json) }
-      : { activity: JSON.parse(row.raw_json) }),
-  }));
+  ).all(baselineRunId) as unknown as PersistedObserveEventRow[];
+  const events: ObserveEvent[] = rows.map(decodePersistedObserveEvent);
   const observeRun = database.prepare(
     `SELECT ruleset_hash FROM observe_runs
      WHERE baseline_run_id=? ORDER BY started_at DESC,observe_run_id DESC LIMIT 1`,

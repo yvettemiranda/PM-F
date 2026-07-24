@@ -47,6 +47,7 @@ export const CORE_COMPATIBILITY_EXECUTION_FILES = [
   "src/execution/market-order-constraints.ts",
   "src/execution/orderbook-matching.ts",
   "src/execution/signal-integrity.ts",
+  "src/execution/target-sell-policy.ts",
   "src/execution/types.ts",
 ] as const;
 
@@ -113,6 +114,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/031_validation_duration_policy.sql",
   "src/infra/sqlite/032_negative_risk_conversion.sql",
   "src/infra/sqlite/034_signal_enrichment_resilience.sql",
+  "src/infra/sqlite/035_special_activity_projection.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
@@ -133,6 +135,7 @@ export const VALIDATION_POLICY_FILES = [
   "src/replay/replay-engine.ts",
   "src/services/api-contract.ts",
   "src/services/trade-multiplicity-evidence.ts",
+  "src/execution/target-sell-policy.ts",
 ] as const;
 
 export const OPERATOR_BUILD_FILES = [

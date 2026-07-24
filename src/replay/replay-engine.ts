@@ -10,6 +10,16 @@ import { activityAsTrade } from "../domain/activity-trade.js";
 import { RULESET, VERSIONS, stableJson } from "../domain/versioning.js";
 import { effectiveTargetSellRatio } from "../execution/target-sell-policy.js";
 import { mergeExitPrices } from "../observe/position-projector.js";
+import {
+  negativeRiskConversionEvidenceHash,
+  type VerifiedNegativeRiskConversion,
+} from "../observe/negative-risk-conversion.js";
+import {
+  splitProjectionEvidenceHash,
+  type VerifiedSplitProjection,
+} from "../observe/split-projection.js";
+import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
+import type { ClobMarket } from "../adapters/polymarket-public.js";
 
 export interface ReplayGap {
   fromTimestamp: number;
@@ -35,6 +45,8 @@ export interface ReplayInput {
   activityPaginationBoundaryOverlaps?: PublicTrade[];
   confirmedTradeOccurrenceCounts?: Readonly<Record<string, number>>;
   verifiedMarketOutcomeAssetsByCondition?: Readonly<Record<string, readonly string[]>>;
+  verifiedSplitProjectionsBySourceEventKey?: Readonly<Record<string, VerifiedSplitProjection>>;
+  verifiedNegativeRiskConversionsBySourceEventKey?: Readonly<Record<string, VerifiedNegativeRiskConversion>>;
 }
 
 export interface ReplayReport {
@@ -382,10 +394,228 @@ export class ReplayEngine {
           eventOutcomes[key] = { eventClassification: "NON_TRADE_ACTIVITY", reason: "REDEEM_PROJECTED" };
           continue;
         }
-        if (activity.type === "SPLIT" || activity.type === "CONVERSION") {
+        if (activity.type === "SPLIT") {
           comboEvents += 1;
-          eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: `${activity.type}_RECORDED_WITHOUT_SIGNAL` };
-          activityIncompleteReasons.add(`UNSUPPORTED_TARGET_ACTIVITY:${activity.type}`);
+          const proof = input.verifiedSplitProjectionsBySourceEventKey?.[key];
+          let amount: bigint | null = null;
+          let assets: string[] = [];
+          let verified = false;
+          try {
+            if (!proof || activity.size === undefined || !conditionId) throw new Error("SPLIT_PROOF_MISSING");
+            amount = decimalToScaled(activity.size, SHARE_SCALE_DIGITS);
+            if (amount <= 0n || proof.amountMicros !== amount.toString()) throw new Error("SPLIT_AMOUNT_MISMATCH");
+            if (proof.transactionHash !== activity.transactionHash.trim().toLowerCase()) {
+              throw new Error("SPLIT_TRANSACTION_MISMATCH");
+            }
+            if (proof.conditionId !== conditionId) throw new Error("SPLIT_CONDITION_MISMATCH");
+            const { evidenceHash, ...splitWithoutHash } = proof;
+            if (splitProjectionEvidenceHash(splitWithoutHash) !== evidenceHash) {
+              throw new Error("SPLIT_EVIDENCE_HASH_MISMATCH");
+            }
+            if (createHash("sha256").update(proof.marketSnapshotJson).digest("hex") !== proof.marketSnapshotHash) {
+              throw new Error("SPLIT_MARKET_SNAPSHOT_HASH_MISMATCH");
+            }
+            if (createHash("sha256").update(proof.positionsSnapshotJson).digest("hex") !== proof.positionsSnapshotHash) {
+              throw new Error("SPLIT_POSITIONS_SNAPSHOT_HASH_MISMATCH");
+            }
+            if (
+              !Number.isFinite(Date.parse(proof.marketFetchedAt))
+              || !Number.isFinite(Date.parse(proof.positionsSnapshotTime))
+              || Date.parse(proof.positionsSnapshotTime) < activity.timestamp * 1_000
+              || !proof.marketSourceUrl.trim()
+            ) throw new Error("SPLIT_SNAPSHOT_METADATA_INVALID");
+            const market = JSON.parse(proof.marketSnapshotJson) as ClobMarket;
+            assets = verifiedBinaryMarketOutcomeAssets(market, conditionId);
+            if (stableJson(assets) !== stableJson(proof.outcomeAssets)) throw new Error("SPLIT_OUTCOME_SET_MISMATCH");
+            const positions = JSON.parse(proof.positionsSnapshotJson) as Array<{ asset?: unknown; size?: unknown }>;
+            if (!Array.isArray(positions)) throw new Error("SPLIT_POSITIONS_SNAPSHOT_INVALID");
+            const positionsByAsset = new Map(positions.map((position) => [String(position.asset ?? ""), position]));
+            if (assets.some((asset) => {
+              const position = positionsByAsset.get(asset);
+              if (!position || position.size === undefined) return true;
+              try {
+                return decimalToScaled(String(position.size), SHARE_SCALE_DIGITS) < amount!;
+              } catch {
+                return true;
+              }
+            })) throw new Error("SPLIT_POSITIONS_SNAPSHOT_INSUFFICIENT");
+            verified = true;
+          } catch {
+            verified = false;
+          }
+          if (!verified) {
+            eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: "SPLIT_RECORDED_WITHOUT_SIGNAL" };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:SPLIT");
+            continue;
+          }
+          const gapEvent = insideGap(activity.timestamp, input.gaps ?? []);
+          if (gapEvent) gapEvents += 1;
+          for (const asset of assets) {
+            const historicalBefore = historicalPositions.get(asset) ?? 0n;
+            const trackedBefore = trackedPositions.get(asset) ?? 0n;
+            historicalPositions.set(asset, historicalBefore + amount!);
+            conditionByAsset.set(asset, conditionId!);
+            const syntheticEvent: SourceEvent = {
+              sourceEventKey: key,
+              trade: {
+                proxyWallet: activity.proxyWallet,
+                transactionHash: activity.transactionHash,
+                conditionId: conditionId!,
+                asset,
+                side: "BUY",
+                price: "0",
+                size: activity.size!,
+                timestamp: activity.timestamp,
+              },
+              priceUnits: 0n,
+              sizeMicros: amount!,
+              gapEvent,
+              isCombo: true,
+            };
+            positionLedger.push(this.ledger(
+              syntheticEvent,
+              historicalBefore,
+              historicalBefore + amount!,
+              trackedBefore,
+              trackedBefore,
+              0n,
+              "VERIFIED_SPLIT_TO_HISTORICAL_BUCKET",
+            ));
+          }
+          eventOutcomes[key] = {
+            eventClassification: "COMBO_ACTIVITY",
+            reason: "VERIFIED_SPLIT_PROJECTED_TO_HISTORICAL",
+          };
+          continue;
+        }
+        if (activity.type === "CONVERSION") {
+          comboEvents += 1;
+          const proof = input.verifiedNegativeRiskConversionsBySourceEventKey?.[key];
+          let verified = false;
+          let amount = 0n;
+          try {
+            if (!proof || activity.size === undefined || !conditionId) throw new Error("CONVERSION_PROOF_MISSING");
+            amount = decimalToScaled(activity.size, SHARE_SCALE_DIGITS);
+            if (amount <= 0n || proof.amountMicros !== amount.toString()) {
+              throw new Error("CONVERSION_AMOUNT_MISMATCH");
+            }
+            if (proof.transactionHash !== activity.transactionHash.trim().toLowerCase()) {
+              throw new Error("CONVERSION_TRANSACTION_MISMATCH");
+            }
+            if (proof.groupConditionId !== conditionId) throw new Error("CONVERSION_CONDITION_MISMATCH");
+            const { evidenceHash, ...conversionWithoutHash } = proof;
+            if (negativeRiskConversionEvidenceHash(conversionWithoutHash) !== evidenceHash) {
+              throw new Error("CONVERSION_EVIDENCE_HASH_MISMATCH");
+            }
+            if (
+              proof.destinationAssets.length < 2
+              || new Set(proof.destinationAssets.map((destination) => destination.asset)).size
+                !== proof.destinationAssets.length
+              || proof.destinationAssets.some((destination) => (
+                destination.amountMicros !== amount.toString()
+                || !destination.asset.trim()
+                || !destination.conditionId.trim()
+              ))
+            ) throw new Error("CONVERSION_DESTINATION_SET_INVALID");
+            verified = true;
+          } catch {
+            verified = false;
+          }
+          if (!verified || !proof) {
+            eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: "CONVERSION_RECORDED_WITHOUT_SIGNAL" };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:CONVERSION");
+            continue;
+          }
+          const beforeHistorical = historicalPositions.get(proof.sourceAsset) ?? 0n;
+          const beforeTracked = trackedPositions.get(proof.sourceAsset) ?? 0n;
+          if (amount > beforeHistorical + beforeTracked) {
+            eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: "CONVERSION_SOURCE_BALANCE_INSUFFICIENT" };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:CONVERSION");
+            continue;
+          }
+          const trackedConverted = amount < beforeTracked ? amount : beforeTracked;
+          const historicalConverted = amount - trackedConverted;
+          const historicalAfter = beforeHistorical - historicalConverted;
+          const trackedAfter = beforeTracked - trackedConverted;
+          const sourcePrice = lastPriceByAsset.get(proof.sourceAsset);
+          const sourceConditionId = conditionByAsset.get(proof.sourceAsset);
+          const gapEvent = insideGap(activity.timestamp, input.gaps ?? []);
+          if (!gapEvent && trackedConverted > 0n && (!sourcePrice || sourcePrice <= 0n || !sourceConditionId)) {
+            eventOutcomes[key] = { eventClassification: "COMBO_ACTIVITY", reason: "CONVERSION_SOURCE_EXIT_EVIDENCE_MISSING" };
+            activityIncompleteReasons.add("UNSUPPORTED_TARGET_ACTIVITY:CONVERSION");
+            continue;
+          }
+          historicalPositions.set(proof.sourceAsset, historicalAfter);
+          trackedPositions.set(proof.sourceAsset, trackedAfter);
+          const sourceEvent: SourceEvent = {
+            sourceEventKey: key,
+            trade: {
+              proxyWallet: activity.proxyWallet,
+              transactionHash: activity.transactionHash,
+              conditionId: sourceConditionId ?? proof.groupConditionId,
+              asset: proof.sourceAsset,
+              side: "SELL",
+              price: "0",
+              size: activity.size!,
+              timestamp: activity.timestamp,
+            },
+            priceUnits: sourcePrice ?? 0n,
+            sizeMicros: amount,
+            gapEvent,
+            isCombo: true,
+          };
+          positionLedger.push(this.ledger(
+            sourceEvent,
+            beforeHistorical,
+            historicalAfter,
+            beforeTracked,
+            trackedAfter,
+            trackedConverted,
+            gapEvent
+              ? "GAP_NEGATIVE_RISK_CONVERSION_SOURCE_EXIT_RECORDED"
+              : "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
+          ));
+          for (const destination of proof.destinationAssets) {
+            const destinationHistoricalBefore = historicalPositions.get(destination.asset) ?? 0n;
+            const destinationTracked = trackedPositions.get(destination.asset) ?? 0n;
+            historicalPositions.set(destination.asset, destinationHistoricalBefore + amount);
+            conditionByAsset.set(destination.asset, destination.conditionId);
+            positionLedger.push(this.ledger({
+              ...sourceEvent,
+              trade: {
+                ...sourceEvent.trade,
+                conditionId: destination.conditionId,
+                asset: destination.asset,
+                side: "BUY",
+              },
+              priceUnits: 0n,
+            }, destinationHistoricalBefore, destinationHistoricalBefore + amount, destinationTracked, destinationTracked, 0n,
+            "VERIFIED_CONVERSION_DESTINATION_TO_HISTORICAL_BUCKET"));
+          }
+          if (trackedConverted > 0n) {
+            const signal = this.signal(
+              input.targetId,
+              sourceEvent,
+              "TARGET_SELL",
+              gapEvent
+                ? "GAP_NEGATIVE_RISK_CONVERSION_SOURCE_EXIT_RECORDED"
+                : "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
+              "NEGATIVE_RISK_CONVERSION",
+              !gapEvent,
+              gapEvent ? "GAP_EVENT" : undefined,
+              trackedConverted,
+              beforeTracked,
+              proof.sourceAsset,
+            );
+            signals.push(signal);
+            eventOutcomes[key] = this.outcome(signal);
+          } else {
+            eventOutcomes[key] = {
+              eventClassification: "NEGATIVE_RISK_CONVERSION",
+              reason: "HISTORICAL_CONVERSION_PROJECTED",
+            };
+          }
+          if (gapEvent) gapEvents += 1;
           continue;
         }
         eventOutcomes[key] = officialNonTradeTypes.has(activity.type)

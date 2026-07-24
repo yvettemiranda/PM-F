@@ -1,40 +1,34 @@
 # Bugs And Risks
 
 ## Active blockers
-- tracked negative-risk conversion 没有复制能力；当前形成不可执行义务并安全阻断。
-- SPLIT 没有安全的 position projection/copy 语义，会触发 `UNSUPPORTED_TARGET_ACTIVITY + MAJOR_DESYNC`。
-- 无法证明完整 outcome set、余额或定价的 MERGE 继续硬阻断；不会猜测资产集合或价格。
+- 新 Core 尚未开始自然 Paper；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 与特殊操作自然样本未覆盖。
+- 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
+- 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 旧数据库和混合 Campaign 已按用户授权清理；旧 Paper `1.15.0` Campaign 已自然覆盖 BUY/Order/Fill、SELL/Fee/REALIZED_PNL，但95%全退新核心尚无自然运行时长，未满足累计 `24 h`、连续 `4 h`，且 `API_RECOVERY` 未覆盖。
-- geoblock/compliance、隔离钱包、真实 signer、Live arming 和用户再次明确授权均未完成。
+- geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
-- `>=95%` 普通 `STANDARD_TRADE` SELL 会主动结束本轮跟单周期，并把目标仍持有的比例尾部转回 historical bucket；这是用户确认的“不追补旧仓、避免跟单尾仓长期残留”策略取舍。若目标随后只操作该被忽略尾部，不再生成本轮执行 Signal；需用新核心自然 Paper 验证频繁小额调仓下的收益和换手成本。`COMBO_ACTIVITY`/MERGE 已明确排除在该阈值之外。
-- 同一 `orderHash` 可跨多笔 Polygon 交易长期部分成交；昨晚 16 个目标 orderHash 中有 8 个跨交易，最长间隔约 2 小时 43 分。用户已确认按 `transactionHash + orderHash` 定义一次经济成交：同交易多 fill 合并，跨交易后续 fill 独立继续跟，以免等待订单终结导致数小时延迟或漏单。UI/报告必须明确这是经济成交次数，不是原始订单数。
-- 小额追单次数、持仓周期和止损锁由现有不可变证据推导而不扩表。完整 SELL/等价 MERGE/REDEEM 只有在自身旧义务全部归零后才成为重置边界；无法证明时保守不重置。需要自然短测验证复杂交错顺序。
-- Data API 不提供 `orderHash`。多 fill 归并以 Polygon 官方日志为准；跨源只在 transaction/asset/side/timestamp、总 size 和加权价格精确一致且只有一个 Polygon 订单候选时去重。API 时间或精度若不一致会 fail closed，可能牺牲跟单覆盖率但不会猜测合并。
-- 每笔 `<1%` BUY 都可能放大到至少 `1 pUSD`，虽然单笔硬封顶 `5`、小额追单最多 `9`，仍需自然测试累计敞口、目标偏差和实际收益，不能用单元测试证明策略盈利。
-- Polygon WebSocket 只是 wake hint，可能断线/乱序/漏消息；`1 s` 确认块扫描、Data API `3 s` 和 REST/Activity 仍是完整性兜底。2 个确认区块的速度/重组取舍仍需长测。
-- target-maker canonical `OrderFilled` 路径已通过历史抽样，但特殊撮合路径仍需持续交叉确认。
-- WAITING BUY 仍会每 `15 s` REST 兜底；完整证据采样和不可变审计库会持续增长。当前降低了重复写入并只保留 1 份迁移备份，但长期仍需 Campaign 归档和磁盘增长告警。
-- `node:sqlite` 在 Node 24 仍有 experimental warning；需通过新核心长测观察。
-- Data API offset、分页边界、短暂 Positions/Trades/Activity 不同步仍可能触发 gap recovery/reconciliation，不能为提高成交率降低完整性 Gate。
-- 当前 Live 仅在隔离 fake 路径回归，真实 runtime 未接线；不能把单元测试等同实盘就绪。
+- SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
+- 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
+- Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
+- 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
+- 每笔 `<1%` BUY 可能放大到 `1—5 pUSD`，虽有 9 次小额追单上限，仍需自然测试累计敞口、收益偏差和费用。
+- Polygon WebSocket 只是 wake hint；`1 s` 确认块扫描、Data API `3 s` 和 Positions REST 是完整性兜底。确认深度、API offset 和短暂不同步仍可能触发 gap/reconciliation。
+- 不可变 Capture、盘口与特殊操作证据会持续增加磁盘占用；仍需 Campaign 归档和磁盘增长告警。
+- Observe 与 Replay 对特殊操作保留两套面向不同输出的投影编排；当前有一致性回归覆盖，但后续再改 SPLIT/CONVERSION 时应优先抽取共享纯 reducer，避免语义漂移。
+- `node:sqlite` 在 Node 24 仍有 experimental warning。
+- 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
-- Paper 曾在普通 `TARGET_SELL` 尾仓保持 `EXIT_PENDING` 时，把同资产后续独立 BUY 标记为 `SAME_ASSET_EXIT_PENDING` 并等到 BUY 截止；隔离 Live 没有该阻塞，既漏跟又造成 Paper/Live 不一致。当前普通退出义务与后续 BUY 分别保留、独立执行；止损的禁止重开规则不变，并有双模式交错回归。
-- 旧风控会因目标参考价高于 `0.95` 提前拒绝，即使自身实际成交价合法；当前新 Ruleset 只对自身含手续费实际 VWAP执行 `0.95` 上限，旧 Ruleset 行为保留。
-- 小额金额曾可能被 available-cash cap 压到 `1 pUSD` 以下并成交；当前小额保持 1U 下限，现金不足整笔拒绝。
-- MEDIUM 资本证据无 ratio 时曾无法分类并报 `BUY_FOLLOW_RATIO_EVIDENCE_UNAVAILABLE`；当前 fixed fallback 明确归为小额 BUY并保持1U。
-- 市场最低量预检曾使用未按 tick 取整的105%上限，而实际撮合使用向下取整价，可能错误允许不足最低量的部分成交；当前预检和撮合共用同一可执行上限。
-- 新 V4 曾可能重解释缺少 `smallFollowBuyMaxCount` 的 v1.7/v1.8 Ruleset；当前历史 V3/V2 金额证据、lineage、价格和 TARGET_SELL 语义均按旧 Ruleset执行，并有回归覆盖。
-- TARGET_SELL 在新规则下曾因低于市场最小量被终止为 `CANCELLED`；当前 Ruleset 改为持续 `EXIT_PENDING`、保留真实尾仓且对相同约束证据去重。
-- Polygon 同一 orderHash 的多个 fill 曾各自触发 Signal；当前在快速源先按 transaction+orderHash 聚合，并在唯一经济证据匹配时消除 Data API 重复。
-- BUY 原先允许所有低价改善且使用 `2%/2 tick` 上限；当前新 Ruleset 严格执行目标价 90%—105%及实际价0.95上限，历史价格规则不变。
-- Live `TARGET_SELL` 原先只按真实 Position 计算卖出量，没有像 Paper 一样先取消或同比例缩减同 asset/condition 的等待 BUY；当前已补齐 Reservation/Cash/Risk/Audit、Gate 前置、原子回滚、幂等、损坏账本时持久关闭 Gate 和禁止最低额反向抬升的完整路径。
-- Live-only 提交不会改变 Paper core hash，但会改变隔离验证套件；启动器原先只允许 PASSED Campaign 刷新证据，导致同 core 的安全 PAUSED Campaign 无法续跑。当前只对 `PAUSED/PASSED + same core + policy/suite changed` 开放 proof refresh，未完成或不同 core 状态继续 fail closed。
-- launcher 的启动终端/PTY 中断后，收尾阶段新起的 Node 脱敏进程曾卡在 `TTYWrap/uv_tty_init/open`；当前所有诊断包 Node 子命令均使用 `/dev/null` stdin 和独立错误日志，死 TTY 集成回归已覆盖。
-- 安全暂停若先判定 launcher 存活、而 launcher 随后在收尾中退出，旧入口可能等待后遗留 `active.lock`；当前等待后会重新判定身份，并在受控遗留进程收割期间重复清理刚变陈旧的锁。
+- Live 比例 BUY 曾以 available cash 作为资金比例基数，持仓后会系统性低估后续跟单；现在完整估值用 total equity，available cash 只作支付 cap。
+- Live runner 曾先重试旧 waiting BUY，再消费新目标 SELL；现在新退出先处理，完整新 Signal 序列成功后才允许旧 BUY 重试，异常时跳过该轮 BUY。
+- Campaign crash recovery 曾把持久化 Polygon `OrderFilled` 当 Activity 解码；现在正常恢复与 crash recovery 共用 source-aware decoder。
+- Core hash 曾漏掉共享 `target-sell-policy.ts`，修改 SELL 规则可能不重置验证时长；当前执行/验证清单均包含该文件。
+- SPLIT 曾直接触发 unsupported/major desync；当前完整证据可稳定投影到 historical bucket，弱证据仍失败关闭。
+- tracked negative-risk CONVERSION 曾形成不可执行 `TARGET_CONVERSION` 并暂停账户；当前完整证据生成 source `TARGET_SELL` 等价退出，destination 隔离为 historical。旧不可执行 Signal 仍由兼容安全检查阻断。
+- Replay 曾用弱于 Observe 的 SPLIT 证据并固定拒绝所有 CONVERSION；当前只有完整持久化证明才允许同语义回放。
+- 普通 `TARGET_SELL` 尾仓 `EXIT_PENDING` 曾阻塞后续独立 BUY；当前普通退出与后续 BUY 独立，止损重开锁不变。
+- 普通 `STANDARD_TRADE` SELL 达到 `95%` 后曾留下跟单义务；当前按本轮完整退出，MERGE/CONVERSION 不套用该阈值。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。

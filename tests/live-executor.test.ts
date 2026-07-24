@@ -32,7 +32,10 @@ import type {
 } from "../src/live/live-types.js";
 import type { PaperSignalEnvelope, SignalExecutionContext } from "../src/paper/types.js";
 import { RiskManager } from "../src/risk/risk-manager.js";
-import { LiveSignalConsumer } from "../src/live/live-signal-consumer.js";
+import {
+  LiveSignalConsumer,
+  type LiveSignalConsumptionScope,
+} from "../src/live/live-signal-consumer.js";
 import { LiveRunner } from "../src/live/live-runner.js";
 
 const directories: string[] = [];
@@ -103,6 +106,17 @@ class FlippingGate implements LiveExecutionGate {
 class FailingLiveSignalConsumer extends LiveSignalConsumer {
   override async consumeAvailableSignals(): Promise<never> {
     throw new Error("TEST_SIGNAL_CONSUMER_FAILURE");
+  }
+}
+
+class FinalStageFailingLiveSignalConsumer extends LiveSignalConsumer {
+  override async consumeAvailableSignals(
+    accountId: string,
+    limit = 1_000,
+    scope: LiveSignalConsumptionScope = "ALL",
+  ) {
+    if (scope === "ALL") throw new Error("TEST_ORDERED_SIGNAL_CONSUMER_FAILURE");
+    return super.consumeAvailableSignals(accountId, limit, scope);
   }
 }
 
@@ -1929,6 +1943,54 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("sizes a later proportional Live BUY from complete total equity while keeping available cash as the payment cap", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const openingExecutor = liveExecutor(env.databasePath);
+    const openingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      openingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    expect((await openingConsumer.consumeAvailableSignals(accountId))[0]).toMatchObject({ state: "EXECUTED" });
+    openingConsumer.close();
+    openingExecutor.close();
+
+    const later = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-proportional-buy-from-total-equity",
+      riskDecisionId: "unused-live-total-equity-risk",
+      decision: "ALLOW",
+      capitalRatioPpm: "50000",
+    });
+    const executor = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({ balanceMicros: "900000000" }),
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        bids: [{ price: "0.75", size: "1000" }],
+        asks: [{ price: "0.5", size: "1000" }],
+      }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    const [result] = await consumer.consumeAvailableSignals(accountId);
+
+    expect(result).toMatchObject({ signalId: later.signal.signalId, state: "EXECUTED" });
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT requested_amount_micros FROM live_executions WHERE signal_id=?`,
+    ).get(later.signal.signalId)).toEqual({ requested_amount_micros: "52500000" });
+    const sizing = db.prepare(
+      `SELECT capital_sizing_decision_json FROM risk_decisions WHERE risk_decision_id=?`,
+    ).get(result!.riskDecisionId!) as { capital_sizing_decision_json: string };
+    expect(JSON.parse(sizing.capital_sizing_decision_json)).toMatchObject({
+      accountCapitalMicros: "1050000000",
+      calculatedAmountMicros: "52500000",
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
   it("derives the configurable 1 pUSD first-entry minimum before Live risk and reservation", async () => {
     const env = setup({ capitalRatioPpm: "1" });
     const executor = liveExecutor(env.databasePath);
@@ -3000,9 +3062,21 @@ describe("LiveExecutor", () => {
 
   it("isolates malformed and missing-context Signals so later valid Signals are not head-of-line blocked", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
-    const executor = liveExecutor(env.databasePath);
+    const openingExecutor = liveExecutor(env.databasePath);
+    const openingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      openingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    expect(await openingConsumer.consumeAvailableSignals(accountId)).toHaveLength(1);
+    openingConsumer.close();
+    openingExecutor.close();
+
+    const executor = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({ balanceMicros: "900000000" }),
+    });
     const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
-    expect(await consumer.consumeAvailableSignals(accountId)).toHaveLength(1);
 
     insertPublishedSignalWithoutContext(env.databasePath, env.targetId, "live-poison-invalid-size", "not-an-integer");
     insertPublishedSignalWithoutContext(env.databasePath, env.targetId, "live-missing-context");
@@ -3228,6 +3302,213 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("applies a newly arrived target SELL before retrying an older waiting BUY in the same Live cycle", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const waitingExecutor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const waitingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      waitingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    const [waitingBuy] = await waitingConsumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    waitingConsumer.close();
+    waitingExecutor.close();
+
+    let clockMs = Date.parse(now);
+    const clock = () => new Date(clockMs);
+    const executor = liveExecutor(env.databasePath, {
+      now: clock,
+      marketDataProvider: new FakeLiveMarketDataProvider({ now: clock }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, clock);
+    activateLiveGate(env.databasePath);
+    let activated = false;
+    const runner = new LiveRunner(executor, consumer, {
+      accountId,
+      intervalMs: 1_000,
+      durationMs: 1_200,
+      reconciliationEveryCycles: 100,
+      now: clock,
+      wait: async (milliseconds) => {
+        clockMs += milliseconds;
+        if (!activated) {
+          activateLiveGate(env.databasePath);
+          insertSignalAndRisk(env.databasePath, env.targetId, {
+            signalId: "live-runner-sell-before-waiting-buy-retry",
+            riskDecisionId: "unused-live-runner-target-sell-risk",
+            decision: "ALLOW",
+            signalType: "TARGET_SELL",
+            sellRatioNumerator: "1",
+            sellRatioDenominator: "1",
+            requestedAmountMicros: null,
+            requestedSizeMicros: "1",
+            createdAt: clock().toISOString(),
+          });
+          activated = true;
+        }
+      },
+    });
+
+    const report = await runner.run();
+
+    expect(report.errors).toEqual([]);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "CANCELLED",
+      reason: "TARGET_SELL_SUPERSEDED_WAITING_BUY",
+    });
+    expect(db.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 0 });
+    expect(db.prepare(
+      "SELECT state,reason FROM live_executions WHERE signal_id='live-runner-sell-before-waiting-buy-retry'",
+    ).get()).toEqual({
+      state: "EXECUTED",
+      reason: "TARGET_EXIT_APPLIED_TO_WAITING_BUY",
+    });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("preserves target chronology when a new BUY and its later SELL arrive in the same Live cycle", async () => {
+    const env = setup({ capitalRatioPpm: "10000" });
+    let clockMs = Date.parse(now);
+    const clock = () => new Date(clockMs);
+    const executor = liveExecutor(env.databasePath, {
+      now: clock,
+      marketDataProvider: new FakeLiveMarketDataProvider({ now: clock }),
+    });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, clock);
+    activateLiveGate(env.databasePath);
+    let inserted = false;
+    const runner = new LiveRunner(executor, consumer, {
+      accountId,
+      intervalMs: 1_000,
+      durationMs: 1_200,
+      reconciliationEveryCycles: 100,
+      now: clock,
+      wait: async (milliseconds) => {
+        clockMs += milliseconds;
+        if (inserted) return;
+        activateLiveGate(env.databasePath);
+        insertSignalAndRisk(env.databasePath, env.targetId, {
+          signalId: "live-runner-chronological-buy",
+          riskDecisionId: "unused-live-runner-chronological-buy-risk",
+          decision: "ALLOW",
+          capitalRatioPpm: "10000",
+          createdAt: clock().toISOString(),
+        });
+        insertSignalAndRisk(env.databasePath, env.targetId, {
+          signalId: "live-runner-chronological-sell",
+          riskDecisionId: "unused-live-runner-chronological-sell-risk",
+          decision: "ALLOW",
+          signalType: "TARGET_SELL",
+          sellRatioNumerator: "1",
+          sellRatioDenominator: "1",
+          requestedAmountMicros: null,
+          requestedSizeMicros: "1",
+          createdAt: clock().toISOString(),
+        });
+        inserted = true;
+      },
+    });
+
+    const report = await runner.run();
+
+    expect(report.errors).toEqual([]);
+    expect(report.consumedSignals).toBe(2);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      `SELECT status,current_size_micros FROM live_positions
+       WHERE signal_id='live-runner-chronological-buy'`,
+    ).get()).toEqual({ status: "CLOSED", current_size_micros: "0" });
+    expect(db.prepare(
+      "SELECT state FROM live_executions WHERE signal_id='live-runner-chronological-sell'",
+    ).get()).toEqual({ state: "EXECUTED" });
+    expect(db.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 2 });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("does not retry an older waiting BUY when ordered Signal consumption fails", async () => {
+    const env = setup({ capitalRatioPpm: "1" });
+    const waitingExecutor = liveExecutor(env.databasePath, {
+      marketDataProvider: new FakeLiveMarketDataProvider({
+        now: () => new Date(now),
+        asks: [],
+      }),
+    });
+    const waitingConsumer = new LiveSignalConsumer(
+      env.databasePath,
+      waitingExecutor,
+      sourceVersion,
+      () => new Date(now),
+    );
+    const [waitingBuy] = await waitingConsumer.consumeAvailableSignals(accountId);
+    expect(waitingBuy).toMatchObject({ state: "WAITING_EXECUTION" });
+    waitingConsumer.close();
+    waitingExecutor.close();
+
+    let clockMs = Date.parse(now);
+    const clock = () => new Date(clockMs);
+    const executor = liveExecutor(env.databasePath, {
+      now: clock,
+      marketDataProvider: new FakeLiveMarketDataProvider({ now: clock }),
+    });
+    const consumer = new FinalStageFailingLiveSignalConsumer(
+      env.databasePath,
+      executor,
+      sourceVersion,
+      clock,
+    );
+    activateLiveGate(env.databasePath);
+    let reactivated = false;
+    const runner = new LiveRunner(executor, consumer, {
+      accountId,
+      intervalMs: 1_000,
+      durationMs: 1_200,
+      reconciliationEveryCycles: 100,
+      now: clock,
+      wait: async (milliseconds) => {
+        clockMs += milliseconds;
+        if (!reactivated) {
+          activateLiveGate(env.databasePath);
+          reactivated = true;
+        }
+      },
+    });
+
+    const report = await runner.run();
+
+    expect(report.errors).toEqual([
+      expect.objectContaining({
+        operation: "CONSUME_SIGNALS_IN_ORDER",
+        message: "TEST_ORDERED_SIGNAL_CONSUMER_FAILURE",
+      }),
+    ]);
+    expect(report.skippedBuyCycles).toBe(1);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT state,reason FROM live_executions WHERE live_execution_id=?",
+    ).get(waitingBuy!.executionId!)).toEqual({
+      state: "WAITING_EXECUTION",
+      reason: "LIVE_BUY_WAITING_MARKET",
+    });
+    expect(db.prepare("SELECT count(*) count FROM live_orders").get()).toEqual({ count: 0 });
+    db.close();
+    consumer.close();
+    executor.close();
+  });
+
   it("blocks current-cycle BUY consumption and persists Audit when stop-loss market data is stale", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     const buyer = liveExecutor(env.databasePath);
@@ -3352,7 +3633,7 @@ describe("LiveExecutor", () => {
       },
     });
     expect(report.errors).toHaveLength(2);
-    expect(report.errors.every((error) => error.operation === "CONSUME_SIGNALS")).toBe(true);
+    expect(report.errors.every((error) => error.operation === "CONSUME_TARGET_EXITS")).toBe(true);
     expect(report.settlements).toEqual({
       pendingPositionIds: [expect.any(String)],
       resolvedPositionIds: [],

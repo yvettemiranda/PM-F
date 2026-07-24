@@ -701,6 +701,45 @@ export class Phase0Database {
         throw error;
       }
     }
+    const specialActivityProjectionApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.30.0");
+    if (!specialActivityProjectionApplied) {
+      const specialActivityProjectionSql = readFileSync(
+        new URL("./035_special_activity_projection.sql", import.meta.url),
+        "utf8",
+      );
+      const splitEvidenceTable = this.database.prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='split_projection_evidence'",
+      ).get() as { sql: string } | undefined;
+      const splitEvidenceIndex = this.database.prepare(
+        "SELECT 1 ok FROM sqlite_master WHERE type='index' AND name='split_projection_evidence_run_idx'",
+      ).get();
+      const splitEvidenceTriggers = [
+        "split_projection_evidence_no_update",
+        "split_projection_evidence_no_delete",
+      ].every((name) => this.database.prepare(
+        "SELECT 1 ok FROM sqlite_master WHERE type='trigger' AND name=?",
+      ).get(name));
+      const splitEvidenceComplete = splitEvidenceTable !== undefined
+        && splitEvidenceIndex !== undefined
+        && splitEvidenceTriggers
+        && splitEvidenceTable.sql.replace(/\s+/g, " ").includes("positions_snapshot_hash TEXT NOT NULL");
+      if (splitEvidenceTable !== undefined && !splitEvidenceComplete) {
+        throw new Error("MIGRATION_035_PARTIAL_SCHEMA_PRESENT");
+      }
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        if (!splitEvidenceComplete) this.database.exec(specialActivityProjectionSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.30.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

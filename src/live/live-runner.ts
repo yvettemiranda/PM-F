@@ -141,13 +141,18 @@ export class LiveRunner {
       wasActive = active;
       if (active) {
         activeCycles += 1;
-        // Check before retrying pending BUYs. The consumer routes a tracked
-        // conversion through emergencyStop(), which durably disables the Live
-        // gate and prevents any later copy signal from crossing the blocker.
+        // Stage the target's exits before deriving a STOP or retrying any old
+        // BUY. Legacy unexecutable TARGET_CONVERSION signals still route
+        // through emergencyStop(), so they cannot be crossed by later Signals.
         const conversionSafety = await capture(
           "CHECK_TARGET_CONVERSION_BLOCK",
           () => this.consumer.assertNoBlockingTargetConversion(this.options.accountId),
         );
+        const targetExits = await capture(
+          "CONSUME_TARGET_EXITS",
+          () => this.consumer.consumeAvailableSignals(this.options.accountId, 1_000, "LEADING_TARGET_SELLS"),
+        );
+        if (targetExits.ok) consumedSignals += targetExits.value.length;
         const stopLoss = await capture<LiveStopLossCheckResult>(
           "CHECK_STOP_LOSSES",
           () => this.executor.checkStopLosses(this.options.accountId),
@@ -160,13 +165,35 @@ export class LiveRunner {
           retriedExecutions += (await this.executor.retryPending(this.options.accountId, "EXITS_ONLY")).length;
         });
 
-        if (stopLossHealthy && conversionSafety.ok) {
-          await capture("RETRY_PENDING_BUYS", async () => {
-            retriedExecutions += (await this.executor.retryPending(this.options.accountId, "BUYS_ONLY")).length;
+        const lateTargetExits = targetExits.ok
+          ? await capture(
+            "CONSUME_LATE_TARGET_EXITS",
+            () => this.consumer.consumeAvailableSignals(this.options.accountId, 1_000, "LEADING_TARGET_SELLS"),
+          )
+          : targetExits;
+        if (lateTargetExits.ok) consumedSignals += lateTargetExits.value.length;
+
+        if (stopLossHealthy && conversionSafety.ok && targetExits.ok && lateTargetExits.ok) {
+          const orderedSignals = await capture("CONSUME_SIGNALS_IN_ORDER", async () => {
+            const results = await this.consumer.consumeAvailableSignals(
+              this.options.accountId,
+              1_000,
+              "ALL",
+            );
+            consumedSignals += results.length;
+            return results;
           });
-          await capture("CONSUME_SIGNALS", async () => {
-            consumedSignals += (await this.consumer.consumeAvailableSignals(this.options.accountId)).length;
-          });
+          // Only retry older BUYs after the complete newly arrived Signal
+          // sequence has been applied. A BUY followed by a SELL keeps target
+          // chronology, while that SELL can still cancel an older wait before
+          // the older BUY reaches the market again.
+          if (orderedSignals.ok) {
+            await capture("RETRY_PENDING_BUYS", async () => {
+              retriedExecutions += (await this.executor.retryPending(this.options.accountId, "BUYS_ONLY")).length;
+            });
+          } else {
+            skippedBuyCycles += 1;
+          }
         } else {
           skippedBuyCycles += 1;
         }

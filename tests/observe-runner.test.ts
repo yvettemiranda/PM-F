@@ -2245,7 +2245,7 @@ describe("ObserveOnlyRunner", () => {
   );
 
   it(
-    "fails closed immediately when target SPLIT cannot be projected or copied",
+    "fails the poll closed without advancing state when target SPLIT lacks projection evidence",
     async () => {
       const { databasePath } = setup();
       let now = new Date("2026-07-08T00:01:00.000Z");
@@ -2264,32 +2264,125 @@ describe("ObserveOnlyRunner", () => {
         now: () => now,
       });
 
-      await runner.pollOnce();
+      expect(await runner.pollOnce()).toBe(true);
       now = new Date("2026-07-08T00:01:10.000Z");
-      await runner.pollOnce();
+      expect(await runner.pollOnce()).toBe(false);
       store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
       expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
-        processedEvents: 1,
+        processedEvents: 0,
         emittedSignals: 0,
-        majorDesyncCount: 1,
-        finalSyncStatus: "MAJOR_DESYNC",
+        successfulPolls: 1,
+        failedPolls: 1,
+        majorDesyncCount: 0,
+        finalSyncStatus: "SYNCED",
       });
       store.close();
 
       const check = new DatabaseSync(databasePath, { readOnly: true });
-      const report = check.prepare(
-        `SELECT detail_json FROM reconciliation_reports
-         WHERE sync_status='MAJOR_DESYNC' ORDER BY created_at DESC LIMIT 1`,
-      ).get() as { detail_json: string };
-      expect(JSON.parse(report.detail_json)).toContainEqual(expect.objectContaining({
-        issueType: "UNSUPPORTED_TARGET_ACTIVITY",
-        activityType: "SPLIT",
-      }));
+      expect(check.prepare(
+        "SELECT status,error_detail FROM observe_polls ORDER BY sequence DESC LIMIT 1",
+      ).get()).toEqual({
+        status: "PROCESSING_FAILED",
+        error_detail: "SPLIT_MARKET_METADATA_PROVIDER_UNAVAILABLE",
+      });
       expect(check.prepare("SELECT sync_status FROM monitor_targets").get())
-        .toEqual({ sync_status: "MAJOR_DESYNC" });
+        .toEqual({ sync_status: "SYNCED" });
+      expect((check.prepare(
+        "SELECT count(*) count FROM raw_events WHERE source_transaction_hash='0xunsupported-split'",
+      ).get() as { count: number }).count).toBe(0);
       check.close();
     },
   );
+
+  it("projects a verified target SPLIT into historical outcome buckets without pausing other markets", async () => {
+    const { databasePath, baselineRunId } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const split = activity({
+      type: "SPLIT",
+      transactionHash: "0xverified-split",
+      size: "10",
+      timestamp: baselineSecond + 70,
+    });
+    const splitPositions = [
+      { ...position("10"), asset: "asset-no", outcome: "No" },
+      { ...position("10"), asset: "asset-yes", outcome: "Yes" },
+    ];
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      snapshotWithActivity([split], splitPositions, "2026-07-08T00:01:10.000Z"),
+    ]), {
+      walletAddress: wallet,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      signalMarketMetadataProvider: {
+        async market() {
+          return {
+            sourceUrl: "https://clob.test/markets/0xcondition",
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: "0xcondition",
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [
+                { token_id: "asset-yes", outcome: "Yes" },
+                { token_id: "asset-no", outcome: "No" },
+              ],
+            },
+          };
+        },
+      },
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:10.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 1,
+      emittedSignals: 0,
+      majorDesyncCount: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT asset_id,historical_micros,tracked_micros
+       FROM observe_position_projection ORDER BY asset_id`,
+    ).all()).toEqual([
+      { asset_id: "asset-no", historical_micros: "10000000", tracked_micros: "0" },
+      { asset_id: "asset-yes", historical_micros: "10000000", tracked_micros: "0" },
+    ]);
+    expect((check.prepare("SELECT count(*) count FROM split_projection_evidence").get() as { count: number }).count).toBe(1);
+    check.close();
+
+    now = new Date("2026-07-08T00:01:20.000Z");
+    const resumedStore = new ObserveStore(databasePath, sourceVersion);
+    const resumedRunner = new ObserveOnlyRunner(resumedStore, new QueueSource([
+      snapshotWithActivity([split], splitPositions, now.toISOString()),
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      signalMarketMetadataProvider: {
+        async market() {
+          throw new Error("SPLIT_EVIDENCE_MUST_BE_RESTORED_FROM_DATABASE");
+        },
+      },
+    });
+    expect(await resumedRunner.pollOnce()).toBe(true);
+    expect(resumedStore.runMetrics(resumedRunner.start().observeRunId)).toMatchObject({
+      successfulPolls: 1,
+      failedPolls: 0,
+      processedEvents: 0,
+      checkpointRecovered: true,
+      checkpointProjectionHashMismatch: false,
+      finalSyncStatus: "SYNCED",
+    });
+    resumedStore.close();
+  });
 
   it("persists verified negative-risk conversion evidence and restores it without another RPC call", async () => {
     const sourceAsset = "100";
@@ -2394,6 +2487,109 @@ describe("ObserveOnlyRunner", () => {
     expect((check.prepare(
       "SELECT count(*) count FROM negative_risk_conversion_evidence",
     ).get() as { count: number }).count).toBe(1);
+    check.close();
+  });
+
+  it("publishes a chronological source BUY and equivalent source exit for a tracked conversion", async () => {
+    const sourceAsset = "100";
+    const destinationAssets = ["201", "202", "203", "204"];
+    const sourceConditionId = `0x${"9".repeat(64)}`;
+    const groupConditionId = `0x${"4".repeat(64)}`;
+    const transactionHash = `0x${"3".repeat(64)}`;
+    const sourceBuy = trade({
+      transactionHash: `0x${"2".repeat(64)}`,
+      conditionId: sourceConditionId,
+      asset: sourceAsset,
+      price: "0.5",
+      size: "10",
+      timestamp: baselineSecond + 20,
+    });
+    const conversion = activity({
+      type: "CONVERSION",
+      transactionHash,
+      conditionId: groupConditionId,
+      size: "10",
+      eventSlug: "fed-decision-in-july-test",
+      timestamp: baselineSecond + 30,
+    });
+    const currentPositions = destinationAssets.map((asset, index) => (
+      negativeRiskPosition(asset, String(index + 1))
+    ));
+    const current = snapshot([sourceBuy], currentPositions, "2026-07-08T00:01:10.000Z");
+    current.activity = capture("activity", [
+      { ...sourceBuy, type: "TRADE", isCombo: false },
+      conversion,
+    ], current.activity.fetchedAt);
+    const { databasePath, baselineRunId } = setup([]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([
+      snapshot([], [], now.toISOString()),
+      current,
+    ]), {
+      walletAddress: wallet,
+      baselineRunId,
+      pollIntervalMs: 1_000,
+      now: () => now,
+      negativeRiskConversionReceiptProvider: {
+        async transactionReceipt() {
+          return conversionReceipt(
+            transactionHash,
+            groupConditionId,
+            sourceAsset,
+            destinationAssets,
+            10_000_000n,
+          );
+        },
+      },
+      signalMarketMetadataProvider: {
+        async market(conditionId) {
+          return {
+            sourceUrl: `https://clob.test/markets/${conditionId}`,
+            fetchedAt: now.toISOString(),
+            market: {
+              condition_id: conditionId,
+              end_date_iso: "2026-07-08T01:00:00.000Z",
+              closed: false,
+              tokens: [
+                { token_id: sourceAsset, outcome: "Yes" },
+                { token_id: "101", outcome: "No" },
+              ],
+            },
+          };
+        },
+      },
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:10.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
+      processedEvents: 2,
+      emittedSignals: 2,
+      majorDesyncCount: 0,
+      finalSyncStatus: "SYNCED",
+    });
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare(
+      `SELECT signal_type,asset_id,condition_id,reason,execution_eligible
+       FROM signals ORDER BY created_at,signal_id`,
+    ).all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ signal_type: "TARGET_BUY", asset_id: sourceAsset }),
+      expect.objectContaining({
+        signal_type: "TARGET_SELL",
+        asset_id: sourceAsset,
+        condition_id: sourceConditionId,
+        reason: "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
+        execution_eligible: 1,
+      }),
+    ]));
+    expect((check.prepare(
+      "SELECT count(*) count FROM signals WHERE signal_type='TARGET_CONVERSION'",
+    ).get() as { count: number }).count).toBe(0);
     check.close();
   });
 

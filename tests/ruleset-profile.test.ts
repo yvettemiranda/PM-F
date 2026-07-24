@@ -62,7 +62,7 @@ describe("operator ruleset profile", () => {
       rules: Record<string, unknown>;
     };
     expect(document.schemaVersion).toBe(1);
-    expect(document.baseRulesetVersion).toBe("v1.10.0");
+    expect(document.baseRulesetVersion).toBe("v1.11.0");
     expect(Object.keys(document.rules).sort()).toEqual(Object.keys(DEFAULT_RULESET).sort());
   });
 

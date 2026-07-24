@@ -28,6 +28,7 @@ import {
   type NegativeRiskConversionReceiptProvider,
 } from "./negative-risk-conversion.js";
 import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
+import { verifySplitProjection } from "./split-projection.js";
 import { PolygonOrderFilledFeedUnsafeError } from "./polygon-order-filled-trade-feed.js";
 import type { ObserveWakeResult, ObserveWakeSource } from "./polygon-order-filled-wake-feed.js";
 
@@ -554,17 +555,20 @@ export class ObserveOnlyRunner {
     const marketCache = new Map<string, Promise<Awaited<ReturnType<SignalMarketMetadataProvider["market"]>>>>();
     const mergeOutcomeAssetsByCondition = new Map<string, readonly string[]>();
     const pendingMergeConditions = new Set<string>();
-    const mergeEventsByCondition = new Map<string, ObserveEvent[]>();
+    const marketSetEventsByCondition = new Map<string, ObserveEvent[]>();
     for (const event of allEvents) {
-      const conditionId = event.activity?.type === "MERGE"
-        ? event.activity.conditionId?.toLowerCase()
+      const activity = event.activity;
+      const needsOutcomeSet = activity?.type === "MERGE"
+        || (activity?.type === "SPLIT" && !event.split);
+      const conditionId = needsOutcomeSet
+        ? activity.conditionId?.toLowerCase()
         : undefined;
       if (!conditionId) continue;
-      const grouped = mergeEventsByCondition.get(conditionId) ?? [];
+      const grouped = marketSetEventsByCondition.get(conditionId) ?? [];
       grouped.push(event);
-      mergeEventsByCondition.set(conditionId, grouped);
+      marketSetEventsByCondition.set(conditionId, grouped);
     }
-    for (const [conditionId, mergeEvents] of mergeEventsByCondition) {
+    for (const [conditionId, marketSetEvents] of marketSetEventsByCondition) {
       if (!this.options.signalMarketMetadataProvider) continue;
       try {
         const marketPromise = this.options.signalMarketMetadataProvider.market(conditionId, signal);
@@ -577,9 +581,9 @@ export class ObserveOnlyRunner {
       } catch (error) {
         const errorDetail = error instanceof Error ? error.message : String(error);
         if (!errorDetail.startsWith("MARKET_OUTCOME_SET_")) pendingMergeConditions.add(conditionId);
-        for (const event of mergeEvents) {
+        for (const event of marketSetEvents) {
           signalEnrichmentFailures.push({
-            signalId: `MERGE_MARKET_OUTCOME_SET:${event.sourceEventKey}`,
+            signalId: `${event.activity?.type ?? "SPECIAL"}_MARKET_OUTCOME_SET:${event.sourceEventKey}`,
             sourceEventKey: event.sourceEventKey,
             conditionId,
             errorDetail,
@@ -588,6 +592,7 @@ export class ObserveOnlyRunner {
       }
     }
     const conversionEvidence: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["conversionEvidence"] = [];
+    const splitEvidence: Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["splitEvidence"] = [];
     let projection: ReturnType<typeof projectObserveEvents>;
     try {
       for (const event of allEvents) {
@@ -604,11 +609,35 @@ export class ObserveOnlyRunner {
         event.conversion = conversion;
         conversionEvidence.push({ sourceEventKey: event.sourceEventKey, conversion, receipt });
       }
+      for (const event of allEvents) {
+        if (event.activity?.type !== "SPLIT" || event.split) continue;
+        const provider = this.options.signalMarketMetadataProvider;
+        if (!provider) throw new Error("SPLIT_MARKET_METADATA_PROVIDER_UNAVAILABLE");
+        let marketPromise = marketCache.get(event.activity.conditionId?.toLowerCase() ?? "");
+        if (!marketPromise) {
+          const conditionId = event.activity.conditionId?.toLowerCase();
+          if (!conditionId) throw new Error("SPLIT_CONDITION_ID_MISSING");
+          marketPromise = provider.market(conditionId, signal);
+          marketCache.set(conditionId, marketPromise);
+        }
+        const market = await marketPromise;
+        const split = verifySplitProjection({
+          activity: event.activity,
+          market: market.market,
+          marketSourceUrl: market.sourceUrl,
+          marketFetchedAt: market.fetchedAt,
+          positions: snapshot.positions.data,
+          positionsSnapshotTime: snapshot.positions.fetchedAt,
+        });
+        event.split = split;
+        splitEvidence.push({ sourceEventKey: event.sourceEventKey, split });
+      }
       projection = projectObserveEvents(
         started.baseline,
         allEvents,
         {
           requireVerifiedConversions: true,
+          requireVerifiedSplits: true,
           mergeOutcomeAssetsByCondition,
           pendingMergeConditions,
           followSellFullExitThresholdPpm: RULESET.followSellFullExitThresholdPpm,
@@ -672,13 +701,14 @@ export class ObserveOnlyRunner {
         decimalToScaled(position.size, SHARE_SCALE_DIGITS),
       ]),
     );
-    const conversionAssets = new Set(
-      conversionEvidence.flatMap(({ conversion }) => [
+    const specialProjectionAssets = new Set([
+      ...conversionEvidence.flatMap(({ conversion }) => [
         conversion.sourceAsset,
         ...conversion.destinationAssets.map((destination) => destination.asset),
       ]),
-    );
-    const exactMismatchAsset = [...conversionAssets].find((asset) => (
+      ...splitEvidence.flatMap(({ split }) => split.outcomeAssets),
+    ]);
+    const exactMismatchAsset = [...specialProjectionAssets].find((asset) => (
       (expectedPositions.get(asset) ?? 0n) !== (observedPositions.get(asset) ?? 0n)
     ));
     // A receipt proves the on-chain conversion, but it is not sufficient on
@@ -686,25 +716,29 @@ export class ObserveOnlyRunner {
     // with the complete ordered projection before evidence becomes immutable.
     // Retrying the poll is safer than certifying a conversion during even a
     // transient quantity disagreement.
-    if (conversionEvidence.length > 0 && exactMismatchAsset) {
+    if ((conversionEvidence.length > 0 || splitEvidence.length > 0) && exactMismatchAsset) {
       this.store.recordFailedPoll(
         started.observeRunId,
         sequence,
         pollStartedAt,
         completedAt,
-        new Error(`NEGATIVE_RISK_CONVERSION_POSITION_QUANTITY_MISMATCH:${exactMismatchAsset}`),
+        new Error(splitEvidence.length > 0
+          ? `SPLIT_POSITION_QUANTITY_MISMATCH:${exactMismatchAsset}`
+          : `NEGATIVE_RISK_CONVERSION_POSITION_QUANTITY_MISMATCH:${exactMismatchAsset}`),
         "PROCESSING_FAILED",
       );
       this.lastPollCompletedAt = completedAt;
       return false;
     }
-    if (conversionEvidence.length > 0 && reconciliation.syncStatus !== "SYNCED") {
+    if ((conversionEvidence.length > 0 || splitEvidence.length > 0) && reconciliation.syncStatus !== "SYNCED") {
       this.store.recordFailedPoll(
         started.observeRunId,
         sequence,
         pollStartedAt,
         completedAt,
-        new Error(`NEGATIVE_RISK_CONVERSION_POSITIONS_UNVERIFIED:${reconciliation.syncStatus}`),
+        new Error(splitEvidence.length > 0
+          ? `SPLIT_POSITIONS_UNVERIFIED:${reconciliation.syncStatus}`
+          : `NEGATIVE_RISK_CONVERSION_POSITIONS_UNVERIFIED:${reconciliation.syncStatus}`),
         "PROCESSING_FAILED",
       );
       this.lastPollCompletedAt = completedAt;
@@ -792,6 +826,7 @@ export class ObserveOnlyRunner {
       newEvents,
       eventConfirmations,
       conversionEvidence,
+      splitEvidence,
       duplicateEvents,
       projection,
       signalsToEmit,

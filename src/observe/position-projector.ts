@@ -5,7 +5,7 @@ import { stableJson } from "../domain/versioning.js";
 import { effectiveTargetSellRatio } from "../execution/target-sell-policy.js";
 import type { ObserveBaseline, ObserveEvent, ObserveProjectionEntry, ObserveProjectionResult, ObserveSignal } from "./types.js";
 
-export const OBSERVE_SIGNAL_VERSION = "observe-v1.4.0";
+export const OBSERVE_SIGNAL_VERSION = "observe-v1.5.0";
 
 function signalKey(baselineRunId: string, sourceEventKey: string, type: string, asset = ""): string {
   const identity = [OBSERVE_SIGNAL_VERSION, baselineRunId, sourceEventKey, type];
@@ -49,6 +49,7 @@ export function projectObserveEvents(
   events: ObserveEvent[],
   options: {
     requireVerifiedConversions?: boolean;
+    requireVerifiedSplits?: boolean;
     mergeOutcomeAssetsByCondition?: ReadonlyMap<string, readonly string[]>;
     pendingMergeConditions?: ReadonlySet<string>;
     followSellFullExitThresholdPpm?: number;
@@ -99,42 +100,52 @@ export function projectObserveEvents(
           conditionByAsset.set(destination.asset, destination.conditionId);
           historical.set(
             destination.asset,
-            (historical.get(destination.asset) ?? 0n) + historicalConverted,
-          );
-          tracked.set(
-            destination.asset,
-            (tracked.get(destination.asset) ?? 0n) + trackedConverted,
+            (historical.get(destination.asset) ?? 0n) + historicalConverted + trackedConverted,
           );
           lastEventByAsset.set(destination.asset, event.sourceEventKey);
         }
         if (trackedConverted > 0n) {
-          const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_CONVERSION");
+          const sourcePrice = lastPriceByAsset.get(sourceAsset);
+          const sourceConditionId = conditionByAsset.get(sourceAsset);
+          if (!event.isGap && (!sourcePrice || sourcePrice <= 0n || !sourceConditionId)) {
+            throw new Error(`NEGATIVE_RISK_CONVERSION_SOURCE_EXIT_EVIDENCE_MISSING:${event.sourceEventKey}`);
+          }
+          const id = signalKey(baseline.baselineRunId, event.sourceEventKey, "TARGET_SELL", sourceAsset);
           signals.push({
             signalId: id,
             targetId: baseline.targetId,
             signalIdempotencyKey: id,
             sourceEventKey: event.sourceEventKey,
-            signalType: "TARGET_CONVERSION",
+            signalType: "TARGET_SELL",
             asset: sourceAsset,
-            conditionId: conversion.groupConditionId,
-            targetPriceUnits: "0",
+            conditionId: sourceConditionId ?? conversion.groupConditionId,
+            targetPriceUnits: (sourcePrice ?? 0n).toString(),
             targetSizeMicros: amount.toString(),
             sellRatioNumerator: trackedConverted.toString(),
             sellRatioDenominator: beforeTracked.toString(),
             reason: event.isGap
-              ? "GAP_NEGATIVE_RISK_CONVERSION_RECORDED"
-              : "TRACKED_NEGATIVE_RISK_CONVERSION_RECORDED",
+              ? "GAP_NEGATIVE_RISK_CONVERSION_SOURCE_EXIT_RECORDED"
+              : "TARGET_CONVERSION_EQUIVALENT_SOURCE_EXIT",
             eventClassification: "NEGATIVE_RISK_CONVERSION",
-            executionEligible: false,
-            executionBlockReason: event.isGap
-              ? "GAP_NEGATIVE_RISK_CONVERSION_UNFOLLOWED"
-              : "NEGATIVE_RISK_CONVERSION_EXECUTION_UNAVAILABLE",
+            executionEligible: !event.isGap,
+            executionBlockReason: event.isGap ? "GAP_EVENT" : null,
           });
         }
         continue;
       }
       if (event.activity.type === "SPLIT") {
-        unsupportedActivities.push({ sourceEventKey: event.sourceEventKey, activityType: "SPLIT" });
+        if (!event.split) {
+          if (options.requireVerifiedSplits) {
+            throw new Error(`SPLIT_PROJECTION_EVIDENCE_MISSING:${event.sourceEventKey}`);
+          }
+          unsupportedActivities.push({ sourceEventKey: event.sourceEventKey, activityType: "SPLIT" });
+          continue;
+        }
+        for (const asset of event.split.outcomeAssets) {
+          conditionByAsset.set(asset, event.split.conditionId);
+          historical.set(asset, (historical.get(asset) ?? 0n) + BigInt(event.split.amountMicros));
+          lastEventByAsset.set(asset, event.sourceEventKey);
+        }
         continue;
       }
       if (event.activity.type === "MERGE") {
