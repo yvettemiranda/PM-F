@@ -317,6 +317,7 @@ describe("Paper Campaign operator shell", () => {
     expect(common).toContain("OPERATOR_SOURCE_PROVENANCE");
     expect(common).toContain("sourceCodeDirty: provenance.sourceCodeDirty ?? null");
     expect(common).toContain("coreCompatibilityHash: provenance.coreCompatibilityHash ?? null");
+    expect(common).toContain("operator_cleanup_stale_campaign_artifacts");
     expect(common).toContain('"$actual_pnpm" != "$expected_pnpm"');
     expect(phase0).toContain("preparePhase0ValidationDatabase");
     expect(phase0).not.toContain("database.initialize()");

@@ -442,7 +442,23 @@ operator_stop_registered_sessions() {
     rm -f "$RUN_DIR/active.lock"/*.tmp(N)
     rmdir "$RUN_DIR/active.lock" 2>/dev/null || true
   fi
+  operator_cleanup_stale_campaign_artifacts
   return 0
+}
+
+operator_cleanup_stale_campaign_artifacts() {
+  [[ -d "$RUN_DIR/active.lock" ]] && return 0
+  local artifact basename pid
+  for artifact in "$RUN_DIR"/paper-campaign-pointer-*.marker(N) "$RUN_DIR"/operator-log-*.fifo(N); do
+    basename="${artifact:t}"
+    pid="${basename##*-}"
+    pid="${pid%.marker}"
+    pid="${pid%.fifo}"
+    [[ "$pid" == <-> ]] || continue
+    operator_process_running "$pid" && continue
+    print "清理已失效的运行工件：${basename}"
+    rm -f "$artifact"
+  done
 }
 
 operator_tsx() {
