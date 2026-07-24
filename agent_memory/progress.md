@@ -21,6 +21,7 @@
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
 - `PC-2EB95BD31A8EB9693837 / PS-58AB7048A91D8264E009` 运行约 2 小时 52 分后异常结束：Observe 结果最终 `SYNCED`，Paper 失败为 `unable to open database file`；macOS System Policy/TCC 同时拒绝 WAL 与 operator pointer 访问。
 - `--recover-only` 已安全将旧 Session 标记 `BLOCKED`、旧 Campaign 标记 `FROZEN`；正式 Session/Campaign 报告和 ZIP 不生成，数据库 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`，安全 Gate 未变化。
+- 已通过 macOS 系统设置核验：终端的“文稿”文件夹访问为开启，ChatGPT 的“完全磁盘访问权限”为开启；本次未重复切换或扩大权限，也未启动新 Paper。
 
 ## Next steps
 1. 保持当前旧 Campaign 只作为冻结失败证据，不把这次时长计入新 core 的 4 小时门槛。
