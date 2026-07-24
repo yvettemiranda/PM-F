@@ -588,13 +588,20 @@ async function main(): Promise<void> {
   await prepareRuntimeDatabase({ databasePath, sourceVersion });
   const targetBinding = findTargetAndBaseline();
   const isolated = await readJson<IsolatedVerificationEvidence>(isolatedEvidencePath);
-  if (!verifyIsolatedVerificationEvidence(
+  const isolatedEvidenceValid = verifyIsolatedVerificationEvidence(
     isolated,
     coreCompatibilityHash,
     compatibilityEvidence.verificationSuiteHash,
     targetWallet,
-  )) {
+  );
+  if (!isolatedEvidenceValid && !recoveryOnly) {
     throw new Error("PAPER_CAMPAIGN_ISOLATED_EVIDENCE_INVALID_OR_CORE_MISMATCH");
+  }
+  if (!isolatedEvidenceValid && recoveryOnly) {
+    console.log(JSON.stringify({
+      event: "PAPER_CAMPAIGN_RECOVERY_ONLY_USING_PRIOR_ISOLATED_EVIDENCE",
+      reason: "CURRENT_CORE_DOES_NOT_MATCH_ABANDONED_CAMPAIGN",
+    }));
   }
   const replayEvidence = await loadReplayEvidence(coreCompatibilityHash, targetBinding.targetId);
 
