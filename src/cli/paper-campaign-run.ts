@@ -571,19 +571,26 @@ async function main(): Promise<void> {
     clockCalibration,
     safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
   }));
-  try {
-    assertPaperCampaignPreMigrationCompatible({ databasePath, manifest, targetWallet });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!message.startsWith("ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:")) throw error;
-    const frozen = freezePaperCampaignPreMigrationMismatch({
-      databasePath,
-      manifest,
-      sourceVersion,
-      now: new Date().toISOString(),
-      targetWallet,
-    });
-    throw new Error(`PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION:${frozen.campaignId ?? "UNKNOWN"}`);
+  if (!recoveryOnly) {
+    try {
+      assertPaperCampaignPreMigrationCompatible({ databasePath, manifest, targetWallet });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.startsWith("ACTIVE_CAMPAIGN_CORE_MISMATCH_BEFORE_MIGRATION:")) throw error;
+      const frozen = freezePaperCampaignPreMigrationMismatch({
+        databasePath,
+        manifest,
+        sourceVersion,
+        now: new Date().toISOString(),
+        targetWallet,
+      });
+      throw new Error(`PAPER_CAMPAIGN_FROZEN_BEFORE_MIGRATION:${frozen.campaignId ?? "UNKNOWN"}`);
+    }
+  } else {
+    console.log(JSON.stringify({
+      event: "PAPER_CAMPAIGN_RECOVERY_ONLY_SKIP_PRE_MIGRATION_GUARD",
+      reason: "RECOVERY_ONLY_DOES_NOT_MIGRATE_OR_START_NEW_CORE",
+    }));
   }
   await prepareRuntimeDatabase({ databasePath, sourceVersion });
   const targetBinding = findTargetAndBaseline();
