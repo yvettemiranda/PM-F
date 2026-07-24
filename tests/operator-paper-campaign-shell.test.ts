@@ -324,6 +324,7 @@ describe("Paper Campaign operator shell", () => {
     expect(campaignRunner).toContain("acceptedIncompleteReasons: isolated.proofs.acceptedIncompleteReasons");
     expect(campaignRunner).toContain("parsePaperCampaignChildResult");
     expect(campaignRunner).toContain("PAPER_CAMPAIGN_RECOVERY_POINTER_WRITE_FAILED");
+    expect(campaignRunner).toContain("--recover-only");
     expect(campaignRunner.indexOf("service.store.runningSession(snapshot.campaignId)"))
       .toBeLessThan(campaignRunner.indexOf("const startDisposition = paperCampaignStartDisposition("));
     expect(campaignEvidence).toContain("phase0ReplayStatus: evidence.proofs.phase0ReplayStatus");

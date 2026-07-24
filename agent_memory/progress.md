@@ -9,12 +9,13 @@
 - supervisor 收尾路径识别失败/无效 Paper 与 Observe 报告，进入失败收尾并把 Paper 原始失败信息写入报告 payload。
 - supervisor catch 对 pointer 写入失败做 best effort，保留原始错误并记录 `PAPER_CAMPAIGN_RECOVERY_POINTER_WRITE_FAILED`。
 - 启动顺序先回收或安全冻结旧 core 的遗留 `RUNNING` Session，再按 core hash 创建 replacement，避免重复点击和残留 `RUNNING`。
+- 新增受限 `--recover-only` supervisor 模式，只做遗留 Session 回收/安全冻结并退出，不创建新 Session、不启动 Paper/Observe。
 - 新源码与回归测试已纳入 Core compatibility manifest。
 
 ## Verification
 - 失败测试先红：缺失 child-result 模块。
-- 当前通过：TypeScript；相关测试 `5 files / 53 tests`。
-- 尚未运行全量 `55+` 文件测试，也尚未提交。
+- 当前通过：TypeScript；相关测试 `5 files / 53 tests`；此前全量 `56 files / 769 tests` 通过。
+- `--recover-only` 增量修复尚未提交；全量测试需在该增量后重跑。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程。
@@ -22,6 +23,6 @@
 - 正式 Session/Campaign 报告和 ZIP 未生成；数据库仍为 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`，安全 Gate 未变化。
 
 ## Next steps
-1. 完成全量测试、`git diff --check` 和静态审查，提交当前修复。
+1. 完成增量全量测试、`git diff --check` 和静态审查，提交当前修复。
 2. 先让启动程序获得 macOS `Documents` 访问权限，再安全回收本次遗留 Session；不把这次时长计入新 core 的 4 小时门槛。
 3. 从干净新提交创建新 Campaign，重新累计自然 Paper。

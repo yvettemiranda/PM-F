@@ -86,6 +86,7 @@ const latestPointerPath = resolve(projectRoot, "data/operator/paper-campaign-lat
 const targetWallet = normalizeTargetWallet(process.argv
   .find((argument) => argument.startsWith("--target-wallet="))
   ?.slice("--target-wallet=".length));
+const recoveryOnly = process.argv.includes("--recover-only");
 const operatorOwnerToken = process.argv
   .find((argument) => argument.startsWith("--operator-owner-token="))
   ?.slice("--operator-owner-token=".length) ?? null;
@@ -616,6 +617,9 @@ async function main(): Promise<void> {
 
   try {
     const ids = service.store.campaignIdsForTarget(targetBinding.targetId);
+    if (recoveryOnly && ids.length === 0) {
+      throw new Error("PAPER_CAMPAIGN_RECOVERY_NOTHING_TO_RECOVER");
+    }
     let snapshot = ids.length === 0
       ? createCampaign(service, manifest, sourceVersion, compatibilityEvidence, targetBinding)
       : service.campaignSnapshot(ids.at(-1)!);
@@ -623,7 +627,8 @@ async function main(): Promise<void> {
       throw new Error(`PAPER_CAMPAIGN_TARGET_BINDING_MISMATCH:${snapshot.campaignId}`);
     }
     let interruptedSessionHandled = false;
-    if (service.store.runningSession(snapshot.campaignId)) {
+    const interruptedSession = service.store.runningSession(snapshot.campaignId);
+    if (interruptedSession) {
       try {
         await recoverInterrupted(service, snapshot, manifest, sourceVersion, isolated);
       } catch (error) {
@@ -639,6 +644,28 @@ async function main(): Promise<void> {
       }
       interruptedSessionHandled = true;
       snapshot = service.campaignSnapshot(snapshot.campaignId);
+    }
+    if (recoveryOnly) {
+      const recoveredAt = new Date().toISOString();
+      await writeJsonAtomically(latestPointerPath, {
+        campaignId: snapshot.campaignId,
+        sessionId: interruptedSession?.sessionId ?? snapshot.latestSessionId,
+        state: snapshot.state,
+        recoveryOnly: true,
+        operatorOwnerToken,
+        updatedAt: recoveredAt,
+      });
+      console.log(JSON.stringify({
+        event: "PAPER_CAMPAIGN_RECOVERY_ONLY_COMPLETE",
+        campaignId: snapshot.campaignId,
+        sessionId: interruptedSession?.sessionId ?? snapshot.latestSessionId,
+        campaignState: snapshot.state,
+        interruptedSessionHandled,
+        executionMode: "PAPER",
+        liveGateState: "LIVE_DISABLED",
+        liveAllowed: false,
+      }));
+      return;
     }
     const startDisposition = paperCampaignStartDisposition(
       snapshot,
