@@ -12,14 +12,17 @@
 - 启动顺序先回收或安全冻结旧 core 的遗留 `RUNNING` Session，再按 core hash 创建 replacement，避免重复点击和残留 `RUNNING`。
 - 新增受限 `--recover-only` supervisor 模式，只做遗留 Session 回收/安全冻结并退出，不创建新 Session、不启动 Paper/Observe。
 - 新源码与回归测试已纳入 Core compatibility manifest。
+- 2026-07-25 首次启动时，隔离套件中的重型 Shell 打包参数化用例在全套并发下触发默认 `5 s` 超时；已仅将该两组集成用例的显式时限调整为 `15 s`，不改生产逻辑或安全 Gate。
 
 ## Verification
 - 失败测试先红：缺失 child-result 模块。
 - 当前通过：TypeScript；相关测试 `5 files / 53 tests`；此前全量 `56 files / 769 tests` 通过；恢复工件清理后追加 Shell 生命周期测试 `2 files / 16 tests` 通过，`git diff --check` 通过。
 - `--recover-only` 与恢复工件清理修复均已提交；本次最终只变更项目记忆文件，不影响运行时代码。
+- 超时修复后，Shell 打包文件 `12/12` 通过；TypeScript 与全套 `56 files / 769 tests` 通过。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
+- 2026-07-25 10:57 首次启动在隔离测试阶段安全拒绝：`768/769` 通过，唯一失败为重型 Shell 打包用例超过默认 `5 s`；未创建新 Campaign/Session，未进入 Paper/Observe。
 - 深度清理释放约 2.32 GB；清理后磁盘可用空间约 309 GB。`~/.cache/codex-runtimes` 保留约 1.6 GB。
 - `PC-2EB95BD31A8EB9693837 / PS-58AB7048A91D8264E009` 运行约 2 小时 52 分后异常结束：Observe 结果最终 `SYNCED`，Paper 失败为 `unable to open database file`；macOS System Policy/TCC 同时拒绝 WAL 与 operator pointer 访问。
 - `--recover-only` 已安全将旧 Session 标记 `BLOCKED`、旧 Campaign 标记 `FROZEN`；正式 Session/Campaign 报告和 ZIP 不生成，数据库 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`，安全 Gate 未变化。

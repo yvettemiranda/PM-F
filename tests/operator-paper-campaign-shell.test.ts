@@ -515,7 +515,7 @@ describe("Paper Campaign operator shell", () => {
       sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
       coreCompatibilityHash: bundled.expectedCurrentCoreHash,
     });
-  });
+  }, 15_000);
 
   it("packages every Phase0 and Replay attempt from the current launch only", () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
