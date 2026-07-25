@@ -1,7 +1,6 @@
 # Bugs And Risks
 
 ## Active blockers
-- 本轮 Campaign 因 macOS System Policy/TCC 在 16:45 CST 拒绝 Node 读取 `phase0.sqlite-wal`、删除 WAL/SHM 和更新 pointer，Paper 失败为 `unable to open database file`；需先恢复启动程序的 Documents 访问并安全回收遗留 `RUNNING` Session。
 - 新 Core 尚未开始自然 Paper；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 与特殊操作自然样本未覆盖。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
@@ -9,6 +8,8 @@
 - geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
+- 上轮 Campaign 曾因 macOS System Policy/TCC attribution chain 异常而失去 `Documents` 内 WAL/pointer 访问；终端“文稿”权限与 ChatGPT 完全磁盘访问当前均已开启，修复后的 supervisor 会保留原始失败并安全冻结遗留状态，但新一轮仍需持续观察是否复发。
+- 深度清理已删除用户级应用缓存和日志；相关应用下次启动可能需要重新生成缓存或重新建立索引，未删除 Codex runtime 以避免破坏当前工具环境。
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
