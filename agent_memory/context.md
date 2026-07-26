@@ -8,7 +8,7 @@
 ## Safety boundary
 - 必须保持 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
 - 未再次明确授权前，禁止 private key/seed、真实 signer、认证 CLOB submit/cancel、approve、真实 redeem、真实订单、真实资金和链上写入。
-- 禁止绕过 geoblock、时钟、安全 Gate、数据完整性 Gate，禁止覆盖历史失败证据或跨核心混算验证时长。
+- 禁止绕过 geoblock、时钟、安全 Gate、数据完整性 Gate，禁止覆盖历史失败证据。用户已明确授权把旧 Core 的有效 `12 h` 与新 Core 的有效 `12 h` 作为独立证据跨 Core 汇总，但不得篡改数据库或伪称同 Core Campaign 完成。
 - Gap、无法证明的跨源去重、证据不完整的 SPLIT/CONVERSION、无法证明完整 outcome set 的 MERGE 继续 fail closed。
 
 ## Runtime architecture
@@ -38,13 +38,16 @@
 - 当前源码目标版本：Schema `2.30.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.17.0`、Live `1.14.0`、Validation `1.8.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
 - 当前运行数据库是 Schema `2.30.0`；本轮已完成迁移但异常 Session 未生成正式报告。后续启动仍必须沿用备份优先和既有入口。
 - `BUY_AMOUNT_POLICY_V4` 与 `followSellFullExitThresholdPpm=950000` 只由包含相应字段的新 Ruleset 解释；旧 Ruleset 固定按旧语义恢复，不得重解释历史执行。
-- Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign，旧时长不能继承。
+- Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
 
 ## Current runtime and evidence
-- `PC-A1C63D1657110D955029` 的前三个 Session 各有约 `4 h` 有效运行，累计 `43,200,006 ms`；第四个 Session `PS-BFDD2F7E81AA8ADE1EAB` 在 MacBook 合盖睡眠期间启动，出现 `13` 个 scheduling gap、最大 gap `2,538,381 ms`，最终 `FINAL_DRAIN_INCOMPLETE`，有效时长 `0`、Campaign `BLOCKED`。
-- `pmset` 证明 2026-07-26 03:08—09:13 机器持续处于 Deep Idle/DarkWake；`caffeinate` 不能阻止合盖睡眠。失败不是跟单策略或 API 缺陷，失败 Session 和轮换空窗均不得计时。
-- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理；数据库 `quick_check=ok`、外键问题 `0`，安全状态仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Attempt/Fill 全为 `0`。
-- 正在加入启动前 `AppleClamshellState` fail-closed 检查；该修复会改变 Core，旧 12 小时只保留为历史证据，修复后新 Core 必须重新累计 24 小时。
+- 旧 Core `PC-A1C63D1657110D955029` 固定有效基线为 `43,200,006 ms`；合盖失败轮 `PS-BFDD2F7E81AA8ADE1EAB` 为 `0 ms`，不计入。
+- 新 Core `a8fbf2...` / Campaign `PC-1FA2F49244FE2B7BE43D` 第 1 轮 `PS-82029D62FCBC90727F35` 正常完成并计入 `14,400,002 ms`。
+- 新 Core 第 2 轮 `PS-8B337FF558CBBFA6BAD7` 在满 `4 h` 的最终估值窗口遇到公共市场数据持续超时，Paper 返回 `FINAL_DRAIN_INCOMPLETE`；该轮 `countsTowardCampaign=false`，Campaign 因同 Core 终态策略进入 `BLOCKED`。
+- 第 2 轮 Observe 最终对账为 `SYNCED`，但收尾前 API 超时窗口未在 Session 结束前恢复；稍后只读复测公共 API 已恢复。数据库 `quick_check=ok`、外键问题 `0`，全程仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Attempt/Fill 全为 `0`。
+- 用户已明确授权：若 Session 已完整运行、Observe 无调度/数据 gap 且最终 `SYNCED`、数据库和安全门正常、公共市场数据随后恢复，并且唯一失败是最终估值的 `FINAL_DRAIN_INCOMPLETE`，则可在独立业主汇总中计入该轮，但不得改写原始 Session/Campaign 报告。
+- 第 2 轮据此以 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION` 计入 `14,400,002 ms`；用户口径当前累计为旧 Core `43,200,006 ms` + 新 Core 第 1 轮 `14,400,002 ms` + 第 2 轮例外 `14,400,002 ms`，合计 `72,000,010 ms`，还缺 `14,399,990 ms`。
+- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。验收策略改动会产生新 Core；通过正式入口创建 replacement 后再运行最后一轮约 `4 h`。
 
 ## Remaining blockers before small Live
 - 合盖保护修复后的新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。

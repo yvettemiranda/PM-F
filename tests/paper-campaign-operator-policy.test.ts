@@ -4,6 +4,7 @@ import {
   paperCampaignReplacementReason,
   paperCampaignStartDisposition,
   paperCampaignPlannedDurationOverride,
+  paperOwnerAuthorizedFinalizationRuntimePolicy,
   paperQualifyingFinalizationPolicy,
 } from "../src/paper-validation/operator-policy.js";
 import { paperCompatibilityEvidenceRefreshRequired } from "../src/paper-validation/preflight.js";
@@ -238,5 +239,94 @@ describe("paper Campaign operator policy", () => {
       stopReason: "PLANNED_SESSION_DURATION_REACHED",
       gateBlockers: ["MINIMUM_RUNTIME_NOT_REACHED"],
     })).toEqual({ blockers: ["MINIMUM_RUNTIME_NOT_REACHED"], qualificationDeferred: false });
+  });
+
+  it("credits a full healthy runtime when only final public valuation timed out and the owner accepts it", () => {
+    const accepted = paperOwnerAuthorizedFinalizationRuntimePolicy({
+      ownerAuthorized: true,
+      stopReason: "PLANNED_SESSION_DURATION_REACHED",
+      blockers: [
+        "PAPER_CHILD_FAILED:FINAL_DRAIN_INCOMPLETE",
+        "PAPER_EXIT_CODE:1",
+      ],
+      plannedDurationMs: 14_400_000,
+      effectiveActiveRuntimeMs: 14_400_002,
+      longestHealthySegmentMs: 14_400_002,
+      observe: {
+        successfulPolls: 8_200,
+        schedulingGapCount: 0,
+        gapEvents: 0,
+        majorDesyncCount: 0,
+        finalSyncStatus: "SYNCED",
+      },
+      databaseIntegrityPassed: true,
+      externalMarketDataRecovered: true,
+      safety: {
+        executionMode: "PAPER",
+        liveGateState: "LIVE_DISABLED",
+        liveAllowed: false,
+        privateKeyLoaded: false,
+        authenticatedTradingClientPresent: false,
+        realOrdersCreated: 0,
+        chainWrites: 0,
+      },
+    });
+    expect(accepted).toEqual({
+      accepted: true,
+      creditedRuntimeMs: 14_400_002,
+      disclosure: "OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION",
+      reasons: [],
+    });
+  });
+
+  it("never credits an early, unsafe, desynchronized, or unverified finalization failure", () => {
+    const baseline = {
+      ownerAuthorized: true,
+      stopReason: "PLANNED_SESSION_DURATION_REACHED",
+      blockers: [
+        "PAPER_CHILD_FAILED:FINAL_DRAIN_INCOMPLETE",
+        "PAPER_EXIT_CODE:1",
+      ],
+      plannedDurationMs: 14_400_000,
+      effectiveActiveRuntimeMs: 14_400_002,
+      longestHealthySegmentMs: 14_400_002,
+      observe: {
+        successfulPolls: 8_200,
+        schedulingGapCount: 0,
+        gapEvents: 0,
+        majorDesyncCount: 0,
+        finalSyncStatus: "SYNCED",
+      },
+      databaseIntegrityPassed: true,
+      externalMarketDataRecovered: true,
+      safety: {
+        executionMode: "PAPER",
+        liveGateState: "LIVE_DISABLED",
+        liveAllowed: false,
+        privateKeyLoaded: false,
+        authenticatedTradingClientPresent: false,
+        realOrdersCreated: 0,
+        chainWrites: 0,
+      },
+    } as const;
+
+    const rejected = [
+      { ...baseline, ownerAuthorized: false },
+      { ...baseline, stopReason: "UNEXPECTED_CHILD_EXIT" },
+      { ...baseline, effectiveActiveRuntimeMs: 14_399_999 },
+      { ...baseline, blockers: [...baseline.blockers, "MAJOR_DESYNC:1"] },
+      { ...baseline, observe: { ...baseline.observe, schedulingGapCount: 1 } },
+      { ...baseline, observe: { ...baseline.observe, finalSyncStatus: "INCOMPLETE" } },
+      { ...baseline, databaseIntegrityPassed: false },
+      { ...baseline, externalMarketDataRecovered: false },
+      { ...baseline, safety: { ...baseline.safety, liveAllowed: true } },
+      { ...baseline, safety: { ...baseline.safety, realOrdersCreated: 1 } },
+    ].map((input) => paperOwnerAuthorizedFinalizationRuntimePolicy(input));
+
+    expect(rejected.every((result) => (
+      !result.accepted
+      && result.creditedRuntimeMs === 0
+      && result.reasons.length > 0
+    ))).toBe(true);
   });
 });
