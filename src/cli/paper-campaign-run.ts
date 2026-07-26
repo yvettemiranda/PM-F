@@ -22,6 +22,7 @@ import {
 } from "../paper-validation/core-compatibility.js";
 import {
   checkPaperCampaignClockSafety,
+  checkPaperCampaignPowerSafety,
   type PaperCampaignClockSafetyEvidence,
 } from "../paper-validation/clock-safety.js";
 import {
@@ -559,6 +560,18 @@ async function main(): Promise<void> {
   const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
   const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
   const compatibilityEvidence = buildCurrentCompatibilityEvidence(projectRoot);
+  const powerSafety = checkPaperCampaignPowerSafety();
+  if (!recoveryOnly && powerSafety.status !== "PASSED") {
+    throw new Error(
+      `PAPER_CAMPAIGN_POWER_SAFETY_BLOCKED:${powerSafety.reason ?? "UNKNOWN"}`,
+    );
+  }
+  console.log(JSON.stringify({
+    event: "PAPER_CAMPAIGN_POWER_SAFETY_CHECKED",
+    powerSafety,
+    recoveryOnly,
+    safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
+  }));
   const clockCalibration: PaperCampaignClockSafetyEvidence = await checkPaperCampaignClockSafety();
   if (clockCalibration.status !== "PASSED" || clockCalibration.offsetMs === null) {
     throw new Error(

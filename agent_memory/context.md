@@ -41,13 +41,13 @@
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign，旧时长不能继承。
 
 ## Current runtime and evidence
-- 当前没有 Observe/Paper/Supervisor/launcher 后台进程；`PC-2EB95BD31A8EB9693837 / PS-58AB7048A91D8264E009` 于 2026-07-24 16:45 CST 因 macOS System Policy/TCC 同时拒绝 `phase0.sqlite-wal` 与 operator pointer 访问而异常结束，正式报告/ZIP 未生成；`--recover-only` 已将 Session 标记 `BLOCKED`、Campaign 标记 `FROZEN`，运行锁、marker、FIFO 已清理，数据库仍为 `PAPER + LIVE_DISABLED`、quick_check=ok、foreign_key_check=0。当前已核验终端“文稿”文件夹访问开启、ChatGPT 完全磁盘访问开启，未扩大权限。
-- 上一自然 Campaign `PC-305046D47E89A5529CDA` 已安全暂停：有效运行 `1.63 h`，Observe `5556/0`、Gap `0`、3 BUY Signal、1 SELL Signal、2 Fill、1 Realized PnL；它属于旧核心，只保留为自然路径证据。
-- 当前修复已提交（`9ea31be`、`a99b877`、`fed9753`、`6cc1e97`、`b1758c0`），包含失败子进程结果分流、pointer 写入失败保真、旧 core 遗留 Session 回收、`--recover-only` 和 stale marker/FIFO 清理；工作树干净，未启动新 Paper。
-- 安全状态保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，历史 Live Execution/Order/Fill/Attempt 为 `0`。
+- `PC-A1C63D1657110D955029` 的前三个 Session 各有约 `4 h` 有效运行，累计 `43,200,006 ms`；第四个 Session `PS-BFDD2F7E81AA8ADE1EAB` 在 MacBook 合盖睡眠期间启动，出现 `13` 个 scheduling gap、最大 gap `2,538,381 ms`，最终 `FINAL_DRAIN_INCOMPLETE`，有效时长 `0`、Campaign `BLOCKED`。
+- `pmset` 证明 2026-07-26 03:08—09:13 机器持续处于 Deep Idle/DarkWake；`caffeinate` 不能阻止合盖睡眠。失败不是跟单策略或 API 缺陷，失败 Session 和轮换空窗均不得计时。
+- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理；数据库 `quick_check=ok`、外键问题 `0`，安全状态仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Attempt/Fill 全为 `0`。
+- 正在加入启动前 `AppleClamshellState` fail-closed 检查；该修复会改变 Core，旧 12 小时只保留为历史证据，修复后新 Core 必须重新累计 24 小时。
 
 ## Remaining blockers before small Live
-- 新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。
+- 合盖保护修复后的新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。
 - SPLIT/CONVERSION 采用“退出或隔离”而非真实链上复制，可能与目标组合的经济结果不同；必须在 Paper 报告中单独统计。
 - 历史 Phase 0 若只有特殊 Activity、没有本系统提交的完整证明，Replay 会保持 `INCOMPLETE`，不得人工降级通过。
 - 官方结束时间缺失的 Live 策略、合规/geoblock、隔离钱包、真实 signer、真实 Live runtime 接线和 Live arming 尚未完成。

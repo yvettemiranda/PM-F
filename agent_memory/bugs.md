@@ -1,14 +1,14 @@
 # Bugs And Risks
 
 ## Active blockers
-- 新 Core 尚未开始自然 Paper；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 与特殊操作自然样本未覆盖。
+- 合盖保护修复后的新 Core 尚未开始自然 Paper；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 与特殊操作自然样本未覆盖。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
 - geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
-- 上轮 Campaign 曾因 macOS System Policy/TCC attribution chain 异常而失去 `Documents` 内 WAL/pointer 访问；终端“文稿”权限与 ChatGPT 完全磁盘访问当前均已开启，修复后的 supervisor 会保留原始失败并安全冻结遗留状态，但新一轮仍需持续观察是否复发。
+- `caffeinate` 无法阻止 MacBook 合盖睡眠；运行期间必须保持屏幕盖打开，可以锁屏或自动黑屏。启动前合盖检查只能避免在已合盖时误启动，不能阻止启动后再次合盖。
 - 深度清理已删除用户级应用缓存和日志；相关应用下次启动可能需要重新生成缓存或重新建立索引，未删除 Codex runtime 以避免破坏当前工具环境。
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
@@ -22,6 +22,7 @@
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
+- Paper Campaign 曾能在 MacBook 已合盖的 DarkWake 中启动，造成调度空窗、Gap 和最终阻断；当前启动前读取 `AppleClamshellState`，合盖时以 `MACBOOK_LID_CLOSED` fail closed。
 - 首次新核心隔离套件曾因两个真实打包集成用例共用默认 `5 s` 时限、在全套并发和冷缓存下出现单例超时；现在仅对这两个重型用例声明 `15 s`，生产打包与安全判断不变，全套 `769/769` 通过。
 - Paper child 失败 JSON 曾被 supervisor 当成正常报告，导致原始错误被二次异常和 pointer `EPERM` 覆盖；现在显式分流失败 payload、保留失败原因并在 core 变更前先处理遗留 Session。
 - Live 比例 BUY 曾以 available cash 作为资金比例基数，持仓后会系统性低估后续跟单；现在完整估值用 total equity，available cash 只作支付 cap。

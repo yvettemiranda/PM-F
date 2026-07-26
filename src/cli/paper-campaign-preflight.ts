@@ -6,7 +6,10 @@ import {
   buildCurrentCoreCompatibilityManifest,
   computeCoreCompatibilityHash,
 } from "../paper-validation/core-compatibility.js";
-import { checkPaperCampaignClockSafety } from "../paper-validation/clock-safety.js";
+import {
+  checkPaperCampaignClockSafety,
+  checkPaperCampaignPowerSafety,
+} from "../paper-validation/clock-safety.js";
 import { normalizeTargetWallet } from "../operator/target-wallet.js";
 import {
   paperCampaignReplacementAuthorized,
@@ -26,6 +29,18 @@ if (sourceVersion.dirty) throw new Error("PAPER_CAMPAIGN_REQUIRES_CLEAN_SOURCE")
 const manifest = buildCurrentCoreCompatibilityManifest(projectRoot);
 const coreCompatibilityHash = computeCoreCompatibilityHash(manifest);
 const compatibilityEvidence = buildCurrentCompatibilityEvidence(projectRoot);
+const powerSafety = checkPaperCampaignPowerSafety();
+if (powerSafety.status !== "PASSED") {
+  console.error(JSON.stringify({
+    status: "BLOCKED",
+    reason: "POWER_SAFETY_FAILED",
+    powerSafety,
+    sourceCodeCommit: sourceVersion.commit,
+    coreCompatibilityHash,
+    safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
+  }));
+  throw new Error(`PAPER_CAMPAIGN_POWER_SAFETY_BLOCKED:${powerSafety.reason ?? "UNKNOWN"}`);
+}
 const clockSafety = await checkPaperCampaignClockSafety();
 if (clockSafety.status !== "PASSED") {
   console.error(JSON.stringify({
@@ -86,6 +101,7 @@ console.log(JSON.stringify({
   sourceCodeCommit: sourceVersion.commit,
   coreCompatibilityHash,
   targetWallet,
+  powerSafety,
   clockSafety,
   safety: { executionMode: "PAPER", liveGateState: "LIVE_DISABLED", liveAllowed: false },
 }));

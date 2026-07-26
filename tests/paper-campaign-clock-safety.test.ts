@@ -4,6 +4,7 @@ import {
   CLOB_TIME_ENDPOINT,
   checkPaperCampaignClockSafety,
   evaluatePaperCampaignClockSafety,
+  evaluatePaperCampaignPowerSafety,
   PAPER_CLOCK_CALIBRATION_SAMPLE_COUNT,
 } from "../src/paper-validation/clock-safety.js";
 import type {
@@ -94,5 +95,31 @@ describe("Paper Campaign clock safety", () => {
       providerType: "FAKE",
       results: Array.from({ length: PAPER_CLOCK_CALIBRATION_SAMPLE_COUNT }, () => result(0)),
     })).toMatchObject({ status: "BLOCKED", reason: "CLOCK_PROVIDER_NOT_LIVE_READONLY" });
+  });
+});
+
+describe("Paper Campaign power safety", () => {
+  it("blocks a Campaign start while a MacBook lid is closed", () => {
+    expect(evaluatePaperCampaignPowerSafety({
+      checkedAt: "2026-07-26T01:00:00.000Z",
+      ioregOutput: '  |   "AppleClamshellState" = Yes\\n',
+    })).toEqual({
+      status: "BLOCKED",
+      lidState: "CLOSED",
+      checkedAt: "2026-07-26T01:00:00.000Z",
+      source: "IOREG_APPLE_CLAMSHELL_STATE",
+      reason: "MACBOOK_LID_CLOSED",
+    });
+  });
+
+  it("allows an open MacBook or a desktop without clamshell state", () => {
+    expect(evaluatePaperCampaignPowerSafety({
+      checkedAt: "2026-07-26T01:00:00.000Z",
+      ioregOutput: '  |   "AppleClamshellState" = No\\n',
+    })).toMatchObject({ status: "PASSED", lidState: "OPEN", reason: null });
+    expect(evaluatePaperCampaignPowerSafety({
+      checkedAt: "2026-07-26T01:00:00.000Z",
+      ioregOutput: "+-o IOPMrootDomain\\n",
+    })).toMatchObject({ status: "PASSED", lidState: "NOT_APPLICABLE", reason: null });
   });
 });

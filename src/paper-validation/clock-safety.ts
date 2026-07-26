@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { RULESET } from "../domain/versioning.js";
 import { MAX_MARKET_CLOCK_CALIBRATION_OFFSET_MS } from "../execution/market-data.js";
 import {
@@ -13,6 +14,7 @@ import type {
 export { CLOB_TIME_ENDPOINT };
 
 export const PAPER_CLOCK_CALIBRATION_SAMPLE_COUNT = 5;
+export const PAPER_POWER_SAFETY_SOURCE = "IOREG_APPLE_CLAMSHELL_STATE";
 
 export interface PaperCampaignClockSafetyEvidence {
   status: "PASSED" | "BLOCKED";
@@ -27,6 +29,68 @@ export interface PaperCampaignClockSafetyEvidence {
   sampleOffsetsMs: number[];
   spreadMs: number | null;
   reason: string | null;
+}
+
+export interface PaperCampaignPowerSafetyEvidence {
+  status: "PASSED" | "BLOCKED";
+  lidState: "OPEN" | "CLOSED" | "NOT_APPLICABLE" | "UNKNOWN";
+  checkedAt: string;
+  source: typeof PAPER_POWER_SAFETY_SOURCE;
+  reason: "MACBOOK_LID_CLOSED" | "POWER_SAFETY_EVIDENCE_INVALID" | "POWER_SAFETY_CHECK_FAILED" | null;
+}
+
+export function evaluatePaperCampaignPowerSafety(input: {
+  checkedAt: string;
+  ioregOutput: string;
+}): PaperCampaignPowerSafetyEvidence {
+  if (!Number.isFinite(Date.parse(input.checkedAt))) {
+    return {
+      status: "BLOCKED",
+      lidState: "UNKNOWN",
+      checkedAt: input.checkedAt,
+      source: PAPER_POWER_SAFETY_SOURCE,
+      reason: "POWER_SAFETY_EVIDENCE_INVALID",
+    };
+  }
+  const match = input.ioregOutput.match(/"AppleClamshellState"\s*=\s*(Yes|No)\b/);
+  if (!match) {
+    return {
+      status: "PASSED",
+      lidState: "NOT_APPLICABLE",
+      checkedAt: input.checkedAt,
+      source: PAPER_POWER_SAFETY_SOURCE,
+      reason: null,
+    };
+  }
+  const lidState = match[1] === "Yes" ? "CLOSED" : "OPEN";
+  return {
+    status: lidState === "CLOSED" ? "BLOCKED" : "PASSED",
+    lidState,
+    checkedAt: input.checkedAt,
+    source: PAPER_POWER_SAFETY_SOURCE,
+    reason: lidState === "CLOSED" ? "MACBOOK_LID_CLOSED" : null,
+  };
+}
+
+export function checkPaperCampaignPowerSafety(
+  checkedAt = new Date().toISOString(),
+): PaperCampaignPowerSafetyEvidence {
+  try {
+    const ioregOutput = execFileSync(
+      "/usr/sbin/ioreg",
+      ["-r", "-k", "AppleClamshellState", "-d", "4"],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+    return evaluatePaperCampaignPowerSafety({ checkedAt, ioregOutput });
+  } catch {
+    return {
+      status: "BLOCKED",
+      lidState: "UNKNOWN",
+      checkedAt,
+      source: PAPER_POWER_SAFETY_SOURCE,
+      reason: "POWER_SAFETY_CHECK_FAILED",
+    };
+  }
 }
 
 function resultIsWellFormed(result: ClockSafetyResult): boolean {
