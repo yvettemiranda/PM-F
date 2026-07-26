@@ -1,8 +1,8 @@
 # Progress
 
 ## Current task
-- 按用户授权完成跨 Core 累计验证：旧 Core 固定有效 `12 h`，新 Core 需再取得有效 `12 h`；最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION`，不得改写同 Core Campaign 的内建计时。
-- 全程保持 `PAPER + LIVE_DISABLED + liveAllowed=false`；异常时先判断安全性和数据完整性，再决定修复、重启或停止。
+- Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
+- 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
 
 ## Implemented
 - Risk Manager 现在把 `POLYGON_TRADE_FEED_UNSAFE` 事故限定到事故所属 Observe Run：新 Run 的 Signal 不再被旧 Run 的事故误拒绝，同时旧事故记录保持 `OPEN`，同 Run、归属缺失/损坏及其他 `MAJOR_DESYNC` 继续硬阻断。
@@ -32,16 +32,13 @@
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
-- 旧 Core 固定计入 `43,200,006 ms`；新 Core 第 1 轮正常计入 `14,400,002 ms`。
-- 新 Core 第 2 轮 `PS-8B337FF558CBBFA6BAD7` 运行满 `4 h`，但收尾市场数据超时导致 `FINAL_DRAIN_INCOMPLETE`，`countsTowardCampaign=false`，Campaign `PC-1FA2F49244FE2B7BE43D` 已 `BLOCKED`。
-- 第 2 轮 Observe 有 `8,200` 次成功轮询、`16` 次失败轮询、`6` 个事件、`2` 个 Signal、`0` 个 scheduling gap，最终对账 `SYNCED`；Paper 的 3 个持仓因最终估值不可用保守冻结。公共 API 随后已恢复。
-- 第 2 轮按用户授权外部收尾例外计入独立汇总；当前用户口径累计 `72,000,010 ms`，还缺 `14,399,990 ms`。
-- 修复前 replacement `PC-323157F9C8C2FBE4EA27` 的首轮因 Polygon confirmed cursor `0x56b313f` 浅层重组检测在约 `64 min` 时安全失败，`countsTowardCampaign=false`，该失败轮不计入；Paper 收尾完整、无持仓、现金/账本一致。
-- 浅层重组修复后的 `PC-5C99C6CBEEC9CC9CE5C2 / PS-5287E9167B4EBFE7B75B` 在 `3,962,220 ms` 时因审计发现旧 Run 风险标记误拦两笔新 BUY 而安全暂停；Session 原始报告完整保留且内部 `countsTowardCampaign=true`，但本次业主汇总不计该缺陷影响时长。
-- 本轮 `17` 个新事件全部 Activity 确认、`gap=0`；`15` 个 SELL 属于无 tracked/Paper 仓位的正常不跟，`2` 个 BUY 正常生成可执行 Signal，却被旧事故 ID `6d669d...` 错误拒绝。修复不补单、不追价，只影响后续新 Run Signal。
-- 数据库 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`，Live 数据全为 `0`，安全 Gate 未变化。
+- 最终 `PC-53F4B34D814FCDDFB663 / PS-04B30EBA4C1C49656AF7` 正常完成并计入 `14,400,002 ms`；独立业主累计为 `86,400,012 ms`，达到 24 小时。
+- 最终轮 `25` 个事件、`13` 个 Signal、`11` 个可执行 BUY 全部 Risk ALLOW 并被 Paper 消费；因安全限价/截止时间，`1,239` 个订单均零成交，当前无 Paper 持仓、手续费或盈亏。
+- Observe 最终 `SYNCED`，scheduling gap/major desync 为 `0`；数据库 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`。
+- `PAPER + LIVE_DISABLED + liveAllowed=false` 保持不变，Live execution/order/attempt/fill 全为 `0`。
+- 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 提交已验证的事故范围修复；保留两笔误拒和旧事故原始证据，不补单。
-2. 保持 MacBook 开盖，通过正式 Terminal 入口创建新 Core replacement 并重新运行最后一轮约 `4 h`。
-3. 每小时检查一次，正常时静默；完成后生成跨 Core/业主例外累计报告和 ZIP。
+1. 不再继续 Paper 累计运行。
+2. 在考虑小额 Live 前，单独完成合规/geoblock、隔离钱包、真实 signer、Live runtime 接线与 arming 审计，并取得用户再次明确授权。
+3. 若需要更强自然覆盖，应另开 Paper Campaign 等待自然 FILL/SELL/PnL 样本；不得因此放宽价格或风控。

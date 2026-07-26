@@ -41,22 +41,18 @@
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
 
 ## Current runtime and evidence
-- 旧 Core `PC-A1C63D1657110D955029` 固定有效基线为 `43,200,006 ms`；合盖失败轮 `PS-BFDD2F7E81AA8ADE1EAB` 为 `0 ms`，不计入。
-- 新 Core `a8fbf2...` / Campaign `PC-1FA2F49244FE2B7BE43D` 第 1 轮 `PS-82029D62FCBC90727F35` 正常完成并计入 `14,400,002 ms`。
-- 新 Core 第 2 轮 `PS-8B337FF558CBBFA6BAD7` 在满 `4 h` 的最终估值窗口遇到公共市场数据持续超时，Paper 返回 `FINAL_DRAIN_INCOMPLETE`；该轮 `countsTowardCampaign=false`，Campaign 因同 Core 终态策略进入 `BLOCKED`。
-- 第 2 轮 Observe 最终对账为 `SYNCED`，但收尾前 API 超时窗口未在 Session 结束前恢复；稍后只读复测公共 API 已恢复。数据库 `quick_check=ok`、外键问题 `0`，全程仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Attempt/Fill 全为 `0`。
-- 用户已明确授权：若 Session 已完整运行、Observe 无调度/数据 gap 且最终 `SYNCED`、数据库和安全门正常、公共市场数据随后恢复，并且唯一失败是最终估值的 `FINAL_DRAIN_INCOMPLETE`，则可在独立业主汇总中计入该轮，但不得改写原始 Session/Campaign 报告。
-- 第 2 轮据此以 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION` 计入 `14,400,002 ms`；用户口径当前累计为旧 Core `43,200,006 ms` + 新 Core 第 1 轮 `14,400,002 ms` + 第 2 轮例外 `14,400,002 ms`，合计 `72,000,010 ms`，还缺 `14,399,990 ms`。
-- 新 Core `cea650dd...` / Campaign `PC-323157F9C8C2FBE4EA27` 于 `2026-07-26T12:08:36Z` 启动，但 Observe 在运行 `3,840,425 ms` 后检测到确认游标 `0x56b313f` 的区块哈希变化并抛出 `POLYGON_TRADE_FEED_CONFIRMED_REORG`。Supervisor 安全停止 Paper；失败轮不计入，Campaign `BLOCKED`。
-- 事故前最后一个 Polygon 批次 `0x56b313f-0x56b313f` 没有目标日志；Paper 最终估值完整、账本一致、真实订单和链上写入均为 `0`。实现缺陷是对“上一锚点未变且被重组批次没有目标成交”的可安全浅层重扫也直接终止。
-- 当前已增加受限恢复：先重复核验游标哈希；若只是单次 RPC 链视图不一致则继续，若两次确认发生变化，则只在上一锚点哈希未变且被重组批次目标成交数为 `0` 时回退到上一锚点并重扫。曾发布目标成交或上一锚点也变化时仍 fail closed。
-- 浅层重组修复后的 Core `e28ebb...` / Campaign `PC-5C99C6CBEEC9CC9CE5C2` 运行 `3,962,220 ms` 后安全暂停：本轮捕获 `17` 个事件、生成 `2` 个可执行 BUY Signal，但两者都被上一失败 Observe Run 遗留的全局 `POLYGON_TRADE_FEED_UNSAFE` 事故标记拒绝。最终 Observe `SYNCED`、Paper 估值和账本完整、Live 数据为 `0`；该轮虽在自身 Campaign 内 `countsTowardCampaign=true`，但因跟单链路受实现缺陷影响，不加入本次业主最终汇总。
-- 根因是 Risk Manager 把目标级未解决事故跨 Observe Run 永久应用；旧事故对应 `observeRunId=925775fa...`，被拒的两个新 Signal 对应 `observeRunId=08bb1dcd...`，事故范围明确不相同。
-- 当前最小修复保留旧事故为 `OPEN` 历史证据，只让 `POLYGON_TRADE_FEED_UNSAFE` 阻断所属 Observe Run 的 Signal；无法解析事故归属、Signal 缺少 Run 归属、同 Run 事故及其他未解决 `MAJOR_DESYNC` 仍 fail closed。
-- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。修复会再次产生新 Core；提交后须通过正式入口创建 replacement，重新完成最后约 `4 h`。
+- Paper 跨 Core 累计验证已于 `2026-07-27 02:41:48 +08:00` 完成。最终独立报告为 `data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`，验收标记为 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION`。
+- 固定计入：旧 Core 三轮 `43,200,006 ms`；Core `a8fbf2...` 正常轮 `14,400,002 ms`；同 Core 最终估值超时轮按 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION` 仅在独立业主汇总计入 `14,400,002 ms`；最终修复验证轮 `14,400,002 ms`。合计 `86,400,012 ms`。
+- 原始数据库和 Session/Campaign 报告均未改写；跨 Core 结果没有伪称为单一 Campaign 的内建 24 小时完成。
+- 最终 Core `e284de7...` / Campaign `PC-53F4B34D814FCDDFB663` / Session `PS-04B30EBA4C1C49656AF7` 为 `COMPLETED`、`countsTowardCampaign=true`、blocker 空，连续有效 `14,400,002 ms`。
+- 最终轮处理 `25` 个事件、发布 `13` 个 Signal；`11` 个可执行 BUY 全被 Paper 消费且 Risk `ALLOW`，全部因安全价格条件或截止时间正常过期；`2` 个 SELL 为 `GAP_EVENT` 且无 Paper 仓位，不补单。其余 SELL 为历史/无本轮 tracked 仓位，正常不跟。
+- 最终轮 Paper execution `11`、order `1,239`、fill `0`、position `0`，现金/权益均为 `1,000,000,000 micros`，手续费和盈亏均为 `0`，估值完整。
+- Observe 成功轮询 `10,241` 次，scheduling gap 和 major desync 均为 `0`，最终 `SYNCED`；数据库 `quick_check=ok`、外键问题 `0`。
+- 最终仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live execution/order/attempt/fill 全为 `0`，真实订单和链上写入为 `0`。
+- Observe/Paper/Supervisor/launcher 均已退出，operator lock、marker、FIFO 已清理。
 
 ## Remaining blockers before small Live
-- 合盖保护修复后的新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。
+- 用户授权的 Paper 累计 `24 h` 和最终连续 `4 h` 已完成；但自然 FILL、POSITION_UPDATE、FEE、PnL 仍未发生，不能把隔离测试伪称为自然成交。
 - SPLIT/CONVERSION 采用“退出或隔离”而非真实链上复制，可能与目标组合的经济结果不同；必须在 Paper 报告中单独统计。
 - 历史 Phase 0 若只有特殊 Activity、没有本系统提交的完整证明，Replay 会保持 `INCOMPLETE`，不得人工降级通过。
 - 官方结束时间缺失的 Live 策略、合规/geoblock、隔离钱包、真实 signer、真实 Live runtime 接线和 Live arming 尚未完成。

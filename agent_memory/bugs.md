@@ -1,8 +1,8 @@
 # Bugs And Risks
 
 ## Active blockers
-- Campaign `PC-5C99C6CBEEC9CC9CE5C2` 已安全暂停；旧 Observe Run 的 `POLYGON_TRADE_FEED_UNSAFE` 事故误拦本轮两笔新 BUY。事故范围修复已通过验证，提交后须创建新 Core replacement 完成最后约 `4 h`。
-- 用户口径下当前累计 `72,000,010 ms`，还缺 `14,399,990 ms`。
+- Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
+- 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
@@ -26,6 +26,7 @@
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
+- 用户授权的独立跨 Core Paper 汇总已达到 `86,400,012 ms`；最终连续 4 小时运行完整、安全，原始数据库与各 Campaign 的内建计时未改写。
 - 上一 Observe Run 的全局 `POLYGON_TRADE_FEED_UNSAFE` 曾永久阻断后续新 Run 的所有标的，造成两个正常 BUY Signal 在 Paper 中被误拒；现在事故只阻断其所属 Run，历史记录不删除，同 Run 和不可证明归属仍拒绝。
 - Polygon confirmed cursor 哈希变化曾无条件终止 Observe，即使该批次没有目标成交、上一锚点未变且可安全重扫；现在会二次核验并仅在可证明无经济事件冲突时回退重扫。
 - 新 Core 第 2 轮收尾失败没有造成风险边界突破：失败 Session 未计时，3 个 Paper 持仓保守冻结，数据库一致性正常，Live 执行与链上写入均为 `0`；公共只读 API 随后恢复。
