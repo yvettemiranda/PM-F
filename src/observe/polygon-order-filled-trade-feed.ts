@@ -55,6 +55,13 @@ export interface PolygonOrderFilledEvidence {
   blockHeaders: PolygonBlockHeader[];
   marketBindings: ClobMarketByToken[];
   trades: PublicTrade[];
+  reorgRecovery?: {
+    reorgedCursorBlock: string;
+    previousCursorHash: string;
+    canonicalCursorHash: string;
+    reanchorBlock: string;
+    reanchorHash: string;
+  } | null;
 }
 
 export interface PolygonOrderFilledTradeBatch {
@@ -211,6 +218,9 @@ export class PolygonOrderFilledTradeFeed {
   private readonly confirmationDepth: number;
   private cursorBlock: bigint | null = null;
   private cursorHash: string | null = null;
+  private previousCursorBlock: bigint | null = null;
+  private previousCursorHash: string | null = null;
+  private cursorBatchTargetFillCount = 0;
   private readonly marketCache = new Map<string, ApiCapture<ClobMarketByToken>>();
 
   constructor(
@@ -246,12 +256,55 @@ export class PolygonOrderFilledTradeFeed {
         capture: null,
       };
     }
+    if (this.cursorHash === null) throw new Error("POLYGON_TRADE_FEED_CURSOR_HASH_MISSING");
 
-    const cursorHex = quantityHex(this.cursorBlock);
-    const cursorCapture = await this.provider.polygonBlock(cursorHex, signal);
-    const currentCursorHeader = blockHeader(cursorCapture, cursorHex);
+    let cursorHex = quantityHex(this.cursorBlock);
+    let cursorCapture = await this.provider.polygonBlock(cursorHex, signal);
+    let currentCursorHeader = blockHeader(cursorCapture, cursorHex);
+    const reorgCaptures: ApiCapture<PolygonBlockResponse>[] = [];
+    let reorgRecovery: NonNullable<PolygonOrderFilledEvidence["reorgRecovery"]> | null = null;
     if (currentCursorHeader.hash !== this.cursorHash) {
-      throw new PolygonOrderFilledFeedUnsafeError(`POLYGON_TRADE_FEED_CONFIRMED_REORG:${cursorHex}`);
+      const reorgedCursorBlock = cursorHex;
+      const previousCursorHash = this.cursorHash;
+      const verificationCapture = await this.provider.polygonBlock(cursorHex, signal);
+      const verifiedCursorHeader = blockHeader(verificationCapture, cursorHex);
+      reorgCaptures.push(cursorCapture, verificationCapture);
+      if (verifiedCursorHeader.hash === previousCursorHash) {
+        cursorCapture = verificationCapture;
+        currentCursorHeader = verifiedCursorHeader;
+      } else {
+        if (
+          verifiedCursorHeader.hash !== currentCursorHeader.hash
+          || this.previousCursorBlock === null
+          || this.previousCursorHash === null
+          || this.cursorBatchTargetFillCount > 0
+        ) {
+          throw new PolygonOrderFilledFeedUnsafeError(
+            `POLYGON_TRADE_FEED_CONFIRMED_REORG:${reorgedCursorBlock}`,
+          );
+        }
+        const reanchorBlock = quantityHex(this.previousCursorBlock);
+        const reanchorCapture = await this.provider.polygonBlock(reanchorBlock, signal);
+        const reanchorHeader = blockHeader(reanchorCapture, reanchorBlock);
+        reorgCaptures.push(reanchorCapture);
+        if (reanchorHeader.hash !== this.previousCursorHash) {
+          throw new PolygonOrderFilledFeedUnsafeError(
+            `POLYGON_TRADE_FEED_CONFIRMED_REORG:${reorgedCursorBlock}`,
+          );
+        }
+        reorgRecovery = {
+          reorgedCursorBlock,
+          previousCursorHash,
+          canonicalCursorHash: verifiedCursorHeader.hash,
+          reanchorBlock,
+          reanchorHash: reanchorHeader.hash,
+        };
+        this.cursorBlock = this.previousCursorBlock;
+        this.cursorHash = this.previousCursorHash;
+        cursorHex = reanchorBlock;
+        cursorCapture = reanchorCapture;
+        currentCursorHeader = reanchorHeader;
+      }
     }
     if (confirmedHead <= this.cursorBlock) {
       return {
@@ -363,6 +416,7 @@ export class PolygonOrderFilledTradeFeed {
     const allCaptures: ApiCapture<unknown>[] = [
       headCapture,
       cursorCapture,
+      ...reorgCaptures,
       ...logCaptures,
       ...blockCaptures,
       ...marketCaptures,
@@ -382,9 +436,13 @@ export class PolygonOrderFilledTradeFeed {
         condition_id: capture.data.condition_id.toLowerCase(),
       }])).values()],
       trades,
+      reorgRecovery,
     };
+    this.previousCursorBlock = this.cursorBlock;
+    this.previousCursorHash = this.cursorHash;
     this.cursorBlock = confirmedHead;
     this.cursorHash = confirmedHeader.hash;
+    this.cursorBatchTargetFillCount = decoded.length;
     return {
       status: "AVAILABLE",
       confirmedHead: confirmedHeadHex,

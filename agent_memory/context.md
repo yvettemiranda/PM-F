@@ -47,7 +47,10 @@
 - 第 2 轮 Observe 最终对账为 `SYNCED`，但收尾前 API 超时窗口未在 Session 结束前恢复；稍后只读复测公共 API 已恢复。数据库 `quick_check=ok`、外键问题 `0`，全程仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，Live Execution/Order/Attempt/Fill 全为 `0`。
 - 用户已明确授权：若 Session 已完整运行、Observe 无调度/数据 gap 且最终 `SYNCED`、数据库和安全门正常、公共市场数据随后恢复，并且唯一失败是最终估值的 `FINAL_DRAIN_INCOMPLETE`，则可在独立业主汇总中计入该轮，但不得改写原始 Session/Campaign 报告。
 - 第 2 轮据此以 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION` 计入 `14,400,002 ms`；用户口径当前累计为旧 Core `43,200,006 ms` + 新 Core 第 1 轮 `14,400,002 ms` + 第 2 轮例外 `14,400,002 ms`，合计 `72,000,010 ms`，还缺 `14,399,990 ms`。
-- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。验收策略改动会产生新 Core；通过正式入口创建 replacement 后再运行最后一轮约 `4 h`。
+- 新 Core `cea650dd...` / Campaign `PC-323157F9C8C2FBE4EA27` 于 `2026-07-26T12:08:36Z` 启动，但 Observe 在运行 `3,840,425 ms` 后检测到确认游标 `0x56b313f` 的区块哈希变化并抛出 `POLYGON_TRADE_FEED_CONFIRMED_REORG`。Supervisor 安全停止 Paper；失败轮不计入，Campaign `BLOCKED`。
+- 事故前最后一个 Polygon 批次 `0x56b313f-0x56b313f` 没有目标日志；Paper 最终估值完整、账本一致、真实订单和链上写入均为 `0`。实现缺陷是对“上一锚点未变且被重组批次没有目标成交”的可安全浅层重扫也直接终止。
+- 当前已增加受限恢复：先重复核验游标哈希；若只是单次 RPC 链视图不一致则继续，若两次确认发生变化，则只在上一锚点哈希未变且被重组批次目标成交数为 `0` 时回退到上一锚点并重扫。曾发布目标成交或上一锚点也变化时仍 fail closed。
+- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。修复会产生新 Core；提交后须通过正式入口创建 replacement，重新完成最后约 `4 h`。
 
 ## Remaining blockers before small Live
 - 合盖保护修复后的新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。

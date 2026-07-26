@@ -297,6 +297,191 @@ describe("PolygonOrderFilledTradeFeed", () => {
     ]);
   });
 
+  it("replays an empty cursor batch after a one-anchor confirmed reorg", async () => {
+    const blockNumbers = ["0x66", "0x67", "0x68"];
+    let block65Reads = 0;
+    const canonicalLog = {
+      ...targetBuyLog({
+        orderHashDigit: "6",
+        logIndex: 1,
+        collateralMicros: 1_000_000n,
+        sizeMicros: 2_000_000n,
+      }),
+      blockHash: `0x${"c".repeat(64)}`,
+    };
+    const provider: PolygonOrderFilledFeedProvider = {
+      async polygonBlockNumber(): Promise<ApiCapture<PolygonBlockNumberResponse>> {
+        return capture({ jsonrpc: "2.0", id: 10, result: blockNumbers.shift()! });
+      },
+      async polygonBlock(blockNumber): Promise<ApiCapture<PolygonBlockResponse>> {
+        if (blockNumber === "0x64") {
+          return capture({
+            ...block("0x64", "a", 1_774_172_560),
+            result: {
+              ...block("0x64", "a", 1_774_172_560).result!,
+              parentHash: `0x${"9".repeat(64)}`,
+            },
+          });
+        }
+        if (blockNumber === "0x65") {
+          const hashDigit = block65Reads++ === 0 ? "b" : "c";
+          return capture({
+            ...block("0x65", hashDigit, 1_774_172_562),
+            result: {
+              ...block("0x65", hashDigit, 1_774_172_562).result!,
+              parentHash: `0x${"a".repeat(64)}`,
+            },
+          });
+        }
+        return capture({
+          ...block("0x66", "d", 1_774_172_564),
+          result: {
+            ...block("0x66", "d", 1_774_172_564).result!,
+            parentHash: `0x${"c".repeat(64)}`,
+          },
+        });
+      },
+      async polygonOrderFilledLogs(
+        exchange,
+        _maker,
+        fromBlock,
+        toBlock,
+      ): Promise<ApiCapture<PolygonLogsResponse>> {
+        return capture({
+          jsonrpc: "2.0",
+          id: 11,
+          result: exchange === POLYMARKET_CTF_EXCHANGES[0]
+            && fromBlock === "0x65"
+            && toBlock === "0x66"
+            ? [canonicalLog]
+            : [],
+        });
+      },
+      async clobMarketByToken(): Promise<ApiCapture<ClobMarketByToken>> {
+        return capture({
+          condition_id: conditionId,
+          primary_token_id: asset,
+          secondary_token_id: "42",
+        });
+      },
+    };
+    const feed = new PolygonOrderFilledTradeFeed(provider, { confirmationDepth: 2 });
+
+    await feed.poll(wallet);
+    expect(await feed.poll(wallet)).toMatchObject({
+      status: "AVAILABLE",
+      fromBlock: "0x65",
+      toBlock: "0x65",
+      trades: [],
+    });
+    const recovered = await feed.poll(wallet);
+
+    expect(recovered).toMatchObject({
+      status: "AVAILABLE",
+      fromBlock: "0x65",
+      toBlock: "0x66",
+      trades: [expect.objectContaining({
+        transactionHash,
+        orderHash: `0x${"6".repeat(64)}`,
+      })],
+      capture: {
+        data: {
+          reorgRecovery: {
+            reorgedCursorBlock: "0x65",
+            previousCursorHash: `0x${"b".repeat(64)}`,
+            canonicalCursorHash: `0x${"c".repeat(64)}`,
+            reanchorBlock: "0x64",
+            reanchorHash: `0x${"a".repeat(64)}`,
+          },
+        },
+      },
+    });
+  });
+
+  it("retries a single inconsistent RPC cursor hash before declaring a reorg", async () => {
+    const blockNumbers = ["0x66", "0x67"];
+    let block64Reads = 0;
+    const provider: PolygonOrderFilledFeedProvider = {
+      async polygonBlockNumber(): Promise<ApiCapture<PolygonBlockNumberResponse>> {
+        return capture({ jsonrpc: "2.0", id: 10, result: blockNumbers.shift()! });
+      },
+      async polygonBlock(blockNumber): Promise<ApiCapture<PolygonBlockResponse>> {
+        if (blockNumber === "0x64") {
+          const hashDigit = ["a", "f", "a"][block64Reads++] ?? "a";
+          return capture(block("0x64", hashDigit, 1_774_172_560));
+        }
+        return capture(block("0x65", "b", 1_774_172_562));
+      },
+      async polygonOrderFilledLogs(): Promise<ApiCapture<PolygonLogsResponse>> {
+        return capture({ jsonrpc: "2.0", id: 11, result: [] });
+      },
+      async clobMarketByToken(): Promise<ApiCapture<ClobMarketByToken>> {
+        throw new Error("UNEXPECTED_MARKET_LOOKUP");
+      },
+    };
+    const feed = new PolygonOrderFilledTradeFeed(provider, { confirmationDepth: 2 });
+
+    await feed.poll(wallet);
+    await expect(feed.poll(wallet)).resolves.toMatchObject({
+      status: "AVAILABLE",
+      fromBlock: "0x65",
+      toBlock: "0x65",
+      trades: [],
+      capture: { data: { reorgRecovery: null } },
+    });
+  });
+
+  it("still fails closed when the reorged cursor batch emitted a target fill", async () => {
+    const blockNumbers = ["0x66", "0x67", "0x68"];
+    let block65Reads = 0;
+    const emittedLog = targetBuyLog({
+      orderHashDigit: "7",
+      logIndex: 1,
+      collateralMicros: 1_000_000n,
+      sizeMicros: 2_000_000n,
+    });
+    const provider: PolygonOrderFilledFeedProvider = {
+      async polygonBlockNumber(): Promise<ApiCapture<PolygonBlockNumberResponse>> {
+        return capture({ jsonrpc: "2.0", id: 10, result: blockNumbers.shift()! });
+      },
+      async polygonBlock(blockNumber): Promise<ApiCapture<PolygonBlockResponse>> {
+        if (blockNumber === "0x64") return capture(block("0x64", "a", 1_774_172_560));
+        if (blockNumber === "0x65") {
+          return capture(block("0x65", block65Reads++ === 0 ? "b" : "c", 1_774_172_562));
+        }
+        return capture(block("0x66", "d", 1_774_172_564));
+      },
+      async polygonOrderFilledLogs(
+        exchange,
+        _maker,
+        fromBlock,
+        toBlock,
+      ): Promise<ApiCapture<PolygonLogsResponse>> {
+        return capture({
+          jsonrpc: "2.0",
+          id: 11,
+          result: exchange === POLYMARKET_CTF_EXCHANGES[0]
+            && fromBlock === "0x65"
+            && toBlock === "0x65"
+            ? [emittedLog]
+            : [],
+        });
+      },
+      async clobMarketByToken(): Promise<ApiCapture<ClobMarketByToken>> {
+        return capture({
+          condition_id: conditionId,
+          primary_token_id: asset,
+          secondary_token_id: "42",
+        });
+      },
+    };
+    const feed = new PolygonOrderFilledTradeFeed(provider, { confirmationDepth: 2 });
+
+    await feed.poll(wallet);
+    expect((await feed.poll(wallet)).trades).toHaveLength(1);
+    await expect(feed.poll(wallet)).rejects.toThrow("POLYGON_TRADE_FEED_CONFIRMED_REORG:0x65");
+  });
+
   it("subscribes to only the target maker logs and treats the public WebSocket message as a wake hint", async () => {
     class FakeSocket implements PolygonWakeWebSocket {
       readyState = 0;

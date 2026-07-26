@@ -1,7 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
-- 新 Core Campaign `PC-1FA2F49244FE2B7BE43D` 仍按原始证据为 `BLOCKED`；用户已授权把其第 2 轮作为外部收尾例外计入独立汇总。策略改动产生新 Core 后须创建 replacement 完成最后约 `4 h`。
+- Campaign `PC-323157F9C8C2FBE4EA27` 因 Polygon confirmed cursor `0x56b313f` 的哈希变化进入 `BLOCKED`；该轮只运行约 `64 min`，不计入。浅层安全重扫修复已通过验证，提交后须创建 replacement 完成最后约 `4 h`。
 - 用户口径下当前累计 `72,000,010 ms`，还缺 `14,399,990 ms`。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
@@ -9,6 +9,7 @@
 - geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
+- Polygon 的两块确认深度仍可能遇到浅层重组或负载均衡节点链视图不一致。新恢复只覆盖“上一锚点不变 + 被重组批次未发布目标成交”；否则继续 fail closed，避免撤销或漏记已发布 Signal。
 - 当前最终估值硬时限为 `30 s`。本次公共 API 故障持续数分钟，仅增加短重试无法挽救该轮；无限延长收尾又会破坏轮换时限。当前采用保留失败证据、严格限定后计入独立业主汇总并由新 Core replacement 续跑的方式。
 - `caffeinate` 无法阻止 MacBook 合盖睡眠；运行期间必须保持屏幕盖打开，可以锁屏或自动黑屏。启动前合盖检查只能避免在已合盖时误启动，不能阻止启动后再次合盖。
 - 深度清理已删除用户级应用缓存和日志；相关应用下次启动可能需要重新生成缓存或重新建立索引，未删除 Codex runtime 以避免破坏当前工具环境。
@@ -24,6 +25,7 @@
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
+- Polygon confirmed cursor 哈希变化曾无条件终止 Observe，即使该批次没有目标成交、上一锚点未变且可安全重扫；现在会二次核验并仅在可证明无经济事件冲突时回退重扫。
 - 新 Core 第 2 轮收尾失败没有造成风险边界突破：失败 Session 未计时，3 个 Paper 持仓保守冻结，数据库一致性正常，Live 执行与链上写入均为 `0`；公共只读 API 随后恢复。
 - Paper Campaign 曾能在 MacBook 已合盖的 DarkWake 中启动，造成调度空窗、Gap 和最终阻断；当前启动前读取 `AppleClamshellState`，合盖时以 `MACBOOK_LID_CLOSED` fail closed。
 - 首次新核心隔离套件曾因两个真实打包集成用例共用默认 `5 s` 时限、在全套并发和冷缓存下出现单例超时；现在仅对这两个重型用例声明 `15 s`，生产打包与安全判断不变，全套 `769/769` 通过。
