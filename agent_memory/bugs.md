@@ -1,7 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
-- Campaign `PC-323157F9C8C2FBE4EA27` 因 Polygon confirmed cursor `0x56b313f` 的哈希变化进入 `BLOCKED`；该轮只运行约 `64 min`，不计入。浅层安全重扫修复已通过验证，提交后须创建 replacement 完成最后约 `4 h`。
+- Campaign `PC-5C99C6CBEEC9CC9CE5C2` 已安全暂停；旧 Observe Run 的 `POLYGON_TRADE_FEED_UNSAFE` 事故误拦本轮两笔新 BUY。事故范围修复已通过验证，提交后须创建新 Core replacement 完成最后约 `4 h`。
 - 用户口径下当前累计 `72,000,010 ms`，还缺 `14,399,990 ms`。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
@@ -9,6 +9,7 @@
 - geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
 
 ## Active risks
+- `reconciliation_issues` 是目标级长期证据；新修复只对 `POLYGON_TRADE_FEED_UNSAFE` 使用明确的 Observe Run 归属缩小阻断范围。归属缺失、JSON 损坏、同 Run 或其他类型 `MAJOR_DESYNC` 全部继续 fail closed；后续若新增可恢复事故类型，必须单独定义恢复证明，不能泛化跳过。
 - Polygon 的两块确认深度仍可能遇到浅层重组或负载均衡节点链视图不一致。新恢复只覆盖“上一锚点不变 + 被重组批次未发布目标成交”；否则继续 fail closed，避免撤销或漏记已发布 Signal。
 - 当前最终估值硬时限为 `30 s`。本次公共 API 故障持续数分钟，仅增加短重试无法挽救该轮；无限延长收尾又会破坏轮换时限。当前采用保留失败证据、严格限定后计入独立业主汇总并由新 Core replacement 续跑的方式。
 - `caffeinate` 无法阻止 MacBook 合盖睡眠；运行期间必须保持屏幕盖打开，可以锁屏或自动黑屏。启动前合盖检查只能避免在已合盖时误启动，不能阻止启动后再次合盖。
@@ -25,6 +26,7 @@
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
 
 ## Resolved in current implementation
+- 上一 Observe Run 的全局 `POLYGON_TRADE_FEED_UNSAFE` 曾永久阻断后续新 Run 的所有标的，造成两个正常 BUY Signal 在 Paper 中被误拒；现在事故只阻断其所属 Run，历史记录不删除，同 Run 和不可证明归属仍拒绝。
 - Polygon confirmed cursor 哈希变化曾无条件终止 Observe，即使该批次没有目标成交、上一锚点未变且可安全重扫；现在会二次核验并仅在可证明无经济事件冲突时回退重扫。
 - 新 Core 第 2 轮收尾失败没有造成风险边界突破：失败 Session 未计时，3 个 Paper 持仓保守冻结，数据库一致性正常，Live 执行与链上写入均为 `0`；公共只读 API 随后恢复。
 - Paper Campaign 曾能在 MacBook 已合盖的 DarkWake 中启动，造成调度空窗、Gap 和最终阻断；当前启动前读取 `AppleClamshellState`，合盖时以 `MACBOOK_LID_CLOSED` fail closed。

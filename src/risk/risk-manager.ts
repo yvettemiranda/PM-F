@@ -147,7 +147,9 @@ export class RiskManager {
     }
     pass("target_sync", target?.sync_status ?? "UNKNOWN");
 
-    const issue = target ? this.majorReconciliationIssue(target.target_id, input.signal.assetId) : null;
+    const issue = target
+      ? this.majorReconciliationIssue(target.target_id, input.signal.assetId, target.observe_run_id)
+      : null;
     if (issue) return fail("reconciliation", `MAJOR_DESYNC_RECONCILIATION:${issue.issue_id}`);
     pass("reconciliation");
 
@@ -584,24 +586,50 @@ export class RiskManager {
     };
   }
 
-  private signalTarget(signalId: string): { target_id: string; sync_status: string } | null {
+  private signalTarget(
+    signalId: string,
+  ): { target_id: string; sync_status: string; observe_run_id: string | null } | null {
     const row = this.database.prepare(
-      `SELECT s.target_id,t.sync_status
+      `SELECT s.target_id,t.sync_status,s.observe_run_id
        FROM signals s
        JOIN monitor_targets t ON t.target_id=s.target_id
        WHERE s.signal_id=?`,
-    ).get(signalId) as { target_id: string; sync_status: string } | undefined;
+    ).get(signalId) as {
+      target_id: string;
+      sync_status: string;
+      observe_run_id: string | null;
+    } | undefined;
     return row ?? null;
   }
 
-  private majorReconciliationIssue(targetId: string, assetId: string): { issue_id: string } | null {
-    const row = this.database.prepare(
-      `SELECT issue_id FROM reconciliation_issues
+  private majorReconciliationIssue(
+    targetId: string,
+    assetId: string,
+    observeRunId: string | null,
+  ): { issue_id: string } | null {
+    const rows = this.database.prepare(
+      `SELECT issue_id,issue_type,detail_json FROM reconciliation_issues
        WHERE target_id=? AND (asset_id IS NULL OR asset_id=?) AND sync_status='MAJOR_DESYNC'
          AND status!='RESOLVED'
-       ORDER BY created_at DESC LIMIT 1`,
-    ).get(targetId, assetId) as { issue_id: string } | undefined;
-    return row ?? null;
+       ORDER BY created_at DESC`,
+    ).all(targetId, assetId) as Array<{
+      issue_id: string;
+      issue_type: string;
+      detail_json: string;
+    }>;
+    for (const row of rows) {
+      if (row.issue_type !== "POLYGON_TRADE_FEED_UNSAFE") return row;
+      if (observeRunId === null) return row;
+      let issueObserveRunId: string | null = null;
+      try {
+        const detail = JSON.parse(row.detail_json) as { observeRunId?: unknown };
+        issueObserveRunId = typeof detail.observeRunId === "string" ? detail.observeRunId : null;
+      } catch {
+        return row;
+      }
+      if (issueObserveRunId === null || issueObserveRunId === observeRunId) return row;
+    }
+    return null;
   }
 
   private blockingFrozenPositionCount(mode: ExecutorMode, accountId: string): number {

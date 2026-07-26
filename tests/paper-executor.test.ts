@@ -298,6 +298,7 @@ function insertSignal(input: {
   marketEndTime?: string;
   marketEndTimeStatus?: "VERIFIED" | "UNAVAILABLE";
   executionDeadlineAt?: string | null;
+  observeRunId?: string | null;
   ruleset?: TestRuleset;
   exactSizing?: {
     targetPriceUnits: string;
@@ -373,8 +374,8 @@ function insertSignal(input: {
       sell_ratio_denominator,reason,schema_version,signal_version,strategy_version,
       risk_version,replay_version,ruleset_snapshot_json,ruleset_hash,source_code_commit,
       created_at,execution_eligible,execution_block_reason,event_classification,
-      capital_estimate_id,source_code_dirty,producer_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OBSERVE_ONLY')`,
+      capital_estimate_id,source_code_dirty,producer_mode,observe_run_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OBSERVE_ONLY', ?)`,
   ).run(
     input.signalId,
     input.targetId,
@@ -402,6 +403,7 @@ function insertSignal(input: {
     (input.executionEligible ?? true) ? null : input.executionBlockReason ?? "GAP_EVENT",
     input.eventClassification ?? "STANDARD_TRADE",
     capitalId,
+    input.observeRunId ?? null,
   );
   db.prepare(
     `INSERT INTO signal_execution_contexts(
@@ -4089,6 +4091,66 @@ describe("PaperExecutor", () => {
     expect((check.prepare("SELECT risk_reject_reason FROM paper_executions WHERE paper_execution_id=?").get(executionId) as { risk_reject_reason: string }).risk_reject_reason)
       .toContain("MAJOR_DESYNC_RECONCILIATION");
     check.close();
+    env.executor.close();
+  });
+
+  it("scopes a Polygon feed safety issue to the affected Observe run", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    const db = new DatabaseSync(env.databasePath);
+    db.prepare(
+      `INSERT INTO reconciliation_issues(
+        issue_id,target_id,asset_id,issue_type,expected_value,observed_value,sync_status,
+        status,detail_json,created_at
+      ) VALUES (
+        'prior-polygon-feed-unsafe', ?, NULL, 'POLYGON_TRADE_FEED_UNSAFE',
+        'CONFIRMED_CHAIN_STABLE', 'POLYGON_TRADE_FEED_CONFIRMED_REORG:0x65',
+        'MAJOR_DESYNC', 'OPEN', ?, ?
+      )`,
+    ).run(
+      env.targetId,
+      stableJson({
+        observeRunId: "prior-observe-run",
+        baselineRunId: "prior-baseline-run",
+        errorDetail: "POLYGON_TRADE_FEED_CONFIRMED_REORG:0x65",
+      }),
+      "2026-07-08T00:00:00.000Z",
+    );
+    db.close();
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "new-observe-run-buy",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      observeRunId: "current-observe-run",
+    });
+
+    const executionId = await env.executor.consumeSignal(env.accountId, "new-observe-run-buy");
+    expect(env.executor.executionState(executionId)).toBe("EXECUTED");
+
+    const check = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(check.prepare(
+      "SELECT decision,risk_reject_reason FROM risk_decisions WHERE signal_id='new-observe-run-buy'",
+    ).get()).toEqual({ decision: "ALLOW", risk_reject_reason: null });
+    expect(check.prepare(
+      "SELECT status,resolved_at FROM reconciliation_issues WHERE issue_id='prior-polygon-feed-unsafe'",
+    ).get()).toEqual({ status: "OPEN", resolved_at: null });
+    check.close();
+
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "affected-observe-run-buy",
+      createdAt: "2026-07-08T00:00:02.000Z",
+      observeRunId: "prior-observe-run",
+    });
+    const affectedExecutionId = await env.executor.consumeSignal(env.accountId, "affected-observe-run-buy");
+    expect(env.executor.executionState(affectedExecutionId)).toBe("REJECTED");
+    const affectedCheck = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((affectedCheck.prepare(
+      "SELECT risk_reject_reason FROM paper_executions WHERE paper_execution_id=?",
+    ).get(affectedExecutionId) as { risk_reject_reason: string }).risk_reject_reason)
+      .toBe("MAJOR_DESYNC_RECONCILIATION:prior-polygon-feed-unsafe");
+    affectedCheck.close();
     env.executor.close();
   });
 

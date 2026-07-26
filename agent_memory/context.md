@@ -50,7 +50,10 @@
 - 新 Core `cea650dd...` / Campaign `PC-323157F9C8C2FBE4EA27` 于 `2026-07-26T12:08:36Z` 启动，但 Observe 在运行 `3,840,425 ms` 后检测到确认游标 `0x56b313f` 的区块哈希变化并抛出 `POLYGON_TRADE_FEED_CONFIRMED_REORG`。Supervisor 安全停止 Paper；失败轮不计入，Campaign `BLOCKED`。
 - 事故前最后一个 Polygon 批次 `0x56b313f-0x56b313f` 没有目标日志；Paper 最终估值完整、账本一致、真实订单和链上写入均为 `0`。实现缺陷是对“上一锚点未变且被重组批次没有目标成交”的可安全浅层重扫也直接终止。
 - 当前已增加受限恢复：先重复核验游标哈希；若只是单次 RPC 链视图不一致则继续，若两次确认发生变化，则只在上一锚点哈希未变且被重组批次目标成交数为 `0` 时回退到上一锚点并重扫。曾发布目标成交或上一锚点也变化时仍 fail closed。
-- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。修复会产生新 Core；提交后须通过正式入口创建 replacement，重新完成最后约 `4 h`。
+- 浅层重组修复后的 Core `e28ebb...` / Campaign `PC-5C99C6CBEEC9CC9CE5C2` 运行 `3,962,220 ms` 后安全暂停：本轮捕获 `17` 个事件、生成 `2` 个可执行 BUY Signal，但两者都被上一失败 Observe Run 遗留的全局 `POLYGON_TRADE_FEED_UNSAFE` 事故标记拒绝。最终 Observe `SYNCED`、Paper 估值和账本完整、Live 数据为 `0`；该轮虽在自身 Campaign 内 `countsTowardCampaign=true`，但因跟单链路受实现缺陷影响，不加入本次业主最终汇总。
+- 根因是 Risk Manager 把目标级未解决事故跨 Observe Run 永久应用；旧事故对应 `observeRunId=925775fa...`，被拒的两个新 Signal 对应 `observeRunId=08bb1dcd...`，事故范围明确不相同。
+- 当前最小修复保留旧事故为 `OPEN` 历史证据，只让 `POLYGON_TRADE_FEED_UNSAFE` 阻断所属 Observe Run 的 Signal；无法解析事故归属、Signal 缺少 Run 归属、同 Run 事故及其他未解决 `MAJOR_DESYNC` 仍 fail closed。
+- 当前无 Observe/Paper/Supervisor/launcher 进程，运行锁、marker、FIFO 已清理。修复会再次产生新 Core；提交后须通过正式入口创建 replacement，重新完成最后约 `4 h`。
 
 ## Remaining blockers before small Live
 - 合盖保护修复后的新核心尚无自然运行时长；累计 `24 h`、连续 `4 h`、`API_RECOVERY` 和新特殊操作自然样本仍未满足。
