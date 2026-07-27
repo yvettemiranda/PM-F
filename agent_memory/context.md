@@ -67,3 +67,7 @@
 - Paper final drain 与 Paper/Live 只读估值均使用有上限的重试和退避；最终估值短暂不完整会保留原始 blocker 和恢复证据，并允许同一 Core 后续恢复，而不是把仓位当成已结算或强行完成。
 - Paper BUY 在已有持仓且市场数据仍处于不可恢复冻结时不消费/不下新 BUY；Live BUY 在估值不完整时保留 Signal 待重试，不 quarantine、不消费。
 - Live 仅增加禁用态下的 `handoffRuntime` 元数据交接和 final valuation recovery；全局 `PAPER + LIVE_DISABLED + liveAllowed=false`、无 signer/真实订单的安全边界不变，未完成合规和 arming 前不能进入真实 Live。
+
+## Owner-selected delivery order
+- 用户明确要求按“3 → 2 → 1”推进：先完成全部 Live/后端接线、账户交接、外部订单恢复、合规与安全闸门等开发（但不得启用真实订单）；再开发可操作的 UI；最后统一做 Paper、隔离 Live 和安全门验证。
+- UI 完成后才进入最终验证；最终验证通过且用户再次明确授权前，仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。这里的“先做 3”表示先把能力开发完整，不表示提前接通或启用实盘。

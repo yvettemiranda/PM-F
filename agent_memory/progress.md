@@ -41,6 +41,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 本次代码修复提交后，不再自动启动 Paper/Live；现有 24 小时历史证据不改写。
-2. 在考虑小额 Live 前，单独完成合规/geoblock、隔离钱包、真实 signer、Live runtime 接线与 arming 审计，并取得用户再次明确授权；当前 Live 仍是 `LIVE_DISABLED`。
-3. 若需要更强自然覆盖，应另开 Paper Campaign 等待自然 FILL/SELL/PnL 样本；不得因此放宽价格或风控。
+1. 按用户指定顺序执行第 3 阶段：先完成全部 Live/后端能力、隔离钱包与账户交接、外部订单恢复、合规/geoblock、风控熔断和 arming 接线；只开发和隔离验证接口，不启用真实订单。
+2. 第 3 阶段完成后开发第 2 阶段 UI：先支持 Paper/Observe 的完整操作和审计，再把 Live 控件接入安全 Gate，未授权时保持禁用。
+3. 最后执行第 1 阶段统一验收：Paper 自然 BUY/SELL/平仓/PnL、跨 Core 交接、估值恢复、隔离 Live 和 UI 安全门；通过后仍需用户再次明确授权才可小额灰度实盘。
