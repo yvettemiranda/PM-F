@@ -35,7 +35,7 @@
 - Replay 只有收到相同的完整持久化证明才投影 SPLIT/CONVERSION；仅有历史 Activity 或市场元数据时保持 `INCOMPLETE`。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.31.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.18.0`、Live `1.15.0`、Validation `1.9.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
+- 当前源码目标版本：Schema `2.31.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.18.0`、Live `1.16.0`、Validation `1.9.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
 - 当前运行数据库是 Schema `2.30.0`；本轮已完成迁移但异常 Session 未生成正式报告。后续启动仍必须沿用备份优先和既有入口。
 - `BUY_AMOUNT_POLICY_V4` 与 `followSellFullExitThresholdPpm=950000` 只由包含相应字段的新 Ruleset 解释；旧 Ruleset 固定按旧语义恢复，不得重解释历史执行。
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
@@ -55,18 +55,20 @@
 - 用户授权的 Paper 累计 `24 h` 和最终连续 `4 h` 已完成；但自然 FILL、POSITION_UPDATE、FEE、PnL 仍未发生，不能把隔离测试伪称为自然成交。
 - SPLIT/CONVERSION 采用“退出或隔离”而非真实链上复制，可能与目标组合的经济结果不同；必须在 Paper 报告中单独统计。
 - 历史 Phase 0 若只有特殊 Activity、没有本系统提交的完整证明，Replay 会保持 `INCOMPLETE`，不得人工降级通过。
-- 官方结束时间缺失的 Live 策略、合规/geoblock、隔离钱包、真实 signer、真实 Live runtime 接线和 Live arming 尚未完成。
+- 官方结束时间缺失的 Live 策略仍会阻断；真实 signer、认证凭据、真实资金证据和用户再次明确授权均不存在，因此不能启用真实 Live。阶段 3 只完成了显式依赖注入的后端能力和 fake/isolated 验证。
 
 ## Operator workflow
 - 桌面入口：`/Users/d4clt/Desktop/Polymarket验证_点这里`；目标文件：`data/operator/target-wallet.txt`。运行锁存在时禁止切换目标。
-- `operator-control` 是未来 localhost UI 的统一控制面；Live 控件继续固定为 `LIVE_RUNTIME_NOT_WIRED`，执行模式不能做成普通 UI 配置。
+- `operator-control` 是未来 localhost UI 的统一控制面；Live 后端已接线，但 Live 控件继续固定为 `LIVE_UI_NOT_IMPLEMENTED`，执行模式不能做成普通 UI 配置。
 
 ## Runtime handoff and valuation recovery
 - Paper 账户现在是跨 Campaign 的持久化组合容器。新 Core replacement 在旧 Campaign 已终止、没有等待中的 BUY/活动 reservation 且现金账本一致时复用同一 `paper_account_id` 和同一 `baseline_run_id`；旧仓位、旧 execution 和旧 ruleset 快照保持不可变，新账户运行时元数据更新到当前 Core，并在 Campaign transition evidence 中记录单向交接。
 - SQLite 迁移 `036_execution_runtime_handoff.sql` 移除 Campaign 对 `paper_account_id` 的列级唯一限制，改为可审计的 `(paper_account_id, created_at)` 索引，允许同一持久化 Paper 账户跨顺序 replacement Campaign 使用。
 - Paper final drain 与 Paper/Live 只读估值均使用有上限的重试和退避；最终估值短暂不完整会保留原始 blocker 和恢复证据，并允许同一 Core 后续恢复，而不是把仓位当成已结算或强行完成。
 - Paper BUY 在已有持仓且市场数据仍处于不可恢复冻结时不消费/不下新 BUY；Live BUY 在估值不完整时保留 Signal 待重试，不 quarantine、不消费。
-- Live 仅增加禁用态下的 `handoffRuntime` 元数据交接和 final valuation recovery；全局 `PAPER + LIVE_DISABLED + liveAllowed=false`、无 signer/真实订单的安全边界不变，未完成合规和 arming 前不能进入真实 Live。
+- Live 已具备禁用态 `handoffRuntime`、final valuation recovery、启动恢复、外部订单/成交/仓位对账、合规/geoblock/时钟 provider、钱包/signer 公共身份绑定、arming/kill switch 和显式依赖装配；全局 `PAPER + LIVE_DISABLED + liveAllowed=false`、无真实 signer/真实订单的安全边界不变。
+- Live `handoffRuntime` 现在还要求账户处于禁用态、没有未终态外部订单或活动 reservation、现金/保留账本非负且没有非零冻结仓位；Live Gate 全局 reconciliation 同时检查 Live 账本与孤儿/负仓位。`LiveRuntime` 仅组合 Gate 启动恢复、LiveExecutor 和 LiveRunner，不自行 arming 或发现凭据。
+- `LiveIdentityBinding` 在启动恢复、arming 申请/确认和轮询入口都核对注册账户、钱包状态、运行时钱包地址、authorized signer 地址、组件环境类型与源码版本；漂移时紧急禁用 Gate。`assembleLiveRuntime` 要求调用方显式注入全部 provider/adapter，不读取私钥或自动构造认证客户端。
 
 ## Owner-selected delivery order
 - 用户明确要求按“3 → 2 → 1”推进：先完成全部 Live/后端接线、账户交接、外部订单恢复、合规与安全闸门等开发（但不得启用真实订单）；再开发可操作的 UI；最后统一做 Paper、隔离 Live 和安全门验证。

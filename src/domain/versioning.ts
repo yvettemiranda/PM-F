@@ -13,7 +13,7 @@ export const DEFAULT_VERSIONS = Object.freeze({
   riskVersion: "1.10.0",
   replayVersion: "2.5.0",
   paperVersion: "1.18.0",
-  liveVersion: "1.15.0",
+  liveVersion: "1.16.0",
   validationVersion: "1.9.0",
   operationalVersion: "1.9.0",
   rulesetVersion: "v1.11.0",

@@ -4,6 +4,7 @@
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
 - 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
 - 已完成 Paper/Live 运行时交接与最终估值恢复修复：同一 Paper 账户和 baseline 可在安全 replacement 中承接旧仓位；最终 drain/估值有界重试；估值未完成时新 BUY 延后且不消费；Live 仅保留禁用态交接与隔离恢复。
+- 第 3 阶段 Live/后端能力和安全接线已完成：禁用态跨 Core 交接、外部订单/成交/仓位恢复对账、合规/geoblock/时钟安全 provider、钱包/signer 身份绑定、风控/arming/kill switch、启动与估值恢复、账本隔离及完整运行时装配均已有公开后端 seam；仍保持真实 Live 禁用，仅用 fake/isolated 测试验证。
 
 ## Implemented
 - Risk Manager 现在把 `POLYGON_TRADE_FEED_UNSAFE` 事故限定到事故所属 Observe Run：新 Run 的 Signal 不再被旧 Run 的事故误拒绝，同时旧事故记录保持 `OPEN`，同 Run、归属缺失/损坏及其他 `MAJOR_DESYNC` 继续硬阻断。
@@ -19,6 +20,7 @@
 - 2026-07-25 首次启动时，隔离套件中的重型 Shell 打包参数化用例在全套并发下触发默认 `5 s` 超时；已仅将该两组集成用例的显式时限调整为 `15 s`，不改生产逻辑或安全 Gate。
 
 ## Verification
+- 第 3 阶段新增：Live 账户 handoff 拒绝未终态外部订单、未结现金/资产 reservation、负现金或非零冻结仓位；Live Gate reconciliation 检查 Live 现金、reservation、孤儿执行/仓位、负仓位和冻结仓位；合规 provider 默认生产禁用并失败关闭；身份绑定在启动、arming 申请/确认与轮询入口拒绝钱包/signer 漂移；`assembleLiveRuntime` 只接受显式注入的依赖。TypeScript、定向 6 files / 241 tests、最终全量 56 files / 794 tests 和 `git diff --check` 通过。
 - 事故范围红测先稳定复现：上一 Observe Run 的 `POLYGON_TRADE_FEED_UNSAFE` 使当前 Run BUY 进入 `REJECTED`；修复后当前 Run BUY `EXECUTED`，事故所属旧 Run 的 BUY 仍以原事故 ID 拒绝，旧事故记录未改写。Paper Executor `122/122`、TypeScript、全套 `56 files / 777 tests` 和 `git diff --check` 通过。
 - Polygon 重组恢复红测先以 `POLYGON_TRADE_FEED_CONFIRMED_REORG:0x65` 失败；实现后定向 `2 files / 66 tests`、TypeScript、全套 `56 files / 776 tests` 通过。额外覆盖单次 RPC 哈希不一致可恢复，以及已发布目标成交后重组仍拒绝。
 - 用户授权例外红测先以 `paperOwnerAuthorizedFinalizationRuntimePolicy is not a function` 失败；实现后策略测试 `8/8`、TypeScript、全套 `56 files / 773 tests` 通过。
@@ -41,6 +43,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 按用户指定顺序执行第 3 阶段：先完成全部 Live/后端能力、隔离钱包与账户交接、外部订单恢复、合规/geoblock、风控熔断和 arming 接线；只开发和隔离验证接口，不启用真实订单。
-2. 第 3 阶段完成后开发第 2 阶段 UI：先支持 Paper/Observe 的完整操作和审计，再把 Live 控件接入安全 Gate，未授权时保持禁用。
-3. 最后执行第 1 阶段统一验收：Paper 自然 BUY/SELL/平仓/PnL、跨 Core 交接、估值恢复、隔离 Live 和 UI 安全门；通过后仍需用户再次明确授权才可小额灰度实盘。
+1. 按用户指定顺序进入第 2 阶段 UI：先支持 Paper/Observe 的完整操作和审计，再把 Live 控件接入安全 Gate，未授权时保持禁用。
+2. UI 完成后进入第 1 阶段统一验收：Paper 自然 BUY/SELL/平仓/PnL、跨 Core 交接、估值恢复、隔离 Live 和 UI 安全门。
+3. 统一验收通过后仍保持 `PAPER + LIVE_DISABLED`；只有用户再次明确授权，才可另行设计小额灰度实盘步骤。

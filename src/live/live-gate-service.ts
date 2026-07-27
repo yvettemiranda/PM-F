@@ -6,9 +6,13 @@ import type { BalanceProvider, BalanceResult } from "./balance-provider.js";
 import { LiveGateReconciliation } from "./live-gate-reconciliation.js";
 import {
   DisabledClockSafetyProvider,
+  DisabledComplianceProvider,
   DisabledGeoblockProvider,
+  FakeComplianceProvider,
   type ClockSafetyProvider,
   type ClockSafetyResult,
+  type ComplianceProvider,
+  type ComplianceResult,
   type GeoblockProvider,
   type GeoblockResult,
 } from "./live-safety-provider.js";
@@ -48,6 +52,7 @@ interface LiveGateServiceOptions {
   sourceVersion?: SourceVersion;
   now?: () => Date;
   geoblockProvider?: GeoblockProvider;
+  complianceProvider?: ComplianceProvider;
   clockProvider?: ClockSafetyProvider;
 }
 
@@ -114,6 +119,7 @@ export class LiveGateService implements LiveGate {
   private readonly sourceVersion: SourceVersion;
   private readonly now: () => Date;
   private readonly geoblockProvider: GeoblockProvider;
+  private readonly complianceProvider: ComplianceProvider;
   private readonly clockProvider: ClockSafetyProvider;
 
   constructor(
@@ -128,6 +134,16 @@ export class LiveGateService implements LiveGate {
     this.now = options.now ?? (() => new Date());
     this.runtimeEnvironment = this.config.runtimeEnvironment ?? "PRODUCTION";
     this.geoblockProvider = options.geoblockProvider ?? new DisabledGeoblockProvider();
+    this.complianceProvider = options.complianceProvider
+      ?? (this.runtimeEnvironment === "TEST"
+        ? new FakeComplianceProvider({
+          status: "ALLOWED",
+          checkedAt: this.now().toISOString(),
+          source: "TEST_DEFAULT_COMPLIANCE",
+          policyVersion: "TEST_POLICY",
+          reason: null,
+        })
+        : new DisabledComplianceProvider());
     this.clockProvider = options.clockProvider ?? new DisabledClockSafetyProvider();
     this.store = new LiveGateStore(this.database, this.sourceVersion, this.now);
     this.store.ensureDefaultState();
@@ -714,6 +730,7 @@ export class LiveGateService implements LiveGate {
         this.walletMetadataCheck(wallet),
         this.balanceProviderCheck(balance, now),
         this.geoblockCheck(geoblock, now),
+        await this.complianceCheck(wallet, now),
         this.clockSafetyCheck(clock, now),
         ...this.configurationChecks(),
         ...this.riskParameterChecks(),
@@ -880,6 +897,48 @@ export class LiveGateService implements LiveGate {
       return { name: "geoblock_compliance", passed: false, reason: "GEOBLOCK_EVIDENCE_STALE_OR_INVALID" };
     }
     return { name: "geoblock_compliance", passed: true, reason: "OK" };
+  }
+
+  private async complianceCheck(wallet: LiveWalletMetadata | null, now: string): Promise<LiveGateCheck> {
+    if (!wallet) return { name: "compliance_policy", passed: false, reason: "WALLET_METADATA_MISSING" };
+    if (this.runtimeEnvironment === "PRODUCTION" && this.complianceProvider.providerType !== "LIVE_READONLY") {
+      return {
+        name: "compliance_policy",
+        passed: false,
+        reason: `COMPLIANCE_PROVIDER_FORBIDDEN_IN_PRODUCTION:${this.complianceProvider.providerType}`,
+      };
+    }
+    if (this.runtimeEnvironment === "TEST" && this.complianceProvider.providerType !== "FAKE") {
+      return { name: "compliance_policy", passed: false, reason: "TEST_COMPLIANCE_PROVIDER_MUST_BE_FAKE" };
+    }
+    let signer: string | null = null;
+    const row = this.database.prepare(
+      `SELECT authorized_signer_address
+       FROM live_accounts
+       WHERE live_wallet_id=? AND status='ACTIVE'`,
+    ).get(wallet.liveWalletId) as { authorized_signer_address: string | null } | undefined;
+    signer = row?.authorized_signer_address ?? null;
+    let result: ComplianceResult;
+    try {
+      result = await this.complianceProvider.check({
+        walletAddress: wallet.walletAddress,
+        walletType: wallet.walletType,
+        network: wallet.network,
+        authorizedSignerAddress: signer,
+      });
+    } catch {
+      return { name: "compliance_policy", passed: false, reason: "COMPLIANCE_PROVIDER_ERROR" };
+    }
+    if (result.status !== "ALLOWED") {
+      return { name: "compliance_policy", passed: false, reason: result.reason ?? `COMPLIANCE_${result.status}` };
+    }
+    if (!result.policyVersion?.trim()) {
+      return { name: "compliance_policy", passed: false, reason: "COMPLIANCE_POLICY_VERSION_MISSING" };
+    }
+    if (!this.externalEvidenceFresh(result.checkedAt, result.source, now)) {
+      return { name: "compliance_policy", passed: false, reason: "COMPLIANCE_EVIDENCE_STALE_OR_INVALID" };
+    }
+    return { name: "compliance_policy", passed: true, reason: "OK" };
   }
 
   private clockSafetyCheck(result: ClockSafetyResult, now: string): LiveGateCheck {

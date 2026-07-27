@@ -229,6 +229,69 @@ export class LiveAccountRegistry {
         `LIVE_ACCOUNT_HANDOFF_GATE_UNSAFE:${gate?.execution_mode ?? "MISSING"}:${gate?.live_gate_state ?? "MISSING"}`,
       );
     }
+    const pendingOrder = this.database.prepare(
+      `SELECT o.live_order_id,o.status
+       FROM live_orders o
+       JOIN live_executions e ON e.live_execution_id=o.live_execution_id
+       WHERE e.live_account_id=? AND o.is_terminal=0
+       ORDER BY o.created_at,o.live_order_id LIMIT 1`,
+    ).get(account.liveAccountId) as { live_order_id: string; status: string } | undefined;
+    if (pendingOrder) {
+      throw new Error(`LIVE_ACCOUNT_HANDOFF_PENDING_ORDER:${pendingOrder.live_order_id}:${pendingOrder.status}`);
+    }
+    const pendingReservation = this.database.prepare(
+      `SELECT e.live_execution_id,SUM(r.delta_micros) reserved_micros
+       FROM live_reservation_ledger r
+       JOIN live_executions e ON e.live_execution_id=r.live_execution_id
+       WHERE e.live_account_id=?
+       GROUP BY e.live_execution_id
+       HAVING SUM(r.delta_micros)<>0
+       ORDER BY e.live_execution_id LIMIT 1`,
+    ).get(account.liveAccountId) as { live_execution_id: string; reserved_micros: string } | undefined;
+    if (pendingReservation) {
+      throw new Error(
+        `LIVE_ACCOUNT_HANDOFF_ACTIVE_RESERVATION:${pendingReservation.live_execution_id}:${pendingReservation.reserved_micros}`,
+      );
+    }
+    const pendingAssetReservation = this.database.prepare(
+      `SELECT e.live_execution_id,SUM(r.delta_size_micros) reserved_size_micros
+       FROM live_asset_reservation_ledger r
+       JOIN live_executions e ON e.live_execution_id=r.live_execution_id
+       WHERE e.live_account_id=?
+       GROUP BY e.live_execution_id
+       HAVING SUM(r.delta_size_micros)<>0
+       ORDER BY e.live_execution_id LIMIT 1`,
+    ).get(account.liveAccountId) as { live_execution_id: string; reserved_size_micros: string } | undefined;
+    if (pendingAssetReservation) {
+      throw new Error(
+        `LIVE_ACCOUNT_HANDOFF_ACTIVE_ASSET_RESERVATION:${pendingAssetReservation.live_execution_id}:${pendingAssetReservation.reserved_size_micros}`,
+      );
+    }
+    const cashLedger = this.database.prepare(
+      `SELECT initial_bankroll_micros,
+              COALESCE((SELECT SUM(cash_delta_micros) FROM live_cash_ledger WHERE live_account_id=?),0) cash_delta_micros,
+              COALESCE((SELECT SUM(reserved_delta_micros) FROM live_cash_ledger WHERE live_account_id=?),0) reserved_delta_micros
+       FROM live_accounts WHERE live_account_id=?`,
+    ).get(account.liveAccountId, account.liveAccountId, account.liveAccountId) as {
+      initial_bankroll_micros: string;
+      cash_delta_micros: string;
+      reserved_delta_micros: string;
+    } | undefined;
+    if (!cashLedger) throw new Error(`LIVE_ACCOUNT_NOT_FOUND:${account.liveAccountId}`);
+    const expectedCash = BigInt(cashLedger.initial_bankroll_micros) + BigInt(cashLedger.cash_delta_micros);
+    const reserved = BigInt(cashLedger.reserved_delta_micros);
+    if (expectedCash < 0n || reserved < 0n) {
+      throw new Error(`LIVE_ACCOUNT_HANDOFF_LEDGER_INCONSISTENT:${account.liveAccountId}`);
+    }
+    const frozenPosition = this.database.prepare(
+      `SELECT live_position_id
+       FROM live_positions
+       WHERE live_account_id=? AND status='FROZEN' AND current_size_micros<>'0'
+       ORDER BY created_at,live_position_id LIMIT 1`,
+    ).get(account.liveAccountId) as { live_position_id: string } | undefined;
+    if (frozenPosition) {
+      throw new Error(`LIVE_ACCOUNT_HANDOFF_FROZEN_POSITION:${frozenPosition.live_position_id}`);
+    }
     const previous = this.database.prepare(
       `SELECT schema_version,strategy_version,risk_version,live_version,ruleset_hash,
               source_code_commit,source_code_dirty,config_version
@@ -272,6 +335,8 @@ export class LiveAccountRegistry {
         currentSourceCodeCommit: this.sourceVersion.commit,
         executionMode: gate.execution_mode,
         liveGateState: gate.live_gate_state,
+        expectedCashMicros: expectedCash.toString(),
+        reservedMicros: reserved.toString(),
       });
     });
     return this.require(account.liveAccountId);

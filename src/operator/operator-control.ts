@@ -43,7 +43,7 @@ export interface OperatorControlSnapshot {
   controls: {
     targetWallet: { available: boolean; blockedReason: string | null };
     paper: { available: boolean; blockedReason: string | null };
-    live: { available: false; blockedReason: "LIVE_RUNTIME_NOT_WIRED" };
+    live: { available: false; blockedReason: "LIVE_UI_NOT_IMPLEMENTED" };
     parameters: {
       available: boolean;
       blockedReason: string | null;
@@ -128,7 +128,7 @@ export function operatorControlSnapshot(projectRoot: string): OperatorControlSna
         available: paperAvailable,
         blockedReason: paperAvailable ? null : "DATABASE_NOT_PAPER_LIVE_DISABLED",
       },
-      live: { available: false, blockedReason: "LIVE_RUNTIME_NOT_WIRED" },
+      live: { available: false, blockedReason: "LIVE_UI_NOT_IMPLEMENTED" },
       parameters: {
         available: mutationAvailable,
         blockedReason: runtimeSafety.mutationBlockedReason,

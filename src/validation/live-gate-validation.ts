@@ -8,7 +8,11 @@ import {
   LiveGateService,
   defaultLiveGateConfig,
 } from "../live/live-gate-service.js";
-import { FakeClockSafetyProvider, FakeGeoblockProvider } from "../live/live-safety-provider.js";
+import {
+  FakeClockSafetyProvider,
+  FakeComplianceProvider,
+  FakeGeoblockProvider,
+} from "../live/live-safety-provider.js";
 import { MockBalanceProvider } from "../live/mock-balance-provider.js";
 import { Phase0Database } from "../infra/sqlite/database.js";
 import { check, errorCheck } from "./checks.js";
@@ -66,6 +70,13 @@ export class LiveGateValidation implements ValidationValidator {
           status: "ALLOWED",
           checkedAt,
           source: "VALIDATION_TEST_FIXTURE",
+          reason: null,
+        }),
+        complianceProvider: new FakeComplianceProvider({
+          status: "ALLOWED",
+          checkedAt,
+          source: "VALIDATION_TEST_FIXTURE",
+          policyVersion: "VALIDATION_TEST_POLICY",
           reason: null,
         }),
         clockProvider: new FakeClockSafetyProvider({

@@ -79,7 +79,7 @@ describe("operator control", () => {
       controls: {
         targetWallet: { available: true, blockedReason: null },
         paper: { available: true, blockedReason: null },
-        live: { available: false, blockedReason: "LIVE_RUNTIME_NOT_WIRED" },
+        live: { available: false, blockedReason: "LIVE_UI_NOT_IMPLEMENTED" },
         parameters: { available: true, blockedReason: null, appliesOnNextCampaign: true },
       },
     });
@@ -111,7 +111,7 @@ describe("operator control", () => {
       controls: {
         targetWallet: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
         paper: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
-        live: { available: false, blockedReason: "LIVE_RUNTIME_NOT_WIRED" },
+        live: { available: false, blockedReason: "LIVE_UI_NOT_IMPLEMENTED" },
         parameters: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
       },
     });

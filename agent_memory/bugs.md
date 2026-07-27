@@ -6,7 +6,7 @@
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- geoblock/compliance、隔离钱包、真实 signer、Live runtime 接线、Live arming 和用户再次明确授权均未完成。
+- 阶段 3 后端接口与隔离接线已完成；真实 signer、认证 CLOB 凭据、真实钱包资金证据、真实 Live UI、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
 
 ## Active risks
 - `reconciliation_issues` 是目标级长期证据；新修复只对 `POLYGON_TRADE_FEED_UNSAFE` 使用明确的 Observe Run 归属缩小阻断范围。归属缺失、JSON 损坏、同 Run 或其他类型 `MAJOR_DESYNC` 全部继续 fail closed；后续若新增可恢复事故类型，必须单独定义恢复证明，不能泛化跳过。
@@ -17,7 +17,8 @@
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
-- 运行时交接与最终估值恢复已实现，但真实 Live 尚未启用；`handoffRuntime` 只允许账户 DISABLED 且全局 `PAPER + LIVE_DISABLED`，必须在未来真实 Live 设计中补齐合规、signer、外部订单恢复和 arming 审计后才可使用。
+- 阶段 3 已完成运行时交接、估值恢复、合规 provider、外部订单恢复、身份绑定和 arming 审计接口；但它们只证明后端 seam 和隔离 fake 路径。`LiveRuntime`/`assembleLiveRuntime` 不创建凭据、不自动切换模式，当前仍没有真实 signer、认证 CLOB client、真实资金运行证据或获授权的生产启动入口。
+- `ConfiguredComplianceProvider` 是显式配置的只读策略适配器，不是法律意见或远端权威合规服务；生产接入时仍需由用户确认适用政策来源、地域和账户资格，并保留新鲜证据。
 - 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
 - 每笔 `<1%` BUY 可能放大到 `1—5 pUSD`，虽有 9 次小额追单上限，仍需自然测试累计敞口、收益偏差和费用。
 - Polygon WebSocket 只是 wake hint；`1 s` 确认块扫描、Data API `3 s` 和 Positions REST 是完整性兜底。确认深度、API offset 和短暂不同步仍可能触发 gap/reconciliation。

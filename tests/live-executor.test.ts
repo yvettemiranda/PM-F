@@ -9,6 +9,9 @@ import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { LiveAccountRegistry } from "../src/live/live-account-registry.js";
 import { LiveExecutor } from "../src/live/live-executor.js";
+import { LiveIdentityBinding } from "../src/live/live-identity-binding.js";
+import { LiveRuntime } from "../src/live/live-runtime.js";
+import { assembleLiveRuntime } from "../src/live/live-runtime-assembly.js";
 import { LiveStore } from "../src/live/live-store.js";
 import { FakeOrderAdapter } from "../src/live/fake-order-adapter.js";
 import { FakeSigner } from "../src/live/fake-signer.js";
@@ -16,7 +19,11 @@ import { FakeWalletProvider } from "../src/live/fake-wallet-provider.js";
 import { FakeLiveMarketDataProvider } from "../src/live/fake-live-market-data.js";
 import { FakeRedeemAdapter } from "../src/live/fake-redeem-adapter.js";
 import { LiveGateService, defaultLiveGateConfig } from "../src/live/live-gate-service.js";
-import { FakeClockSafetyProvider, FakeGeoblockProvider } from "../src/live/live-safety-provider.js";
+import {
+  FakeClockSafetyProvider,
+  FakeComplianceProvider,
+  FakeGeoblockProvider,
+} from "../src/live/live-safety-provider.js";
 import { MockBalanceProvider } from "../src/live/mock-balance-provider.js";
 import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "../src/live/order-adapter.js";
 import type { RedeemAdapter, RedeemResult } from "../src/live/redeem-adapter.js";
@@ -55,6 +62,7 @@ interface TestRuleset {
 class FakeGate implements LiveExecutionGate {
   readonly gateType = "FAKE" as const;
   readonly runtimeEnvironment = "TEST" as const;
+  readonly emergencyDisableReasons: string[] = [];
 
   constructor(private readonly allowed = true, private readonly reason = "FAKE_GATE_BLOCKED") {}
 
@@ -64,6 +72,22 @@ class FakeGate implements LiveExecutionGate {
 
   async checkAccountAction(): Promise<{ allowed: boolean; checks: []; blockedReasons: string[]; runId: string }> {
     return { allowed: this.allowed, checks: [], blockedReasons: this.allowed ? [] : [this.reason], runId: "fake-live-action-gate-run" };
+  }
+
+  async recoverOnStartup(): Promise<{ allowed: boolean; checks: []; blockedReasons: string[]; runId: string }> {
+    return { allowed: this.allowed, checks: [], blockedReasons: this.allowed ? [] : [this.reason], runId: "fake-live-startup-run" };
+  }
+
+  async requestLiveActivation(): Promise<{ allowed: boolean; checks: []; blockedReasons: string[]; runId: string }> {
+    return { allowed: this.allowed, checks: [], blockedReasons: this.allowed ? [] : [this.reason], runId: "fake-live-arm-run" };
+  }
+
+  async confirmLiveActivation(): Promise<{ allowed: boolean; checks: []; blockedReasons: string[]; runId: string }> {
+    return { allowed: this.allowed, checks: [], blockedReasons: this.allowed ? [] : [this.reason], runId: "fake-live-confirm-run" };
+  }
+
+  async emergencyDisable(input: { reason: string }): Promise<void> {
+    this.emergencyDisableReasons.push(input.reason);
   }
 }
 
@@ -5698,5 +5722,171 @@ describe("LiveExecutor", () => {
       .toBe(0);
     check.close();
     retry.close();
+  });
+});
+
+describe("LiveIdentityBinding", () => {
+  it("accepts only the registered fake wallet and signer identities in isolated tests", async () => {
+    const env = setup();
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: wallet }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    await expect(binding.check(accountId)).resolves.toMatchObject({
+      accountId,
+      ready: true,
+      walletAddress: wallet,
+      signerAddress: wallet,
+    });
+    binding.close();
+  });
+
+  it("fails closed when the runtime wallet identity drifts from the registered account", async () => {
+    const env = setup();
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: "0x0000000000000000000000000000000000000002" }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    const result = await binding.check(accountId);
+    expect(result.ready).toBe(false);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "runtime_wallet_address", reason: "RUNTIME_WALLET_IDENTITY_MISMATCH" }),
+    ]));
+    binding.close();
+  });
+});
+
+describe("LiveRuntime", () => {
+  it("runs startup recovery and leaves Live disabled until an explicit arming path", async () => {
+    const env = setup();
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: wallet }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    const runtime = new LiveRuntime(new FakeGate(false, "LIVE_DISABLED_IN_TEST"), executor, consumer, binding);
+    const recovery = await runtime.recoverOnStartup(accountId);
+    expect(recovery.ready).toBe(false);
+    expect(recovery.identity?.ready).toBe(true);
+    expect(recovery.execution.passed).toBe(true);
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
+    database.close();
+    runtime.close();
+  });
+
+  it("rechecks identity at the polling entrypoint and disables the Gate on drift", async () => {
+    const env = setup();
+    const gate = new FakeGate(false, "LIVE_DISABLED_IN_TEST");
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: "0x0000000000000000000000000000000000000002" }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    const runtime = new LiveRuntime(gate, executor, consumer, binding);
+    let currentTime = new Date(now).valueOf();
+    const result = await runtime.run({
+      accountId,
+      durationMs: 1,
+      now: () => new Date(currentTime++),
+      wait: async () => {},
+    });
+    expect(result.identity?.ready).toBe(false);
+    expect(gate.emergencyDisableReasons).toEqual([
+      expect.stringContaining("LIVE_IDENTITY_BINDING_FAILED:RUNTIME_WALLET_IDENTITY_MISMATCH"),
+    ]);
+    runtime.close();
+  });
+
+  it("blocks arming before the Gate when the wallet identity has drifted", async () => {
+    const env = setup();
+    const gate = new FakeGate(true);
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: "0x0000000000000000000000000000000000000002" }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    const runtime = new LiveRuntime(gate, executor, consumer, binding);
+    await expect(runtime.requestActivation(accountId, {
+      actor: "TEST",
+      reason: "identity drift probe",
+    })).rejects.toThrow("LIVE_IDENTITY_BINDING_FAILED:RUNTIME_WALLET_IDENTITY_MISMATCH");
+    expect(gate.emergencyDisableReasons).toHaveLength(1);
+    runtime.close();
+  });
+
+  it("assembles the complete isolated backend graph without credentials or real adapters", async () => {
+    const env = setup();
+    const assembly = assembleLiveRuntime({
+      databasePath: env.databasePath,
+      sourceVersion,
+      now: () => new Date(now),
+      environment: "TEST",
+      balanceProvider: new MockBalanceProvider({
+        status: "AVAILABLE",
+        balanceMicros: "1000000000",
+        reason: null,
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+      }),
+      geoblockProvider: new FakeGeoblockProvider({
+        status: "ALLOWED",
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+        reason: null,
+      }),
+      complianceProvider: new FakeComplianceProvider({
+        status: "ALLOWED",
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+        policyVersion: "TEST_POLICY",
+        reason: null,
+      }),
+      clockProvider: new FakeClockSafetyProvider({
+        status: "SAFE",
+        offsetMs: 0,
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+        reason: null,
+      }),
+      orderAdapter: new FakeOrderAdapter(),
+      walletProvider: new FakeWalletProvider({ address: wallet }),
+      signer: new FakeSigner(wallet),
+      redeemAdapter: new FakeRedeemAdapter(),
+      marketDataProvider: new FakeLiveMarketDataProvider(),
+      requireExternalPositionReconciliation: false,
+    });
+    const recovery = await assembly.runtime.recoverOnStartup(accountId);
+    expect(recovery).toMatchObject({
+      ready: false,
+      execution: { passed: true },
+      identity: { ready: true },
+    });
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
+    database.close();
+    assembly.close();
   });
 });

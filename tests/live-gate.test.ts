@@ -8,9 +8,13 @@ import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } fr
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { LiveGateService, defaultLiveGateConfig } from "../src/live/live-gate-service.js";
+import { LiveAccountRegistry } from "../src/live/live-account-registry.js";
+import { LiveGateReconciliation } from "../src/live/live-gate-reconciliation.js";
 import { ClobClockSafetyProvider } from "../src/live/clob-clock-safety-provider.js";
 import {
+  ConfiguredComplianceProvider,
   FakeClockSafetyProvider,
+  FakeComplianceProvider,
   FakeGeoblockProvider,
 } from "../src/live/live-safety-provider.js";
 import { MockBalanceProvider } from "../src/live/mock-balance-provider.js";
@@ -1583,6 +1587,110 @@ describe("LiveGateService", () => {
     expect(columns).not.toContain("transaction_capability");
     db.close();
     gate.close();
+  });
+});
+
+describe("phase 3 Live handoff and reconciliation", () => {
+  it("hands off only a disabled, quiescent Live account", () => {
+    const env = setup();
+    insertLiveAccount(env.databasePath);
+    const database = new DatabaseSync(env.databasePath);
+    database.prepare(
+      "UPDATE live_accounts SET status='DISABLED',updated_at=? WHERE live_account_id=?",
+    ).run(now, liveAccountId);
+    const registry = new LiveAccountRegistry(database, sourceVersion, () => new Date(now));
+    expect(registry.handoffRuntime({
+      liveAccountId,
+      actor: "TEST",
+      reason: "RUNTIME_REPLACEMENT",
+    }).status).toBe("DISABLED");
+    expect(database.prepare(
+      `SELECT action FROM audit_log
+       WHERE entity_type='LIVE_ACCOUNT' AND entity_id=? AND action='runtime_handoff'`,
+    ).get(liveAccountId)).toEqual({ action: "runtime_handoff" });
+    database.close();
+  });
+
+  it("fails the Gate reconciliation projection on negative Live expected cash", () => {
+    const env = setup();
+    insertLiveAccount(env.databasePath);
+    const database = new DatabaseSync(env.databasePath);
+    database.prepare(
+      `INSERT INTO live_cash_ledger(
+        cash_ledger_id,live_account_id,live_execution_id,entry_type,cash_delta_micros,
+        reserved_delta_micros,cash_after_micros,reserved_after_micros,idempotency_key,created_at
+      ) VALUES ('live-gate-cash',?,?, 'TEST','-1000000001','0',NULL,NULL,'live-gate-cash-key',?)`,
+    ).run(liveAccountId, null, now);
+    expect(new LiveGateReconciliation(database).check()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "live_reconciliation_cash_ledger", passed: false }),
+    ]));
+    database.close();
+  });
+
+  it("fails closed when compliance evidence is blocked or unavailable", async () => {
+    const env = setup();
+    insertLiveAccount(env.databasePath);
+    const gate = new LiveGateService(
+      env.databasePath,
+      new MockBalanceProvider({
+        status: "AVAILABLE",
+        balanceMicros: "1000000000",
+        reason: null,
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+      }),
+      { ...defaultLiveGateConfig(), runtimeEnvironment: "TEST" },
+      {
+        sourceVersion,
+        now: () => new Date(now),
+        geoblockProvider: new FakeGeoblockProvider({
+          status: "ALLOWED",
+          checkedAt: now,
+          source: "TEST_FIXTURE",
+          reason: null,
+        }),
+        complianceProvider: new FakeComplianceProvider({
+          status: "BLOCKED",
+          checkedAt: now,
+          source: "TEST_COMPLIANCE",
+          policyVersion: "policy-1",
+          reason: "JURISDICTION_BLOCKED",
+        }),
+        clockProvider: new FakeClockSafetyProvider({
+          status: "SAFE",
+          offsetMs: 0,
+          checkedAt: now,
+          source: "TEST_FIXTURE",
+          reason: null,
+        }),
+      },
+    );
+    const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
+    expect(result.blockedReasons).toContain("JURISDICTION_BLOCKED");
+    gate.close();
+  });
+
+  it("evaluates a configured read-only compliance policy without credentials", async () => {
+    const provider = new ConfiguredComplianceProvider({
+      policyVersion: "policy-1",
+      source: "LOCAL_POLICY",
+      checkedAt: now,
+      allowedNetworks: ["POLYGON"],
+      allowedWalletTypes: ["EOA"],
+      allowedWalletAddresses: [wallet],
+    });
+    await expect(provider.check({
+      walletAddress: wallet,
+      walletType: "EOA",
+      network: "POLYGON",
+      authorizedSignerAddress: wallet,
+    })).resolves.toMatchObject({ status: "ALLOWED", policyVersion: "policy-1" });
+    await expect(provider.check({
+      walletAddress: "0x0000000000000000000000000000000000000002",
+      walletType: "EOA",
+      network: "POLYGON",
+      authorizedSignerAddress: "0x0000000000000000000000000000000000000002",
+    })).resolves.toMatchObject({ status: "BLOCKED", reason: "COMPLIANCE_POLICY_REJECTED" });
   });
 });
 

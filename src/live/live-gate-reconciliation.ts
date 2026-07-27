@@ -28,6 +28,12 @@ export class LiveGateReconciliation {
       this.frozenPositionCheck(),
       this.majorDesyncCheck(),
       this.portfolioProjectionCheck(),
+      this.liveCashLedgerCheck(),
+      this.liveReservationLedgerCheck(),
+      this.liveOrphanExecutionCheck(),
+      this.liveOrphanPositionCheck(),
+      this.liveNegativePositionCheck(),
+      this.liveFrozenPositionCheck(),
     ];
   }
 
@@ -180,5 +186,95 @@ export class LiveGateReconciliation {
       }
     }
     return { name: "reconciliation_portfolio_projection", passed: true, reason: "OK" };
+  }
+
+  private liveCashLedgerCheck(): LiveGateCheck {
+    const accounts = this.database.prepare(
+      "SELECT live_account_id,initial_bankroll_micros FROM live_accounts",
+    ).all() as unknown as Array<{ live_account_id: string; initial_bankroll_micros: string }>;
+    for (const account of accounts) {
+      const rows = this.database.prepare(
+        "SELECT cash_delta_micros FROM live_cash_ledger WHERE live_account_id=?",
+      ).all(account.live_account_id) as unknown as Array<{ cash_delta_micros: string }>;
+      const expected = rows.reduce(
+        (total, row) => total + BigInt(row.cash_delta_micros),
+        BigInt(account.initial_bankroll_micros),
+      );
+      if (expected < 0n) {
+        return {
+          name: "live_reconciliation_cash_ledger",
+          passed: false,
+          reason: `LIVE_NEGATIVE_EXPECTED_CASH:${account.live_account_id}`,
+        };
+      }
+    }
+    return { name: "live_reconciliation_cash_ledger", passed: true, reason: "OK" };
+  }
+
+  private liveReservationLedgerCheck(): LiveGateCheck {
+    const rows = this.database.prepare(
+      `SELECT e.live_account_id,SUM(r.delta_micros) reserved_micros
+       FROM live_reservation_ledger r
+       JOIN live_executions e ON e.live_execution_id=r.live_execution_id
+       GROUP BY e.live_account_id`,
+    ).all() as unknown as Array<{ live_account_id: string; reserved_micros: string }>;
+    const mismatch = rows.find((row) => BigInt(row.reserved_micros) < 0n);
+    return mismatch
+      ? {
+        name: "live_reconciliation_reservations",
+        passed: false,
+        reason: `LIVE_NEGATIVE_RESERVATIONS:${mismatch.live_account_id}`,
+      }
+      : { name: "live_reconciliation_reservations", passed: true, reason: "OK" };
+  }
+
+  private liveOrphanExecutionCheck(): LiveGateCheck {
+    const row = this.database.prepare(
+      `SELECT e.live_execution_id
+       FROM live_executions e
+       LEFT JOIN live_accounts a ON a.live_account_id=e.live_account_id
+       WHERE a.live_account_id IS NULL
+       LIMIT 1`,
+    ).get() as { live_execution_id: string } | undefined;
+    return row
+      ? { name: "live_reconciliation_orphan_execution", passed: false, reason: `LIVE_ORPHAN_EXECUTION:${row.live_execution_id}` }
+      : { name: "live_reconciliation_orphan_execution", passed: true, reason: "OK" };
+  }
+
+  private liveOrphanPositionCheck(): LiveGateCheck {
+    const row = this.database.prepare(
+      `SELECT p.live_position_id
+       FROM live_positions p
+       LEFT JOIN live_executions e ON e.live_execution_id=p.opening_execution_id
+       WHERE e.live_execution_id IS NULL
+       LIMIT 1`,
+    ).get() as { live_position_id: string } | undefined;
+    return row
+      ? { name: "live_reconciliation_orphan_position", passed: false, reason: `LIVE_ORPHAN_POSITION:${row.live_position_id}` }
+      : { name: "live_reconciliation_orphan_position", passed: true, reason: "OK" };
+  }
+
+  private liveNegativePositionCheck(): LiveGateCheck {
+    const row = this.database.prepare(
+      `SELECT live_position_id
+       FROM live_positions
+       WHERE CAST(current_size_micros AS INTEGER)<0 OR CAST(remaining_cost_micros AS INTEGER)<0
+       LIMIT 1`,
+    ).get() as { live_position_id: string } | undefined;
+    return row
+      ? { name: "live_reconciliation_negative_position", passed: false, reason: `LIVE_NEGATIVE_POSITION:${row.live_position_id}` }
+      : { name: "live_reconciliation_negative_position", passed: true, reason: "OK" };
+  }
+
+  private liveFrozenPositionCheck(): LiveGateCheck {
+    const row = this.database.prepare(
+      `SELECT live_position_id
+       FROM live_positions
+       WHERE status='FROZEN' AND current_size_micros<>'0'
+       LIMIT 1`,
+    ).get() as { live_position_id: string } | undefined;
+    return row
+      ? { name: "live_reconciliation_frozen_positions", passed: false, reason: `LIVE_FROZEN_POSITION:${row.live_position_id}` }
+      : { name: "live_reconciliation_frozen_positions", passed: true, reason: "OK" };
   }
 }
