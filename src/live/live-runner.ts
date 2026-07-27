@@ -5,6 +5,10 @@ import type {
   LiveStopLossCheckResult,
 } from "./live-executor.js";
 import type { LiveSignalConsumer } from "./live-signal-consumer.js";
+import {
+  recoverIncompleteValuation,
+  type ValuationRecoveryPolicy,
+} from "../execution/valuation-recovery.js";
 
 const DEFAULT_REPORT_DETAIL_LIMIT = 100;
 
@@ -16,6 +20,7 @@ export interface LiveRunnerOptions {
   reportDetailLimit?: number;
   now?: () => Date;
   wait?: (milliseconds: number) => Promise<void>;
+  valuationRecovery?: Omit<ValuationRecoveryPolicy, "signal">;
 }
 
 export interface LiveRunnerSettlementCounts {
@@ -44,6 +49,11 @@ export interface LiveRunnerReport {
   droppedErrorCount: number;
   errors: Array<{ time: string; operation: string; message: string }>;
   account: PaperAccountSnapshot | null;
+  valuationRecovery: {
+    attempts: number;
+    recovered: boolean;
+    status: "COMPLETE" | "INCOMPLETE";
+  } | null;
 }
 
 /**
@@ -233,8 +243,21 @@ export class LiveRunner {
       await this.wait(Math.min(this.intervalMs, remaining));
     }
     let account: PaperAccountSnapshot | null = null;
+    let valuationRecovery: LiveRunnerReport["valuationRecovery"] = null;
     await capture("FINAL_ACCOUNT_SNAPSHOT", async () => {
-      account = await this.executor.getBalance({ accountId: this.options.accountId });
+      const recovered = await recoverIncompleteValuation(
+        () => this.executor.getBalance({ accountId: this.options.accountId }),
+        {
+          ...this.options.valuationRecovery,
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+      account = recovered.value;
+      valuationRecovery = {
+        attempts: recovered.attempts,
+        recovered: recovered.recovered,
+        status: recovered.status,
+      };
     });
     return {
       accountId: this.options.accountId,
@@ -256,6 +279,7 @@ export class LiveRunner {
       droppedErrorCount: Math.max(0, errorCount - errors.length),
       errors,
       account,
+      valuationRecovery,
     };
   }
 }

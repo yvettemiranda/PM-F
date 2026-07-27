@@ -1504,9 +1504,27 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const snapshot = hasOpenPosition
       ? await this.accountSnapshot(accountId, abortSignal)
       : null;
+    const unrecoveredValuationFailure = snapshot !== null
+      && (snapshot.valuationStatus !== "COMPLETE" || snapshot.unpricedPositionCount !== 0)
+      && Boolean(this.database.prepare(
+        `SELECT 1 present
+         FROM paper_positions p
+         LEFT JOIN paper_market_data_health h
+           ON h.paper_account_id=p.paper_account_id
+          AND h.asset_id=p.asset_id
+          AND h.condition_id=p.condition_id
+         WHERE p.paper_account_id=?
+           AND p.status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')
+           AND CAST(p.current_size_micros AS INTEGER)>0
+           AND (p.status='FROZEN' OR h.state='FROZEN')
+         LIMIT 1`,
+      ).get(accountId));
+    if (unrecoveredValuationFailure) {
+      throw new Error("PAPER_PORTFOLIO_VALUATION_INCOMPLETE");
+    }
     const sizingCapital = snapshot === null
       ? BigInt(account.cash_balance_micros)
-      : snapshot.valuationStatus === "COMPLETE"
+      : snapshot.valuationStatus === "COMPLETE" && snapshot.unpricedPositionCount === 0
         ? BigInt(snapshot.totalEquityMicros)
         : available;
     const evidence = calculateBuyCapitalSizing({

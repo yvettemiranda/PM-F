@@ -207,6 +207,76 @@ export class LiveAccountRegistry {
     return this.require(account.liveAccountId);
   }
 
+  /**
+   * Rebinds the durable Live portfolio container to the current runtime while
+   * leaving every historical execution and Position ruleset untouched.
+   * Handoff is allowed only while both the account and global Live gate are
+   * disabled; startup recovery remains responsible for pending external orders.
+   */
+  handoffRuntime(input: ChangeLiveAccountStateInput): LiveAccount {
+    if (this.sourceVersion.dirty) throw new Error("LIVE_ACCOUNT_HANDOFF_SOURCE_DIRTY");
+    const account = this.require(input.liveAccountId);
+    const actor = required(input.actor, "LIVE_ACCOUNT_ACTOR_REQUIRED");
+    const reason = required(input.reason, "LIVE_ACCOUNT_REASON_REQUIRED");
+    if (account.status !== "DISABLED") {
+      throw new Error(`LIVE_ACCOUNT_HANDOFF_REQUIRES_DISABLED:${account.status}`);
+    }
+    const gate = this.database.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get() as { execution_mode: string; live_gate_state: string } | undefined;
+    if (!gate || gate.execution_mode !== "PAPER" || gate.live_gate_state !== "LIVE_DISABLED") {
+      throw new Error(
+        `LIVE_ACCOUNT_HANDOFF_GATE_UNSAFE:${gate?.execution_mode ?? "MISSING"}:${gate?.live_gate_state ?? "MISSING"}`,
+      );
+    }
+    const previous = this.database.prepare(
+      `SELECT schema_version,strategy_version,risk_version,live_version,ruleset_hash,
+              source_code_commit,source_code_dirty,config_version
+       FROM live_accounts WHERE live_account_id=?`,
+    ).get(account.liveAccountId) as {
+      schema_version: string;
+      strategy_version: string;
+      risk_version: string;
+      live_version: string;
+      ruleset_hash: string;
+      source_code_commit: string;
+      source_code_dirty: number;
+      config_version: string;
+    };
+    const now = this.now().toISOString();
+    this.transaction(() => {
+      this.database.prepare(
+        `UPDATE live_accounts
+         SET schema_version=?,strategy_version=?,risk_version=?,live_version=?,
+             ruleset_hash=?,source_code_commit=?,source_code_dirty=0,config_version=?,updated_at=?
+         WHERE live_account_id=? AND status='DISABLED'`,
+      ).run(
+        VERSIONS.schemaVersion,
+        VERSIONS.strategyVersion,
+        VERSIONS.riskVersion,
+        VERSIONS.liveVersion,
+        RULESET_HASH,
+        this.sourceVersion.commit,
+        VERSIONS.configVersion,
+        now,
+        account.liveAccountId,
+      );
+      this.audit(account.liveAccountId, "runtime_handoff", reason, actor, now, {
+        previousSchemaVersion: previous.schema_version,
+        currentSchemaVersion: VERSIONS.schemaVersion,
+        previousLiveVersion: previous.live_version,
+        currentLiveVersion: VERSIONS.liveVersion,
+        previousRulesetHash: previous.ruleset_hash,
+        currentRulesetHash: RULESET_HASH,
+        previousSourceCodeCommit: previous.source_code_commit,
+        currentSourceCodeCommit: this.sourceVersion.commit,
+        executionMode: gate.execution_mode,
+        liveGateState: gate.live_gate_state,
+      });
+    });
+    return this.require(account.liveAccountId);
+  }
+
   get(liveAccountId: string): LiveAccount | null {
     const row = this.database.prepare(
       `SELECT a.live_account_id,a.live_wallet_id,w.status wallet_status,a.name,a.status,

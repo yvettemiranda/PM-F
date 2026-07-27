@@ -228,6 +228,7 @@ export interface FinalizeSessionInput {
   recoveryConfirmed: boolean;
   stopReason: string;
   blockers: string[];
+  recoverableBlockers?: string[];
   coverage: SessionCoverage;
   observeMetrics?: ObserveOperationalMetrics | null;
   stoppedAt: string;

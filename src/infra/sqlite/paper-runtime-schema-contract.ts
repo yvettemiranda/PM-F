@@ -28,6 +28,7 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.27.0",
   "2.29.0",
   "2.30.0",
+  "2.31.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
@@ -160,6 +161,7 @@ export const PAPER_RUNTIME_REQUIRED_INDEXES = [
   "paper_settlement_retry_due_idx",
   "paper_validation_evidence_adjudications_campaign_idx",
   "paper_validation_campaign_transition_sequence_idx",
+  "paper_validation_campaigns_account_idx",
   "paper_validation_session_transition_sequence_idx",
   "replay_event_classifications_event_idx",
 ] as const;

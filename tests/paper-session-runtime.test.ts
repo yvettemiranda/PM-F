@@ -72,7 +72,11 @@ describe("Paper Session runtime contract", () => {
 
   it("drains before cancelling waiting BUYs and rebuilding final valuation", async () => {
     const order: string[] = [];
-    const account = { paperAccountId: "PA" };
+    const account = {
+      paperAccountId: "PA",
+      valuationStatus: "COMPLETE",
+      unpricedPositionCount: 0,
+    };
     const report = {
       accountId: "PA",
       startedAt: "2026-07-17T00:00:00.000Z",
@@ -102,5 +106,106 @@ describe("Paper Session runtime contract", () => {
     expect(finalized.cancelledWaitingBuyCount).toBe(1);
     expect(finalized.report.consumedSignals).toBe(5);
     expect(finalized.report.cycles).toBe(3);
+  });
+
+  it("retries only the read-only final valuation when the public API recovers", async () => {
+    const incomplete = {
+      paperAccountId: "PA",
+      valuationStatus: "INCOMPLETE",
+      unpricedPositionCount: 1,
+    };
+    const complete = {
+      paperAccountId: "PA",
+      valuationStatus: "COMPLETE",
+      unpricedPositionCount: 0,
+    };
+    const accountSnapshot = vi.fn()
+      .mockResolvedValueOnce(incomplete)
+      .mockResolvedValueOnce(complete);
+    const report = {
+      accountId: "PA",
+      startedAt: "2026-07-17T00:00:00.000Z",
+      stoppedAt: "2026-07-17T00:01:00.000Z",
+      cycles: 1,
+      consumedSignals: 0,
+      errorCount: 0,
+      droppedErrorCount: 0,
+      errors: [],
+      account: incomplete,
+      acceptance: {},
+    } as unknown as PaperRunnerReport;
+
+    const finalized = await finalizePaperSession({
+      runner: { finalDrain: async () => 0 },
+      executor: {
+        cancelWaitingBuys: async () => 0,
+        accountSnapshot,
+        acceptanceSummary: () => ({} as never),
+      },
+      accountId: "PA",
+      report,
+      signal: new AbortController().signal,
+      valuationRecovery: {
+        maxAttempts: 2,
+        wait: async () => undefined,
+      },
+    });
+
+    expect(accountSnapshot).toHaveBeenCalledTimes(2);
+    expect(finalized.account).toBe(complete);
+    expect(finalized.valuationRecovery).toEqual({
+      attempts: 2,
+      recovered: true,
+      status: "COMPLETE",
+    });
+  });
+
+  it("retries an aborted final drain idempotently before cancelling BUYs", async () => {
+    const finalDrain = vi.fn()
+      .mockRejectedValueOnce(new Error("FINAL_DRAIN_INCOMPLETE"))
+      .mockResolvedValueOnce(1);
+    const cancelWaitingBuys = vi.fn(async () => 0);
+    const account = {
+      paperAccountId: "PA",
+      valuationStatus: "COMPLETE",
+      unpricedPositionCount: 0,
+    };
+    const report = {
+      accountId: "PA",
+      startedAt: "2026-07-17T00:00:00.000Z",
+      stoppedAt: "2026-07-17T00:01:00.000Z",
+      cycles: 1,
+      consumedSignals: 0,
+      errorCount: 0,
+      droppedErrorCount: 0,
+      errors: [],
+      account,
+      acceptance: {},
+    } as unknown as PaperRunnerReport;
+
+    const finalized = await finalizePaperSession({
+      runner: { finalDrain },
+      executor: {
+        cancelWaitingBuys,
+        accountSnapshot: async () => account as never,
+        acceptanceSummary: () => ({} as never),
+      },
+      accountId: "PA",
+      report,
+      signal: new AbortController().signal,
+      finalDrainRecovery: {
+        maxAttempts: 2,
+        wait: async () => undefined,
+      },
+    });
+
+    expect(finalDrain).toHaveBeenCalledTimes(2);
+    expect(cancelWaitingBuys).toHaveBeenCalledTimes(1);
+    expect(finalized.finalDrainConsumedSignals).toBe(1);
+    expect(finalized.finalDrainRecovery).toEqual({
+      attempts: 2,
+      recovered: true,
+      status: "COMPLETE",
+    });
   });
 });

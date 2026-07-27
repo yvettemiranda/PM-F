@@ -3,6 +3,10 @@ import type { SourceVersion } from "../infra/source-version.js";
 import type { PaperAccountSnapshot, PaperSignalConsumptionScope } from "./types.js";
 import type { ConsumerCutoffResult, PaperExecutor } from "./paper-executor.js";
 import type { PaperRunner, PaperRunnerOptions, PaperRunnerReport } from "./paper-runner.js";
+import {
+  recoverIncompleteValuation,
+  type ValuationRecoveryPolicy,
+} from "../execution/valuation-recovery.js";
 
 export const PAPER_SESSION_CUTOFF_REASON = "PAPER_RUNNER_SESSION_START";
 export const PAPER_SESSION_END_REASON = "PAPER_CAMPAIGN_SESSION_END";
@@ -121,6 +125,23 @@ export interface FinalizedPaperSession {
   finalDrainConsumedSignals: number;
   cancelledWaitingBuyCount: number;
   account: PaperAccountSnapshot;
+  valuationRecovery: {
+    attempts: number;
+    recovered: boolean;
+    status: "COMPLETE" | "INCOMPLETE";
+  };
+  finalDrainRecovery: {
+    attempts: number;
+    recovered: boolean;
+    status: "COMPLETE" | "INCOMPLETE";
+  };
+}
+
+export interface PaperFinalDrainRecoveryPolicy {
+  maxAttempts?: number;
+  backoffMs?: readonly number[];
+  attemptTimeoutMs?: number;
+  wait?: (milliseconds: number) => Promise<void>;
 }
 
 /**
@@ -133,25 +154,96 @@ export async function finalizePaperSession(input: {
   accountId: string;
   report: PaperRunnerReport;
   signal: AbortSignal;
+  valuationRecovery?: Omit<ValuationRecoveryPolicy, "signal">;
+  finalDrainRecovery?: PaperFinalDrainRecoveryPolicy;
   now?: () => Date;
 }): Promise<FinalizedPaperSession> {
   const now = input.now ?? (() => new Date());
-  const finalDrainConsumedSignals = await input.runner.finalDrain(input.signal);
+  const finalDrainPolicy = input.finalDrainRecovery ?? {};
+  const maxDrainAttempts = finalDrainPolicy.maxAttempts ?? 3;
+  if (!Number.isSafeInteger(maxDrainAttempts) || maxDrainAttempts <= 0) {
+    throw new Error("FINAL_DRAIN_RECOVERY_MAX_ATTEMPTS_INVALID");
+  }
+  const drainBackoffMs = finalDrainPolicy.backoffMs ?? [1_000, 3_000];
+  if (drainBackoffMs.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new Error("FINAL_DRAIN_RECOVERY_BACKOFF_INVALID");
+  }
+  const attemptTimeoutMs = finalDrainPolicy.attemptTimeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(attemptTimeoutMs) || attemptTimeoutMs <= 0) {
+    throw new Error("FINAL_DRAIN_RECOVERY_TIMEOUT_INVALID");
+  }
+  const wait = finalDrainPolicy.wait ?? ((milliseconds: number) => (
+    new Promise((resolve) => setTimeout(resolve, milliseconds))
+  ));
+  let finalDrainConsumedSignals = 0;
+  let finalDrainAttempts = 0;
+  let finalDrainError: unknown = null;
+  for (let attempt = 1; attempt <= maxDrainAttempts; attempt += 1) {
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("FINAL_DRAIN_RECOVERY_ABORTED");
+    finalDrainAttempts = attempt;
+    const attemptSignal = AbortSignal.any([
+      input.signal,
+      AbortSignal.timeout(attemptTimeoutMs),
+    ]);
+    try {
+      finalDrainConsumedSignals = await input.runner.finalDrain(attemptSignal);
+      finalDrainError = null;
+      break;
+    } catch (error) {
+      finalDrainError = error;
+      if (input.signal.aborted) throw input.signal.reason ?? error;
+      if (attempt < maxDrainAttempts) {
+        const delay = drainBackoffMs[Math.min(attempt - 1, drainBackoffMs.length - 1)] ?? 0;
+        if (delay > 0) await wait(delay);
+      }
+    }
+  }
   const cancelledWaitingBuyCount = await input.executor.cancelWaitingBuys(
     input.accountId,
     PAPER_SESSION_END_REASON,
   );
-  const account = await input.executor.accountSnapshot(input.accountId, input.signal);
+  const valuationRecovery = await recoverIncompleteValuation(
+    () => input.executor.accountSnapshot(
+      input.accountId,
+      AbortSignal.any([input.signal, AbortSignal.timeout(attemptTimeoutMs)]),
+    ),
+    {
+      ...input.valuationRecovery,
+      signal: input.signal,
+    },
+  );
+  const account = valuationRecovery.value;
   const stoppedAt = now().toISOString();
+  const finalDrainRecovery = {
+    attempts: finalDrainAttempts,
+    recovered: finalDrainError === null && finalDrainAttempts > 1,
+    status: finalDrainError === null ? "COMPLETE" as const : "INCOMPLETE" as const,
+  };
+  const finalDrainMessage = finalDrainError instanceof Error
+    ? finalDrainError.message
+    : String(finalDrainError);
   return {
     finalDrainConsumedSignals,
     cancelledWaitingBuyCount,
     account,
+    valuationRecovery: {
+      attempts: valuationRecovery.attempts,
+      recovered: valuationRecovery.recovered,
+      status: valuationRecovery.status,
+    },
+    finalDrainRecovery,
     report: {
       ...input.report,
       stoppedAt,
       cycles: input.report.cycles + 1,
       consumedSignals: input.report.consumedSignals + finalDrainConsumedSignals,
+      ...(finalDrainError === null ? {} : {
+        errorCount: input.report.errorCount + 1,
+        errors: [
+          ...input.report.errors,
+          { time: stoppedAt, message: `FINAL_DRAIN_RECOVERY_EXHAUSTED:${finalDrainMessage}` },
+        ],
+      }),
       account,
       acceptance: input.executor.acceptanceSummary(input.accountId, {
         startAt: input.report.startedAt,

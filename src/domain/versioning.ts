@@ -7,14 +7,14 @@ import {
 export { stableJson } from "./canonical-json.js";
 
 export const DEFAULT_VERSIONS = Object.freeze({
-  schemaVersion: "2.30.0",
+  schemaVersion: "2.31.0",
   signalVersion: "1.11.0",
   strategyVersion: "2.9.0",
   riskVersion: "1.10.0",
   replayVersion: "2.5.0",
-  paperVersion: "1.17.0",
-  liveVersion: "1.14.0",
-  validationVersion: "1.8.0",
+  paperVersion: "1.18.0",
+  liveVersion: "1.15.0",
+  validationVersion: "1.9.0",
   operationalVersion: "1.9.0",
   rulesetVersion: "v1.11.0",
   feeModelVersion: "clob-fd-v1",

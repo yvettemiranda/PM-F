@@ -50,6 +50,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.28.0",
   "2.29.0",
   "2.30.0",
+  "2.31.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -298,6 +299,7 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     "observe_signal_emissions_source_event_idx",
     "paper_validation_campaign_transition_sequence_idx",
     "paper_validation_session_transition_sequence_idx",
+    "paper_validation_campaigns_account_idx",
     "replay_event_classifications_event_idx",
   ]) {
     const row = database.prepare(

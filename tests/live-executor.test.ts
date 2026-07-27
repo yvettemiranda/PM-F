@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
@@ -3177,6 +3177,53 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("defers and later resumes a Live BUY while portfolio valuation is incomplete", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    const executor = liveExecutor(env.databasePath);
+    const complete = {
+      paperAccountId: accountId,
+      initialBalanceMicros: "1000000000",
+      cashBalanceMicros: "1000000000",
+      reservedBalanceMicros: "0",
+      availableBalanceMicros: "1000000000",
+      positionValueMicros: "0",
+      realizedPnlMicros: "0",
+      unrealizedPnlMicros: "0",
+      totalEquityMicros: "1000000000",
+      valuationStatus: "COMPLETE",
+      unpricedPositionCount: 0,
+      priceSource: "ORDERBOOK_EXIT_VWAP",
+      priceTimestamp: now,
+    } as const;
+    vi.spyOn(executor, "getBalance")
+      .mockResolvedValueOnce({
+        ...complete,
+        valuationStatus: "INCOMPLETE",
+        unpricedPositionCount: 1,
+      })
+      .mockResolvedValue(complete);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+
+    expect(await consumer.consumeAvailableSignals(accountId)).toEqual([]);
+    let database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare(
+      "SELECT count(*) count FROM live_signal_quarantines WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(0);
+    expect((database.prepare(
+      "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(0);
+    database.close();
+
+    expect(await consumer.consumeAvailableSignals(accountId)).toHaveLength(1);
+    database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare(
+      "SELECT count(*) count FROM live_signal_consumptions WHERE signal_id=?",
+    ).get(env.signal.signalId) as { count: number }).count).toBe(1);
+    database.close();
+    consumer.close();
+    executor.close();
+  });
+
   it("runs startup recovery before activation and never backfills signals from the disabled interval", async () => {
     const env = setup({ capitalRatioPpm: "100000" });
     let clockMs = Date.parse(now);
@@ -3229,6 +3276,51 @@ describe("LiveExecutor", () => {
     ).get() as { metadata_json: string };
     expect(JSON.parse(cutoffAudit.metadata_json)).toMatchObject({ skippedSignals: 1 });
     db.close();
+    consumer.close();
+    executor.close();
+  });
+
+  it("retries only the final Live valuation when public data recovers", async () => {
+    const env = setup({ capitalRatioPpm: "100000" });
+    let clockMs = Date.parse(now);
+    const clock = () => new Date(clockMs);
+    const executor = liveExecutor(env.databasePath, { now: clock });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, clock);
+    const incomplete = {
+      paperAccountId: accountId,
+      valuationStatus: "INCOMPLETE",
+      unpricedPositionCount: 1,
+    };
+    const complete = {
+      paperAccountId: accountId,
+      valuationStatus: "COMPLETE",
+      unpricedPositionCount: 0,
+    };
+    const getBalance = vi.spyOn(executor, "getBalance")
+      .mockResolvedValueOnce(incomplete as never)
+      .mockResolvedValueOnce(complete as never);
+    const runner = new LiveRunner(executor, consumer, {
+      accountId,
+      intervalMs: 1,
+      durationMs: 1,
+      reconciliationEveryCycles: 100,
+      now: clock,
+      wait: async (milliseconds) => { clockMs += milliseconds; },
+      valuationRecovery: {
+        maxAttempts: 2,
+        wait: async () => undefined,
+      },
+    });
+
+    const report = await runner.run();
+
+    expect(getBalance).toHaveBeenCalledTimes(2);
+    expect(report.account).toBe(complete);
+    expect(report.valuationRecovery).toEqual({
+      attempts: 2,
+      recovered: true,
+      status: "COMPLETE",
+    });
     consumer.close();
     executor.close();
   });

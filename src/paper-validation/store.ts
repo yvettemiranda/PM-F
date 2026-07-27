@@ -174,7 +174,20 @@ export class PaperValidationStore {
     riskVersion: string;
     paperVersion: string;
     rulesetHash: string;
-  }): void {
+    now: string;
+    handoff?: {
+      fromCampaignId: string;
+      toCampaignId: string;
+    };
+  }): {
+    mode: "PAPER";
+    accountId: string;
+    baselineRunId: string;
+    fromCampaignId: string;
+    toCampaignId: string;
+    terminalExecutionCount: number;
+    openPositionCount: number;
+  } | null {
     const target = this.database.prepare(
       "SELECT identity_status FROM monitor_targets WHERE target_id=?",
     ).get(input.targetId) as { identity_status: string } | undefined;
@@ -210,6 +223,100 @@ export class PaperValidationStore {
     } | undefined;
     if (!account || account.target_id !== input.targetId || account.status !== "ACTIVE") {
       throw new Error(`PAPER_VALIDATION_ACCOUNT_NOT_ACTIVE:${input.paperAccountId}`);
+    }
+    if (input.handoff) {
+      if (account.initial_balance_micros !== input.initialBalanceMicros) {
+        throw new Error(`PAPER_VALIDATION_ACCOUNT_INITIAL_BALANCE_MISMATCH:${input.paperAccountId}`);
+      }
+      const previous = this.database.prepare(
+        `SELECT paper_account_id,target_id,baseline_run_id
+         FROM paper_validation_campaigns WHERE campaign_id=?`,
+      ).get(input.handoff.fromCampaignId) as {
+        paper_account_id: string;
+        target_id: string;
+        baseline_run_id: string;
+      } | undefined;
+      if (
+        !previous
+        || previous.paper_account_id !== input.paperAccountId
+        || previous.target_id !== input.targetId
+        || previous.baseline_run_id !== input.baselineRunId
+      ) {
+        throw new Error(`PAPER_VALIDATION_ACCOUNT_HANDOFF_BINDING_MISMATCH:${input.paperAccountId}`);
+      }
+      const unsafe = this.database.prepare(
+        `SELECT
+          (SELECT count(*) FROM paper_executions
+           WHERE paper_account_id=?
+             AND execution_type='TARGET_BUY'
+             AND state IN ('WAITING_EXECUTION','PARTIALLY_EXECUTED')) pending_buys,
+          (SELECT count(*) FROM paper_reservations
+           WHERE paper_account_id=? AND status='ACTIVE') active_reservations`,
+      ).get(input.paperAccountId, input.paperAccountId) as {
+        pending_buys: number;
+        active_reservations: number;
+      };
+      if (unsafe.pending_buys !== 0 || unsafe.active_reservations !== 0) {
+        throw new Error(`PAPER_VALIDATION_ACCOUNT_HANDOFF_PENDING_BUY:${input.paperAccountId}`);
+      }
+      const latestLedger = this.database.prepare(
+        `SELECT cash_after_micros,reserved_after_micros
+         FROM paper_cash_ledger WHERE paper_account_id=?
+         ORDER BY created_at DESC,cash_ledger_id DESC LIMIT 1`,
+      ).get(input.paperAccountId) as {
+        cash_after_micros: string;
+        reserved_after_micros: string;
+      } | undefined;
+      if (
+        !latestLedger
+        || latestLedger.cash_after_micros !== account.cash_balance_micros
+        || latestLedger.reserved_after_micros !== account.reserved_balance_micros
+      ) {
+        throw new Error(`PAPER_VALIDATION_ACCOUNT_HANDOFF_LEDGER_MISMATCH:${input.paperAccountId}`);
+      }
+      const ruleset = this.database.prepare(
+        "SELECT ruleset_snapshot_json FROM rulesets WHERE ruleset_hash=?",
+      ).get(input.rulesetHash) as { ruleset_snapshot_json: string } | undefined;
+      if (!ruleset) throw new Error(`PAPER_VALIDATION_RULESET_NOT_FOUND:${input.rulesetHash}`);
+      this.database.prepare(
+        `UPDATE paper_accounts
+         SET schema_version=?,strategy_version=?,risk_version=?,paper_version=?,
+             ruleset_snapshot_json=?,ruleset_hash=?,source_code_commit=?,
+             source_code_dirty=?,updated_at=?
+         WHERE paper_account_id=? AND status='ACTIVE'`,
+      ).run(
+        input.schemaVersion,
+        input.strategyVersion,
+        input.riskVersion,
+        input.paperVersion,
+        ruleset.ruleset_snapshot_json,
+        input.rulesetHash,
+        input.sourceVersion.commit,
+        input.sourceVersion.dirty ? 1 : 0,
+        input.now,
+        input.paperAccountId,
+      );
+      const activity = this.database.prepare(
+        `SELECT
+          (SELECT count(*) FROM paper_executions
+           WHERE paper_account_id=?
+             AND state IN ('EXECUTED','EXPIRED','REJECTED','CANCELLED')) terminal_executions,
+          (SELECT count(*) FROM paper_positions
+           WHERE paper_account_id=?
+             AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')) open_positions`,
+      ).get(input.paperAccountId, input.paperAccountId) as {
+        terminal_executions: number;
+        open_positions: number;
+      };
+      return {
+        mode: "PAPER",
+        accountId: input.paperAccountId,
+        baselineRunId: input.baselineRunId,
+        fromCampaignId: input.handoff.fromCampaignId,
+        toCampaignId: input.handoff.toCampaignId,
+        terminalExecutionCount: activity.terminal_executions,
+        openPositionCount: activity.open_positions,
+      };
     }
     if (
       account.initial_balance_micros !== input.initialBalanceMicros
@@ -280,6 +387,7 @@ export class PaperValidationStore {
     if (!checkpoint || checkpoint.last_signal_created_at !== null || checkpoint.last_signal_id !== null) {
       throw new Error(`PAPER_VALIDATION_CONSUMER_CHECKPOINT_NOT_CLEAN:${input.paperAccountId}`);
     }
+    return null;
   }
 
   insertCampaign(input: CampaignDefinition & {

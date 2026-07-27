@@ -3,6 +3,7 @@
 ## Current task
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
 - 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
+- 已完成 Paper/Live 运行时交接与最终估值恢复修复：同一 Paper 账户和 baseline 可在安全 replacement 中承接旧仓位；最终 drain/估值有界重试；估值未完成时新 BUY 延后且不消费；Live 仅保留禁用态交接与隔离恢复。
 
 ## Implemented
 - Risk Manager 现在把 `POLYGON_TRADE_FEED_UNSAFE` 事故限定到事故所属 Observe Run：新 Run 的 Signal 不再被旧 Run 的事故误拒绝，同时旧事故记录保持 `OPEN`，同 Run、归属缺失/损坏及其他 `MAJOR_DESYNC` 继续硬阻断。
@@ -29,6 +30,7 @@
 - 当前通过：TypeScript；相关测试 `5 files / 53 tests`；此前全量 `56 files / 769 tests` 通过；恢复工件清理后追加 Shell 生命周期测试 `2 files / 16 tests` 通过，`git diff --check` 通过。
 - `--recover-only` 与恢复工件清理修复均已提交。
 - 超时修复后，Shell 打包文件 `12/12` 通过；TypeScript 与全套 `56 files / 769 tests` 通过。
+- 本次运行时交接/估值恢复改动完成后，TypeScript 通过；定向 Campaign/Live 风险测试 `2 files / 40 tests` 通过；全套 `56 files / 784 tests` 通过；`git diff --check` 通过。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
@@ -39,6 +41,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 不再继续 Paper 累计运行。
-2. 在考虑小额 Live 前，单独完成合规/geoblock、隔离钱包、真实 signer、Live runtime 接线与 arming 审计，并取得用户再次明确授权。
+1. 本次代码修复提交后，不再自动启动 Paper/Live；现有 24 小时历史证据不改写。
+2. 在考虑小额 Live 前，单独完成合规/geoblock、隔离钱包、真实 signer、Live runtime 接线与 arming 审计，并取得用户再次明确授权；当前 Live 仍是 `LIVE_DISABLED`。
 3. 若需要更强自然覆盖，应另开 Paper Campaign 等待自然 FILL/SELL/PnL 样本；不得因此放宽价格或风控。

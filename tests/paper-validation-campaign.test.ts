@@ -1003,22 +1003,38 @@ describe("PaperValidationCampaignService", () => {
       sessionId: "PS-FREEZE-OLD-CORE",
     })).toThrow(`PAPER_VALIDATION_CAMPAIGN_FROZEN:CORE_COMPATIBILITY_MISMATCH:${original.campaignId}`);
 
-    const executor = new PaperExecutor(
-      input.databasePath,
-      new PublicPaperMarketDataProvider(),
-      { sourceVersion },
+    input.service.store.database.prepare(
+      `INSERT INTO paper_executions(
+        paper_execution_id,paper_account_id,signal_id,execution_idempotency_key,
+        execution_type,state,asset_id,condition_id,requested_amount_micros,
+        requested_size_micros,filled_size_micros,filled_notional_micros,fee_micros,
+        target_price_units,price_limit_lower_units,price_limit_upper_units,capital_mode,
+        deadline_at,attempt_count,reason,context_id,schema_version,strategy_version,
+        risk_version,paper_version,ruleset_hash,risk_decision_id,risk_reject_reason,
+        source_code_commit,source_code_dirty,config_version,created_at,updated_at
+      ) VALUES (
+        'PE-HISTORICAL',?,NULL,'historical-terminal','TARGET_BUY','REJECTED',
+        'historical-asset','historical-condition','100',NULL,'0','0','0',
+        NULL,NULL,NULL,NULL,NULL,0,'HISTORICAL_TERMINAL',NULL,?,?,?,?,?,
+        NULL,'TEST_REJECT',?,0,?,?,?
+      )`,
+    ).run(
+      input.accountId,
+      VERSIONS.schemaVersion,
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      VERSIONS.paperVersion,
+      RULESET_HASH,
+      sourceVersion.commit,
+      VERSIONS.configVersion,
+      at(1),
+      at(1),
     );
-    const replacementAccountId = executor.createAccount(
-      "Replacement Campaign Account",
-      BigInt(RULESET.paperInitialBalanceMicros),
-      input.targetId,
-    );
-    executor.close();
 
     const replacementInput = {
       targetId: input.targetId,
       baselineRunId: input.baselineRunId,
-      paperAccountId: replacementAccountId,
+      paperAccountId: input.accountId,
       coreManifest: repairedManifest,
       compatibilityEvidence,
       sourceVersion,
@@ -1040,7 +1056,7 @@ describe("PaperValidationCampaignService", () => {
     });
     expect(replacement.state).toBe("QUALIFYING");
     expect(replacement.accumulatedActiveRuntimeMs).toBe(0);
-    expect(replacement.paperAccountId).toBe(replacementAccountId);
+    expect(replacement.paperAccountId).toBe(input.accountId);
 
     const transition = input.service.store.database.prepare(
       `SELECT reason,evidence_json FROM paper_validation_transitions
@@ -1053,9 +1069,40 @@ describe("PaperValidationCampaignService", () => {
       supersededCoreCompatibilityHash: original.coreCompatibilityHash,
       replacementReason: "CORE_VERSION_REPLACEMENT",
       changedCoreComponents: ["paperExecution"],
+      accountHandoff: {
+        mode: "PAPER",
+        accountId: input.accountId,
+        baselineRunId: input.baselineRunId,
+        fromCampaignId: original.campaignId,
+        toCampaignId: replacement.campaignId,
+        terminalExecutionCount: 1,
+        openPositionCount: 0,
+      },
       executionMode: "PAPER",
       liveGateState: "LIVE_DISABLED",
     });
+    const accountRuntime = input.service.store.database.prepare(
+      `SELECT schema_version,strategy_version,risk_version,paper_version,
+              ruleset_snapshot_json,ruleset_hash,source_code_commit
+       FROM paper_accounts WHERE paper_account_id=?`,
+    ).get(input.accountId) as {
+      schema_version: string;
+      strategy_version: string;
+      risk_version: string;
+      paper_version: string;
+      ruleset_snapshot_json: string;
+      ruleset_hash: string;
+      source_code_commit: string;
+    };
+    expect(accountRuntime).toMatchObject({
+      schema_version: repairedManifest.schemaVersion,
+      strategy_version: repairedManifest.strategyVersion,
+      risk_version: repairedManifest.riskVersion,
+      paper_version: repairedManifest.paperVersion,
+      ruleset_hash: repairedManifest.rulesetHash,
+      source_code_commit: sourceVersion.commit,
+    });
+    expect(accountRuntime.ruleset_snapshot_json).toBe(RULESET_SNAPSHOT_JSON);
     input.service.close();
   });
 
@@ -1132,6 +1179,36 @@ describe("PaperValidationCampaignService", () => {
       replacementReason: "CORE_VERSION_REPLACEMENT",
       changedCoreComponents: ["observeRecovery"],
     });
+    input.service.close();
+  });
+
+  it("keeps a final-valuation timeout resumable instead of blocking the Campaign", () => {
+    const input = fixture();
+    const campaign = createCampaign(input);
+    const session = startSession(input, campaign.campaignId, 0, "PS-VALUATION-RETRY");
+    recordHealthySession(input, session, 0, 2);
+    const finalized = input.service.finalizeSession({
+      sessionId: session.sessionId,
+      outcome: "SAFE_STOP",
+      acceptanceStatus: "INCOMPLETE_COVERAGE",
+      consistencyPassed: true,
+      recoveryConfirmed: true,
+      stopReason: "PLANNED_SESSION_DURATION_REACHED",
+      blockers: [
+        "PAPER_STATUS:COMPLETED_INCOMPLETE_VALUATION",
+        "PAPER_FINAL_VALUATION_INCOMPLETE",
+      ],
+      recoverableBlockers: [
+        "PAPER_STATUS:COMPLETED_INCOMPLETE_VALUATION",
+        "PAPER_FINAL_VALUATION_INCOMPLETE",
+      ],
+      coverage: {},
+      stoppedAt: at(2),
+    });
+
+    expect(finalized.session.countsTowardCampaign).toBe(false);
+    expect(finalized.campaign.campaignState).not.toBe("BLOCKED");
+    expect(finalized.campaign.canContinue).toBe(true);
     input.service.close();
   });
 

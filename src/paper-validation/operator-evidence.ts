@@ -60,6 +60,16 @@ export interface PaperCampaignReport {
   marketClockOffsetMs: number;
   finalDrainConsumedSignals: number;
   cancelledWaitingBuyCount?: number;
+  valuationRecovery?: {
+    attempts: number;
+    recovered: boolean;
+    status: "COMPLETE" | "INCOMPLETE";
+  } | null;
+  finalDrainRecovery?: {
+    attempts: number;
+    recovered: boolean;
+    status: "COMPLETE" | "INCOMPLETE";
+  } | null;
   report: {
     startedAt: string;
     stoppedAt: string;

@@ -362,7 +362,7 @@ export class PaperValidationCampaignService {
       } else if (input.supersedesCampaignId || input.replacementReason) {
         throw new Error("PAPER_VALIDATION_REPLACEMENT_SOURCE_NOT_FOUND");
       }
-      this.store.assertCampaignBindings({
+      const accountHandoff = this.store.assertCampaignBindings({
         targetId: input.targetId,
         baselineRunId: input.baselineRunId,
         paperAccountId: input.paperAccountId,
@@ -373,6 +373,15 @@ export class PaperValidationCampaignService {
         riskVersion: input.coreManifest.riskVersion,
         paperVersion: input.coreManifest.paperVersion,
         rulesetHash: input.coreManifest.rulesetHash,
+        now: input.now,
+        ...(input.supersedesCampaignId === undefined
+          || this.campaignSnapshot(input.supersedesCampaignId).paperAccountId !== input.paperAccountId
+          ? {} : {
+          handoff: {
+            fromCampaignId: input.supersedesCampaignId,
+            toCampaignId: campaignId,
+          },
+        }),
       });
       this.store.insertCampaign({
         ...definition,
@@ -400,6 +409,7 @@ export class PaperValidationCampaignService {
           liveGateState: "LIVE_DISABLED",
           compatibilityEvidence: input.compatibilityEvidence,
           ...replacementEvidence,
+          ...(accountHandoff === null ? {} : { accountHandoff }),
         },
         coreCompatibilityHash,
         sourceVersion: input.sourceVersion,
@@ -697,9 +707,11 @@ export class PaperValidationCampaignService {
       });
       const recoverySafe = !["CRASH_RECOVERED", "CRASH_UNVERIFIED"].includes(input.outcome)
         || input.recoveryConfirmed;
+      const recoverableBlockers = new Set(input.recoverableBlockers ?? []);
+      const fatalBlockers = blockers.filter((blocker) => !recoverableBlockers.has(blocker));
       const safetyPassed = consistencyPassed
         && recoverySafe
-        && blockers.length === 0
+        && fatalBlockers.length === 0
         && input.acceptanceStatus !== "FAILED"
         && !["FAILED", "CRASH_UNVERIFIED"].includes(input.outcome);
       const previouslyQualified = this.store.sessionReports(session.campaignId)
@@ -720,7 +732,10 @@ export class PaperValidationCampaignService {
         && input.acceptanceStatus === "INCOMPLETE_COVERAGE"
         && runtime.effectiveActiveRuntimeMs > 0
         && runtime.effectiveActiveRuntimeMs < campaign.qualifyingRuntimeMs;
-      const longRunningPassed = session.sessionKind === "LONG_RUNNING" && previouslyQualified && safetyPassed;
+      const longRunningPassed = session.sessionKind === "LONG_RUNNING"
+        && previouslyQualified
+        && safetyPassed
+        && recoverableBlockers.size === 0;
       const countsTowardCampaign = qualifyingPassed || safePartialQualifyingRuntime || longRunningPassed;
       const fatal = !safetyPassed;
       const sessionState: ValidationSessionState = input.outcome === "CRASH_RECOVERED" && safetyPassed

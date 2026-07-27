@@ -199,21 +199,30 @@ const main = async (): Promise<void> => {
     let report = await runner.run(controller.signal);
     let finalDrainConsumedSignals = 0;
     let cancelledWaitingBuyCount = 0;
+    let valuationRecovery: {
+      attempts: number;
+      recovered: boolean;
+      status: "COMPLETE" | "INCOMPLETE";
+    } | null = null;
+    let finalDrainRecovery: {
+      attempts: number;
+      recovered: boolean;
+      status: "COMPLETE" | "INCOMPLETE";
+    } | null = null;
     if (currentShutdownMode() === "FINAL_VALUATION") {
-      const finalValuationSignal = AbortSignal.any([
-        finalValuationController.signal,
-        AbortSignal.timeout(FINAL_VALUATION_TIMEOUT_MS),
-      ]);
       const finalized = await finalizePaperSession({
         runner,
         executor,
         accountId: selection.accountId,
         report,
-        signal: finalValuationSignal,
+        signal: finalValuationController.signal,
+        finalDrainRecovery: { attemptTimeoutMs: FINAL_VALUATION_TIMEOUT_MS },
       });
       report = finalized.report;
       finalDrainConsumedSignals = finalized.finalDrainConsumedSignals;
       cancelledWaitingBuyCount = finalized.cancelledWaitingBuyCount;
+      valuationRecovery = finalized.valuationRecovery;
+      finalDrainRecovery = finalized.finalDrainRecovery;
     }
     await mkdir(outputDirectory, { recursive: true });
     const output = resultFile ?? resolve(outputDirectory, `paper-${selection.accountId}-${Date.now()}.json`);
@@ -233,6 +242,8 @@ const main = async (): Promise<void> => {
       consumerCutoff,
       finalDrainConsumedSignals,
       cancelledWaitingBuyCount,
+      valuationRecovery,
+      finalDrainRecovery,
       report,
       safety: {
         privateKeyLoaded: false,

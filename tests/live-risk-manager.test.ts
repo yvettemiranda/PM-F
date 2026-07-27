@@ -350,6 +350,59 @@ afterEach(() => {
 });
 
 describe("Live account and risk isolation", () => {
+  it("hands a disabled Live account to a new runtime without replacing the durable account", () => {
+    const { database } = setup();
+    const original = new LiveAccountRegistry(database, sourceVersion, () => new Date(now));
+    const account = original.register({
+      liveAccountId: "live-account-handoff",
+      liveWalletId: "wallet-live-risk",
+      name: "Durable Live account",
+      initialBankrollMicros: 1_000_000_000n,
+      riskBudgetMicros: 500_000_000n,
+      signalCutoffAt: now,
+      actor: "TEST",
+      reason: "REGISTER",
+    });
+    const nextSourceVersion: SourceVersion = { commit: "live-risk-next-core", dirty: false };
+    const next = new LiveAccountRegistry(
+      database,
+      nextSourceVersion,
+      () => new Date("2026-07-10T00:01:00.000Z"),
+    );
+
+    expect(next.handoffRuntime({
+      liveAccountId: account.liveAccountId,
+      actor: "TEST",
+      reason: "CORE_VERSION_REPLACEMENT",
+    })).toMatchObject({
+      liveAccountId: account.liveAccountId,
+      status: "DISABLED",
+    });
+    expect(database.prepare(
+      `SELECT source_code_commit,source_code_dirty,schema_version,live_version,ruleset_hash
+       FROM live_accounts WHERE live_account_id=?`,
+    ).get(account.liveAccountId)).toEqual({
+      source_code_commit: nextSourceVersion.commit,
+      source_code_dirty: 0,
+      schema_version: VERSIONS.schemaVersion,
+      live_version: VERSIONS.liveVersion,
+      ruleset_hash: RULESET_HASH,
+    });
+    const audit = database.prepare(
+      `SELECT reason,metadata_json FROM audit_log
+       WHERE entity_type='LIVE_ACCOUNT' AND entity_id=? AND action='runtime_handoff'`,
+    ).get(account.liveAccountId) as { reason: string; metadata_json: string };
+    expect(audit.reason).toBe("CORE_VERSION_REPLACEMENT");
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({
+      previousSourceCodeCommit: sourceVersion.commit,
+      currentSourceCodeCommit: nextSourceVersion.commit,
+      previousRulesetHash: RULESET_HASH,
+      currentRulesetHash: RULESET_HASH,
+      liveGateState: "LIVE_DISABLED",
+    });
+    database.close();
+  });
+
   it("registers disabled metadata with an immutable EOA signer identity and requires an active wallet", () => {
     const { database } = setup();
     const registry = new LiveAccountRegistry(database, sourceVersion, () => new Date(now));

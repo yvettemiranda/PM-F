@@ -3373,6 +3373,41 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
+  it("defers a new BUY without consuming it while an existing portfolio cannot be valued", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "valuation-block-first",
+      createdAt: "2026-07-08T00:00:01.000Z",
+    });
+    expect(env.executor.executionState(
+      await env.executor.consumeSignal(env.accountId, "valuation-block-first"),
+    )).toBe("EXECUTED");
+    env.market.orderbookError = Object.assign(new Error("No orderbook exists"), {
+      code: "NO_ORDERBOOK_EXISTS",
+    });
+    insertSignal({
+      databasePath: env.databasePath,
+      targetId: env.targetId,
+      signalId: "valuation-block-second",
+      createdAt: "2026-07-08T00:00:02.000Z",
+    });
+
+    await expect(env.executor.consumeSignal(env.accountId, "valuation-block-second"))
+      .rejects.toThrow("PAPER_PORTFOLIO_VALUATION_INCOMPLETE");
+
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((database.prepare(
+      "SELECT count(*) count FROM paper_signal_consumptions WHERE signal_id='valuation-block-second'",
+    ).get() as { count: number }).count).toBe(0);
+    expect((database.prepare(
+      "SELECT count(*) count FROM paper_executions WHERE signal_id='valuation-block-second'",
+    ).get() as { count: number }).count).toBe(0);
+    database.close();
+    env.executor.close();
+  });
+
   it("applies a public non-zero fee model without spending beyond reservation", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     env.market.feeSnapshot = { ...env.market.feeSnapshot, baseFee: 30, feeRatePpm: "30000", exponent: 1 };

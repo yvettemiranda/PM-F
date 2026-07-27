@@ -297,14 +297,14 @@ function createCampaign(
   }
   const executor = new PaperExecutor(databasePath, new PublicPaperMarketDataProvider(), { sourceVersion });
   try {
-    const accountId = executor.createAccount(
+    const accountId = superseded?.paperAccountId ?? executor.createAccount(
       "Paper 累计验证固定账户",
       BigInt(RULESET.paperInitialBalanceMicros),
       targetId,
     );
     return service.createCampaign({
       targetId,
-      baselineRunId,
+      baselineRunId: superseded?.baselineRunId ?? baselineRunId,
       paperAccountId: accountId,
       coreManifest: manifest,
       compatibilityEvidence,
@@ -706,7 +706,10 @@ async function main(): Promise<void> {
         manifest,
         sourceVersion,
         compatibilityEvidence,
-        targetBinding,
+        {
+          targetId: targetBinding.targetId,
+          baselineRunId: previous.baselineRunId,
+        },
         previous,
       );
       console.log(JSON.stringify({
@@ -1080,7 +1083,17 @@ async function main(): Promise<void> {
         })
         : { blockers, qualificationDeferred: false };
       const finalizationBlockers = qualifyingPolicy.blockers;
-      const acceptanceStatus = qualifyingPolicy.qualificationDeferred && finalizationBlockers.length === 0
+      const finalValuationRecoverable = paperReport.status === "COMPLETED_INCOMPLETE_VALUATION"
+        && processBlockers.length === 0
+        && integrity.passed
+        && finalizationBlockers.length > 0
+        && finalizationBlockers.every((blocker) => (
+          blocker === "PAPER_FINAL_VALUATION_INCOMPLETE"
+          || blocker === "PAPER_STATUS:COMPLETED_INCOMPLETE_VALUATION"
+        ));
+      const acceptanceStatus = finalValuationRecoverable
+        ? "INCOMPLETE_COVERAGE"
+        : qualifyingPolicy.qualificationDeferred && finalizationBlockers.length === 0
         ? "INCOMPLETE_COVERAGE"
         : sessionAcceptanceStatus({
         qualifying: session.sessionKind === "QUALIFYING",
@@ -1117,7 +1130,7 @@ async function main(): Promise<void> {
         sessionId: session.sessionId,
         outcome: buildFinalizationOutcome({
           processBlockerCount: processBlockers.length,
-          finalizationBlockerCount: finalizationBlockers.length,
+          finalizationBlockerCount: finalValuationRecoverable ? 0 : finalizationBlockers.length,
           autoStopped,
         }),
         acceptanceStatus,
@@ -1125,6 +1138,7 @@ async function main(): Promise<void> {
         recoveryConfirmed: true,
         stopReason,
         blockers: finalizationBlockers,
+        ...(finalValuationRecoverable ? { recoverableBlockers: finalizationBlockers } : {}),
         coverage,
         observeMetrics: observeOperationalMetrics(observeReport),
         stoppedAt,

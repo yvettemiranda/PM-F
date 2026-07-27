@@ -196,6 +196,7 @@ export class LiveSignalConsumer {
           };
       } catch (error) {
         const reason = error instanceof Error ? error.message : "LIVE_SIGNAL_PREPARATION_FAILED";
+        if (reason === "LIVE_PORTFOLIO_VALUATION_INCOMPLETE") break;
         this.recordQuarantine(accountId, row.signal_id, row.signal_sequence, "PRE_RISK_VALIDATION", reason);
         results.push({
           signalId: row.signal_id,
@@ -549,10 +550,11 @@ export class LiveSignalConsumer {
     buyAmountPolicyDecision: BuyAmountPolicyDecision | null;
   }> {
     const snapshot = await this.executor.getBalance({ accountId });
+    if (snapshot.valuationStatus !== "COMPLETE" || snapshot.unpricedPositionCount !== 0) {
+      throw new Error("LIVE_PORTFOLIO_VALUATION_INCOMPLETE");
+    }
     const available = BigInt(snapshot.availableBalanceMicros);
-    const sizingCapital = snapshot.valuationStatus === "COMPLETE"
-      ? BigInt(snapshot.totalEquityMicros)
-      : available;
+    const sizingCapital = BigInt(snapshot.totalEquityMicros);
     const capitalSizingDecision = calculateBuyCapitalSizing({
       accountCapitalMicros: sizingCapital,
       capitalDecision: signal.capitalDecision,

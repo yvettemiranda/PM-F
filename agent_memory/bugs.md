@@ -17,6 +17,7 @@
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
+- 运行时交接与最终估值恢复已实现，但真实 Live 尚未启用；`handoffRuntime` 只允许账户 DISABLED 且全局 `PAPER + LIVE_DISABLED`，必须在未来真实 Live 设计中补齐合规、signer、外部订单恢复和 arming 审计后才可使用。
 - 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
 - 每笔 `<1%` BUY 可能放大到 `1—5 pUSD`，虽有 9 次小额追单上限，仍需自然测试累计敞口、收益偏差和费用。
 - Polygon WebSocket 只是 wake hint；`1 s` 确认块扫描、Data API `3 s` 和 Positions REST 是完整性兜底。确认深度、API offset 和短暂不同步仍可能触发 gap/reconciliation。
@@ -42,6 +43,9 @@
 - Replay 曾用弱于 Observe 的 SPLIT 证据并固定拒绝所有 CONVERSION；当前只有完整持久化证明才允许同语义回放。
 - 普通 `TARGET_SELL` 尾仓 `EXIT_PENDING` 曾阻塞后续独立 BUY；当前普通退出与后续 BUY 独立，止损重开锁不变。
 - 普通 `STANDARD_TRADE` SELL 达到 `95%` 后曾留下跟单义务；当前按本轮完整退出，MERGE/CONVERSION 不套用该阈值。
+- 跨 Core 交接曾受 `paper_validation_campaigns.paper_account_id UNIQUE` 限制且新 Core 会丢失旧 Paper 持仓；现在迁移 `036` 移除该限制，复用同一账户/baseline，校验无 pending BUY/active reservation/账本不一致，并更新当前账户元数据而不改写历史仓位 ruleset。
+- 公共 API 短暂故障曾让 final drain/估值一次超时即终止；现在 Paper/Live 只读估值和 Paper final drain 有界重试，无法恢复时保留不完整状态和原始证据，后续可恢复而不伪称结算完成。
+- Paper/Live 估值不完整时的新 BUY 现在分别延后且不消费，避免在旧仓位冻结或估值缺失时错误放大风险。
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
