@@ -60,6 +60,7 @@
 ## Operator workflow
 - 桌面入口：`/Users/d4clt/Desktop/Polymarket验证_点这里`；目标文件：`data/operator/target-wallet.txt`。运行锁存在时禁止切换目标。
 - `operator-control` 与 `operator-dashboard` 是当前 localhost UI 的统一控制面；UI 可读取真实后台投影、保存目标/规则集、启动/暂停/恢复 Paper，并通过真实 Live Gate 发起预检、请求、确认、恢复和紧急停用。Live execution/order runtime 由注入的 capability 驱动；默认仍报告未配置，执行、取消、重试、对账和恢复按钮会明确禁用，执行模式不能做成普通 UI 配置。
+- 最新生产准备方向：UI 与控制面按最终 Live 生产路径展示，Live capability 默认是 `PENDING_PREREQUISITES` 而不是永久隐藏；可保存被 Git 忽略的 `data/operator/live-production.json`，但只允许公开钱包地址和网络，绝不接收或读取私钥。正式钱包、secure signer、只读余额、认证 CLOB、合规/geoblock/时钟 provider、宿主注入的 LiveRuntime 和 Gate 用户授权逐项 readiness 全部通过后，才允许真实运行入口转为 `AVAILABLE`；在此之前数据库仍固定 `PAPER + LIVE_DISABLED + liveAllowed=false`，后端 fail closed。
 
 ## Runtime handoff and valuation recovery
 - Paper 账户现在是跨 Campaign 的持久化组合容器。新 Core replacement 在旧 Campaign 已终止、没有等待中的 BUY/活动 reservation 且现金账本一致时复用同一 `paper_account_id` 和同一 `baseline_run_id`；旧仓位、旧 execution 和旧 ruleset 快照保持不可变，新账户运行时元数据更新到当前 Core，并在 Campaign transition evidence 中记录单向交接。

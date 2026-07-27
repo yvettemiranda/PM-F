@@ -136,7 +136,7 @@ export function operatorControlSnapshot(projectRoot: string): OperatorControlSna
         available: runtimeSafety.databaseAvailable,
         gateAvailable: runtimeSafety.databaseAvailable,
         blockedReason: runtimeSafety.databaseAvailable
-          ? "LIVE_EXECUTION_NOT_CONFIGURED"
+          ? "LIVE_PRODUCTION_PREREQUISITES_PENDING"
           : "LIVE_GATE_DATABASE_NOT_INITIALIZED",
       },
       parameters: {

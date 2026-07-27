@@ -388,7 +388,12 @@ describe("operator dashboard", () => {
         gate: null,
         capability: {
           activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
-          execution: "NOT_CONFIGURED",
+          execution: "PENDING_PREREQUISITES",
+        },
+        production: {
+          path: "PRODUCTION_LIVE",
+          status: "PENDING_PREREQUISITES",
+          nextStep: "CONNECT_FORMAL_WALLET",
         },
       },
       comparisons: [],

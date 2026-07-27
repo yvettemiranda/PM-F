@@ -2,9 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import {
+  ConfiguredOperatorLiveRuntimeActions,
   DefaultOperatorLiveGateActions,
   UnconfiguredOperatorLiveRuntimeActions,
 } from "../src/operator/operator-actions.js";
@@ -84,5 +85,83 @@ describe("operator actions", () => {
       accepted: false,
       code: "AUTHENTICATED_CLOB_CANCEL_ADAPTER_NOT_CONFIGURED",
     });
+  });
+
+  it("routes explicitly injected LiveRuntime and LiveExecutor operations", async () => {
+    let releaseRun!: () => void;
+    const runtime = {
+      recoverOnStartup: vi.fn(async () => ({ ready: true, recoveryRunId: "recovery-1" })),
+      run: vi.fn(async (_options: unknown, signal?: AbortSignal) => {
+        await new Promise<void>((resolve) => {
+          releaseRun = resolve;
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }),
+      emergencyStop: vi.fn(async () => undefined),
+    };
+    const executor = {
+      cancelOrder: vi.fn(async () => undefined),
+      retryExecution: vi.fn(async () => undefined),
+      reconcile: vi.fn(async () => ({ reason: "LIVE_RECONCILED" })),
+    };
+    const actions = new ConfiguredOperatorLiveRuntimeActions({
+      runtime,
+      executor,
+      accountId: "live-account-1",
+      runOptions: { intervalMs: 10, durationMs: 100 },
+      production: {
+        FORMAL_WALLET: true,
+        SECURE_SIGNER: true,
+        READONLY_BALANCE: true,
+        AUTHENTICATED_CLOB: true,
+        COMPLIANCE: true,
+        GEOBLOCK: true,
+        CLOCK_SAFETY: true,
+      },
+    });
+    expect(actions.capability).toMatchObject({
+      execution: "AVAILABLE",
+      orderManagement: "AVAILABLE",
+      production: { SECURE_SIGNER: true, AUTHENTICATED_CLOB: true },
+    });
+
+    await expect(actions.start({ actor: "TEST", reason: "START" })).resolves.toMatchObject({
+      accepted: true,
+      code: "LIVE_RUNTIME_STARTED",
+    });
+    expect(runtime.run).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "live-account-1", intervalMs: 10 }),
+      expect.any(AbortSignal),
+    );
+    await expect(actions.start({ actor: "TEST", reason: "START_AGAIN" })).resolves.toMatchObject({
+      accepted: false,
+      code: "LIVE_RUNTIME_ALREADY_RUNNING",
+    });
+    await expect(actions.stop({ actor: "TEST", reason: "STOP" })).resolves.toMatchObject({
+      accepted: true,
+      code: "LIVE_RUNTIME_STOPPED",
+    });
+    releaseRun();
+
+    await expect(actions.cancelOrder({
+      orderId: "order-1",
+      actor: "TEST",
+      reason: "CANCEL",
+    })).resolves.toMatchObject({ accepted: true, code: "LIVE_ORDER_CANCEL_ACCEPTED" });
+    await expect(actions.reconcile({ actor: "TEST", reason: "RECONCILE" })).resolves.toMatchObject({
+      accepted: true,
+      code: "LIVE_RECONCILED",
+    });
+    await expect(actions.recover({ actor: "TEST", reason: "RECOVER" })).resolves.toMatchObject({
+      accepted: true,
+      code: "LIVE_RUNTIME_RECOVERED",
+    });
+    await expect(actions.retryExecution({
+      executionId: "execution-1",
+      actor: "TEST",
+      reason: "RETRY",
+    })).resolves.toMatchObject({ accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" });
+    expect(executor.cancelOrder).toHaveBeenCalledWith("order-1", "CANCEL");
+    expect(executor.retryExecution).toHaveBeenCalledWith("execution-1", "RETRY");
   });
 });

@@ -6,7 +6,7 @@
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 阶段 3 后端接口与隔离接线已完成；当前 localhost UI 已连接真实后台快照、Paper lifecycle 和 Live Gate。真实 signer、认证 CLOB 凭据、真实钱包资金证据、Live execution/order runtime、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
+- 阶段 3 后端接口与隔离接线已完成；当前 localhost UI 已连接真实后台快照、Paper lifecycle 和 Live Gate。最新实现补上了最终 Live 生产准备投影：公开钱包配置和逐项 readiness 会显示在 UI，默认 capability 为 `PENDING_PREREQUISITES`，不是把 Live 永久标成未配置。真实 signer、认证 CLOB 凭据、真实钱包资金证据、Live execution/order runtime、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 
 ## Active risks
@@ -20,6 +20,7 @@
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
 - 阶段 3 已完成运行时交接、估值恢复、合规 provider、外部订单恢复、身份绑定和 arming 审计接口；本轮 UI 已通过 `DefaultOperatorLiveGateActions` 连接真实 Gate 预检/请求/确认/恢复/紧急停用，但 Live execution/order actions 仍只保留显式注入 seam。`LiveRuntime`/`assembleLiveRuntime` 不创建凭据、不自动切换模式，当前仍没有真实 signer、认证 CLOB client、真实资金运行证据或获授权的生产启动入口。
 - `ConfiguredComplianceProvider` 是显式配置的只读策略适配器，不是法律意见或远端权威合规服务；生产接入时仍需由用户确认适用政策来源、地域和账户资格，并保留新鲜证据。
+- Live readiness 的“可就绪”状态依赖宿主显式提供每项 provider capability override；仅保存公开钱包地址不会伪称钱包已连接，也不会让 Gate 自动通过。生产接入时必须把这些 override 与真实只读 provider、Signer 和认证 CLOB 的新鲜证据绑定，不能由浏览器或配置文件自行勾选。
 - 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
 - 每笔 `<1%` BUY 可能放大到 `1—5 pUSD`，虽有 9 次小额追单上限，仍需自然测试累计敞口、收益偏差和费用。
 - Polygon WebSocket 只是 wake hint；`1 s` 确认块扫描、Data API `3 s` 和 Positions REST 是完整性兜底。确认深度、API offset 和短暂不同步仍可能触发 gap/reconciliation。

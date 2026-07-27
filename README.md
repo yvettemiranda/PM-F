@@ -26,7 +26,7 @@
 - 完全相同成交的链上次数证明：只对官方 Polygon V2 Exchange 的成功回执解码 `OrderFilled`，并要求目标 maker、side、token、抵押金额、成交次数和不同 `orderHash` 全部精确一致；原始回执与派生 proof 随 Capture Manifest 内容寻址、不可变保存，任何缺失或不一致继续阻断 Replay
 - Live 下单边界加固：不可变 Signal/Execution Context 逐字段校验、钱包与 authorized signer 绑定、signed order 的 maker/signer/数量/限价/fee 复核、完整 Order Intent 快照及恢复 hash、账户级串行化、取消 CAS、启动恢复门槛和紧急停止竞态保护
 
-`Live Executor` 已有完整架构、官方 CLOB SDK adapter、合规/geoblock/时钟安全 provider、钱包与 signer 身份绑定、启动恢复、外部订单/成交/仓位对账、arming/kill switch 和完整依赖装配入口。装配入口只接受显式注入的 adapter，不会发现或加载私钥；当前也没有用户可操作的 Live UI。数据库状态固定为 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。私钥接入、真实订单、approve、真实 redeem 和链上写操作均不属于当前默认运行状态。Phase 4/5 和自动化 hardening 只代表技术候选与验证框架可用，不代表最终验证通过，也不代表 Live 已获授权。
+`Live Executor` 已有完整架构、官方 CLOB SDK adapter、合规/geoblock/时钟安全 provider、钱包与 signer 身份绑定、启动恢复、外部订单/成交/仓位对账、arming/kill switch 和完整依赖装配入口。装配入口只接受显式注入的 adapter，不会发现或加载私钥；localhost 控制台现在按最终 Live 生产路径展示前置条件、公开钱包配置、预检和运行入口。数据库状态仍固定为 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。私钥接入、真实订单、approve、真实 redeem 和链上写操作均不属于当前默认运行状态；连接正式钱包前，所有 Live 执行入口继续由前置条件安全阻断。Phase 4/5 和自动化 hardening 只代表技术候选与验证框架可用，不代表最终验证通过，也不代表 Live 已获授权。
 
 ## 本机验证
 
@@ -42,7 +42,7 @@
 
 目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。
 
- localhost `Hecatonchires` UI 复用 `operator-control` 控制面和 `operator-dashboard` 只读投影：它统一展示目标钱包、数据库安全状态、Campaign、Observe、Signal、Market、Risk、Paper/Live 账户、资金、执行、持仓、订单、成交、盈亏、账本、日志索引、对账、恢复、隔离异常、审计和目标/我的对照事件。Live 订单取消、执行重试和运行时恢复入口会根据后台 capability 开启；未配置时以明确原因禁用。原始订单请求/响应与日志正文不进入 localhost 快照。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标和参数修改都会失败关闭；这两条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换、Live Gate、Paper 生命周期和恢复都由后台接口执行。Live Gate 可以从 UI 发起真实后台预检和审计，但当前 Live execution/order runtime 仍因无 signer、认证 CLOB、外部余额/合规/地理和时钟 provider 而保持 fail closed。
+ localhost `Hecatonchires` UI 复用 `operator-control` 控制面和 `operator-dashboard` 只读投影：它统一展示目标钱包、数据库安全状态、Campaign、Observe、Signal、Market、Risk、Paper/Live 账户、资金、执行、持仓、订单、成交、盈亏、账本、日志索引、对账、恢复、隔离异常、审计和目标/我的对照事件。Live 生产路径会展示正式钱包、Signer、只读余额、认证 CLOB、合规、地域、时钟、运行时和用户授权等逐项 readiness；页面只允许保存公开钱包地址与网络，不接受私钥。Live 订单取消、执行重试和运行时恢复入口会根据后台 capability 开启；钱包和生产适配器未注入时以“待前置条件”状态保留入口并由后端拒绝。原始订单请求/响应与日志正文不进入 localhost 快照。若未来由受授权宿主显式注入完整 `LiveRuntime`/`LiveExecutor`，还需通过 `ConfiguredOperatorLiveRuntimeActions` 的 production capability overrides 提供各项真实 provider 已注入的事实，才会逐项解除 readiness 阻断；UI 服务器不会发现或加载凭据。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标、参数和生产钱包公开配置修改都会失败关闭；这几条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换、Live Gate、Paper 生命周期和恢复都由后台接口执行。Live Gate 可以从 UI 发起真实后台预检和审计，但当前 Live execution/order runtime 仍因无 signer、认证 CLOB、外部余额/合规/地理和时钟 provider 而保持 fail closed。
 
 ```bash
 pnpm install --frozen-lockfile

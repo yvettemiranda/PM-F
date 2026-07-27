@@ -201,6 +201,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/isolated-proof.test.ts",
   "tests/live-executor.test.ts",
   "tests/live-gate.test.ts",
+  "tests/live-production-readiness.test.ts",
   "tests/live-risk-manager.test.ts",
   "tests/market-change-feed.test.ts",
   "tests/market-order-constraints.test.ts",

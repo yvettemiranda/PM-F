@@ -140,6 +140,40 @@ describe("operator UI server", () => {
     });
   });
 
+  it("stores only public Live production wallet metadata and reports pending prerequisites", async () => {
+    const { baseUrl } = await listen();
+    const response = await mutation(baseUrl, "/api/operator/live/configuration", {
+      method: "PUT",
+      body: {
+        walletAddress: selectedWallet.toUpperCase(),
+        network: "POLYGON",
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      data: {
+        config: {
+          schemaVersion: "live-production-config-v1",
+          walletAddress: selectedWallet,
+          network: "POLYGON",
+          walletBinding: "SECURE_HOST_INJECTION",
+        },
+        snapshot: {
+          live: {
+            production: {
+              path: "PRODUCTION_LIVE",
+              status: "PENDING_PREREQUISITES",
+              checks: expect.arrayContaining([
+                expect.objectContaining({ key: "SECURE_SIGNER", status: "PENDING" }),
+              ]),
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("routes Paper lifecycle, Live Gate and Live runtime operations without front-end fake state", async () => {
     const runtimeActions: OperatorRuntimeActions = {
       startPaper: vi.fn(async () => ({ accepted: true, operation: "PAPER_START" as const, pid: 101 })),

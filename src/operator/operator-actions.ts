@@ -11,12 +11,16 @@ import {
   defaultLiveGateConfig,
 } from "../live/live-gate-service.js";
 import type { LiveGateResult } from "../live/live-gate-types.js";
+import type { LiveRunnerOptions } from "../live/live-runner.js";
 import { buildSafeChildEnvironment } from "./safe-child-environment.js";
 import {
   OPERATOR_DATABASE_FILE,
   operatorRuntimeSafety,
 } from "./operator-mutation-guard.js";
 import { selectedTargetWallet } from "./target-wallet.js";
+import type {
+  LiveProductionCapabilityOverrides,
+} from "./live-production-readiness.js";
 
 export interface OperatorRuntimeActionResult {
   accepted: boolean;
@@ -54,8 +58,9 @@ export interface OperatorLiveRuntimeResult {
 }
 
 export interface OperatorLiveRuntimeCapability {
-  execution: "AVAILABLE" | "NOT_CONFIGURED";
-  orderManagement: "AVAILABLE" | "NOT_CONFIGURED";
+  execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
+  orderManagement: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
+  production?: LiveProductionCapabilityOverrides;
 }
 
 export interface OperatorLiveRuntimeActions {
@@ -74,6 +79,33 @@ export interface OperatorLiveRuntimeActions {
     actor: string;
     reason: string;
   }): Promise<OperatorLiveRuntimeResult>;
+}
+
+/**
+ * Explicitly injected backend seam for an already-assembled LiveRuntime.
+ *
+ * The operator server never constructs this graph itself. A caller must
+ * provide the complete LiveRuntime/LiveExecutor dependency graph, which keeps
+ * credential discovery and production arming outside the UI process.
+ */
+export interface OperatorLiveRuntimeBackend {
+  recoverOnStartup(accountId: string): Promise<{ ready: boolean; [key: string]: unknown }>;
+  run(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
+  emergencyStop(accountId: string, reason: string, actor?: string): Promise<void>;
+}
+
+export interface OperatorLiveExecutionBackend {
+  cancelOrder(orderId: string, reason: string): Promise<void>;
+  retryExecution(executionId: string, reason: string): Promise<void>;
+  reconcile(input: { accountId: string; reason: string }): Promise<{ reason: string }>;
+}
+
+export interface ConfiguredOperatorLiveRuntimeOptions {
+  runtime: OperatorLiveRuntimeBackend;
+  executor: OperatorLiveExecutionBackend;
+  accountId: string;
+  runOptions?: Omit<LiveRunnerOptions, "accountId">;
+  production?: LiveProductionCapabilityOverrides;
 }
 
 class UnavailableLiveBalanceProvider implements LiveReadonlyBalanceProvider {
@@ -227,8 +259,8 @@ export class DefaultOperatorLiveGateActions implements OperatorLiveGateActions {
 
 export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
   readonly capability = {
-    execution: "NOT_CONFIGURED",
-    orderManagement: "NOT_CONFIGURED",
+    execution: "PENDING_PREREQUISITES",
+    orderManagement: "PENDING_PREREQUISITES",
   } as const;
 
   async start(_input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
@@ -275,8 +307,180 @@ export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRunti
       code,
       details: {
         safety: "PAPER + LIVE_DISABLED",
-        reason: "No signer, authenticated CLOB adapter, or authorized Live runtime was injected.",
+        reason: "Production Live path is prepared, but no wallet, signer, authenticated CLOB adapter, or authorized Live runtime was injected.",
       },
     };
+  }
+}
+
+/**
+ * Bridges the UI operations to the existing LiveRuntime and LiveExecutor
+ * contracts when a caller explicitly injects an assembled graph.
+ *
+ * This class is intentionally not the server default. In the current
+ * repository safety state the server uses
+ * `UnconfiguredOperatorLiveRuntimeActions`, so no signer, authenticated CLOB
+ * adapter, or real account can be reached from the browser accidentally.
+ */
+export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
+  readonly capability: OperatorLiveRuntimeCapability;
+
+  private running = false;
+  private abortController: AbortController | null = null;
+  private lastRunError: string | null = null;
+
+  constructor(private readonly options: ConfiguredOperatorLiveRuntimeOptions) {
+    this.capability = {
+      execution: "AVAILABLE",
+      orderManagement: "AVAILABLE",
+      ...(options.production === undefined ? {} : { production: options.production }),
+    };
+  }
+
+  async start(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    if (this.running) {
+      return {
+        accepted: false,
+        code: "LIVE_RUNTIME_ALREADY_RUNNING",
+      };
+    }
+    const controller = new AbortController();
+    this.abortController = controller;
+    this.running = true;
+    this.lastRunError = null;
+    void this.options.runtime.run(
+      {
+        ...(this.options.runOptions ?? {}),
+        accountId: this.options.accountId,
+      },
+      controller.signal,
+    ).catch((error: unknown) => {
+      this.lastRunError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      this.running = false;
+      this.abortController = null;
+    });
+    return {
+      accepted: true,
+      code: "LIVE_RUNTIME_STARTED",
+      details: {
+        actor: input.actor,
+        reason: input.reason,
+        accountId: this.options.accountId,
+      },
+    };
+  }
+
+  async stop(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    this.abortController?.abort();
+    try {
+      await this.options.runtime.emergencyStop(this.options.accountId, input.reason, input.actor);
+      this.running = false;
+      return {
+        accepted: true,
+        code: "LIVE_RUNTIME_STOPPED",
+        details: { accountId: this.options.accountId },
+      };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_RUNTIME_STOP_FAILED",
+        details: {
+          accountId: this.options.accountId,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async cancelOrder(input: {
+    orderId: string;
+    actor: string;
+    reason: string;
+  }): Promise<OperatorLiveRuntimeResult> {
+    try {
+      await this.options.executor.cancelOrder(input.orderId, input.reason);
+      return { accepted: true, code: "LIVE_ORDER_CANCEL_ACCEPTED" };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_ORDER_CANCEL_FAILED",
+        details: {
+          actor: input.actor,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async reconcile(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    try {
+      const result = await this.options.executor.reconcile({
+        accountId: this.options.accountId,
+        reason: input.reason,
+      });
+      return {
+        accepted: result.reason === "LIVE_RECONCILED",
+        code: result.reason,
+        details: { actor: input.actor, accountId: this.options.accountId },
+      };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_RECONCILIATION_FAILED",
+        details: {
+          actor: input.actor,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async recover(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    try {
+      const result = await this.options.runtime.recoverOnStartup(this.options.accountId);
+      return {
+        accepted: result.ready,
+        code: result.ready ? "LIVE_RUNTIME_RECOVERED" : "LIVE_RUNTIME_RECOVERY_BLOCKED",
+        details: {
+          actor: input.actor,
+          reason: input.reason,
+          recovery: result,
+        },
+      };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_RUNTIME_RECOVERY_FAILED",
+        details: {
+          actor: input.actor,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async retryExecution(input: {
+    executionId: string;
+    actor: string;
+    reason: string;
+  }): Promise<OperatorLiveRuntimeResult> {
+    try {
+      await this.options.executor.retryExecution(input.executionId, input.reason);
+      return { accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_EXECUTION_RETRY_FAILED",
+        details: {
+          actor: input.actor,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  get lastError(): string | null {
+    return this.lastRunError;
   }
 }

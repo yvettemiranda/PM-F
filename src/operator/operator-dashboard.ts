@@ -6,6 +6,10 @@ import {
   OPERATOR_ACTIVE_LOCK,
   OPERATOR_DATABASE_FILE,
 } from "./operator-mutation-guard.js";
+import {
+  liveProductionReadiness,
+  type LiveProductionReadiness,
+} from "./live-production-readiness.js";
 
 const MONEY_SCALE_DIGITS = 6;
 const PRICE_SCALE_DIGITS = 18;
@@ -103,10 +107,11 @@ export interface OperatorDashboardSnapshot {
   live: {
     capability: {
       activation: "LIVE_GATE" | "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION";
-      execution: "AVAILABLE" | "NOT_CONFIGURED";
-      orderManagement: "AVAILABLE" | "NOT_CONFIGURED";
+      execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
+      orderManagement: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
       externalDependencies: readonly string[];
     };
+    production: LiveProductionReadiness;
     gate: null | {
       executionMode: string;
       state: string;
@@ -592,8 +597,8 @@ function emptySnapshot(
     live: {
       capability: {
         activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
-        execution: "NOT_CONFIGURED",
-        orderManagement: "NOT_CONFIGURED",
+        execution: "PENDING_PREREQUISITES",
+        orderManagement: "PENDING_PREREQUISITES",
         externalDependencies: [
           "LIVE_READONLY_BALANCE_PROVIDER",
           "COMPLIANCE_POLICY",
@@ -604,6 +609,11 @@ function emptySnapshot(
           "USER_EXPLICIT_AUTHORIZATION",
         ],
       },
+      production: liveProductionReadiness(projectRoot, {
+        databaseAvailable: false,
+        gatePrerequisites: [],
+        executionCapability: "PENDING_PREREQUISITES",
+      }, () => new Date(generatedAt)),
       gate: null,
       prerequisites: [],
       gateRuns: [],
@@ -1137,6 +1147,11 @@ export function operatorDashboardSnapshot(
        ORDER BY timestamp DESC,audit_id DESC LIMIT ?`,
       [limit],
     ), { json: ["metadata_json"] });
+    snapshot.live.production = liveProductionReadiness(projectRoot, {
+      databaseAvailable: snapshot.database.status === "AVAILABLE",
+      gatePrerequisites: snapshot.live.prerequisites,
+      executionCapability: snapshot.live.capability.execution,
+    }, () => new Date(generatedAt));
 
     const lockPath = resolve(projectRoot, OPERATOR_ACTIVE_LOCK);
     const operatorLocked = existsSync(lockPath);

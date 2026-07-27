@@ -118,7 +118,7 @@ describe("operator control", () => {
         live: {
           available: true,
           gateAvailable: true,
-          blockedReason: "LIVE_EXECUTION_NOT_CONFIGURED",
+          blockedReason: "LIVE_PRODUCTION_PREREQUISITES_PENDING",
         },
         parameters: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
       },

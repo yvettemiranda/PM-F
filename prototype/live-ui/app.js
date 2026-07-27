@@ -259,7 +259,7 @@ function runtimePanel(snapshot) {
     ? liveCapability === "AVAILABLE"
     : paperControl?.available === true;
   const unavailableReason = liveMode
-    ? "Live 运行时未配置"
+    ? "Live 生产链路已准备，等待正式钱包与生产前置条件"
     : paperControl?.blockedReason ?? "Paper 当前不可运行";
   const startDisabled = Boolean(state.busy) || !runtimeAvailable || runtime?.state === "RUNNING";
   const stopDisabled = Boolean(state.busy) || !runtimeAvailable || runtime?.state !== "RUNNING";
@@ -312,7 +312,7 @@ function runtimePanel(snapshot) {
         <p class="ops-note">${escapeHtml(liveMode
           ? (runtimeAvailable
             ? "Live 生命周期通过已注入运行时执行，并继续受 Gate、风控、审计和恢复机制约束。"
-            : "Live 运行时未注入，启动、暂停和恢复均明确禁用。")
+            : "Live 生产路径已接入；连接正式钱包并完成生产预检后，启动、暂停和恢复会自动开放。")
           : "Paper 启动/暂停复用桌面入口；恢复只收割经过身份验证的遗留进程，不会启动 Live。")}</p>
       </div>
     </details>
@@ -323,9 +323,21 @@ function livePanel(snapshot) {
   const gate = snapshot?.live?.gate;
   const blocked = snapshot?.live?.capability?.externalDependencies ?? [];
   const prerequisites = snapshot?.live?.prerequisites ?? [];
+  const production = snapshot?.live?.production;
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
   const runtimeConfigured = snapshot?.live?.capability?.execution === "AVAILABLE";
   const gateReason = snapshot?.control?.controls?.live?.blockedReason ?? "Live Gate 尚不可用";
+  const checkLabels = {
+    FORMAL_WALLET: "正式钱包",
+    SECURE_SIGNER: "安全 Signer",
+    READONLY_BALANCE: "只读余额",
+    AUTHENTICATED_CLOB: "认证 CLOB",
+    COMPLIANCE: "合规",
+    GEOBLOCK: "地域限制",
+    CLOCK_SAFETY: "时钟安全",
+    LIVE_RUNTIME: "LiveRuntime",
+    USER_AUTHORIZATION: "用户授权",
+  };
   return `
     <details class="fold-panel ops-panel reveal" style="--delay: 125ms">
       <summary>
@@ -335,8 +347,33 @@ function livePanel(snapshot) {
       </summary>
       <div class="fold-content ops-content">
         <div class="gate-banner ${gate?.state === "LIVE_ACTIVE" ? "danger" : ""}">
-          <strong>${escapeHtml(gate?.state ?? "LIVE_DISABLED")}</strong>
-          <span>${escapeHtml(gate?.reason ?? "Live 当前不会提交真实订单。")}</span>
+          <strong>${escapeHtml(production?.status === "READY" ? "生产路径已就绪" : "生产路径待前置条件")}</strong>
+          <span>${escapeHtml(gate?.reason ?? "当前不会提交真实订单；连接正式钱包后继续完成预检。")}</span>
+        </div>
+        <div class="live-production-config">
+          <div class="production-heading">
+            <div><strong>生产钱包准备</strong><span>这里只登记公开地址，不输入私钥。</span></div>
+            <span class="production-status ${production?.status === "READY" ? "ready" : "pending"}">
+              ${escapeHtml(production?.status === "READY" ? "可预检" : "等待连接")}
+            </span>
+          </div>
+          <div class="production-config-row">
+            <input class="target-input" id="live-wallet-address" value="${escapeHtml(production?.config?.walletAddress ?? "")}"
+              placeholder="正式钱包地址 0x…" aria-label="正式钱包地址" spellcheck="false" />
+            <select class="network-select" id="live-wallet-network" aria-label="生产网络">
+              <option value="POLYGON" ${production?.config?.network === "POLYGON" ? "selected" : ""}>Polygon 主网</option>
+              <option value="POLYGON_AMOY" ${production?.config?.network === "POLYGON_AMOY" ? "selected" : ""}>Polygon Amoy（测试）</option>
+            </select>
+            <button class="secondary-button" data-action="live-save-configuration" type="button"
+              ${disabledAttr(Boolean(state.busy), "")}>保存</button>
+          </div>
+        </div>
+        <div class="production-check-list">
+          ${(production?.checks ?? []).map((item) => `
+            <span class="production-check ${item.status === "READY" ? "ready" : "pending"}">
+              <i></i>${escapeHtml(checkLabels[item.key] ?? item.key)}
+            </span>
+          `).join("")}
         </div>
         <div class="prerequisite-list">
           ${prerequisites.length
@@ -349,11 +386,13 @@ function livePanel(snapshot) {
           <button class="secondary-button" data-action="live-recover" type="button"
             ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>恢复 Gate</button>
           <button class="secondary-button" data-action="live-reconcile" type="button"
-            ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "Live 对账运行时未配置")}>Live 对账</button>
+            ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "等待正式钱包与 LiveRuntime 注入")}>Live 对账</button>
           <button class="secondary-button danger-button" data-action="live-disable" type="button"
             ${disabledAttr(Boolean(state.busy) || gate?.state === "LIVE_DISABLED", "Live 当前已禁用")}>紧急停用 Live</button>
         </div>
-        <p class="ops-note">当前未注入 ${escapeHtml(blocked.join("、"))}；Live 执行、订单取消和资金操作会保持明确禁用。</p>
+        <p class="ops-note">${escapeHtml(production?.status === "READY"
+          ? "生产前置条件已齐备，下一步由用户执行正式预检与 Gate 二次确认。"
+          : `当前待完成：${blocked.join("、")}。连接正式钱包后，宿主会注入安全 Signer 和生产适配器；浏览器永远不接触私钥。`)}</p>
       </div>
     </details>
   `;
@@ -487,7 +526,7 @@ function domainDetails(snapshot) {
   const runtime = snapshot?.runtime;
   const liveExecutionAvailable = live?.capability?.execution === "AVAILABLE";
   const liveOrderManagementAvailable = live?.capability?.orderManagement === "AVAILABLE";
-  const retryableExecutionStates = new Set(["FAILED", "FROZEN"]);
+  const retryableExecutionStates = new Set(["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"]);
   return `
     <details class="fold-panel domain-panel reveal" style="--delay: 440ms">
       <summary>
@@ -737,6 +776,23 @@ async function restoreDefaults() {
   }
 }
 
+async function saveLiveConfiguration() {
+  const walletAddress = document.querySelector("#live-wallet-address")?.value.trim() ?? "";
+  const network = document.querySelector("#live-wallet-network")?.value ?? "POLYGON";
+  if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
+    setNotice("error", "生产配置未保存", "请填写有效的正式钱包地址；这里只保存公开身份，不接收私钥。");
+    return;
+  }
+  try {
+    await runAction("保存生产钱包配置", "/api/operator/live/configuration", {
+      method: "PUT",
+      body: JSON.stringify({ walletAddress, network }),
+    }, { success: "生产钱包公开配置已保存，等待安全宿主连接钱包。" });
+  } catch {
+    // runAction already surfaces the backend reason.
+  }
+}
+
 async function liveRequest() {
   try {
     const data = await runAction("检查 Live Gate", "/api/operator/live/request", {
@@ -795,7 +851,7 @@ function showModeModal() {
   showModal(
     "切换到 LIVE",
     `<div class="mode-preview"><span class="current"><i></i>PAPER</span><svg viewBox="0 0 20 20"><path d="m6 4 6 6-6 6" /></svg><span>LIVE</span></div><p>第一次确认只会请求后台 Gate 检查，不会直接提交订单。</p>`,
-    "Live 当前默认禁用，缺少外部依赖时会明确拒绝。",
+    "Live 生产路径已准备；正式钱包、Signer 和外部服务未齐全前，后台会保持阻断。",
     "请求 Live 检查",
     liveRequest,
   );
@@ -808,6 +864,7 @@ async function actionClick(action, input = {}) {
   if (action === "runtime-recover") await runAction(`恢复 ${mode}`, "/api/operator/runtime/recover", { body: JSON.stringify({ mode, actor: "LOCAL_OPERATOR", reason: "UI_RUNTIME_RECOVER" }) }, { success: `${mode} 恢复请求已提交。` });
   if (action === "live-preflight") await runAction("检查 Live Gate", "/api/operator/live/preflight", { body: "{}" }, { success: "Live Gate 检查完成。" });
   if (action === "live-recover") await runAction("恢复 Live Gate", "/api/operator/live/recover", { body: "{}" }, { success: "Live Gate 恢复检查完成。" });
+  if (action === "live-save-configuration") await saveLiveConfiguration();
   if (action === "live-disable") {
     showModal("紧急停用 Live", "<p>这会把执行模式切回 PAPER，并记录一条后台审计。</p>", "确认后立即生效。", "确认停用", async () => {
       await runAction("紧急停用 Live", "/api/operator/live/emergency-disable", { body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_EMERGENCY_DISABLE" }) }, { success: "Live 已停用。" });
@@ -849,7 +906,7 @@ function bindEvents() {
       showModal(
         "重试 Live 执行",
         `<p>重试仍会重新经过 Gate、风控、订单和审计链路。</p><code>${escapeHtml(executionId)}</code>`,
-        "只有失败或冻结执行可从这里请求恢复。",
+        "只有等待中或退出待处理执行可从这里请求重试。",
         "确认重试",
         async () => {
           await runAction("重试 Live 执行", `/api/operator/live/executions/${encodeURIComponent(executionId)}/retry`, {

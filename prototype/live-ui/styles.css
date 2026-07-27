@@ -1825,6 +1825,116 @@ body::after {
   background: var(--amber-soft);
 }
 
+.live-production-config {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+
+.production-heading,
+.production-config-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.production-heading > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.production-heading strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.production-heading span {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.production-status {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.production-status.ready {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.production-status.pending {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.production-config-row .target-input {
+  min-width: 0;
+  min-height: 36px;
+  flex: 1 1 auto;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.network-select {
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink-muted);
+  background: var(--surface);
+  font-size: 10px;
+}
+
+.production-config-row .secondary-button {
+  min-height: 36px;
+  padding: 0 11px;
+  font-size: 10px;
+}
+
+.production-check-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.production-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-muted);
+  background: var(--surface-subtle);
+  font-size: 9px;
+}
+
+.production-check i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.production-check.ready {
+  border-color: #ccebdd;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.production-check.ready i {
+  background: var(--green);
+}
+
 .empty-inline {
   color: var(--ink-faint);
   font-size: 10px;
@@ -2937,6 +3047,20 @@ body::after {
 
   .trade-footer {
     min-height: 44px;
+  }
+
+  .production-config-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .production-config-row .target-input {
+    flex-basis: 100%;
+  }
+
+  .network-select,
+  .production-config-row .secondary-button {
+    flex: 1 1 0;
   }
 }
 

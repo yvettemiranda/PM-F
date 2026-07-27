@@ -41,6 +41,7 @@
 - Animal 皮肤浏览器检查通过：首屏、参数面板、动森风格有机弹窗、交易对照卡和九列表格均正常，控制台无错误；仅修改 UI/CSS/说明文档，未改变 Paper/Live 运行逻辑或安全边界。
 - 海豹/边牧/乌鸦背景浏览器检查通过：角色在首屏两侧和交易卡后方可见，透明度与层级不遮挡地址、金额和状态；PNG 已确认是 RGBA 透明背景，控制台无错误。
 - 本轮接入收尾修正通过：Live 账户/执行/订单尝试/账本/隔离异常均进入后台明细；Paper/Live/目标/参数操作按后台 capability 禁用确定失败入口；原始 Live 请求/响应和日志正文不进入快照，仅保留安全摘要/索引。`pnpm typecheck`、定向 4 files / 14 tests、全量 59 files / 802 tests、`git diff --check` 均通过；真实 localhost 快照仍为 `PAPER + LIVE_DISABLED + STOPPED`，桌面/390px 移动回归无浏览器控制台错误。
+- 本轮 Live 生产准备接线通过：`src/operator/live-production-readiness.ts` 定义非敏感生产钱包配置、逐项 provider/Signer/Runtime/Gate readiness 和安全宿主 capability overrides；新增 `PUT /api/operator/live/configuration` 只保存公开钱包地址与网络，UI Live 安全面板展示“生产路径待前置条件”、准备项和明确阻断原因。默认 capability 为 `PENDING_PREREQUISITES`，真实 Live 仍不会触达。`pnpm typecheck`、定向 readiness/actions/UI 测试 `3 files / 10 tests`、最终全量 `60 files / 806 tests`、`node --check` 和 `git diff --check` 通过；localhost 快照确认 `PAPER + LIVE_DISABLED + liveAllowed=false`。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
@@ -51,6 +52,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 提交本次 UI/API 接入；用户先在 UI 检查 Paper/Live 状态、目标地址、参数保存、运行/恢复入口、对照卡、执行明细和后台明细。
-2. UI 验收后再进入统一 Paper/隔离 Live/安全门验证；仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，且不自动启动 Paper。
-3. 只有用户再次明确授权且补齐真实 signer、认证 CLOB、余额/合规/地域/时钟 provider，才另行设计小额灰度实盘；当前 UI 的 Live 运行时与订单管理保持 capability disabled。
+1. 完成并提交 Live 生产准备接线：公开钱包配置、逐项 readiness、待前置条件 capability、同源 API 和 UI 状态。
+2. 运行定向与全量测试、启动 localhost UI 做桌面/移动回归；仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，且不自动启动 Paper。
+3. 用户连接正式钱包后，由受授权宿主显式注入 signer、认证 CLOB、余额/合规/地域/时钟 provider 与 `ConfiguredOperatorLiveRuntimeActions`，再进行真实 Gate 预检和二次授权；当前不宣称已具备实盘凭据或真实运行证据。

@@ -353,6 +353,47 @@ export class LiveExecutor implements ExecutorInterface {
     return this.serializeAccount(execution.live_account_id, () => this.cancelExecutionUnlocked(executionId, reason));
   }
 
+  /**
+   * Operator-facing order cancellation seam. The UI owns an order id while
+   * the executor's invariant is cancellation of the parent execution; resolve
+   * that relationship here so the UI cannot bypass the normal cancellation,
+   * reconciliation, freeze and audit path.
+   */
+  async cancelOrder(orderId: string, reason: string): Promise<void> {
+    const row = this.database.prepare(
+      `SELECT live_execution_id
+       FROM live_orders
+       WHERE live_order_id=?
+       LIMIT 1`,
+    ).get(orderId) as { live_execution_id: string } | undefined;
+    if (!row) throw new Error("LIVE_ORDER_NOT_FOUND");
+    return this.cancelExecution(row.live_execution_id, reason);
+  }
+
+  /**
+   * Retry one persisted pending execution through the same idempotent retry
+   * reducer used by LiveRunner. Failed or frozen executions are not silently
+   * recreated: they must first be recovered by the backend's explicit
+   * recovery path.
+   */
+  async retryExecution(executionId: string, reason: string): Promise<void> {
+    const execution = this.store.executionById(executionId);
+    if (!execution) throw new Error("LIVE_EXECUTION_NOT_FOUND");
+    if (!["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"].includes(execution.state)) {
+      throw new Error(`LIVE_EXECUTION_NOT_RETRYABLE_STATE:${execution.state}`);
+    }
+    const scope: LivePendingRetryScope = execution.execution_type === "TARGET_BUY"
+      ? "BUYS_ONLY"
+      : "EXITS_ONLY";
+    this.store.audit("LIVE_EXECUTION", executionId, "operator_retry_requested", reason, {
+      scope,
+    });
+    const processed = await this.retryPending(execution.live_account_id, scope, executionId);
+    if (!processed.includes(executionId)) {
+      throw new Error("LIVE_EXECUTION_RETRY_NOT_PROCESSED");
+    }
+  }
+
   private async cancelExecutionUnlocked(executionId: string, reason: string): Promise<void> {
     const execution = this.store.executionById(executionId);
     if (!execution) throw new Error("LIVE_EXECUTION_NOT_FOUND");
@@ -819,13 +860,18 @@ export class LiveExecutor implements ExecutorInterface {
     });
   }
 
-  async retryPending(accountId: string, scope: LivePendingRetryScope = "ALL"): Promise<string[]> {
+  async retryPending(
+    accountId: string,
+    scope: LivePendingRetryScope = "ALL",
+    executionId?: string,
+  ): Promise<string[]> {
     return this.serializeAccount(accountId, async () => {
       const rows = this.database.prepare(
         `SELECT live_execution_id,signal_id,risk_decision_id,execution_type,state,
                 target_price_units,requested_size_micros
          FROM live_executions
          WHERE live_account_id=?
+           AND (? IS NULL OR live_execution_id=?)
            AND state IN ('WAITING_EXECUTION','EXIT_PENDING','STOP_EXIT_PENDING')
            AND execution_type IN ('TARGET_BUY','TARGET_SELL','STOP_LOSS')
            AND (
@@ -835,7 +881,7 @@ export class LiveExecutor implements ExecutorInterface {
            )
          ORDER BY CASE execution_type WHEN 'STOP_LOSS' THEN 0 WHEN 'TARGET_SELL' THEN 1 ELSE 2 END,
                   created_at,live_execution_id`,
-      ).all(accountId, scope, scope, scope) as unknown as Array<{
+      ).all(accountId, executionId ?? null, executionId ?? null, scope, scope, scope) as unknown as Array<{
         live_execution_id: string;
         signal_id: string | null;
         risk_decision_id: string;
@@ -2944,6 +2990,14 @@ export class LiveExecutorPlaceholder implements ExecutorInterface {
   }
 
   async cancelExecution(_executionId: string, _reason: string): Promise<void> {
+    throw new Error("LIVE_EXECUTOR_NOT_IMPLEMENTED");
+  }
+
+  async cancelOrder(_orderId: string, _reason: string): Promise<void> {
+    throw new Error("LIVE_EXECUTOR_NOT_IMPLEMENTED");
+  }
+
+  async retryExecution(_executionId: string, _reason: string): Promise<void> {
     throw new Error("LIVE_EXECUTOR_NOT_IMPLEMENTED");
   }
 

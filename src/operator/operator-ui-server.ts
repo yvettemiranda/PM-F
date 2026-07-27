@@ -18,6 +18,10 @@ import {
 } from "./ruleset-profile.js";
 import { OPERATOR_RULESET_PROFILE_CONTEXT } from "../domain/versioning.js";
 import { saveSelectedTargetWallet } from "./target-wallet.js";
+import {
+  liveProductionReadiness,
+  saveLiveProductionConfig,
+} from "./live-production-readiness.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -173,6 +177,14 @@ function freshSnapshot(
     : operatorDashboardSnapshot(options.projectRoot, { now: options.now });
   snapshot.live.capability.execution = liveRuntimeActions.capability.execution;
   snapshot.live.capability.orderManagement = liveRuntimeActions.capability.orderManagement;
+  snapshot.live.production = liveProductionReadiness(options.projectRoot, {
+    databaseAvailable: snapshot.database.status === "AVAILABLE",
+    gatePrerequisites: snapshot.live.prerequisites,
+    executionCapability: liveRuntimeActions.capability.execution,
+    ...(liveRuntimeActions.capability.production === undefined
+      ? {}
+      : { injectedChecks: liveRuntimeActions.capability.production }),
+  }, options.now);
   return snapshot;
 }
 
@@ -184,6 +196,21 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "GET" && path === "/api/operator/snapshot") {
     success(response, dashboardSnapshot());
+    return;
+  }
+
+  if (request.method === "PUT" && path === "/api/operator/live/configuration") {
+    const body = await readJson(request);
+    const walletAddress = stringField(body, "walletAddress");
+    const network = stringField(body, "network").toUpperCase();
+    if (network !== "POLYGON" && network !== "POLYGON_AMOY") {
+      throw new HttpError(400, "LIVE_PRODUCTION_NETWORK_INVALID", "network 只能是 POLYGON 或 POLYGON_AMOY。");
+    }
+    const config = saveLiveProductionConfig(options.projectRoot, {
+      walletAddress,
+      network,
+    });
+    success(response, { config, snapshot: dashboardSnapshot() });
     return;
   }
 
