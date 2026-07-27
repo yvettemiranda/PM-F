@@ -53,6 +53,9 @@ title() {
 }
 
 pause_if_double_clicked() {
+  if [[ "${NI_K_OPERATOR_HEADLESS:-0}" == "1" ]]; then
+    return 0
+  fi
   print ""
   print "如果这个窗口是双击打开的，可以看完上面的结果后关闭。"
   if [[ -t 0 ]]; then
@@ -1087,12 +1090,18 @@ operator_create_campaign_bundle() {
 }
 
 open_codex_results() {
+  if [[ "${NI_K_OPERATOR_HEADLESS:-0}" == "1" ]]; then
+    return 0
+  fi
   local results_dir="$PROJECT_ROOT/交给Codex"
   mkdir -p "$results_dir"
   open "$results_dir"
 }
 
 reveal_codex_result() {
+  if [[ "${NI_K_OPERATOR_HEADLESS:-0}" == "1" ]]; then
+    return 0
+  fi
   if [[ -n "$OPERATOR_RESULT_ZIP" && -e "$OPERATOR_RESULT_ZIP" ]]; then
     open -R "$OPERATOR_RESULT_ZIP" 2>/dev/null || open_codex_results || true
   else

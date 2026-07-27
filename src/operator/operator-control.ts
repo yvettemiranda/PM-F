@@ -43,7 +43,11 @@ export interface OperatorControlSnapshot {
   controls: {
     targetWallet: { available: boolean; blockedReason: string | null };
     paper: { available: boolean; blockedReason: string | null };
-    live: { available: false; blockedReason: "LIVE_UI_NOT_IMPLEMENTED" };
+    live: {
+      available: boolean;
+      gateAvailable: boolean;
+      blockedReason: string | null;
+    };
     parameters: {
       available: boolean;
       blockedReason: string | null;
@@ -60,9 +64,9 @@ function tableExists(database: DatabaseSync, table: string): boolean {
 }
 
 /**
- * Read-only control-plane projection intended for the future localhost UI.
- * It reports unavailable controls honestly; it never initializes the database,
- * transitions the Live Gate, or derives account balances.
+ * Read-only control-plane projection for the localhost UI.
+ * It reports Gate and execution capability separately; it never initializes
+ * the database, transitions the Live Gate, or derives account balances.
  */
 export function operatorControlSnapshot(projectRoot: string): OperatorControlSnapshot {
   const target = selectedTargetWallet(projectRoot);
@@ -128,7 +132,13 @@ export function operatorControlSnapshot(projectRoot: string): OperatorControlSna
         available: paperAvailable,
         blockedReason: paperAvailable ? null : "DATABASE_NOT_PAPER_LIVE_DISABLED",
       },
-      live: { available: false, blockedReason: "LIVE_UI_NOT_IMPLEMENTED" },
+      live: {
+        available: runtimeSafety.databaseAvailable,
+        gateAvailable: runtimeSafety.databaseAvailable,
+        blockedReason: runtimeSafety.databaseAvailable
+          ? "LIVE_EXECUTION_NOT_CONFIGURED"
+          : "LIVE_GATE_DATABASE_NOT_INITIALIZED",
+      },
       parameters: {
         available: mutationAvailable,
         blockedReason: runtimeSafety.mutationBlockedReason,

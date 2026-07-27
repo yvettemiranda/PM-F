@@ -18,7 +18,9 @@
     "paper:campaign:status": "tsx src/cli/paper-campaign-status.ts",
     "operator:control": "tsx src/cli/operator-control.ts",
     "validate:final": "tsx src/cli/validate-final.ts",
-    "operational:validate": "tsx src/cli/operational-validate.ts"
+    "operational:validate": "tsx src/cli/operational-validate.ts",
+    "operator:ui": "node --import tsx prototype/live-ui/server.mjs",
+    "prototype:ui": "node --import tsx prototype/live-ui/server.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.2",

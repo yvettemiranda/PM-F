@@ -5,6 +5,10 @@
 - 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
 - 已完成 Paper/Live 运行时交接与最终估值恢复修复：同一 Paper 账户和 baseline 可在安全 replacement 中承接旧仓位；最终 drain/估值有界重试；估值未完成时新 BUY 延后且不消费；Live 仅保留禁用态交接与隔离恢复。
 - 第 3 阶段 Live/后端能力和安全接线已完成：禁用态跨 Core 交接、外部订单/成交/仓位恢复对账、合规/geoblock/时钟安全 provider、钱包/signer 身份绑定、风控/arming/kill switch、启动与估值恢复、账本隔离及完整运行时装配均已有公开后端 seam；仍保持真实 Live 禁用，仅用 fake/isolated 测试验证。
+- 第 2 阶段 UI 已从 throwaway 原型落为真实 localhost 控制台：品牌名为 `Hecatonchires`，保持用户选定的明亮 Animal Island-inspired 视觉、原创海豹/边牧/乌鸦背景、紧凑目标/我的对照卡、默认收起设置和执行明细。页面不再有 sample/in-memory 数据，3 秒轮询 `/api/operator/snapshot`，所有账户、策略、Signal、Market、Risk、Paper/Live 订单/成交/持仓/盈亏/账本、日志、对账、恢复和审计均由 SQLite 后台投影提供；参数表单按真实 micros/ms 字段转换并通过原有 profile 服务保存/恢复默认。新增运行与恢复、Live Gate 和后台明细折叠区，Paper 生命周期调用既有安全入口，Live 按 Gate 和外部依赖明确阻断。
+- 用户要求改用 `guokaigdg/animal-island-ui` 参考后，原型改为独立的 Animal Island-inspired 皮肤：奶油米白画布、暖棕文字、薄荷青绿/焦点黄、波点纹理、pill 控件、燕尾标题、暖色虚线表格和轻微按键式动效。没有复制参考仓库代码、图片、字体文件或 Nintendo 资产；原仓库的 CC BY-NC 许可已记录在原型 README。原有目标地址、账户概览、对照卡、可编辑设置、PAPER/LIVE 二次确认和执行明细信息结构保持不变。
+- 根据用户最新反馈，新增独立绘制的海豹、边牧和乌鸦岛屿插画 `prototype/live-ui/assets/island-background-v3.png`，以低透明度固定背景层呈现于页面两侧与底部；不改变信息结构、交互逻辑或 PAPER/LIVE 安全边界。
+- 新增 `src/operator/operator-dashboard.ts`、`operator-actions.ts`、`operator-ui-server.ts`：提供统一后台快照、目标/规则集 mutation、Paper 启停/恢复、Live Gate 真实预检/请求/确认/恢复/紧急停用，以及未配置 Live runtime 的明确错误；`prototype/live-ui/server.mjs` 已切换为真实 API 服务器。
 
 ## Implemented
 - Risk Manager 现在把 `POLYGON_TRADE_FEED_UNSAFE` 事故限定到事故所属 Observe Run：新 Run 的 Signal 不再被旧 Run 的事故误拒绝，同时旧事故记录保持 `OPEN`，同 Run、归属缺失/损坏及其他 `MAJOR_DESYNC` 继续硬阻断。
@@ -33,6 +37,10 @@
 - `--recover-only` 与恢复工件清理修复均已提交。
 - 超时修复后，Shell 打包文件 `12/12` 通过；TypeScript 与全套 `56 files / 769 tests` 通过。
 - 本次运行时交接/估值恢复改动完成后，TypeScript 通过；定向 Campaign/Live 风险测试 `2 files / 40 tests` 通过；全套 `56 files / 784 tests` 通过；`git diff --check` 通过。
+- 本轮 UI 视觉重构后，浏览器实机检查通过：桌面版首屏、参数折叠/保存、PAPER→LIVE 二次确认、交易对照卡和展开后的九列表格均正常；未改变原型安全边界。TypeScript、全量 `56 files / 794 tests` 与 `git diff --check` 通过；UI 原型未发现网络请求、私钥或敏感凭据读取。
+- Animal 皮肤浏览器检查通过：首屏、参数面板、动森风格有机弹窗、交易对照卡和九列表格均正常，控制台无错误；仅修改 UI/CSS/说明文档，未改变 Paper/Live 运行逻辑或安全边界。
+- 海豹/边牧/乌鸦背景浏览器检查通过：角色在首屏两侧和交易卡后方可见，透明度与层级不遮挡地址、金额和状态；PNG 已确认是 RGBA 透明背景，控制台无错误。
+- 本轮接入收尾修正通过：Live 账户/执行/订单尝试/账本/隔离异常均进入后台明细；Paper/Live/目标/参数操作按后台 capability 禁用确定失败入口；原始 Live 请求/响应和日志正文不进入快照，仅保留安全摘要/索引。`pnpm typecheck`、定向 4 files / 14 tests、全量 59 files / 802 tests、`git diff --check` 均通过；真实 localhost 快照仍为 `PAPER + LIVE_DISABLED + STOPPED`，桌面/390px 移动回归无浏览器控制台错误。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
@@ -43,6 +51,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 按用户指定顺序进入第 2 阶段 UI：先支持 Paper/Observe 的完整操作和审计，再把 Live 控件接入安全 Gate，未授权时保持禁用。
-2. UI 完成后进入第 1 阶段统一验收：Paper 自然 BUY/SELL/平仓/PnL、跨 Core 交接、估值恢复、隔离 Live 和 UI 安全门。
-3. 统一验收通过后仍保持 `PAPER + LIVE_DISABLED`；只有用户再次明确授权，才可另行设计小额灰度实盘步骤。
+1. 提交本次 UI/API 接入；用户先在 UI 检查 Paper/Live 状态、目标地址、参数保存、运行/恢复入口、对照卡、执行明细和后台明细。
+2. UI 验收后再进入统一 Paper/隔离 Live/安全门验证；仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，且不自动启动 Paper。
+3. 只有用户再次明确授权且补齐真实 signer、认证 CLOB、余额/合规/地域/时钟 provider，才另行设计小额灰度实盘；当前 UI 的 Live 运行时与订单管理保持 capability disabled。

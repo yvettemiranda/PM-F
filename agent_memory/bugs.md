@@ -6,7 +6,8 @@
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 阶段 3 后端接口与隔离接线已完成；真实 signer、认证 CLOB 凭据、真实钱包资金证据、真实 Live UI、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
+- 阶段 3 后端接口与隔离接线已完成；当前 localhost UI 已连接真实后台快照、Paper lifecycle 和 Live Gate。真实 signer、认证 CLOB 凭据、真实钱包资金证据、Live execution/order runtime、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
+- UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 
 ## Active risks
 - `reconciliation_issues` 是目标级长期证据；新修复只对 `POLYGON_TRADE_FEED_UNSAFE` 使用明确的 Observe Run 归属缩小阻断范围。归属缺失、JSON 损坏、同 Run 或其他类型 `MAJOR_DESYNC` 全部继续 fail closed；后续若新增可恢复事故类型，必须单独定义恢复证明，不能泛化跳过。
@@ -17,7 +18,7 @@
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
-- 阶段 3 已完成运行时交接、估值恢复、合规 provider、外部订单恢复、身份绑定和 arming 审计接口；但它们只证明后端 seam 和隔离 fake 路径。`LiveRuntime`/`assembleLiveRuntime` 不创建凭据、不自动切换模式，当前仍没有真实 signer、认证 CLOB client、真实资金运行证据或获授权的生产启动入口。
+- 阶段 3 已完成运行时交接、估值恢复、合规 provider、外部订单恢复、身份绑定和 arming 审计接口；本轮 UI 已通过 `DefaultOperatorLiveGateActions` 连接真实 Gate 预检/请求/确认/恢复/紧急停用，但 Live execution/order actions 仍只保留显式注入 seam。`LiveRuntime`/`assembleLiveRuntime` 不创建凭据、不自动切换模式，当前仍没有真实 signer、认证 CLOB client、真实资金运行证据或获授权的生产启动入口。
 - `ConfiguredComplianceProvider` 是显式配置的只读策略适配器，不是法律意见或远端权威合规服务；生产接入时仍需由用户确认适用政策来源、地域和账户资格，并保留新鲜证据。
 - 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
 - 每笔 `<1%` BUY 可能放大到 `1—5 pUSD`，虽有 9 次小额追单上限，仍需自然测试累计敞口、收益偏差和费用。
@@ -26,6 +27,7 @@
 - Observe 与 Replay 对特殊操作保留两套面向不同输出的投影编排；当前有一致性回归覆盖，但后续再改 SPLIT/CONVERSION 时应优先抽取共享纯 reducer，避免语义漂移。
 - `node:sqlite` 在 Node 24 仍有 experimental warning。
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
+- Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
 - 用户授权的独立跨 Core Paper 汇总已达到 `86,400,012 ms`；最终连续 4 小时运行完整、安全，原始数据库与各 Campaign 的内建计时未改写。

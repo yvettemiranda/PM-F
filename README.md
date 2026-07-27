@@ -42,7 +42,7 @@
 
 目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。
 
-未来 localhost UI 可以直接复用 `operator-control` 控制面：它统一投影目标钱包、数据库安全状态、当前目标 Campaign、有效 ruleset 和可用控件。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标和参数修改都会失败关闭；这两条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换仍以数据库 Live Gate 为唯一权威。当前 Live 控件固定报告 `LIVE_UI_NOT_IMPLEMENTED`，不能显示成可用按钮。
+ localhost `Hecatonchires` UI 复用 `operator-control` 控制面和 `operator-dashboard` 只读投影：它统一展示目标钱包、数据库安全状态、Campaign、Observe、Signal、Market、Risk、Paper/Live 账户、资金、执行、持仓、订单、成交、盈亏、账本、日志索引、对账、恢复、隔离异常、审计和目标/我的对照事件。Live 订单取消、执行重试和运行时恢复入口会根据后台 capability 开启；未配置时以明确原因禁用。原始订单请求/响应与日志正文不进入 localhost 快照。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标和参数修改都会失败关闭；这两条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换、Live Gate、Paper 生命周期和恢复都由后台接口执行。Live Gate 可以从 UI 发起真实后台预检和审计，但当前 Live execution/order runtime 仍因无 signer、认证 CLOB、外部余额/合规/地理和时钟 provider 而保持 fail closed。
 
 ```bash
 pnpm install --frozen-lockfile
