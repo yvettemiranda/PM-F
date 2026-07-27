@@ -324,6 +324,8 @@ function livePanel(snapshot) {
   const blocked = snapshot?.live?.capability?.externalDependencies ?? [];
   const prerequisites = snapshot?.live?.prerequisites ?? [];
   const production = snapshot?.live?.production;
+  const walletSession = snapshot?.live?.walletSession;
+  const walletConnected = walletSession?.status === "CONNECTED";
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
   const runtimeConfigured = snapshot?.live?.capability?.execution === "AVAILABLE";
   const gateReason = snapshot?.control?.controls?.live?.blockedReason ?? "Live Gate 尚不可用";
@@ -352,20 +354,30 @@ function livePanel(snapshot) {
         </div>
         <div class="live-production-config">
           <div class="production-heading">
-            <div><strong>生产钱包准备</strong><span>这里只登记公开地址，不输入私钥。</span></div>
+            <div><strong>生产钱包准备</strong><span>连接后只保存公开身份，订单签名由安全宿主/钱包签名器负责。</span></div>
             <span class="production-status ${production?.status === "READY" ? "ready" : "pending"}">
-              ${escapeHtml(production?.status === "READY" ? "可预检" : "等待连接")}
+              ${escapeHtml(production?.status === "READY" ? "可预检" : walletConnected ? "已连接" : "等待连接")}
             </span>
           </div>
           <div class="production-config-row">
-            <input class="target-input" id="live-wallet-address" value="${escapeHtml(production?.config?.walletAddress ?? "")}"
-              placeholder="正式钱包地址 0x…" aria-label="正式钱包地址" spellcheck="false" />
-            <select class="network-select" id="live-wallet-network" aria-label="生产网络">
-              <option value="POLYGON" ${production?.config?.network === "POLYGON" ? "selected" : ""}>Polygon 主网</option>
-              <option value="POLYGON_AMOY" ${production?.config?.network === "POLYGON_AMOY" ? "selected" : ""}>Polygon Amoy（测试）</option>
-            </select>
-            <button class="secondary-button" data-action="live-save-configuration" type="button"
-              ${disabledAttr(Boolean(state.busy), "")}>保存</button>
+            <input class="target-input" id="live-wallet-address" value="${escapeHtml(
+              walletSession?.walletAddress ?? production?.config?.walletAddress ?? "",
+            )}"
+              placeholder="连接后显示正式钱包地址" aria-label="正式钱包地址" spellcheck="false" readonly />
+            <span class="network-select">${escapeHtml(
+              production?.config?.network === "POLYGON_AMOY" ? "Polygon Amoy（测试）" : "Polygon 主网",
+            )}</span>
+            ${walletConnected
+              ? `<button class="secondary-button" data-action="live-wallet-disconnect" type="button"
+                  ${disabledAttr(Boolean(state.busy), "")}>断开钱包</button>`
+              : `<button class="confirm-button" data-action="live-wallet-connect" type="button"
+                  ${disabledAttr(Boolean(state.busy), "")}>连接钱包</button>`}
+          </div>
+          <div class="wallet-session-meta">
+            <span>钱包会话：${escapeHtml(walletConnected ? "已证明地址控制权" : "未连接")}</span>
+            <span>Signer：${escapeHtml(walletSession?.signerStatus === "READY"
+              ? "安全宿主已接入"
+              : walletConnected ? "等待安全宿主接入" : "未连接")}</span>
           </div>
         </div>
         <div class="production-check-list">
@@ -392,7 +404,7 @@ function livePanel(snapshot) {
         </div>
         <p class="ops-note">${escapeHtml(production?.status === "READY"
           ? "生产前置条件已齐备，下一步由用户执行正式预检与 Gate 二次确认。"
-          : `当前待完成：${blocked.join("、")}。连接正式钱包后，宿主会注入安全 Signer 和生产适配器；浏览器永远不接触私钥。`)}</p>
+          : `当前待完成：${blocked.join("、")}。连接钱包只证明公开地址控制权，安全宿主仍需接入 Signer 和生产适配器；浏览器永远不接触私钥。`)}</p>
       </div>
     </details>
   `;
@@ -776,18 +788,49 @@ async function restoreDefaults() {
   }
 }
 
-async function saveLiveConfiguration() {
-  const walletAddress = document.querySelector("#live-wallet-address")?.value.trim() ?? "";
-  const network = document.querySelector("#live-wallet-network")?.value ?? "POLYGON";
-  if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
-    setNotice("error", "生产配置未保存", "请填写有效的正式钱包地址；这里只保存公开身份，不接收私钥。");
+async function connectLiveWallet() {
+  const provider = window.ethereum;
+  if (!provider || typeof provider.request !== "function") {
+    setNotice("error", "未检测到钱包", "当前浏览器没有 EIP-1193 钱包。请在带钱包扩展的浏览器中打开本地控制台。");
     return;
   }
   try {
-    await runAction("保存生产钱包配置", "/api/operator/live/configuration", {
-      method: "PUT",
-      body: JSON.stringify({ walletAddress, network }),
-    }, { success: "生产钱包公开配置已保存，等待安全宿主连接钱包。" });
+    const accounts = await provider.request({ method: "eth_requestAccounts" });
+    const walletAddress = Array.isArray(accounts) ? accounts[0] : "";
+    if (typeof walletAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
+      throw new Error("钱包没有返回有效地址");
+    }
+    const chainId = await provider.request({ method: "eth_chainId" });
+    const challenge = await api("/api/operator/live/wallet-session/challenge", {
+      body: JSON.stringify({ chainId }),
+    });
+    const signature = await provider.request({
+      method: "personal_sign",
+      params: [challenge.message, walletAddress],
+    });
+    if (typeof signature !== "string" || !signature.startsWith("0x")) {
+      throw new Error("钱包没有返回签名");
+    }
+    await runAction("连接正式钱包", "/api/operator/live/wallet-session/connect", {
+      body: JSON.stringify({
+        challengeId: challenge.challengeId,
+        walletAddress,
+        chainId,
+        signature,
+      }),
+    }, { success: "钱包已连接，正在等待生产安全宿主完成装配。" });
+  } catch (error) {
+    setNotice("error", "钱包未连接", error.message ?? "钱包连接被取消或未通过安全证明。");
+  }
+}
+
+async function disconnectLiveWallet() {
+  const sessionId = state.snapshot?.live?.walletSession?.sessionId;
+  if (!sessionId) return;
+  try {
+    await runAction("断开钱包", "/api/operator/live/wallet-session/disconnect", {
+      body: JSON.stringify({ sessionId }),
+    }, { success: "钱包会话已断开，Live 继续保持禁用。" });
   } catch {
     // runAction already surfaces the backend reason.
   }
@@ -864,7 +907,8 @@ async function actionClick(action, input = {}) {
   if (action === "runtime-recover") await runAction(`恢复 ${mode}`, "/api/operator/runtime/recover", { body: JSON.stringify({ mode, actor: "LOCAL_OPERATOR", reason: "UI_RUNTIME_RECOVER" }) }, { success: `${mode} 恢复请求已提交。` });
   if (action === "live-preflight") await runAction("检查 Live Gate", "/api/operator/live/preflight", { body: "{}" }, { success: "Live Gate 检查完成。" });
   if (action === "live-recover") await runAction("恢复 Live Gate", "/api/operator/live/recover", { body: "{}" }, { success: "Live Gate 恢复检查完成。" });
-  if (action === "live-save-configuration") await saveLiveConfiguration();
+  if (action === "live-wallet-connect") await connectLiveWallet();
+  if (action === "live-wallet-disconnect") await disconnectLiveWallet();
   if (action === "live-disable") {
     showModal("紧急停用 Live", "<p>这会把执行模式切回 PAPER，并记录一条后台审计。</p>", "确认后立即生效。", "确认停用", async () => {
       await runAction("紧急停用 Live", "/api/operator/live/emergency-disable", { body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_EMERGENCY_DISABLE" }) }, { success: "Live 已停用。" });

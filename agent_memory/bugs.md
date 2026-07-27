@@ -28,6 +28,9 @@
 - Observe 与 Replay 对特殊操作保留两套面向不同输出的投影编排；当前有一致性回归覆盖，但后续再改 SPLIT/CONVERSION 时应优先抽取共享纯 reducer，避免语义漂移。
 - `node:sqlite` 在 Node 24 仍有 experimental warning。
 - 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
+- 钱包连接协议现在已可用，但连接只证明浏览器地址控制权，不自动生成 secure signer、认证 CLOB 凭据或只读/政策 provider；生产宿主必须调用 `assembleConnectedLiveRuntime` 显式装配并通过 identity/readiness/Gate。若宿主未注入，UI 仍显示等待安全宿主，真实 Live 保持 fail closed。
+- 钱包会话已经作为短期运行时租约绑定到 Live action：断开、过期或替换会话会撤销 action 并触发 emergency stop；这能防止 UI 地址与已装配 runtime 漂移，但生产宿主仍必须把真实 provider、signer、CLOB 和 Gate 授权绑定到同一会话，不能只依赖浏览器端地址。
+- 连接后的宿主 factory 只能通过服务端会话绑定 wrapper 暴露 action；钱包 provider 还必须自报并被装配入口核对 Polygon chainId。会话到期由后台定时器主动失效；紧急停用失败会重试一次并让断开接口返回 503，但若外部停机服务持续不可用，必须继续保持 Gate 禁用并人工处理。
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation

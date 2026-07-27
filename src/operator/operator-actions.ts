@@ -21,6 +21,10 @@ import { selectedTargetWallet } from "./target-wallet.js";
 import type {
   LiveProductionCapabilityOverrides,
 } from "./live-production-readiness.js";
+import type {
+  LiveWalletRuntimeBinding,
+  LiveWalletSessionInvalidationReason,
+} from "./live-wallet-session.js";
 
 export interface OperatorRuntimeActionResult {
   accepted: boolean;
@@ -106,6 +110,7 @@ export interface ConfiguredOperatorLiveRuntimeOptions {
   accountId: string;
   runOptions?: Omit<LiveRunnerOptions, "accountId">;
   production?: LiveProductionCapabilityOverrides;
+  walletSessionBinding?: LiveWalletRuntimeBinding;
 }
 
 class UnavailableLiveBalanceProvider implements LiveReadonlyBalanceProvider {
@@ -323,21 +328,47 @@ export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRunti
  * adapter, or real account can be reached from the browser accidentally.
  */
 export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
-  readonly capability: OperatorLiveRuntimeCapability;
+  private readonly configuredCapability: OperatorLiveRuntimeCapability;
 
   private running = false;
   private abortController: AbortController | null = null;
   private lastRunError: string | null = null;
+  private walletSessionInvalidated = false;
 
   constructor(private readonly options: ConfiguredOperatorLiveRuntimeOptions) {
-    this.capability = {
+    if (options.production !== undefined && options.walletSessionBinding === undefined) {
+      throw new Error("PRODUCTION_LIVE_RUNTIME_REQUIRES_WALLET_SESSION_BINDING");
+    }
+    options.walletSessionBinding?.assertCurrent();
+    options.walletSessionBinding?.onInvalidated((reason) => this.invalidateWalletSession(reason));
+    this.configuredCapability = {
       execution: "AVAILABLE",
       orderManagement: "AVAILABLE",
       ...(options.production === undefined ? {} : { production: options.production }),
     };
   }
 
+  get capability(): OperatorLiveRuntimeCapability {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure === null) return this.configuredCapability;
+    return {
+      execution: "PENDING_PREREQUISITES",
+      orderManagement: "PENDING_PREREQUISITES",
+      ...(this.configuredCapability.production === undefined
+        ? {}
+        : {
+          production: {
+            ...this.configuredCapability.production,
+            FORMAL_WALLET: false,
+            SECURE_SIGNER: false,
+          },
+        }),
+    };
+  }
+
   async start(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
     if (this.running) {
       return {
         accepted: false,
@@ -398,6 +429,8 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
     actor: string;
     reason: string;
   }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
     try {
       await this.options.executor.cancelOrder(input.orderId, input.reason);
       return { accepted: true, code: "LIVE_ORDER_CANCEL_ACCEPTED" };
@@ -414,6 +447,8 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
   }
 
   async reconcile(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
     try {
       const result = await this.options.executor.reconcile({
         accountId: this.options.accountId,
@@ -437,6 +472,8 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
   }
 
   async recover(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
     try {
       const result = await this.options.runtime.recoverOnStartup(this.options.accountId);
       return {
@@ -465,6 +502,8 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
     actor: string;
     reason: string;
   }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
     try {
       await this.options.executor.retryExecution(input.executionId, input.reason);
       return { accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" };
@@ -482,5 +521,53 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
 
   get lastError(): string | null {
     return this.lastRunError;
+  }
+
+  private walletSessionFailure(): OperatorLiveRuntimeResult | null {
+    if (this.walletSessionInvalidated) {
+      return {
+        accepted: false,
+        code: "LIVE_WALLET_SESSION_INVALIDATED",
+      };
+    }
+    try {
+      this.options.walletSessionBinding?.assertCurrent();
+      return null;
+    } catch (error) {
+      this.invalidateWalletSession("EXPIRED");
+      return {
+        accepted: false,
+        code: "LIVE_WALLET_SESSION_INVALIDATED",
+        details: {
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  private async invalidateWalletSession(reason: LiveWalletSessionInvalidationReason): Promise<void> {
+    if (this.walletSessionInvalidated) return;
+    this.walletSessionInvalidated = true;
+    this.abortController?.abort();
+    this.abortController = null;
+    this.running = false;
+    this.lastRunError = `LIVE_WALLET_SESSION_${reason}`;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.options.runtime.emergencyStop(
+          this.options.accountId,
+          `LIVE_WALLET_SESSION_${reason}`,
+          "WALLET_SESSION_GUARD",
+        );
+        return;
+      } catch (error: unknown) {
+        lastError = error;
+      }
+    }
+    this.lastRunError = `LIVE_WALLET_SESSION_EMERGENCY_STOP_FAILED:${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`;
+    throw lastError instanceof Error ? lastError : new Error(this.lastRunError);
   }
 }

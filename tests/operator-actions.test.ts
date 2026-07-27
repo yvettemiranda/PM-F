@@ -104,11 +104,27 @@ describe("operator actions", () => {
       retryExecution: vi.fn(async () => undefined),
       reconcile: vi.fn(async () => ({ reason: "LIVE_RECONCILED" })),
     };
+    const walletSessionBinding = {
+      session: {
+        sessionId: "wallet-session-1",
+        status: "CONNECTED" as const,
+        walletAddress: "0x0000000000000000000000000000000000000001",
+        chainId: 137,
+        network: "POLYGON" as const,
+        walletType: "EIP1193" as const,
+        connectedAt: "2026-07-27T08:00:00.000Z",
+        lastSeenAt: "2026-07-27T08:00:00.000Z",
+        expiresAt: "2026-07-27T08:30:00.000Z",
+      },
+      assertCurrent: vi.fn(),
+      onInvalidated: vi.fn(() => () => undefined),
+    };
     const actions = new ConfiguredOperatorLiveRuntimeActions({
       runtime,
       executor,
       accountId: "live-account-1",
       runOptions: { intervalMs: 10, durationMs: 100 },
+      walletSessionBinding,
       production: {
         FORMAL_WALLET: true,
         SECURE_SIGNER: true,
@@ -163,5 +179,66 @@ describe("operator actions", () => {
     })).resolves.toMatchObject({ accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" });
     expect(executor.cancelOrder).toHaveBeenCalledWith("order-1", "CANCEL");
     expect(executor.retryExecution).toHaveBeenCalledWith("execution-1", "RETRY");
+  });
+
+  it("fails closed and emergency-stops when the bound wallet session is replaced", async () => {
+    let invalidate!: (reason: "REPLACED") => void;
+    const runtime = {
+      recoverOnStartup: vi.fn(async () => ({ ready: true })),
+      run: vi.fn(async (_options: unknown, signal?: AbortSignal) => {
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      }),
+      emergencyStop: vi.fn(async () => undefined),
+    };
+    const executor = {
+      cancelOrder: vi.fn(async () => undefined),
+      retryExecution: vi.fn(async () => undefined),
+      reconcile: vi.fn(async () => ({ reason: "LIVE_RECONCILED" })),
+    };
+    const actions = new ConfiguredOperatorLiveRuntimeActions({
+      runtime,
+      executor,
+      accountId: "live-account-1",
+      walletSessionBinding: {
+        session: {
+          sessionId: "wallet-session-1",
+          status: "CONNECTED",
+          walletAddress: "0x0000000000000000000000000000000000000001",
+          chainId: 137,
+          network: "POLYGON",
+          walletType: "EIP1193",
+          connectedAt: "2026-07-27T08:00:00.000Z",
+          lastSeenAt: "2026-07-27T08:00:00.000Z",
+          expiresAt: "2026-07-27T08:30:00.000Z",
+        },
+        assertCurrent: vi.fn(),
+        onInvalidated: vi.fn((listener) => {
+          invalidate = listener as (reason: "REPLACED") => void;
+          return () => undefined;
+        }),
+      },
+      production: { FORMAL_WALLET: true, SECURE_SIGNER: true },
+    });
+    await expect(actions.start({ actor: "TEST", reason: "START" })).resolves.toMatchObject({
+      accepted: true,
+    });
+    invalidate("REPLACED");
+    await vi.waitFor(() => {
+      expect(runtime.emergencyStop).toHaveBeenCalledWith(
+        "live-account-1",
+        "LIVE_WALLET_SESSION_REPLACED",
+        "WALLET_SESSION_GUARD",
+      );
+    });
+    expect(actions.capability.execution).toBe("PENDING_PREREQUISITES");
+    await expect(actions.cancelOrder({
+      orderId: "order-1",
+      actor: "TEST",
+      reason: "CANCEL",
+    })).resolves.toMatchObject({
+      accepted: false,
+      code: "LIVE_WALLET_SESSION_INVALIDATED",
+    });
+    expect(executor.cancelOrder).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   UnconfiguredOperatorLiveRuntimeActions,
   type OperatorLiveGateActions,
   type OperatorLiveRuntimeActions,
+  type OperatorLiveRuntimeResult,
   type OperatorRuntimeActions,
 } from "./operator-actions.js";
 import {
@@ -22,6 +23,11 @@ import {
   liveProductionReadiness,
   saveLiveProductionConfig,
 } from "./live-production-readiness.js";
+import {
+  LiveWalletSessionManager,
+  type LiveWalletRuntimeBinding,
+  type LiveWalletSession,
+} from "./live-wallet-session.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -40,6 +46,12 @@ export interface OperatorUiServerOptions {
   runtimeActions?: OperatorRuntimeActions;
   liveGateActions?: OperatorLiveGateActions;
   liveRuntimeActions?: OperatorLiveRuntimeActions;
+  walletSessionManager?: LiveWalletSessionManager;
+  connectedLiveRuntimeFactory?: (input: {
+    projectRoot: string;
+    walletSession: LiveWalletSession;
+    walletSessionBinding: LiveWalletRuntimeBinding;
+  }) => Promise<OperatorLiveRuntimeActions>;
   now?: () => Date;
 }
 
@@ -63,7 +75,108 @@ interface RequestContext {
   options: OperatorUiServerOptions;
   runtimeActions: OperatorRuntimeActions;
   liveGateActions: OperatorLiveGateActions;
-  liveRuntimeActions: OperatorLiveRuntimeActions;
+  liveRuntimeActions: MutableOperatorLiveRuntimeActions;
+  walletSessionManager: LiveWalletSessionManager;
+}
+
+class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
+  constructor(private current: OperatorLiveRuntimeActions) {}
+
+  private walletSessionBinding: LiveWalletRuntimeBinding | null = null;
+  private walletSessionInvalidationReason: string | null = null;
+  private unsubscribeWalletSession: (() => void) | null = null;
+
+  get capability() {
+    this.assertWalletSession();
+    const capability = this.current.capability;
+    if (this.walletSessionInvalidationReason === null) return capability;
+    return {
+      execution: "PENDING_PREREQUISITES" as const,
+      orderManagement: "PENDING_PREREQUISITES" as const,
+      ...(capability.production === undefined
+        ? {}
+        : {
+          production: {
+            ...capability.production,
+            FORMAL_WALLET: false,
+            SECURE_SIGNER: false,
+          },
+        }),
+    };
+  }
+
+  install(actions: OperatorLiveRuntimeActions, walletSessionBinding?: LiveWalletRuntimeBinding): void {
+    this.unsubscribeWalletSession?.();
+    this.unsubscribeWalletSession = null;
+    this.current = actions;
+    this.walletSessionBinding = walletSessionBinding ?? null;
+    this.walletSessionInvalidationReason = null;
+    if (walletSessionBinding !== undefined) {
+      this.unsubscribeWalletSession = walletSessionBinding.onInvalidated((reason) => {
+        this.walletSessionInvalidationReason = reason;
+        return this.current.stop({
+          actor: "WALLET_SESSION_GUARD",
+          reason: `LIVE_WALLET_SESSION_${reason}`,
+        }).then((result) => {
+          if (!result.accepted) throw new Error(result.code);
+        });
+      });
+      walletSessionBinding.assertCurrent();
+    }
+  }
+
+  start(input: Parameters<OperatorLiveRuntimeActions["start"]>[0]) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    return this.current.start(input);
+  }
+
+  stop(input: Parameters<OperatorLiveRuntimeActions["stop"]>[0]) {
+    return this.current.stop(input);
+  }
+
+  cancelOrder(input: Parameters<OperatorLiveRuntimeActions["cancelOrder"]>[0]) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    return this.current.cancelOrder(input);
+  }
+
+  reconcile(input: Parameters<OperatorLiveRuntimeActions["reconcile"]>[0]) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    return this.current.reconcile(input);
+  }
+
+  recover(input: Parameters<OperatorLiveRuntimeActions["recover"]>[0]) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    return this.current.recover(input);
+  }
+
+  retryExecution(input: Parameters<OperatorLiveRuntimeActions["retryExecution"]>[0]) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    return this.current.retryExecution(input);
+  }
+
+  private assertWalletSession(): void {
+    if (this.walletSessionBinding === null || this.walletSessionInvalidationReason !== null) return;
+    try {
+      this.walletSessionBinding.assertCurrent();
+    } catch {
+      this.walletSessionInvalidationReason = "INVALIDATED";
+    }
+  }
+
+  private walletSessionFailure(): OperatorLiveRuntimeResult | null {
+    this.assertWalletSession();
+    if (this.walletSessionInvalidationReason === null) return null;
+    return {
+      accepted: false,
+      code: "LIVE_WALLET_SESSION_INVALIDATED",
+      details: { reason: this.walletSessionInvalidationReason },
+    };
+  }
 }
 
 function isMutation(method: string): boolean {
@@ -171,16 +284,34 @@ function failure(response: ServerResponse, error: unknown): void {
 function freshSnapshot(
   options: OperatorUiServerOptions,
   liveRuntimeActions: OperatorLiveRuntimeActions,
+  walletSessionManager: LiveWalletSessionManager,
 ): OperatorDashboardSnapshot {
   const snapshot = options.now === undefined
     ? operatorDashboardSnapshot(options.projectRoot)
     : operatorDashboardSnapshot(options.projectRoot, { now: options.now });
   snapshot.live.capability.execution = liveRuntimeActions.capability.execution;
   snapshot.live.capability.orderManagement = liveRuntimeActions.capability.orderManagement;
+  snapshot.live.walletSession = walletSessionManager.snapshot(options.now);
+  if (
+    snapshot.live.walletSession.status === "CONNECTED"
+    && liveRuntimeActions.capability.production?.SECURE_SIGNER === true
+  ) {
+    snapshot.live.walletSession.signerStatus = "READY";
+  }
   snapshot.live.production = liveProductionReadiness(options.projectRoot, {
     databaseAvailable: snapshot.database.status === "AVAILABLE",
     gatePrerequisites: snapshot.live.prerequisites,
     executionCapability: liveRuntimeActions.capability.execution,
+    ...(snapshot.live.walletSession.status === "CONNECTED"
+      && snapshot.live.walletSession.walletAddress !== null
+      && snapshot.live.walletSession.network !== null
+      ? {
+        walletSession: {
+          walletAddress: snapshot.live.walletSession.walletAddress,
+          network: snapshot.live.walletSession.network,
+        },
+      }
+      : {}),
     ...(liveRuntimeActions.capability.production === undefined
       ? {}
       : { injectedChecks: liveRuntimeActions.capability.production }),
@@ -189,13 +320,113 @@ function freshSnapshot(
 }
 
 async function handleApi(context: RequestContext): Promise<void> {
-  const { request, response, url, options, runtimeActions, liveGateActions, liveRuntimeActions } = context;
-  const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(options, liveRuntimeActions);
+  const {
+    request,
+    response,
+    url,
+    options,
+    runtimeActions,
+    liveGateActions,
+    liveRuntimeActions,
+    walletSessionManager,
+  } = context;
+  const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(
+    options,
+    liveRuntimeActions,
+    walletSessionManager,
+  );
   if (isMutation(request.method ?? "GET")) assertRequestOrigin(request);
   const path = url.pathname;
 
   if (request.method === "GET" && path === "/api/operator/snapshot") {
     success(response, dashboardSnapshot());
+    return;
+  }
+
+  if (request.method === "GET" && path === "/api/operator/live/wallet-session") {
+    success(response, walletSessionManager.snapshot(options.now));
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/live/wallet-session/challenge") {
+    const body = await readJson(request);
+    const chainIdValue = body.chainId;
+    const chainId = typeof chainIdValue === "number"
+      ? chainIdValue
+      : typeof chainIdValue === "string" && /^0x[0-9a-f]+$/i.test(chainIdValue)
+        ? Number.parseInt(chainIdValue, 16)
+        : Number.NaN;
+    try {
+      success(response, walletSessionManager.createChallenge(chainId, options.now));
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      throw new HttpError(400, code, "当前钱包网络不受支持。");
+    }
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/live/wallet-session/connect") {
+    const body = await readJson(request);
+    const challengeId = stringField(body, "challengeId");
+    const walletAddress = stringField(body, "walletAddress");
+    const signature = stringField(body, "signature");
+    const chainIdValue = body.chainId;
+    const chainId = typeof chainIdValue === "number"
+      ? chainIdValue
+      : typeof chainIdValue === "string" && /^0x[0-9a-f]+$/i.test(chainIdValue)
+        ? Number.parseInt(chainIdValue, 16)
+        : Number.NaN;
+    try {
+      const session = await walletSessionManager.connect({
+        challengeId,
+        walletAddress,
+        chainId,
+        signature,
+      }, options.now);
+      try {
+        saveLiveProductionConfig(options.projectRoot, {
+          walletAddress: session.walletAddress,
+          network: session.network,
+        }, options.now);
+        if (options.connectedLiveRuntimeFactory !== undefined) {
+          const walletSessionBinding = walletSessionManager.createRuntimeBinding(
+            session.sessionId,
+            options.now,
+          );
+          const actions = await options.connectedLiveRuntimeFactory({
+            projectRoot: options.projectRoot,
+            walletSession: session,
+            walletSessionBinding,
+          });
+          walletSessionBinding.assertCurrent();
+          liveRuntimeActions.install(actions, walletSessionBinding);
+        }
+      } catch (error) {
+        await walletSessionManager.disconnect(session.sessionId);
+        throw error;
+      }
+      success(response, { session, snapshot: dashboardSnapshot() });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      const statusCode = code === "LIVE_WALLET_SIGNATURE_INVALID" ? 401 : 400;
+      throw new HttpError(statusCode, code, "钱包连接证明未通过。");
+    }
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/live/wallet-session/disconnect") {
+    const body = await readJson(request);
+    const sessionId = body.sessionId === undefined ? undefined : stringField(body, "sessionId");
+    try {
+      await walletSessionManager.disconnect(sessionId);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      const statusCode = code.startsWith("LIVE_WALLET_SESSION_INVALIDATION_FAILED:")
+        ? 503
+        : 404;
+      throw new HttpError(statusCode, code, statusCode === 503 ? "钱包会话已断开，但 Live 紧急停用需要重试。" : "钱包会话不存在。");
+    }
+    success(response, { session: walletSessionManager.snapshot(options.now), snapshot: dashboardSnapshot() });
     return;
   }
 
@@ -413,7 +644,10 @@ function staticRootFromOptions(options: OperatorUiServerOptions): string {
 export function createOperatorUiServer(options: OperatorUiServerOptions): Server {
   const runtimeActions = options.runtimeActions ?? new DefaultOperatorRuntimeActions(options.projectRoot);
   const liveGateActions = options.liveGateActions ?? new DefaultOperatorLiveGateActions(options.projectRoot);
-  const liveRuntimeActions = options.liveRuntimeActions ?? new UnconfiguredOperatorLiveRuntimeActions();
+  const liveRuntimeActions = new MutableOperatorLiveRuntimeActions(
+    options.liveRuntimeActions ?? new UnconfiguredOperatorLiveRuntimeActions(),
+  );
+  const walletSessionManager = options.walletSessionManager ?? new LiveWalletSessionManager();
   const staticRoot = staticRootFromOptions(options);
   const server = createServer(async (request, response) => {
     setHeaders(response);
@@ -431,6 +665,7 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Server
           runtimeActions,
           liveGateActions,
           liveRuntimeActions,
+          walletSessionManager,
         });
       } else if (request.method === "GET" || request.method === "HEAD") {
         await serveStatic(response, staticRoot, url.pathname);

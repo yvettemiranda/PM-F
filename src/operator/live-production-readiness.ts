@@ -40,7 +40,7 @@ export interface LiveProductionReadiness {
   checkedAt: string;
   config: LiveProductionConfig;
   checks: LiveProductionReadinessCheck[];
-  nextStep: "CONNECT_FORMAL_WALLET" | "RUN_PRODUCTION_PREFLIGHT";
+  nextStep: "CONNECT_FORMAL_WALLET" | "INJECT_PRODUCTION_DEPENDENCIES" | "RUN_PRODUCTION_PREFLIGHT";
 }
 
 export interface LiveProductionReadinessInput {
@@ -48,6 +48,10 @@ export interface LiveProductionReadinessInput {
   gatePrerequisites: readonly { key: string; status: string }[];
   executionCapability: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
   injectedChecks?: LiveProductionCapabilityOverrides;
+  walletSession?: {
+    walletAddress: string;
+    network: "POLYGON" | "POLYGON_AMOY";
+  };
 }
 
 function defaultConfig(): LiveProductionConfig {
@@ -127,14 +131,18 @@ export function liveProductionReadiness(
 ): LiveProductionReadiness {
   const config = readLiveProductionConfig(projectRoot);
   const injected = input.injectedChecks ?? {};
+  const connectedWalletMatches = input.walletSession?.network === "POLYGON"
+    && input.walletSession.walletAddress.toLowerCase() === config.walletAddress;
   const walletReady = config.walletAddress !== null
     && config.network === "POLYGON"
-    && injected.FORMAL_WALLET === true;
+    && (connectedWalletMatches || injected.FORMAL_WALLET === true);
   const checks: LiveProductionReadinessCheck[] = [
     {
       key: "FORMAL_WALLET",
       status: walletReady ? "READY" : "PENDING",
-      reason: walletReady ? "生产钱包身份已登记，仍需安全宿主完成连接。" : "尚未登记正式钱包地址。",
+      reason: walletReady
+        ? "生产钱包身份已登记并完成本机钱包会话证明。"
+        : "尚未连接 Polygon 主网正式钱包。",
     },
     {
       key: "SECURE_SIGNER",
@@ -202,6 +210,10 @@ export function liveProductionReadiness(
     checkedAt: now().toISOString(),
     config,
     checks,
-    nextStep: ready ? "RUN_PRODUCTION_PREFLIGHT" : "CONNECT_FORMAL_WALLET",
+    nextStep: ready
+      ? "RUN_PRODUCTION_PREFLIGHT"
+      : walletReady
+        ? "INJECT_PRODUCTION_DEPENDENCIES"
+        : "CONNECT_FORMAL_WALLET",
   };
 }

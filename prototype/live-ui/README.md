@@ -16,10 +16,10 @@ pnpm operator:ui
 
 浏览器打开 `http://127.0.0.1:4173/`。
 
-UI 每 3 秒重新读取快照（编辑输入时不会被静默轮询打断）。Paper 启动、暂停、恢复会复用现有安全入口；Live 按最终生产流程展示公开钱包登记、前置条件 readiness、Gate 预检、运行、对账、恢复和紧急停用入口。当前没有正式钱包、signer、认证 CLOB、真实资金或授权运行时，所以所有真实执行入口会由后台明确阻断。页面只保存公开钱包地址和网络，不读取私钥，也不会提交真实订单。
+UI 每 3 秒重新读取快照（编辑输入时不会被静默轮询打断）。Paper 启动、暂停、恢复会复用现有安全入口；Live 按最终生产流程展示钱包连接、前置条件 readiness、Gate 预检、运行、对账、恢复和紧急停用入口。连接按钮使用通用 EIP-1193 `eth_requestAccounts`、`eth_chainId` 和一次性 `personal_sign` challenge；后端只保存公开地址、网络和内存会话，不读取私钥，也不会提交真实订单。
 
 后台明细包含 Live 账户、执行、订单尝试、订单、成交、持仓、资金/手续费/PnL 账本、对账、恢复、隔离异常和审计；原始订单请求/响应与日志内容不进入快照，只保留失败原因和安全的文件索引。
 
-生产钱包公开配置写入被 Git 忽略的 `data/operator/live-production.json`，只包含地址、网络和安全宿主注入标识。等正式钱包连接后，受授权宿主进程显式注入已经装配好的 `LiveRuntime`/`LiveExecutor`，并通过 `ConfiguredOperatorLiveRuntimeActions` 的 `production` capability overrides 提供每个真实 provider 已注入的证据，才会把对应 readiness 项变为 READY；随后启动、紧急停止、订单取消、单笔执行重试、对账和恢复可接入同一控制面。UI 服务器本身不会发现或加载任何凭据，默认使用“待前置条件”的 `UnconfiguredOperatorLiveRuntimeActions`。
+生产钱包公开配置写入被 Git 忽略的 `data/operator/live-production.json`，只包含地址、网络和安全宿主注入标识。连接成功后，宿主可以通过 `connectedLiveRuntimeFactory` 把同一 `LiveWalletSession` 和会话租约交给 `assembleConnectedLiveRuntime`，由 `ConnectedLiveRuntimeDependencyFactory` 一次性提供 secure signer、只读余额、认证 CLOB、合规/geoblock/时钟和市场数据适配器；装配前会再次核对 signer、wallet provider 自身读取的真实 provider chainId 与会话地址，Polymarket proxy/funder 地址则继续由既有 `LiveIdentityBinding` 核对，任何漂移都会拒绝。会话到期由后台租约定时器自动触发；断开、过期或换钱包时，绑定的 `ConfiguredOperatorLiveRuntimeActions` 会中止运行并紧急停用，停用失败会重试一次并报告错误。`production` capability overrides 仍必须由宿主提供真实证据，readiness 全部通过后才允许正式预检。没有提供宿主 factory 时，UI 服务器继续使用“待前置条件”的 `UnconfiguredOperatorLiveRuntimeActions`。
 
 视觉参考：[guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui)。本地皮肤独立实现，没有复制参考仓库代码、图片、字体或 Nintendo 资产；海豹、边牧和乌鸦背景图也是本项目原创绘制。

@@ -1885,6 +1885,8 @@ body::after {
 }
 
 .network-select {
+  display: inline-flex;
+  align-items: center;
   min-height: 36px;
   padding: 0 9px;
   border: 1px solid var(--line-strong);
@@ -1897,6 +1899,26 @@ body::after {
 .production-config-row .secondary-button {
   min-height: 36px;
   padding: 0 11px;
+  font-size: 10px;
+}
+
+.production-config-row .confirm-button {
+  min-height: 36px;
+  padding: 0 13px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.production-config-row .target-input[readonly] {
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.wallet-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--ink-faint);
   font-size: 10px;
 }
 

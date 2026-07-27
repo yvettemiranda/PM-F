@@ -7,6 +7,12 @@ import type {
 
 export interface WalletProvider {
   readonly providerType: "DISABLED" | "FAKE" | "LIVE_READONLY";
+  /**
+   * Production wallet providers must expose the chain read from their
+   * provider transport so connected-runtime assembly can verify it
+   * independently of the browser request and host factory metadata.
+   */
+  getChainId?(): Promise<number>;
   getAddress(): Promise<string>;
   /** Total externally visible collateral before this process's local reservations. */
   getBalance(): Promise<WalletBalance>;

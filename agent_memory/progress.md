@@ -42,6 +42,7 @@
 - 海豹/边牧/乌鸦背景浏览器检查通过：角色在首屏两侧和交易卡后方可见，透明度与层级不遮挡地址、金额和状态；PNG 已确认是 RGBA 透明背景，控制台无错误。
 - 本轮接入收尾修正通过：Live 账户/执行/订单尝试/账本/隔离异常均进入后台明细；Paper/Live/目标/参数操作按后台 capability 禁用确定失败入口；原始 Live 请求/响应和日志正文不进入快照，仅保留安全摘要/索引。`pnpm typecheck`、定向 4 files / 14 tests、全量 59 files / 802 tests、`git diff --check` 均通过；真实 localhost 快照仍为 `PAPER + LIVE_DISABLED + STOPPED`，桌面/390px 移动回归无浏览器控制台错误。
 - 本轮 Live 生产准备接线通过：`src/operator/live-production-readiness.ts` 定义非敏感生产钱包配置、逐项 provider/Signer/Runtime/Gate readiness 和安全宿主 capability overrides；新增 `PUT /api/operator/live/configuration` 只保存公开钱包地址与网络，UI Live 安全面板展示“生产路径待前置条件”、准备项和明确阻断原因。默认 capability 为 `PENDING_PREREQUISITES`，真实 Live 仍不会触达。`pnpm typecheck`、定向 readiness/actions/UI 测试 `3 files / 10 tests`、最终全量 `60 files / 806 tests`、`node --check` 和 `git diff --check` 通过；localhost 快照确认 `PAPER + LIVE_DISABLED + liveAllowed=false`。
+- 本轮补齐正式钱包连接链：`src/operator/live-wallet-session.ts` 实现只在内存存在的一次性、绑定 chain 的 challenge、EIP-191 地址控制权验证、Polygon/Amoy chain 校验、后台租约定时过期、断开与过期会话；运行时绑定会在钱包替换/断开/过期时撤销 action 并触发 emergency stop，失败会重试一次并返回明确错误。localhost 新增 `/api/operator/live/wallet-session/{challenge,connect,disconnect}`，UI 的“连接钱包”调用通用 EIP-1193，不读取私钥。`src/live/live-connected-runtime.ts` 提供连接后唯一生产装配入口，在交给既有 `assembleLiveRuntime` 前核对会话网络、wallet provider 自身读取的真实 provider chain、signer 与会话地址，proxy/funder 地址仍由 `LiveIdentityBinding` 核对；`connectedLiveRuntimeFactory` 是连接成功后由安全宿主注入 capability 的唯一 seam。新增钱包会话、连接装配和失效撤销隔离测试；`pnpm typecheck`、定向 `4 files / 18 tests`、全量 `62 files / 817 tests`、`node --check` 与 `git diff --check` 通过。localhost 桌面与 390px 移动回归无横向溢出和控制台错误；无钱包浏览器点击连接会明确提示未检测到 EIP-1193，后台仍是 `PAPER + LIVE_DISABLED + liveAllowed=false`。当前连接后仍会等待安全宿主注入真实 signer/CLOB/余额/政策 provider。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
@@ -52,6 +53,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 完成并提交 Live 生产准备接线：公开钱包配置、逐项 readiness、待前置条件 capability、同源 API 和 UI 状态。
-2. 运行定向与全量测试、启动 localhost UI 做桌面/移动回归；仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，且不自动启动 Paper。
-3. 用户连接正式钱包后，由受授权宿主显式注入 signer、认证 CLOB、余额/合规/地域/时钟 provider 与 `ConfiguredOperatorLiveRuntimeActions`，再进行真实 Gate 预检和二次授权；当前不宣称已具备实盘凭据或真实运行证据。
+1. 完成本轮钱包会话与连接后生产装配接线，并做一次全量测试与浏览器回归。
+2. 用户连接正式 Polygon 钱包后，由受授权宿主调用 `assembleConnectedLiveRuntime`，显式提供 signer、认证 CLOB、余额/合规/地域/时钟 provider、市场数据和 `ConfiguredOperatorLiveRuntimeActions`，再进行真实 Gate 预检和二次授权；当前不宣称已具备实盘凭据或真实运行证据。
+3. 在真实钱包连接前继续保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，不自动启动 Paper、不提交真实订单。

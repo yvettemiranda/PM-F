@@ -10,6 +10,7 @@ import {
   liveProductionReadiness,
   type LiveProductionReadiness,
 } from "./live-production-readiness.js";
+import type { LiveWalletSessionSnapshot } from "./live-wallet-session.js";
 
 const MONEY_SCALE_DIGITS = 6;
 const PRICE_SCALE_DIGITS = 18;
@@ -105,6 +106,7 @@ export interface OperatorDashboardSnapshot {
     };
   };
   live: {
+    walletSession: LiveWalletSessionSnapshot;
     capability: {
       activation: "LIVE_GATE" | "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION";
       execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
@@ -595,6 +597,18 @@ function emptySnapshot(
       ledger: { cash: [], fees: [], pnl: [] },
     },
     live: {
+      walletSession: {
+        status: "DISCONNECTED",
+        sessionId: null,
+        walletAddress: null,
+        chainId: null,
+        network: null,
+        walletType: null,
+        connectedAt: null,
+        lastSeenAt: null,
+        expiresAt: null,
+        signerStatus: "NOT_CONNECTED",
+      },
       capability: {
         activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
         execution: "PENDING_PREREQUISITES",

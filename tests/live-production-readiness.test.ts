@@ -59,4 +59,25 @@ describe("Live production readiness", () => {
     expect(existsSync(join(root, "data/operator/live-production.json"))).toBe(true);
     expect(persisted).not.toMatch(/private|seed|mnemonic|secret|apiKey/i);
   });
+
+  it("does not bind a connected session to a different configured wallet", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-mismatch-"));
+    roots.push(root);
+    saveLiveProductionConfig(root, { walletAddress: wallet, network: "POLYGON" });
+    const readiness = liveProductionReadiness(root, {
+      databaseAvailable: true,
+      gatePrerequisites: [],
+      executionCapability: "PENDING_PREREQUISITES",
+      walletSession: {
+        walletAddress: "0x00000000000000000000000000000000000000cd",
+        network: "POLYGON",
+      },
+    });
+
+    expect(readiness.checks).toContainEqual(expect.objectContaining({
+      key: "FORMAL_WALLET",
+      status: "PENDING",
+    }));
+    expect(readiness.nextStep).toBe("CONNECT_FORMAL_WALLET");
+  });
 });

@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOperatorUiServer,
+  type OperatorUiServerOptions,
   type OperatorLiveGateActions,
   type OperatorLiveRuntimeActions,
   type OperatorRuntimeActions,
@@ -39,13 +41,20 @@ async function listen(input: {
   runtimeActions?: OperatorRuntimeActions;
   liveGateActions?: OperatorLiveGateActions;
   liveRuntimeActions?: OperatorLiveRuntimeActions;
+  connectedLiveRuntimeFactory?: OperatorUiServerOptions["connectedLiveRuntimeFactory"];
 } = {}) {
   const fixture = project();
-  const server = createOperatorUiServer({
+  const serverOptions: OperatorUiServerOptions = {
     projectRoot: fixture.root,
     staticRoot: fixture.staticRoot,
-    ...input,
-  });
+    ...(input.runtimeActions === undefined ? {} : { runtimeActions: input.runtimeActions }),
+    ...(input.liveGateActions === undefined ? {} : { liveGateActions: input.liveGateActions }),
+    ...(input.liveRuntimeActions === undefined ? {} : { liveRuntimeActions: input.liveRuntimeActions }),
+    ...(input.connectedLiveRuntimeFactory === undefined
+      ? {}
+      : { connectedLiveRuntimeFactory: input.connectedLiveRuntimeFactory }),
+  };
+  const server = createOperatorUiServer(serverOptions);
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -172,6 +181,126 @@ describe("operator UI server", () => {
         },
       },
     });
+  });
+
+  it("connects a browser EIP-1193 wallet through a one-time challenge", async () => {
+    const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
+    const connectedActions: OperatorLiveRuntimeActions = {
+      capability: {
+        execution: "AVAILABLE",
+        orderManagement: "AVAILABLE",
+        production: {
+          FORMAL_WALLET: true,
+          SECURE_SIGNER: true,
+          READONLY_BALANCE: true,
+          AUTHENTICATED_CLOB: true,
+          COMPLIANCE: true,
+          GEOBLOCK: true,
+          CLOCK_SAFETY: true,
+        },
+      },
+      start: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STARTED" })),
+      stop: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STOPPED" })),
+      cancelOrder: vi.fn(async () => ({ accepted: true, code: "LIVE_ORDER_CANCEL_ACCEPTED" })),
+      reconcile: vi.fn(async () => ({ accepted: true, code: "LIVE_RECONCILED" })),
+      recover: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_RECOVERED" })),
+      retryExecution: vi.fn(async () => ({ accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" })),
+    };
+    const connectedLiveRuntimeFactory = vi.fn(async () => connectedActions);
+    const { baseUrl, root } = await listen({ connectedLiveRuntimeFactory });
+    const challengeResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/challenge", {
+      body: { chainId: "0x89" },
+    });
+    expect(challengeResponse.status).toBe(200);
+    const challengePayload = await challengeResponse.json() as {
+      ok: boolean;
+      data: { challengeId: string; message: string };
+    };
+    const signature = await account.signMessage({ message: challengePayload.data.message });
+    const connectResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/connect", {
+      body: {
+        challengeId: challengePayload.data.challengeId,
+        walletAddress: account.address,
+        chainId: "0x89",
+        signature,
+      },
+    });
+    expect(connectResponse.status).toBe(200);
+    const connectPayload = await connectResponse.json() as {
+      data: { session: { sessionId: string } };
+    };
+    expect(connectPayload).toMatchObject({
+      ok: true,
+      data: {
+        session: {
+          status: "CONNECTED",
+          walletAddress: account.address.toLowerCase(),
+          network: "POLYGON",
+          walletType: "EIP1193",
+        },
+        snapshot: {
+          live: {
+            walletSession: {
+              status: "CONNECTED",
+              signerStatus: "READY",
+            },
+            capability: {
+              execution: "AVAILABLE",
+              orderManagement: "AVAILABLE",
+            },
+            production: {
+              status: "PENDING_PREREQUISITES",
+              checks: expect.arrayContaining([
+                expect.objectContaining({ key: "FORMAL_WALLET", status: "READY" }),
+              ]),
+            },
+          },
+        },
+      },
+    });
+    expect(connectedLiveRuntimeFactory).toHaveBeenCalledWith(expect.objectContaining({
+      projectRoot: root,
+      walletSession: expect.objectContaining({ walletAddress: account.address.toLowerCase() }),
+      walletSessionBinding: expect.objectContaining({
+        session: expect.objectContaining({ walletAddress: account.address.toLowerCase() }),
+      }),
+    }));
+    const persisted = readFileSync(join(root, "data/operator/live-production.json"), "utf8");
+    expect(persisted).not.toMatch(/private|seed|mnemonic|secret|apiKey/i);
+
+    const disconnectResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/disconnect", {
+      body: { sessionId: connectPayload.data.session.sessionId },
+    });
+    expect(disconnectResponse.status).toBe(200);
+    expect(await disconnectResponse.json()).toMatchObject({
+      ok: true,
+      data: { session: { status: "DISCONNECTED" } },
+    });
+    const disconnectedSnapshot = await (await fetch(`${baseUrl}/api/operator/snapshot`)).json() as {
+      data: {
+        live: {
+          capability: { execution: string };
+          production: { checks: Array<{ key: string; status: string }> };
+        };
+      };
+    };
+    expect(disconnectedSnapshot.data.live.capability.execution).toBe("PENDING_PREREQUISITES");
+    expect(disconnectedSnapshot.data.live.production.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: "FORMAL_WALLET", status: "PENDING" })]),
+    );
+    const blockedStart = await mutation(baseUrl, "/api/operator/runtime/start", {
+      body: { mode: "LIVE", actor: "test", reason: "after disconnect" },
+    });
+    expect(blockedStart.status).toBe(409);
+    expect(await blockedStart.json()).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_WALLET_SESSION_INVALIDATED" },
+    });
+    expect(connectedActions.start).not.toHaveBeenCalled();
+    expect(connectedActions.stop).toHaveBeenCalledWith(expect.objectContaining({
+      actor: "WALLET_SESSION_GUARD",
+      reason: "LIVE_WALLET_SESSION_DISCONNECTED",
+    }));
   });
 
   it("routes Paper lifecycle, Live Gate and Live runtime operations without front-end fake state", async () => {
