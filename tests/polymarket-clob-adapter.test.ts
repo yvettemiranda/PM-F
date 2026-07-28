@@ -34,7 +34,6 @@ function signedOrder(overrides: Partial<SignedOrder> = {}): SignedOrder {
     timestamp: "1773014400000",
     metadata: zeroBytes32,
     builder: zeroBytes32,
-    feeRateBps: "0",
     expiration: "0",
     signature: "0xsigned",
     ...overrides,
@@ -216,7 +215,7 @@ describe("PolymarketClobAdapter", () => {
     }))).rejects.toThrow("SIGNED_ORDER_AMOUNT_MISMATCH");
   });
 
-  it("rejects maker, signer and fee evidence that differ from the registered request", async () => {
+  it("rejects maker, signer and external fee evidence that differ from the registered request", async () => {
     const adapter = new PolymarketClobAdapter(client());
     const other = "0x0000000000000000000000000000000000000002";
     await expect(adapter.submitOrder(request({
@@ -228,16 +227,15 @@ describe("PolymarketClobAdapter", () => {
     await expect(adapter.submitOrder(request({
       signedPayload: {
         ...request().signedPayload!,
-        signerAddress: other,
         signedOrder: signedOrder({ signer: other }),
       },
     }))).rejects.toThrow("SIGNED_ORDER_SIGNER_NOT_AUTHORIZED");
     await expect(adapter.submitOrder(request({
       signedPayload: {
         ...request().signedPayload!,
-        signedOrder: signedOrder({ feeRateBps: "1" }),
+        signerAddress: other,
       },
-    }))).rejects.toThrow("SIGNED_ORDER_FEE_RATE_MISMATCH");
+    }))).rejects.toThrow("SIGNED_PAYLOAD_SIGNER_NOT_AUTHORIZED");
     await expect(adapter.submitOrder(request({
       signedPayload: {
         ...request().signedPayload!,
@@ -251,6 +249,39 @@ describe("PolymarketClobAdapter", () => {
     }));
     await expect(exponentAdapter.submitOrder(request())).rejects.toThrow("CLOB_FEE_EXPONENT_MISMATCH");
     expect(postOrder).not.toHaveBeenCalled();
+  });
+
+  it("accepts a POLY_1271 order whose smart-account signer differs from its authorized browser EOA", async () => {
+    const accountAddress = "0x0000000000000000000000000000000000000002";
+    const sdkOrder = signedOrder({
+      maker: accountAddress,
+      signer: accountAddress,
+      signatureType: SignatureTypeV2.POLY_1271,
+    });
+    const postOrder = vi.fn(async () => ({
+      success: true,
+      errorMsg: "",
+      orderID: "order-1271",
+      tradeIDs: [],
+      status: "live",
+      takingAmount: "0",
+      makingAmount: "0",
+    }));
+    const adapter = new PolymarketClobAdapter(client({ postOrder }));
+
+    await expect(adapter.submitOrder(request({
+      registeredWalletAddress: accountAddress,
+      signedPayload: {
+        ...request().signedPayload!,
+        signerAddress,
+        signature: sdkOrder.signature,
+        signedOrder: sdkOrder,
+      },
+    }))).resolves.toMatchObject({
+      externalOrderId: "order-1271",
+      status: "ACKNOWLEDGED",
+    });
+    expect(postOrder).toHaveBeenCalledWith(sdkOrder, OrderType.FAK);
   });
 
   it("rejects a BUY signed without fee-budget evidence before calling CLOB", async () => {
@@ -270,7 +301,7 @@ describe("PolymarketClobAdapter", () => {
 
   it("independently rejects a signed BUY whose fee makes the approved budget insufficient", async () => {
     const postOrder = vi.fn();
-    const sdkOrder = signedOrder({ feeRateBps: "700" });
+    const sdkOrder = signedOrder();
     const adapter = new PolymarketClobAdapter(client({ postOrder, getFeeExponent: vi.fn(async () => 2) }));
 
     await expect(adapter.submitOrder(request({

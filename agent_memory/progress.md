@@ -4,7 +4,11 @@
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
 - 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
 - 已完成 Paper/Live 运行时交接与最终估值恢复修复：同一 Paper 账户和 baseline 可在安全 replacement 中承接旧仓位；最终 drain/估值有界重试；估值未完成时新 BUY 延后且不消费；Live 仅保留禁用态交接与隔离恢复。
-- 第 3 阶段 Live/后端能力和安全接线已完成：禁用态跨 Core 交接、外部订单/成交/仓位恢复对账、合规/geoblock/时钟安全 provider、钱包/signer 身份绑定、风控/arming/kill switch、启动与估值恢复、账本隔离及完整运行时装配均已有公开后端 seam；仍保持真实 Live 禁用，仅用 fake/isolated 测试验证。
+- 普通浏览器 EOA 的最终 Live 代码路径已闭环：session-bound 钱包请求 broker、
+  browser signer、惰性认证 CLOB、真实余额/allowance/仓位、CLOB submit/cancel、
+  EOA approve/redeem、官方 geoblock、时钟、合规、生产账户、Gate、外部对账和默认
+  production assembly 已接入 localhost host。配置变化强制重连；Gate 确认后同步
+  recovery 不 ready 会回滚；后台循环异常 emergency stop。真实钱包和真实订单未触达。
 - 第 2 阶段 UI 已从 throwaway 原型落为真实 localhost 控制台：品牌名为 `Hecatonchires`，保持用户选定的明亮 Animal Island-inspired 视觉、原创海豹/边牧/乌鸦背景、紧凑目标/我的对照卡、默认收起设置和执行明细。页面不再有 sample/in-memory 数据，3 秒轮询 `/api/operator/snapshot`，所有账户、策略、Signal、Market、Risk、Paper/Live 订单/成交/持仓/盈亏/账本、日志、对账、恢复和审计均由 SQLite 后台投影提供；参数表单按真实 micros/ms 字段转换并通过原有 profile 服务保存/恢复默认。新增运行与恢复、Live Gate 和后台明细折叠区，Paper 生命周期调用既有安全入口，Live 按 Gate 和外部依赖明确阻断。
 - 用户要求改用 `guokaigdg/animal-island-ui` 参考后，原型改为独立的 Animal Island-inspired 皮肤：奶油米白画布、暖棕文字、薄荷青绿/焦点黄、波点纹理、pill 控件、燕尾标题、暖色虚线表格和轻微按键式动效。没有复制参考仓库代码、图片、字体文件或 Nintendo 资产；原仓库的 CC BY-NC 许可已记录在原型 README。原有目标地址、账户概览、对照卡、可编辑设置、PAPER/LIVE 二次确认和执行明细信息结构保持不变。
 - 根据用户最新反馈，新增独立绘制的海豹、边牧和乌鸦岛屿插画 `prototype/live-ui/assets/island-background-v3.png`，以低透明度固定背景层呈现于页面两侧与底部；不改变信息结构、交互逻辑或 PAPER/LIVE 安全边界。
@@ -42,8 +46,22 @@
 - 海豹/边牧/乌鸦背景浏览器检查通过：角色在首屏两侧和交易卡后方可见，透明度与层级不遮挡地址、金额和状态；PNG 已确认是 RGBA 透明背景，控制台无错误。
 - 本轮接入收尾修正通过：Live 账户/执行/订单尝试/账本/隔离异常均进入后台明细；Paper/Live/目标/参数操作按后台 capability 禁用确定失败入口；原始 Live 请求/响应和日志正文不进入快照，仅保留安全摘要/索引。`pnpm typecheck`、定向 4 files / 14 tests、全量 59 files / 802 tests、`git diff --check` 均通过；真实 localhost 快照仍为 `PAPER + LIVE_DISABLED + STOPPED`，桌面/390px 移动回归无浏览器控制台错误。
 - 本轮 Live 生产准备接线通过：`src/operator/live-production-readiness.ts` 定义非敏感生产钱包配置、逐项 provider/Signer/Runtime/Gate readiness 和安全宿主 capability overrides；新增 `PUT /api/operator/live/configuration` 只保存公开钱包地址与网络，UI Live 安全面板展示“生产路径待前置条件”、准备项和明确阻断原因。默认 capability 为 `PENDING_PREREQUISITES`，真实 Live 仍不会触达。`pnpm typecheck`、定向 readiness/actions/UI 测试 `3 files / 10 tests`、最终全量 `60 files / 806 tests`、`node --check` 和 `git diff --check` 通过；localhost 快照确认 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-- 本轮补齐正式钱包连接链：`src/operator/live-wallet-session.ts` 实现只在内存存在的一次性、绑定 chain 的 challenge、EIP-191 地址控制权验证、Polygon/Amoy chain 校验、后台租约定时过期、断开与过期会话；运行时绑定会在钱包替换/断开/过期时撤销 action 并触发 emergency stop，失败会重试一次并返回明确错误。localhost 新增 `/api/operator/live/wallet-session/{challenge,connect,disconnect}`，UI 的“连接钱包”调用通用 EIP-1193，不读取私钥。`src/live/live-connected-runtime.ts` 提供连接后唯一生产装配入口，在交给既有 `assembleLiveRuntime` 前核对会话网络、wallet provider 自身读取的真实 provider chain、signer 与会话地址，proxy/funder 地址仍由 `LiveIdentityBinding` 核对；`connectedLiveRuntimeFactory` 是连接成功后由安全宿主注入 capability 的唯一 seam。新增钱包会话、连接装配和失效撤销隔离测试；`pnpm typecheck`、定向 `4 files / 18 tests`、全量 `62 files / 817 tests`、`node --check` 与 `git diff --check` 通过。localhost 桌面与 390px 移动回归无横向溢出和控制台错误；无钱包浏览器点击连接会明确提示未检测到 EIP-1193，后台仍是 `PAPER + LIVE_DISABLED + liveAllowed=false`。当前连接后仍会等待安全宿主注入真实 signer/CLOB/余额/政策 provider。
-- 已生成供外部技术、安全与生产接入审计使用的完整 Markdown 文档 `docs/audit/ni-k-external-audit-2026-07-27.md`，覆盖审计基线、系统架构、当前安全状态、代码证据、Paper 证据限制、风险登记册、生产前置步骤、取证清单、复现命令和审计结论模板；明确区分“工程能力已形成”“真实 Live 未就绪”和“用户未授权”。
+- 当前生产路径定向测试 `13 files / 70 tests` 已通过；全量首次回归因新增测试未登记
+  到 verification-suite 清单而 fail closed，更新受审计清单后相关 `4 files / 55 tests`
+  和 core compatibility `11/11` 已通过。最终 TypeScript、前端语法、`git diff --check`
+  和全量 `71 files / 854 tests` 均通过。
+- 无钱包 UI 实机验收通过：PAPER→LIVE 先显示“不直接下单”的检查确认；Live 面板
+  跨 3 秒刷新保持展开，编辑中的参数不会被覆盖；默认 `10/1/3/1 pUSD` 正确，
+  1280px 无横向溢出且浏览器控制台无错误。未连接钱包、未启动 Paper、未写入 Live
+  授权、未发送订单或链上交易。
+- 最终安全复核补齐：持久化配置在读取时也执行小额硬上限，篡改超限配置会退回
+  断开默认态；每次 CLOB 调用前后都复核 wallet session；UI 宿主退出会先停 Gate、
+  停 runtime、撤销会话；runtime database 和新迁移备份强制 `0600`，宿主使用
+  `umask 077`。审计文档已如实披露 crash recovery 所需 signed order intent 的
+  本地持久化及其残余风险。
+- 外部审计文档已升级为
+  `docs/audit/ni-k-external-audit-2026-07-28.md`，记录实际已实现生产路径、仍未发生
+  的钱包/资金事实、操作顺序、风险、证据索引和外部审计判定口径。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
@@ -54,6 +72,9 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 完成本轮钱包会话与连接后生产装配接线，并做一次全量测试与浏览器回归。
-2. 用户连接正式 Polygon 钱包后，由受授权宿主调用 `assembleConnectedLiveRuntime`，显式提供 signer、认证 CLOB、余额/合规/地域/时钟 provider、市场数据和 `ConfiguredOperatorLiveRuntimeActions`，再进行真实 Gate 预检和二次授权；当前不宣称已具备实盘凭据或真实运行证据。
-3. 在真实钱包连接前继续保持 `PAPER + LIVE_DISABLED + liveAllowed=false`，不自动启动 Paper、不提交真实订单。
+1. 当前代码复核、干净提交和 commit-bound `live-production-validation.json` 已完成；
+   源码再变化时必须重新运行 `pnpm validate:live-production`。
+2. 用户之后先按 UI 测试 Paper；准备小额实盘时按 UI 顺序连接 Polygon EOA、确认
+   `10/1/3/1 pUSD` 或更低限额、完成 allowance 和真实只读核对。
+3. 只有用户当次输入最终确认词后才允许 Gate 尝试启动；在此之前继续保持
+   `PAPER + LIVE_DISABLED + liveAllowed=false`。

@@ -145,6 +145,7 @@ describe("operator actions", () => {
       accepted: true,
       code: "LIVE_RUNTIME_STARTED",
     });
+    expect(runtime.recoverOnStartup).toHaveBeenCalledWith("live-account-1");
     expect(runtime.run).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: "live-account-1", intervalMs: 10 }),
       expect.any(AbortSignal),
@@ -179,6 +180,60 @@ describe("operator actions", () => {
     })).resolves.toMatchObject({ accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" });
     expect(executor.cancelOrder).toHaveBeenCalledWith("order-1", "CANCEL");
     expect(executor.retryExecution).toHaveBeenCalledWith("execution-1", "RETRY");
+  });
+
+  it("does not accept start when synchronous startup recovery is blocked", async () => {
+    const runtime = {
+      recoverOnStartup: vi.fn(async () => ({ ready: false, reason: "ALLOWANCE_MISSING" })),
+      run: vi.fn(async () => undefined),
+      emergencyStop: vi.fn(async () => undefined),
+    };
+    const actions = new ConfiguredOperatorLiveRuntimeActions({
+      runtime,
+      executor: {
+        cancelOrder: vi.fn(async () => undefined),
+        retryExecution: vi.fn(async () => undefined),
+        reconcile: vi.fn(async () => ({ reason: "LIVE_RECONCILED" })),
+      },
+      accountId: "live-account-1",
+    });
+
+    await expect(actions.start({ actor: "TEST", reason: "START" })).resolves.toMatchObject({
+      accepted: false,
+      code: "LIVE_RUNTIME_STARTUP_RECOVERY_BLOCKED",
+    });
+    expect(runtime.run).not.toHaveBeenCalled();
+  });
+
+  it("emergency-stops when the accepted background loop later fails", async () => {
+    const runtime = {
+      recoverOnStartup: vi.fn(async () => ({ ready: true })),
+      run: vi.fn(async () => {
+        throw new Error("LOOP_CRASH");
+      }),
+      emergencyStop: vi.fn(async () => undefined),
+    };
+    const actions = new ConfiguredOperatorLiveRuntimeActions({
+      runtime,
+      executor: {
+        cancelOrder: vi.fn(async () => undefined),
+        retryExecution: vi.fn(async () => undefined),
+        reconcile: vi.fn(async () => ({ reason: "LIVE_RECONCILED" })),
+      },
+      accountId: "live-account-1",
+    });
+
+    await expect(actions.start({ actor: "TEST", reason: "START" })).resolves.toMatchObject({
+      accepted: true,
+    });
+    await vi.waitFor(() => {
+      expect(runtime.emergencyStop).toHaveBeenCalledWith(
+        "live-account-1",
+        "LIVE_RUNTIME_BACKGROUND_FAILED:LOOP_CRASH",
+        "SYSTEM",
+      );
+    });
+    expect(actions.lastError).toBe("LOOP_CRASH");
   });
 
   it("fails closed and emergency-stops when the bound wallet session is replaced", async () => {

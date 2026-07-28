@@ -1,8 +1,9 @@
 # ni-k / Hecatonchires 外部审计文档
 
 > 文档用途：交给外部审计、技术尽调、生产接入和安全复核人员使用。
-> 文档日期：2026-07-27（Asia/Shanghai）
-> 审计基线源码提交：`b2c3c60`（`feat(operator): add secure wallet connection flow`）
+> 文档日期：2026-07-28（Asia/Shanghai）
+> 审计基线源码提交：以交付时 `git rev-parse HEAD` 和
+> `data/operator/live-production-validation.json.sourceCodeCommit` 的一致值为准。
 > 项目目录：`/Users/d4clt/Documents/Codex/2026-07-07/ni-k`
 > 当前分支：`codex/operator-ui-integration`
 > 项目名称：`ni-k`；操作台品牌：`Hecatonchires`
@@ -14,17 +15,31 @@
 1. Polymarket 跟单系统的 Observe、Signal、Risk、Paper、Replay、账本、对账、恢复、审计和 Live Gate 主体架构。
 2. 按用户指定的“3 → 2 → 1”顺序完成 Live/后端能力接线、可操作 localhost 控制台、Paper/隔离验证和安全门验证。
 3. Hecatonchires 明亮 UI、目标/我的对照视图、可折叠参数与执行明细、Paper/LIVE 模式二次确认、真实后台快照和钱包连接页面。
-4. 正式钱包的公开身份连接链：EIP-1193、一次性 chain-bound `personal_sign` challenge、会话租约、运行时绑定、钱包替换/断开/过期撤销。
-5. 连接后生产运行时的显式依赖装配入口：secure signer、认证 CLOB、余额、市场、合规、地域和时钟 provider 必须由安全宿主注入。
-6. 大量 fail-closed 控制和隔离测试；当前最新全量测试为 `62` 个测试文件、`818` 个测试通过。
+4. 正式钱包的公开身份连接链：EIP-1193、一次性 chain-bound
+   `personal_sign` challenge、会话租约、运行时绑定、钱包替换/断开/过期撤销。
+5. 浏览器钱包的会话级签名通道：后端只投递当前 session 的精确
+   `eth_signTypedData_v4` 或 `eth_sendTransaction` 请求；私钥、助记词和可复用
+   API secret 不进入 Node、磁盘或前端 bundle。
+6. 默认生产装配：浏览器钱包 signer、会话内惰性 CLOB L2 认证、真实只读余额/
+   allowance/仓位、真实 CLOB 下单与取消、Polygon 收据确认、EOA 小额授权、二元
+   CTF 赎回、官方 geoblock、时钟安全、合规声明、Live 账户和外部对账。
+7. 小额 Live 风险参数：默认总资金 `10 pUSD`、单笔 `1 pUSD`、总敞口
+   `3 pUSD`、单日亏损 `1 pUSD`；同时存在不可由 UI 放大的硬上限。
+8. 生产启动闭环：配置确认会使旧钱包 session 失效；Live 请求、Gate 二次确认、
+   同步恢复检查和 runtime 启动被串成一个闭环；启动失败自动回滚 Gate，后台循环
+   异常自动 emergency stop；UI 宿主正常退出时先停用 Gate、停止 runtime、撤销
+   钱包 session 并清除内存依赖。
+9. 当前代码的全量类型检查、测试数量和证据文件由
+   `pnpm validate:live-production` 在干净提交上重新生成并绑定到该 commit。
 
 本项目目前**没有**完成，也没有声称完成：
 
-- 真实钱包连接后的生产宿主部署；
-- 真实 signer、私钥、助记词、认证 CLOB 凭据或真实资金接入；
-- 真实订单 submit/cancel、approve、redeem 或任何链上写操作；
+- 用户正式钱包的本轮实际连接和 EIP-1193 人工签名；
+- 用户钱包内 CLOB 凭据派生、真实余额、allowance 和仓位的本轮实测；
+- 真实 approve、submit、cancel、fill、redeem 或任何链上写入的本轮实测；
 - 真实 Live 订单、成交、资金变化或小额灰度实盘；
-- 用户在所有生产前置条件通过后的再次明确授权；
+- 外部审计签字和真实钱包/真实资金验收；
+- 用户在未来小额实盘当次的最终二次确认；
 - 通过测试结果自动打开 Live。
 
 当前安全事实必须保持为：
@@ -41,7 +56,9 @@
 
 因此，本文件的审计意见应理解为：
 
-> “软件安全接线、验证框架和生产依赖边界已形成；系统尚未达到可直接授权真实交易的最终生产状态。”
+> “普通浏览器 EOA 钱包的小额生产代码路径已经闭环到真实 adapter；当前仍未连接
+> 用户钱包、未验证真实资金、未发生用户当次最终确认，因此系统保持
+> `PAPER + LIVE_DISABLED`。代码完成不等于真实资金验收，也不等于实盘授权。”
 
 这不是投资建议、合规意见、法律意见或实时交易授权。
 
@@ -66,7 +83,7 @@ PolymarketBot 的代码、数据库、仓位模型、账本、执行逻辑或页
 
 外部审计应固定以下信息：
 
-- Git commit：`b2c3c60`
+- Git commit：审计时读取 `git rev-parse HEAD`，并与生产验证 artifact 核对
 - Git 工作树：审计前应重新确认 clean
 - Node：`>=24.14.0 <25`
 - package manager：`pnpm@11.9.0`
@@ -88,7 +105,10 @@ PolymarketBot 的代码、数据库、仓位模型、账本、执行逻辑或页
   - Config `v1.7.0`
 
 注意：历史 Paper 最终报告中的正式运行 commit 是较早的
-`2bdb7e3bd2553b4cb8b64e4df78784a5d58ebf2b`。本次新增的钱包连接、生产准备、UI 控制面和 Live 依赖接线应由审计方在当前基线重新执行验证，不能把旧 commit 的报告直接当作当前 commit 的完整证明。
+`2bdb7e3bd2553b4cb8b64e4df78784a5d58ebf2b`。生产验证命令会把该报告和隔离验证
+文件的 SHA-256 与当前干净源码 commit 一起写入 ignored artifact；这只能证明
+“当前代码测试通过且引用了既有 Paper 证据”，不能把历史报告重新描述为当前
+commit 上重新跑出的自然 24 小时 Paper。
 
 ### 1.3 用户指定交付顺序
 
@@ -109,7 +129,8 @@ PolymarketBot 的代码、数据库、仓位模型、账本、执行逻辑或页
 系统从目标钱包的公开 Polygon 活动中识别目标交易，经过数据完整性、市场语义、Risk 和执行资格判断后：
 
 - 在 Paper 中以隔离账户模拟跟单；
-- 在生产宿主显式提供全部真实依赖并通过 Gate 后，才具备进入 Live 的技术路径；
+- 在正式 EOA 钱包连接后由默认生产 host 装配真实依赖，并通过小额参数、钱包授权、
+  Gate 和最终确认后，才具备进入 Live 的技术路径；
 - 把目标行为和我的 Paper/Live 执行结果放在同一张对照台展示。
 
 ### 2.2 逻辑数据流
@@ -131,7 +152,7 @@ Polygon / Data API / Activity / Positions / pUSD
           │                    │
           ▼                    ▼
   Paper Executor        Live Gate / Live Runtime
-  isolated account      explicit host injection only
+  isolated account      connected EOA production assembly
           │                    │
           ▼                    ▼
  Paper ledger       production ledger/order state
@@ -152,7 +173,7 @@ Browser EIP-1193 wallet
 LiveWalletSessionManager
           │ public address/network/session lease only
           ▼
-connectedLiveRuntimeFactory (security host)
+assembleDefaultConnectedLiveRuntime
           │
           ├─ secure signer
           ├─ wallet provider + provider chainId
@@ -173,8 +194,10 @@ LiveRuntime + LiveExecutor
 Live Gate preflight → explicit request → explicit confirmation
 ```
 
-当前默认 `prototype/live-ui/server.mjs` 没有注入
-`connectedLiveRuntimeFactory`，所以连接按钮可以工作，但没有安全宿主时仍显示等待前置条件。这是刻意的 fail-closed 行为，不是遗漏的自动启用。
+当前默认 `prototype/live-ui/server.mjs` 已注入
+`assembleDefaultConnectedLiveRuntime`：完成 EOA 钱包连接后会自动装配上述生产依赖。
+钱包未连接、生产验证 artifact 与源码 commit 不一致、任一外部检查失败或用户未完成
+当次最终授权时，装配或 Gate 都会 fail closed。
 
 ---
 
@@ -296,7 +319,9 @@ Live 不是浏览器直接调用交易 API，而是显式依赖装配：
 - `GeoblockProvider`
 - `ClockSafetyProvider`
 
-默认 adapter 为 disabled/fake 或未配置状态。生产装配入口不扫描环境、不发现私钥、不自动生成认证客户端。
+可复用核心在调用方未提供生产依赖时默认使用 disabled/fake 或未配置状态。
+localhost Operator UI 则只在正式 EOA 会话验证通过后调用默认生产装配；该入口不扫描
+环境、不发现私钥，CLOB 凭据仅在需要认证访问时通过钱包签名惰性派生并保留在内存。
 
 ### 3.6 Operator 控制面
 
@@ -316,6 +341,9 @@ Live 不是浏览器直接调用交易 API，而是显式依赖装配：
 - Paper start/stop/recover；
 - Live Gate preflight/request/confirm/recover/emergency-disable；
 - 钱包 challenge/connect/disconnect；
+- session-bound typed-data/transaction request broker；
+- 小额 Live 参数、合规确认和交易授权检查；
+- Gate 确认后的原子 runtime start 与失败回滚；
 - Live production readiness；
 - 数据库、账户、执行、订单、成交、持仓、账本、对账、恢复、隔离异常和审计投影。
 
@@ -387,6 +415,11 @@ It does not authorize trades or move funds.
 实现位置：
 
 - `src/live/live-connected-runtime.ts`
+- `src/operator/default-connected-live-runtime.ts`
+- `src/live/browser-wallet-clob-signer.ts`
+- `src/live/session-authenticated-clob-client.ts`
+- `src/live/polymarket-readonly-wallet-provider.ts`
+- `src/live/browser-wallet-onchain.ts`
 - `src/live/wallet-provider.ts`
 - `src/operator/operator-actions.ts`
 - `src/operator/operator-ui-server.ts`
@@ -394,31 +427,73 @@ It does not authorize trades or move funds.
 装配要求：
 
 - 当前 session 必须是 Polygon 主网；
-- `connectedLiveRuntimeFactory` 必须显式提供依赖；
+- localhost production host 只在钱包身份证明通过后调用
+  `assembleDefaultConnectedLiveRuntime`；
+- 当前源码必须是 clean commit，并存在 commit-bound production validation artifact；
+- 生产配置的钱包、trading/funder、signature type、network 和小额限额必须一致；
 - `walletProvider.getChainId()` 必须存在；
 - provider 自身读取的 chainId 必须是 `137`；
 - provider chainId 必须与 factory bundle 的 `verifiedChainId` 一致；
 - signer 地址必须等于钱包 session 地址；
 - proxy/funder 地址必须继续经过 `LiveIdentityBinding`；
-- factory 返回的 action 必须由服务端 wrapper 绑定当前钱包 session；
+- factory 返回的 runtime 和 Gate action 必须由服务端 wrapper 绑定当前钱包 session；
 - 未绑定、已撤销或漂移的 action 不得继续执行。
+
+外部规格核对基线：
+
+- [Polymarket Trading Overview](https://docs.polymarket.com/trading/overview)；
+- [Polymarket Deposit Wallets](https://docs.polymarket.com/trading/deposit-wallets)；
+- [Polymarket CLOB Client V2](https://github.com/Polymarket/clob-client-v2)。
+
+仓库固定使用 `@polymarket/clob-client-v2@1.0.8`，实际依赖完整性以
+`pnpm-lock.yaml` 为准。合约地址由该 SDK 的 Polygon `getContractConfig` 返回，不在
+UI 中接受任意 spender 或 Conditional Tokens 地址。
 
 ### 4.5 凭据边界
 
-当前浏览器和 localhost UI：
+当前浏览器和 localhost production host：
 
 - 不读取私钥；
 - 不读取 seed/mnemonic；
-- 不读取 API key；
-- 不保存 signed order；
-- 不加载认证 CLOB；
-- 不自动发现生产 signer；
+- 不把 API key/secret/passphrase 写入配置、磁盘、快照或日志；
+- 为 crash recovery 和未知提交结果对账，`live_orders.signed_payload_json` 会持久化
+  精确 signed order intent；该字段不进入 UI、普通日志或审计包，但必须按敏感数据
+  管理；
+- CLOB L1 EIP-712 只在第一次认证操作时由当前钱包 session 签署；
+- 派生的 L2 API credentials 只存在于内存 SDK 实例，session 失效即丢弃引用；
+- 每个订单 EIP-712 payload 都由 SDK 构造，并由当前浏览器钱包逐次签名；
+- 链上授权和赎回只通过精确 `eth_sendTransaction` 请求交给当前钱包确认；
+- 不自动发现文件或环境变量中的生产 signer；
 - 不根据配置文件勾选真实 provider；
 - 不自动把钱包连接视为交易授权。
 
-安全宿主将来必须在独立边界内提供 signer/CLOB/provider；推荐使用系统安全存储、硬件钱包、独立进程或受控密钥服务，不能把私钥写入仓库、日志、截图、配置示例或前端 bundle。
+当前 UI 只开放已经形成闭环的普通 EOA 浏览器钱包。Proxy、Safe 和 EIP-1271
+签名类型在底层 signer/identity 模型中保留，但链上 allowance/redeem 仍需要
+Polymarket 官方账户初始化或 relayer；因此它们没有被 UI 伪装成“一连接即可完整
+实盘”。如后续开放智能钱包，必须补齐官方 relayer、单独测试和审计。
 
-### 4.6 快照和日志脱敏
+### 4.6 钱包交易授权和链上写入边界
+
+实现位置：`src/live/browser-wallet-onchain.ts`
+
+- collateral 只检查 Exchange V3 spender；
+- allowance 不足时，EOA 可请求 `approve(exchangeV3, confirmedBankroll)`；
+- outcome token 只请求 `setApprovalForAll(exchangeV3, true)`；
+- 每笔交易都需要钱包单独确认；
+- 后端验证返回值必须是 32-byte transaction hash；
+- 独立 Polygon RPC 等待成功 receipt 和至少 2 个 confirmation；
+- revert、超时、hash/receipt 不匹配全部失败关闭；
+- 二元市场赎回调用 Conditional Tokens `redeemPositions`；
+- 智能钱包 allowance/redeem 没有官方 relayer 时明确拒绝。
+
+小额 Live 上限在写入和读取时都会校验：总资金最多 `100 pUSD`、单笔最多
+`10 pUSD`、总敞口最多 `25 pUSD`、单日亏损最多 `10 pUSD`，并要求
+`单笔 ≤ 总敞口 ≤ 总资金`、`单日亏损 ≤ 总资金`。配置文件若被手工改成超限值，
+读取会退回未连接、未确认的安全默认状态，不能把超限配置带入生产装配。
+
+当前没有调用上述链上写入口；本轮验证仅覆盖隔离测试。
+
+### 4.7 快照和日志脱敏
 
 Operator snapshot 只返回：
 
@@ -437,7 +512,7 @@ Operator snapshot 只返回：
 - 私钥或认证凭据；
 - 可直接复用的 signed order。
 
-### 4.7 数据库和迁移安全
+### 4.8 数据库和迁移安全
 
 项目使用 SQLite：
 
@@ -477,6 +552,9 @@ UI 位于：
 - 执行明细表；
 - Live readiness；
 - 钱包连接/断开；
+- EOA 小额 Live 参数保存、固定确认词和合规确认；
+- allowance 检查/设置入口；
+- 钱包签名与链上交易请求的逐次人工确认；
 - Gate 预检、请求、确认、恢复和紧急停用入口；
 - Paper 生命周期；
 - 后台日志、报告、对账、恢复和审计索引。
@@ -496,7 +574,26 @@ UI 不决定：
 
 所有关键状态以后台 snapshot、Live Gate、Operator capability 和 SQLite 证据为准。
 
-### 5.3 视觉资源和许可证风险
+### 5.3 推荐的实际操作顺序
+
+当前 UI 设计的安全顺序是：
+
+1. 先使用 Paper，确认目标地址和跟单参数；
+2. 保持 Paper 停止或安全状态；
+3. 点击右上角 Paper，选择切换到 Live；
+4. 连接 Polygon 主网普通浏览器钱包并完成地址控制权签名；
+5. 保存小额 Live 参数和合规声明；
+6. 因配置变化自动断开后重新连接同一钱包；
+7. 点击“检查 / 设置交易授权”，逐笔审阅钱包交易；
+8. 发起 Live Gate 检查；
+9. 输入 `ENABLE LIVE TRADING` 完成最终二次确认；
+10. Gate 确认后，后台先同步恢复；只有恢复 ready 才启动 runtime；
+11. 任一检查、钱包拒绝、网络漂移、后台异常或启动失败都保持或退回
+    `PAPER + LIVE_DISABLED`。
+
+第 4、7、9 步必须由用户本人在未来实际操作。本轮开发没有代替用户执行这些步骤。
+
+### 5.4 视觉资源和许可证风险
 
 当前使用独立实现的 Animal Island-inspired CSS 视觉，参考仓库为：
 
@@ -618,18 +715,20 @@ OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION
 
 ### 7.1 当前源码基线验证
 
-在审计基线 `b2c3c60` 及其同一工作树上完成：
+在本文件所述工作树上完成，并要求在最终干净交付 commit 再由
+`pnpm validate:live-production` 固化：
 
 ```text
-pnpm typecheck                          PASS
-定向测试 4 files / 19 tests             PASS
-全量测试 62 files / 818 tests           PASS
+TypeScript --noEmit                     PASS
+生产路径定向测试 13 files / 70 tests     PASS
+全量测试 71 files / 854 tests            PASS
 node --check prototype/live-ui/app.js   PASS
 git diff --check                        PASS
-最终代码复审                             无新的 P1/P2
 ```
 
 Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失败。
+最终有效测试数字以 commit-bound production validation artifact 为准；任何后续源码
+变更都会使该 artifact 与当前 commit 不一致并阻断默认生产装配。
 
 ### 7.2 定向测试覆盖
 
@@ -693,14 +792,16 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 | Paper 24h 独立汇总 | 已完成 | final report | 否，且不是单 Campaign 原生 24h |
 | Replay/一致性/恢复 | 已实现并有回归 | validation tests/reports | 否 |
 | Live Gate 架构 | 已实现 | `live-gate-service.ts`、Gate tests | 否，默认关闭 |
-| Live Runtime 架构 | 已实现 | `live-runtime.ts`、`live-executor.ts` | 否，依赖未注入 |
+| Live Runtime 架构 | 已实现 | `live-runtime.ts`、`live-executor.ts` | 代码可用，真实钱包未验收 |
 | Live 身份绑定 | 已实现 | `live-identity-binding.ts` | 否 |
 | 钱包公开身份连接 | 已实现 | `live-wallet-session.ts` | 否，只证明地址控制权 |
-| 安全宿主 factory | 接口已定义，默认未部署 | `connectedLiveRuntimeFactory` seam | 否 |
-| Secure signer | 未接入 | readiness pending | 否 |
-| 认证 CLOB | 未接入 | readiness pending | 否 |
-| 只读余额/仓位 | 生产实例未接入 | readiness pending | 否 |
-| Compliance/Geoblock/Clock | 生产证据未接入 | readiness pending | 否 |
+| 默认生产装配 | 已实现并接入 localhost host | `default-connected-live-runtime.ts` | 需真实钱包验收 |
+| Secure signer | EIP-1193 EOA 已实现 | `browser-wallet-clob-signer.ts` | 需用户逐次签名 |
+| 认证 CLOB | 会话内惰性派生已实现 | `session-authenticated-clob-client.ts` | 需真实钱包验收 |
+| 只读余额/仓位 | CLOB + Data API provider 已实现 | `polymarket-readonly-wallet-provider.ts` | 需真实账户验收 |
+| Approve/redeem | EOA 真实交易构造和 receipt 已实现 | `browser-wallet-onchain.ts` | 本轮未实际发送 |
+| Compliance/Geoblock/Clock | provider 已装配 | production factory、Gate | 需真实网络新鲜证据 |
+| 真实订单 submit/cancel | 真实 adapter 已装配 | `polymarket-clob-adapter.ts` | 本轮未实际发送 |
 | 真实 wallet funds | 未提供证据 | 无 | 否 |
 | 真实订单 | `0` | final report | 否 |
 | 用户最终 Live 授权 | 未发生 | Gate pending | 否 |
@@ -710,27 +811,24 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 
 ## 9. 当前风险登记册
 
-### R-001：生产依赖未部署（阻断级）
+### R-001：真实钱包和生产外部事实尚未验收（阻断级）
 
-- 状态：Open
-- 影响：连接钱包后仍不能安全签名或提交订单。
-- 当前控制：默认 `UnconfiguredOperatorLiveRuntimeActions`，readiness 为 `PENDING_PREREQUISITES`。
-- 必须完成：
-  - 安全宿主；
-  - signer；
-  - 认证 CLOB；
-  - balance/position；
-  - compliance/geoblock/clock；
-  - market data；
-  - `ConfiguredOperatorLiveRuntimeActions`；
-  - capability evidence。
+- 状态：Open；代码实现已完成，外部验收未完成
+- 影响：在没有用户真实 EOA、真实余额、allowance、官方 API 响应和钱包签名的情况下，
+  不能证明生产环境端到端可用。
+- 当前控制：无钱包时 default runtime 不装配；readiness 保持 pending；任何请求失败
+  都不会把 Gate 留在 active。
+- 必须完成：用户按 UI 顺序连接 Polygon EOA，完成只读核对、CLOB 凭据签名和
+  allowance 检查，并由审计方保存脱敏结果。
 
 ### R-002：没有真实资金和真实交易证据（阻断级）
 
 - 状态：Open
 - 影响：无法证明订单签名、资金限额、成交回报、取消、恢复和 PnL 在真实网络有效。
-- 当前控制：真实 submit/cancel/approve/redeem 均禁用。
-- 必须完成：测试网/沙盒合同测试、只读核对、最小限额演练和明确授权。
+- 当前控制：这些入口只有在钱包连接、参数确认、Gate 和用户逐笔确认后可达；
+  本轮没有调用。
+- 必须完成：先真实只读核对，再在用户明确授权下执行最小额度 canary，并验证
+  submit/cancel/fill/reconcile/emergency-stop。
 
 ### R-003：用户最终授权不存在（阻断级）
 
@@ -746,12 +844,15 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 - 当前控制：不放宽限价、不伪造 fill、不把 fake/isolated 样本称为自然成交。
 - 必须完成：在当前源码基线继续自然市场 Paper 观察，或者由审计方明确接受“逻辑覆盖与自然覆盖分离”。
 
-### R-005：8 小时 Observe Gate 证据需重新确认
+### R-005：历史 Observe/Paper 证据与当前源码基线不同
 
 - 状态：Open / Gate prerequisite
 - 影响：短时运行或 4 小时验证不能替代 README 中要求的 Live Gate 前连续 Observe soak。
-- 当前控制：Live Gate 对 `SYNCED`、gap、checkpoint、dirty tree 等有硬判断。
-- 必须完成：当前基线至少连续 8 小时 Observe，保存完整报告和 checkpoint。
+- 当前控制：owner-accepted 历史报告和隔离验证都以 SHA-256 写入当前 commit 的
+  production validation artifact；运行时 Gate 仍检查实时 `SYNCED`、gap、
+  checkpoint、dirty tree 和新鲜度。
+- 必须完成：外部审计方若不接受“历史运行证据 + 当前代码全量回归”的组合口径，
+  应在当前 commit 重新跑至少 8 小时 Observe 和所需 Paper 时长。
 
 ### R-006：跨 Core 24h 是独立汇总，不是单 Campaign 原生时长
 
@@ -802,6 +903,17 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 - 当前控制：内容寻址、日志索引、报告索引和既有归档入口。
 - 必须完成：容量预算、归档策略、校验和恢复演练。
 
+### R-013：已签订单意图的本地持久化
+
+- 状态：受控但仍有残余风险
+- 影响：为 crash recovery 保存的 `live_orders.signed_payload_json` 在尚未提交或结果
+  未知时可能仍具有使用价值；本机数据库或备份泄露会扩大攻击面。
+- 当前控制：该字段不进入 UI、快照、普通日志或外部审计包；runtime database 和新
+  迁移备份强制为 `0600`，Operator UI 进程使用 `umask 077`；钱包会话失效时停止
+  runtime 并丢弃内存 CLOB credentials。
+- 必须完成：生产主机启用全盘加密、受控用户账户、备份访问控制和保留期限；外部
+  审计只核对 hash、状态与恢复设计，不复制 signed payload。
+
 ---
 
 ## 10. 进入生产前必须完成的工作
@@ -825,9 +937,9 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 - `git diff --check` 通过；
 - 当前源码版本、Ruleset、Schema、数据库迁移一致。
 
-### 阶段 B：实现和审计安全宿主
+### 阶段 B：复核已实现的浏览器钱包生产宿主
 
-安全宿主必须：
+当前实现已经做到：
 
 1. 不向浏览器暴露私钥；
 2. 不从任意环境变量盲目发现凭据；
@@ -840,11 +952,11 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 9. 不允许 fake adapter 在 production 环境冒充真实 adapter；
 10. 不允许通过 UI 参数直接勾选 readiness。
 
-交付物：
+审计交付物：
 
 - 生产宿主源码；
 - 依赖清单；
-- signer/credential 存储设计；
+- signer/credential 内存生命周期设计；
 - CLOB 认证设计；
 - provider chain 证明；
 - geoblock/compliance 数据源；
@@ -852,7 +964,7 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 - secret rotation 和撤销设计；
 - emergency stop runbook。
 
-### 阶段 C：真实只读和沙盒合同测试
+### 阶段 C：真实钱包只读和小额合同测试
 
 在不提交真实交易的情况下，先验证：
 
@@ -1096,33 +1208,31 @@ http://127.0.0.1:4173/
 建议结论：
 
 ```text
-PASS WITH CONTROLLED OPEN ITEMS
+READY FOR WALLET-BOUND ACCEPTANCE
 ```
 
 理由：
 
-- 主要运行时、数据、账本、Gate、UI 和钱包会话接线已实现；
-- 全量测试和静态检查通过；
-- 最新复审没有新的 P1/P2；
-- 仍有明确生产依赖和验证缺口。
+- 运行时、数据、账本、Gate、UI、钱包会话、浏览器 signer、认证 CLOB、只读
+  provider、真实 order adapter、EOA allowance/redeem 和失败回滚均已接线；
+- 干净提交上的全量测试和生产 validation artifact 是连接钱包的硬前置；
+- 仍缺用户真实钱包和真实外部服务的端到端验收。
 
 ### 13.2 生产运行状态
 
 建议结论：
 
 ```text
-NOT READY FOR LIVE TRADING
+CODE READY; WALLET/FUNDS ACCEPTANCE NOT PERFORMED
 ```
 
 理由：
 
-- secure signer 未部署；
-- 认证 CLOB 未部署；
-- provider 真实证据未部署；
-- 生产 factory 默认未注入；
+- 当前未连接用户钱包；
+- CLOB 凭据尚未由用户钱包实际派生；
+- provider 尚无本轮真实余额、allowance、仓位和官方服务响应证据；
 - 没有真实订单/成交/资金/PnL 证据；
-- 8 小时 Observe Gate 需在当前基线重新确认；
-- 用户最终 Live 授权不存在。
+- 用户最终 Live 二次确认尚未发生。
 
 ### 13.3 授权状态
 
@@ -1148,7 +1258,8 @@ NOT AUTHORIZED
 2. wallet session 被替换后，旧 runtime 是否仍能执行？
 3. session 过期而没有下一次 HTTP 请求时，runtime 是否会停？
 4. emergency stop 失败时，接口是否会假报成功？
-5. factory 是否可以返回未绑定 session 的任意 action？
+5. default factory 返回的 runtime 与 Gate 是否都绑定同一个 session，配置变化后是否
+   强制重新装配？
 6. provider 是否自己证明了 chainId，而不是只信任浏览器 body？
 7. signer 地址、钱包地址、注册账户和 proxy/funder 是否逐层核对？
 8. 断线、reorg、gap、clock、geoblock、余额、账本异常是否全部 fail closed？
@@ -1162,6 +1273,10 @@ NOT AUTHORIZED
 16. 生产宿主是否可以证明每个 provider 的新鲜度、来源、版本和撤销路径？
 17. 发生 stop 失败时，是否存在人工升级和资金冻结路径？
 18. 用户授权是否明确到钱包、账户、资金、限额、时长和撤销？
+19. 钱包请求 broker 是否拒绝跨 session、过期、错误地址、错误 chain 和并发请求？
+20. Gate 已确认但 runtime 同步恢复失败时，是否真的回滚为 `LIVE_DISABLED`？
+21. runtime 后台循环异步崩溃时，是否独立触发 emergency stop？
+22. allowance 是否只面向 Exchange V3，collateral 授权金额是否等于确认的 bankroll？
 
 只有这些问题全部得到证据支持，才可以讨论小额 Live canary；否则应继续保持：
 
@@ -1188,12 +1303,22 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 - [`src/live/live-gate-reconciliation.ts`](../../src/live/live-gate-reconciliation.ts)
 - [`src/live/live-identity-binding.ts`](../../src/live/live-identity-binding.ts)
 - [`src/live/live-connected-runtime.ts`](../../src/live/live-connected-runtime.ts)
+- [`src/live/browser-wallet-clob-signer.ts`](../../src/live/browser-wallet-clob-signer.ts)
+- [`src/live/session-authenticated-clob-client.ts`](../../src/live/session-authenticated-clob-client.ts)
+- [`src/live/polymarket-readonly-wallet-provider.ts`](../../src/live/polymarket-readonly-wallet-provider.ts)
+- [`src/live/browser-wallet-onchain.ts`](../../src/live/browser-wallet-onchain.ts)
+- [`src/live/polymarket-clob-adapter.ts`](../../src/live/polymarket-clob-adapter.ts)
 - [`src/live/wallet-provider.ts`](../../src/live/wallet-provider.ts)
 - [`src/live/signer.ts`](../../src/live/signer.ts)
 - [`src/live/order-adapter.ts`](../../src/live/order-adapter.ts)
 - [`src/live/redeem-adapter.ts`](../../src/live/redeem-adapter.ts)
 - [`src/operator/live-wallet-session.ts`](../../src/operator/live-wallet-session.ts)
+- [`src/operator/live-wallet-request-broker.ts`](../../src/operator/live-wallet-request-broker.ts)
 - [`src/operator/live-production-readiness.ts`](../../src/operator/live-production-readiness.ts)
+- [`src/operator/live-operator-compliance-provider.ts`](../../src/operator/live-operator-compliance-provider.ts)
+- [`src/operator/production-live-account.ts`](../../src/operator/production-live-account.ts)
+- [`src/operator/production-live-prerequisites.ts`](../../src/operator/production-live-prerequisites.ts)
+- [`src/operator/default-connected-live-runtime.ts`](../../src/operator/default-connected-live-runtime.ts)
 - [`src/operator/operator-actions.ts`](../../src/operator/operator-actions.ts)
 - [`src/operator/operator-ui-server.ts`](../../src/operator/operator-ui-server.ts)
 - [`src/operator/operator-mutation-guard.ts`](../../src/operator/operator-mutation-guard.ts)
@@ -1220,15 +1345,25 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 
 - [`tests/live-wallet-session.test.ts`](../../tests/live-wallet-session.test.ts)
 - [`tests/live-connected-runtime.test.ts`](../../tests/live-connected-runtime.test.ts)
+- [`tests/live-wallet-request-broker.test.ts`](../../tests/live-wallet-request-broker.test.ts)
+- [`tests/browser-wallet-clob-signer.test.ts`](../../tests/browser-wallet-clob-signer.test.ts)
+- [`tests/session-authenticated-clob-client.test.ts`](../../tests/session-authenticated-clob-client.test.ts)
+- [`tests/polymarket-readonly-wallet-provider.test.ts`](../../tests/polymarket-readonly-wallet-provider.test.ts)
+- [`tests/browser-wallet-onchain.test.ts`](../../tests/browser-wallet-onchain.test.ts)
+- [`tests/live-operator-compliance-provider.test.ts`](../../tests/live-operator-compliance-provider.test.ts)
+- [`tests/production-live-account.test.ts`](../../tests/production-live-account.test.ts)
+- [`tests/production-live-prerequisites.test.ts`](../../tests/production-live-prerequisites.test.ts)
+- [`tests/default-connected-live-runtime.test.ts`](../../tests/default-connected-live-runtime.test.ts)
 - [`tests/operator-actions.test.ts`](../../tests/operator-actions.test.ts)
 - [`tests/operator-ui-server.test.ts`](../../tests/operator-ui-server.test.ts)
-- `tests/`：当前共 `62` 个 `*.test.ts` 文件
+- `tests/`：当前共 `71` 个 `*.test.ts` 文件
 
 ### 15.6 运行和报告
 
 - [`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`](../../data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md)
 - `data/paper-validation/campaigns/`
 - `data/operator/paper-campaign-isolated-verification.json`
+- `data/operator/live-production-validation.json`（ignored、本机生成、绑定当前 commit）
 - `data/operator/paper-campaign-latest.json`
 
 ---
@@ -1268,17 +1403,22 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 - Live Gate；
 - Live Runtime 和 Executor 架构；
 - 钱包公开身份证明；
-- 显式生产依赖装配；
+- 浏览器 EOA 安全 signer；
+- 会话内认证 CLOB；
+- 真实只读余额/allowance/仓位；
+- 真实 CLOB submit/cancel adapter；
+- EOA approve/redeem 和收据确认；
+- 默认生产依赖装配；
 - session lease；
 - runtime identity binding；
 - UI 控制面；
 - 审计报告和 fail-closed 约束。
 
-它仍然缺少：
+它仍然缺少的不是接口，而是外部真实事实和验收：
 
-- 生产安全宿主；
-- 真实 signer/CLOB/provider；
-- 当前基线的完整长时验证；
+- 用户本轮正式钱包连接和签名；
+- 真实钱包余额、allowance、仓位和 CLOB 凭据的验收；
+- 当前基线的长时自然市场验证（若外部审计要求重新执行）；
 - 自然成交和真实资金证据；
 - 外部审计签字；
 - 用户新的明确 Live 授权；
@@ -1291,7 +1431,8 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 安全接线：已形成
 验证框架：已形成
 Paper 证据：已形成，但自然成交覆盖有限
-生产依赖：未部署
+生产代码路径：已闭环到普通 EOA 钱包
+生产外部事实：未连接、未验收
 真实 Live：未启用
 用户授权：未发生
 ```

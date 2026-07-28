@@ -87,9 +87,8 @@ function assertChainId(value: unknown): number {
  * stores no private key, API key, seed, or reusable wallet signature.
  *
  * The returned session proves control of a public address for this localhost
- * operator process. A production host still has to attach the corresponding
- * secure signer/CLOB/provider bundle before the Live capability can become
- * available.
+ * process. The production host binds its browser signer/CLOB/provider bundle
+ * to this exact session; the proof alone never authorizes a trade.
  */
 export class LiveWalletSessionManager {
   private currentSession: LiveWalletSession | null = null;

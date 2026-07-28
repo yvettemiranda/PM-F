@@ -19,6 +19,7 @@
     "operator:control": "tsx src/cli/operator-control.ts",
     "validate:final": "tsx src/cli/validate-final.ts",
     "operational:validate": "tsx src/cli/operational-validate.ts",
+    "validate:live-production": "node --import tsx src/cli/validate-live-production-readiness.ts",
     "operator:ui": "node --import tsx prototype/live-ui/server.mjs",
     "prototype:ui": "node --import tsx prototype/live-ui/server.mjs"
   },

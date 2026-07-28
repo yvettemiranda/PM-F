@@ -9,6 +9,9 @@ const state = {
   error: null,
   notice: null,
   refreshTimer: null,
+  walletWorkerGeneration: 0,
+  walletWorkerSessionId: null,
+  openPanels: new Set(),
 };
 
 const SETTING_META = {
@@ -65,6 +68,19 @@ function displayValue(value, fallback = "—") {
 
 function moneyOrDash(value) {
   return value ? `${displayValue(value)} ${value.currency ?? "pUSD"}` : "—";
+}
+
+function microsToPusd(value) {
+  if (!/^\d+$/.test(String(value ?? ""))) return "";
+  return (Number(value) / 1_000_000).toFixed(2).replace(/\.?0+$/, "");
+}
+
+function pusdToMicros(value, label) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100) {
+    throw new Error(`${label} 必须是 0–100 之间的正数`);
+  }
+  return String(Math.round(parsed * 1_000_000));
 }
 
 function disabledAttr(disabled, reason = "") {
@@ -220,7 +236,7 @@ function settingsPanel(snapshot) {
     `;
   }).join("");
   return `
-    <details class="fold-panel reveal" style="--delay: 85ms">
+    <details class="fold-panel reveal" data-panel-id="settings" style="--delay: 85ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">⚙</i><strong>跟单设置</strong></span>
         <span class="fold-summary" id="settings-summary">${escapeHtml(settingsSummary(rules))}</span>
@@ -285,7 +301,7 @@ function runtimePanel(snapshot) {
     ? snapshot?.live?.accounts?.[0]?.status ?? "未配置"
     : paper?.account?.status ?? "未初始化";
   return `
-    <details class="fold-panel ops-panel reveal" style="--delay: 105ms">
+    <details class="fold-panel ops-panel reveal" data-panel-id="runtime" style="--delay: 105ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">▶</i><strong>运行与恢复</strong></span>
         <span class="fold-summary">${escapeHtml(
@@ -328,6 +344,7 @@ function livePanel(snapshot) {
   const walletConnected = walletSession?.status === "CONNECTED";
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
   const runtimeConfigured = snapshot?.live?.capability?.execution === "AVAILABLE";
+  const walletSetupAvailable = snapshot?.live?.capability?.walletSetup === "AVAILABLE";
   const gateReason = snapshot?.control?.controls?.live?.blockedReason ?? "Live Gate 尚不可用";
   const checkLabels = {
     FORMAL_WALLET: "正式钱包",
@@ -337,11 +354,12 @@ function livePanel(snapshot) {
     COMPLIANCE: "合规",
     GEOBLOCK: "地域限制",
     CLOCK_SAFETY: "时钟安全",
+    LIVE_LIMITS: "小额限额",
     LIVE_RUNTIME: "LiveRuntime",
     USER_AUTHORIZATION: "用户授权",
   };
   return `
-    <details class="fold-panel ops-panel reveal" style="--delay: 125ms">
+    <details class="fold-panel ops-panel reveal" data-panel-id="live" style="--delay: 125ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">◆</i><strong>Live 安全状态</strong></span>
         <span class="fold-summary">${escapeHtml(gate ? `${gate.executionMode} · ${gate.state}` : "Gate 等待数据库")}</span>
@@ -354,7 +372,7 @@ function livePanel(snapshot) {
         </div>
         <div class="live-production-config">
           <div class="production-heading">
-            <div><strong>生产钱包准备</strong><span>连接后只保存公开身份，订单签名由安全宿主/钱包签名器负责。</span></div>
+            <div><strong>生产钱包准备</strong><span>连接后只保存公开身份；每次签名和链上交易都由你的浏览器钱包确认。</span></div>
             <span class="production-status ${production?.status === "READY" ? "ready" : "pending"}">
               ${escapeHtml(production?.status === "READY" ? "可预检" : walletConnected ? "已连接" : "等待连接")}
             </span>
@@ -376,9 +394,51 @@ function livePanel(snapshot) {
           <div class="wallet-session-meta">
             <span>钱包会话：${escapeHtml(walletConnected ? "已证明地址控制权" : "未连接")}</span>
             <span>Signer：${escapeHtml(walletSession?.signerStatus === "READY"
-              ? "安全宿主已接入"
-              : walletConnected ? "等待安全宿主接入" : "未连接")}</span>
+              ? "钱包签名通道已准备"
+              : walletConnected ? "正在装配" : "未连接")}</span>
           </div>
+          <form class="live-limit-form" id="live-config-form">
+            <div class="live-limit-heading">
+              <div><strong>小额 Live 参数</strong><span>默认：10 pUSD 资金上限、1 pUSD 单笔、3 pUSD 总敞口、1 pUSD 单日止损。</span></div>
+              <span>${escapeHtml(production?.config?.limitsConfirmedAt ? "已确认" : "待确认")}</span>
+            </div>
+            <div class="live-limit-grid">
+              <label class="settings-field">
+                <span>钱包类型</span>
+                <input name="signatureType" value="EOA" type="hidden" />
+                <div class="readonly-field">普通浏览器钱包（EOA）</div>
+              </label>
+              <label class="settings-field live-wallet-field">
+                <span>交易资金地址</span>
+                <input name="tradingWalletAddress" value="${escapeHtml(
+                  production?.config?.tradingWalletAddress ?? production?.config?.walletAddress ?? "",
+                )}" placeholder="0x…" spellcheck="false" />
+              </label>
+              ${[
+                ["liveBankroll", "Live 资金上限", "liveBankrollMicros"],
+                ["maxTradeSize", "单笔上限", "maxTradeSizeMicros"],
+                ["maxExposure", "总敞口上限", "maxExposureMicros"],
+                ["maxDailyLoss", "单日亏损上限", "maxDailyLossMicros"],
+              ].map(([name, label, key]) => `
+                <label class="settings-field">
+                  <span>${label}</span>
+                  <div class="field-with-unit">
+                    <input name="${name}" type="number" min="0.01" max="100" step="0.01"
+                      value="${escapeHtml(microsToPusd(production?.config?.[key]))}" required />
+                    <em>pUSD</em>
+                  </div>
+                </label>
+              `).join("")}
+            </div>
+            <label class="live-confirm-check">
+              <input name="acceptCompliance" type="checkbox" ${production?.config?.complianceAcceptedAt ? "checked" : ""} />
+              <span>我确认本人所在地区与账户允许使用该交易服务，并接受实时地域检查失败时系统立即阻断。</span>
+            </label>
+            <div class="live-limit-confirm">
+              <input class="modal-input" name="confirmationText" value="" placeholder="输入 CONFIRM SMALL LIVE LIMITS" autocomplete="off" required />
+              <button class="confirm-button" type="submit" ${disabledAttr(Boolean(state.busy), "")}>保存并确认</button>
+            </div>
+          </form>
         </div>
         <div class="production-check-list">
           ${(production?.checks ?? []).map((item) => `
@@ -393,18 +453,23 @@ function livePanel(snapshot) {
             : `<span class="empty-inline">数据库初始化后显示 Gate 前置条件</span>`}
         </div>
         <div class="ops-actions">
+          <button class="secondary-button" data-action="live-wallet-setup" type="button"
+            ${disabledAttr(
+              Boolean(state.busy) || !walletConnected || !walletSetupAvailable,
+              walletConnected ? "钱包链上授权运行时尚未准备" : "请先连接正式钱包",
+            )}>检查 / 设置交易授权</button>
           <button class="secondary-button" data-action="live-preflight" type="button"
             ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>检查 Gate</button>
           <button class="secondary-button" data-action="live-recover" type="button"
             ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>恢复 Gate</button>
           <button class="secondary-button" data-action="live-reconcile" type="button"
-            ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "等待正式钱包与 LiveRuntime 注入")}>Live 对账</button>
+            ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "连接钱包后自动装配 LiveRuntime")}>Live 对账</button>
           <button class="secondary-button danger-button" data-action="live-disable" type="button"
             ${disabledAttr(Boolean(state.busy) || gate?.state === "LIVE_DISABLED", "Live 当前已禁用")}>紧急停用 Live</button>
         </div>
         <p class="ops-note">${escapeHtml(production?.status === "READY"
           ? "生产前置条件已齐备，下一步由用户执行正式预检与 Gate 二次确认。"
-          : `当前待完成：${blocked.join("、")}。连接钱包只证明公开地址控制权，安全宿主仍需接入 Signer 和生产适配器；浏览器永远不接触私钥。`)}</p>
+          : `当前待完成：${blocked.length ? blocked.join("、") : "钱包和确认步骤"}。连接钱包后，本机后端会自动装配生产组件；全部检查完成前不会下单，浏览器永远不接触私钥。`)}</p>
       </div>
     </details>
   `;
@@ -459,7 +524,7 @@ function eventCard(event, index) {
           </div>
         </section>
       </div>
-      <details class="trade-details">
+      <details class="trade-details" data-panel-id="trade-${index}">
         <summary class="trade-footer">
           <span><i></i>${escapeHtml(status)}</span>
           <span><span class="detail-label closed-label">查看明细</span><span class="detail-label open-label">收起明细</span><svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg></span>
@@ -476,7 +541,7 @@ function eventCard(event, index) {
 function executionDetails(snapshot) {
   const events = snapshot?.comparisons ?? [];
   return `
-    <details class="fold-panel execution-panel reveal" style="--delay: 420ms">
+    <details class="fold-panel execution-panel reveal" data-panel-id="executions" style="--delay: 420ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">≡</i><strong>执行明细</strong></span>
         <span class="fold-summary">目标、跟单决定、成交与原因</span>
@@ -540,7 +605,7 @@ function domainDetails(snapshot) {
   const liveOrderManagementAvailable = live?.capability?.orderManagement === "AVAILABLE";
   const retryableExecutionStates = new Set(["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"]);
   return `
-    <details class="fold-panel domain-panel reveal" style="--delay: 440ms">
+    <details class="fold-panel domain-panel reveal" data-panel-id="backend" style="--delay: 440ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">▦</i><strong>后台明细</strong></span>
         <span class="fold-summary">信号 · 市场 · 风险 · 账本 · 日志 · 恢复</span>
@@ -619,6 +684,12 @@ function errorView() {
 
 function render() {
   const app = document.querySelector("#app");
+  for (const panel of app.querySelectorAll("details[data-panel-id]")) {
+    const panelId = panel.dataset.panelId;
+    if (!panelId) continue;
+    if (panel.open) state.openPanels.add(panelId);
+    else state.openPanels.delete(panelId);
+  }
   if (state.loading) {
     app.innerHTML = loadingView();
     return;
@@ -650,6 +721,9 @@ function render() {
       </main>
     </div>
   `;
+  for (const panel of app.querySelectorAll("details[data-panel-id]")) {
+    panel.open = state.openPanels.has(panel.dataset.panelId);
+  }
   bindEvents();
 }
 
@@ -679,7 +753,9 @@ async function api(path, init = {}) {
 
 async function refresh(silent = false) {
   const activeEditor = silent
-    && document.activeElement?.matches("#target-input, #settings-form input");
+    && document.activeElement?.matches(
+      "#target-input, #settings-form input, #live-config-form input, #live-config-form select",
+    );
   if (!silent) state.loading = state.snapshot === null;
   state.refreshing = true;
   if (!state.snapshot) render();
@@ -687,6 +763,7 @@ async function refresh(silent = false) {
     const data = await api("/api/operator/snapshot", { method: "GET", headers: {} });
     state.snapshot = data;
     state.error = null;
+    if (state.snapshot?.live?.walletSession?.status === "CONNECTED") startWalletRequestWorker();
   } catch (error) {
     state.error = error.message;
   } finally {
@@ -800,7 +877,24 @@ async function connectLiveWallet() {
     if (typeof walletAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
       throw new Error("钱包没有返回有效地址");
     }
-    const chainId = await provider.request({ method: "eth_chainId" });
+    let chainId = await provider.request({ method: "eth_chainId" });
+    const parsedChainId = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
+      ? Number.parseInt(chainId, 16)
+      : Number.NaN;
+    if (parsedChainId !== 137) {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x89" }],
+      });
+      chainId = await provider.request({ method: "eth_chainId" });
+      if (
+        typeof chainId !== "string"
+        || !/^0x[0-9a-f]+$/i.test(chainId)
+        || Number.parseInt(chainId, 16) !== 137
+      ) {
+        throw new Error("请把钱包切换到 Polygon 主网");
+      }
+    }
     const challenge = await api("/api/operator/live/wallet-session/challenge", {
       body: JSON.stringify({ chainId }),
     });
@@ -818,7 +912,8 @@ async function connectLiveWallet() {
         chainId,
         signature,
       }),
-    }, { success: "钱包已连接，正在等待生产安全宿主完成装配。" });
+    }, { success: "钱包已连接，Live 签名通道已准备。" });
+    startWalletRequestWorker();
   } catch (error) {
     setNotice("error", "钱包未连接", error.message ?? "钱包连接被取消或未通过安全证明。");
   }
@@ -828,12 +923,130 @@ async function disconnectLiveWallet() {
   const sessionId = state.snapshot?.live?.walletSession?.sessionId;
   if (!sessionId) return;
   try {
+    state.walletWorkerGeneration += 1;
+    state.walletWorkerSessionId = null;
     await runAction("断开钱包", "/api/operator/live/wallet-session/disconnect", {
       body: JSON.stringify({ sessionId }),
     }, { success: "钱包会话已断开，Live 继续保持禁用。" });
   } catch {
     // runAction already surfaces the backend reason.
   }
+}
+
+async function saveLiveConfiguration(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    const tradingWalletAddress = form.elements.tradingWalletAddress.value.trim();
+    const body = {
+      signatureType: form.elements.signatureType.value,
+      ...(tradingWalletAddress ? { tradingWalletAddress } : {}),
+      liveBankrollMicros: pusdToMicros(form.elements.liveBankroll.value, "Live 资金上限"),
+      maxTradeSizeMicros: pusdToMicros(form.elements.maxTradeSize.value, "单笔上限"),
+      maxExposureMicros: pusdToMicros(form.elements.maxExposure.value, "总敞口上限"),
+      maxDailyLossMicros: pusdToMicros(form.elements.maxDailyLoss.value, "单日亏损上限"),
+      confirmationText: form.elements.confirmationText.value.trim(),
+      acceptCompliance: form.elements.acceptCompliance.checked,
+    };
+    const result = await runAction("保存小额 Live 参数", "/api/operator/live/configuration", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }, { success: "" });
+    if (result.reconnectRequired) {
+      setNotice(
+        "success",
+        "Live 参数已保存",
+        "为了让新参数绑定到新的安全会话，钱包已自动断开；请重新连接一次。",
+      );
+    } else {
+      setNotice(
+        "success",
+        "Live 参数已保存",
+        "接下来连接正式钱包，再完成交易授权、生产预检和最终二次确认。",
+      );
+    }
+    render();
+  } catch (error) {
+    setNotice("error", "Live 参数未保存", error.message);
+  }
+}
+
+function walletRequestError(error) {
+  if (error && typeof error === "object") {
+    return String(error.message ?? error.code ?? "钱包拒绝了请求");
+  }
+  return String(error ?? "钱包拒绝了请求");
+}
+
+async function completeWalletRequest(sessionId, requestId, result) {
+  await api("/api/operator/live/wallet-requests/complete", {
+    body: JSON.stringify({ sessionId, requestId, ...result }),
+  });
+}
+
+async function processWalletRequest(provider, session, request) {
+  const activeChainId = await provider.request({ method: "eth_chainId" });
+  const parsedChainId = typeof activeChainId === "string" && /^0x[0-9a-f]+$/i.test(activeChainId)
+    ? Number.parseInt(activeChainId, 16)
+    : Number.NaN;
+  if (parsedChainId !== request.chainId || parsedChainId !== session.chainId) {
+    throw new Error("钱包网络已变化，请切回 Polygon 主网");
+  }
+  const accounts = await provider.request({ method: "eth_accounts" });
+  const activeAddress = Array.isArray(accounts) ? accounts[0] : "";
+  if (typeof activeAddress !== "string"
+    || activeAddress.toLowerCase() !== request.walletAddress.toLowerCase()
+    || activeAddress.toLowerCase() !== session.walletAddress.toLowerCase()) {
+    throw new Error("钱包账户已变化，请重新连接");
+  }
+  const result = await provider.request({
+    method: request.method,
+    params: request.params,
+  });
+  if (typeof result !== "string") throw new Error("钱包没有返回有效结果");
+  await completeWalletRequest(session.sessionId, request.requestId, { result });
+}
+
+async function walletRequestWorker(generation) {
+  const provider = window.ethereum;
+  while (generation === state.walletWorkerGeneration) {
+    const session = state.snapshot?.live?.walletSession;
+    if (!provider || typeof provider.request !== "function" || session?.status !== "CONNECTED") return;
+    try {
+      const data = await api(
+        `/api/operator/live/wallet-requests/next?sessionId=${encodeURIComponent(session.sessionId)}`,
+        { method: "GET", headers: {} },
+      );
+      if (!data.request) {
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+        continue;
+      }
+      try {
+        await processWalletRequest(provider, session, data.request);
+        setNotice("success", "钱包操作已确认", data.request.purpose);
+      } catch (error) {
+        await completeWalletRequest(session.sessionId, data.request.requestId, {
+          error: walletRequestError(error),
+        }).catch(() => undefined);
+        setNotice("error", "钱包操作未完成", walletRequestError(error));
+      }
+    } catch (error) {
+      if (error.code === "LIVE_WALLET_SESSION_INVALIDATED"
+        || error.code === "LIVE_WALLET_SESSION_NOT_FOUND") return;
+      await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+    }
+  }
+}
+
+function startWalletRequestWorker() {
+  const sessionId = state.snapshot?.live?.walletSession?.sessionId;
+  if (!sessionId || state.walletWorkerSessionId === sessionId) return;
+  state.walletWorkerGeneration += 1;
+  state.walletWorkerSessionId = sessionId;
+  const generation = state.walletWorkerGeneration;
+  void walletRequestWorker(generation).finally(() => {
+    if (generation === state.walletWorkerGeneration) state.walletWorkerSessionId = null;
+  });
 }
 
 async function liveRequest() {
@@ -863,7 +1076,7 @@ function showLiveConfirmation() {
       try {
         await runAction("确认 Live", "/api/operator/live/confirm", {
           body: JSON.stringify({ actor: "LOCAL_OPERATOR", confirmationText }),
-        }, { success: "Live Gate 已确认。" });
+        }, { success: "Live 已确认并启动，小额实盘开始受 Gate 持续监控。" });
       } catch {
         // runAction and the following modal contain the authoritative reason.
       }
@@ -909,6 +1122,20 @@ async function actionClick(action, input = {}) {
   if (action === "live-recover") await runAction("恢复 Live Gate", "/api/operator/live/recover", { body: "{}" }, { success: "Live Gate 恢复检查完成。" });
   if (action === "live-wallet-connect") await connectLiveWallet();
   if (action === "live-wallet-disconnect") await disconnectLiveWallet();
+  if (action === "live-wallet-setup") {
+    showModal(
+      "设置交易授权",
+      "<p>系统会先检查 Exchange V3 的 pUSD 与仓位授权；只有额度不足时才请求钱包发送链上交易。pUSD 授权金额不会超过已确认的 Live 资金上限。</p>",
+      "钱包可能连续显示两次交易确认。每笔都必须由你在钱包中单独批准。",
+      "开始检查",
+      async () => {
+        closeModal();
+        await runAction("设置钱包交易授权", "/api/operator/live/wallet-setup", {
+          body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_WALLET_ALLOWANCE_SETUP" }),
+        }, { success: "交易授权检查完成，额度已刷新。" });
+      },
+    );
+  }
   if (action === "live-disable") {
     showModal("紧急停用 Live", "<p>这会把执行模式切回 PAPER，并记录一条后台审计。</p>", "确认后立即生效。", "确认停用", async () => {
       await runAction("紧急停用 Live", "/api/operator/live/emergency-disable", { body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_EMERGENCY_DISABLE" }) }, { success: "Live 已停用。" });
@@ -922,6 +1149,7 @@ function bindEvents() {
   document.querySelector("#apply-target")?.addEventListener("click", applyTarget);
   document.querySelector("#settings-form")?.addEventListener("submit", saveSettings);
   document.querySelector("#settings-default")?.addEventListener("click", restoreDefaults);
+  document.querySelector("#live-config-form")?.addEventListener("submit", saveLiveConfiguration);
   document.querySelector("#target-input")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") applyTarget();
   });
@@ -998,3 +1226,6 @@ document.addEventListener("keydown", (event) => {
 
 refresh();
 state.refreshTimer = window.setInterval(() => refresh(true), 3000);
+window.setTimeout(() => {
+  if (state.snapshot?.live?.walletSession?.status === "CONNECTED") startWalletRequestWorker();
+}, 0);

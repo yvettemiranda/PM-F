@@ -2538,6 +2538,20 @@ body::after {
   box-shadow: 0 0 0 3px rgba(255, 204, 0, 0.2);
 }
 
+.readonly-field {
+  min-height: 38px;
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .input-suffix em {
   top: 16px;
   right: 12px;
@@ -3158,4 +3172,107 @@ body::after {
   background: rgba(255, 255, 255, 0.64);
   color: var(--ink, #4c453c);
   font-size: 12px;
+}
+
+.live-limit-form {
+  display: grid;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(97, 118, 103, 0.28);
+}
+
+.live-limit-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.live-limit-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.live-limit-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.live-limit-heading span {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.live-limit-heading > span {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--green);
+  background: var(--green-soft);
+  font-weight: 800;
+}
+
+.live-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.live-limit-grid .live-wallet-field {
+  grid-column: span 2;
+}
+
+.live-confirm-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.live-confirm-check input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--green);
+}
+
+.live-limit-confirm {
+  display: flex;
+  gap: 10px;
+}
+
+.live-limit-confirm .modal-input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.live-limit-confirm .confirm-button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 760px) {
+  .live-limit-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .live-limit-grid .live-wallet-field {
+    grid-column: 1 / -1;
+  }
+
+  .live-limit-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 440px) {
+  .live-limit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .live-limit-grid .live-wallet-field {
+    grid-column: auto;
+  }
 }

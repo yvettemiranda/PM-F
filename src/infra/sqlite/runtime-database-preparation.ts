@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { VERSIONS } from "../../domain/versioning.js";
@@ -384,6 +392,7 @@ export async function prepareRuntimeDatabase(input: {
   const databasePath = resolve(input.databasePath);
   mkdirSync(dirname(databasePath), { recursive: true });
   const existed = existsSync(databasePath);
+  if (existed) chmodSync(databasePath, 0o600);
   let migrationRequired = existed;
   if (existed) {
     const database = new DatabaseSync(databasePath, { readOnly: true });
@@ -416,6 +425,7 @@ export async function prepareRuntimeDatabase(input: {
     } finally {
       source.close();
     }
+    chmodSync(backupPath, 0o600);
     verifyDatabase(backupPath, "VALID_PREFIX");
     await sha256(backupPath); // force a complete readable-file pass before migration
     pruneBackups(
@@ -432,6 +442,7 @@ export async function prepareRuntimeDatabase(input: {
   } finally {
     migrations.close();
   }
+  chmodSync(databasePath, 0o600);
   verifyDatabase(databasePath);
   return {
     databasePath,

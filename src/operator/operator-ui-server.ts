@@ -13,6 +13,10 @@ import {
   type OperatorRuntimeActions,
 } from "./operator-actions.js";
 import {
+  OPERATOR_DATABASE_FILE,
+  operatorRuntimeSafety,
+} from "./operator-mutation-guard.js";
+import {
   resetSelectedRulesetProfile,
   saveSelectedRulesetProfile,
   type RulesetValues,
@@ -22,12 +26,14 @@ import { saveSelectedTargetWallet } from "./target-wallet.js";
 import {
   liveProductionReadiness,
   saveLiveProductionConfig,
+  type LiveProductionSignatureType,
 } from "./live-production-readiness.js";
 import {
   LiveWalletSessionManager,
   type LiveWalletRuntimeBinding,
   type LiveWalletSession,
 } from "./live-wallet-session.js";
+import { LiveWalletRequestBroker } from "./live-wallet-request-broker.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -47,12 +53,24 @@ export interface OperatorUiServerOptions {
   liveGateActions?: OperatorLiveGateActions;
   liveRuntimeActions?: OperatorLiveRuntimeActions;
   walletSessionManager?: LiveWalletSessionManager;
+  walletRequestBroker?: LiveWalletRequestBroker;
   connectedLiveRuntimeFactory?: (input: {
     projectRoot: string;
     walletSession: LiveWalletSession;
     walletSessionBinding: LiveWalletRuntimeBinding;
-  }) => Promise<OperatorLiveRuntimeActions>;
+  }) => Promise<
+    OperatorLiveRuntimeActions
+    | {
+      runtimeActions: OperatorLiveRuntimeActions;
+      gateActions: OperatorLiveGateActions;
+      dispose?: () => void;
+    }
+  >;
   now?: () => Date;
+}
+
+export interface OperatorUiServer extends Server {
+  shutdownSafety(): Promise<void>;
 }
 
 export type { OperatorLiveGateActions, OperatorLiveRuntimeActions, OperatorRuntimeActions };
@@ -77,6 +95,7 @@ interface RequestContext {
   liveGateActions: OperatorLiveGateActions;
   liveRuntimeActions: MutableOperatorLiveRuntimeActions;
   walletSessionManager: LiveWalletSessionManager;
+  walletRequestBroker: LiveWalletRequestBroker;
 }
 
 class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
@@ -85,6 +104,7 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
   private walletSessionBinding: LiveWalletRuntimeBinding | null = null;
   private walletSessionInvalidationReason: string | null = null;
   private unsubscribeWalletSession: (() => void) | null = null;
+  private disposeCurrent: (() => void) | null = null;
 
   get capability() {
     this.assertWalletSession();
@@ -105,9 +125,15 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
     };
   }
 
-  install(actions: OperatorLiveRuntimeActions, walletSessionBinding?: LiveWalletRuntimeBinding): void {
+  install(
+    actions: OperatorLiveRuntimeActions,
+    walletSessionBinding?: LiveWalletRuntimeBinding,
+    dispose?: () => void,
+  ): void {
     this.unsubscribeWalletSession?.();
     this.unsubscribeWalletSession = null;
+    this.disposeCurrent?.();
+    this.disposeCurrent = dispose ?? null;
     this.current = actions;
     this.walletSessionBinding = walletSessionBinding ?? null;
     this.walletSessionInvalidationReason = null;
@@ -119,10 +145,18 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
           reason: `LIVE_WALLET_SESSION_${reason}`,
         }).then((result) => {
           if (!result.accepted) throw new Error(result.code);
+        }).finally(() => {
+          this.dispose();
         });
       });
       walletSessionBinding.assertCurrent();
     }
+  }
+
+  dispose(): void {
+    const dispose = this.disposeCurrent;
+    this.disposeCurrent = null;
+    dispose?.();
   }
 
   start(input: Parameters<OperatorLiveRuntimeActions["start"]>[0]) {
@@ -159,6 +193,18 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
     return this.current.retryExecution(input);
   }
 
+  prepareWallet(input: { actor: string; reason: string }) {
+    const failure = this.walletSessionFailure();
+    if (failure !== null) return Promise.resolve(failure);
+    if (this.current.prepareWallet === undefined) {
+      return Promise.resolve({
+        accepted: false,
+        code: "LIVE_WALLET_SETUP_NOT_CONFIGURED",
+      });
+    }
+    return this.current.prepareWallet(input);
+  }
+
   private assertWalletSession(): void {
     if (this.walletSessionBinding === null || this.walletSessionInvalidationReason !== null) return;
     try {
@@ -176,6 +222,46 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
       code: "LIVE_WALLET_SESSION_INVALIDATED",
       details: { reason: this.walletSessionInvalidationReason },
     };
+  }
+}
+
+class MutableOperatorLiveGateActions implements OperatorLiveGateActions {
+  private current: OperatorLiveGateActions;
+  private unsubscribeWalletSession: (() => void) | null = null;
+
+  constructor(private readonly fallback: OperatorLiveGateActions) {
+    this.current = fallback;
+  }
+
+  install(actions: OperatorLiveGateActions, walletSessionBinding: LiveWalletRuntimeBinding): void {
+    this.unsubscribeWalletSession?.();
+    this.current = actions;
+    this.unsubscribeWalletSession = walletSessionBinding.onInvalidated(() => {
+      this.current = this.fallback;
+      this.unsubscribeWalletSession?.();
+      this.unsubscribeWalletSession = null;
+    });
+    walletSessionBinding.assertCurrent();
+  }
+
+  preflight() {
+    return this.current.preflight();
+  }
+
+  requestActivation(input: Parameters<OperatorLiveGateActions["requestActivation"]>[0]) {
+    return this.current.requestActivation(input);
+  }
+
+  confirmActivation(input: Parameters<OperatorLiveGateActions["confirmActivation"]>[0]) {
+    return this.current.confirmActivation(input);
+  }
+
+  emergencyDisable(input: Parameters<OperatorLiveGateActions["emergencyDisable"]>[0]) {
+    return this.current.emergencyDisable(input);
+  }
+
+  recover() {
+    return this.current.recover();
   }
 }
 
@@ -291,6 +377,8 @@ function freshSnapshot(
     : operatorDashboardSnapshot(options.projectRoot, { now: options.now });
   snapshot.live.capability.execution = liveRuntimeActions.capability.execution;
   snapshot.live.capability.orderManagement = liveRuntimeActions.capability.orderManagement;
+  snapshot.live.capability.walletSetup = liveRuntimeActions.capability.walletSetup
+    ?? "PENDING_PREREQUISITES";
   snapshot.live.walletSession = walletSessionManager.snapshot(options.now);
   if (
     snapshot.live.walletSession.status === "CONNECTED"
@@ -329,6 +417,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     liveGateActions,
     liveRuntimeActions,
     walletSessionManager,
+    walletRequestBroker,
   } = context;
   const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(
     options,
@@ -345,6 +434,38 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "GET" && path === "/api/operator/live/wallet-session") {
     success(response, walletSessionManager.snapshot(options.now));
+    return;
+  }
+
+  if (request.method === "GET" && path === "/api/operator/live/wallet-requests/next") {
+    const sessionId = url.searchParams.get("sessionId");
+    if (!sessionId) {
+      throw new HttpError(400, "LIVE_WALLET_SESSION_ID_REQUIRED", "缺少钱包会话标识。");
+    }
+    try {
+      success(response, { request: walletRequestBroker.next(sessionId) });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      throw new HttpError(409, code, "钱包签名请求所属会话已失效。");
+    }
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/live/wallet-requests/complete") {
+    const body = await readJson(request);
+    try {
+      walletRequestBroker.complete({
+        sessionId: stringField(body, "sessionId"),
+        requestId: stringField(body, "requestId"),
+        ...(body.result === undefined ? {} : { result: stringField(body, "result") }),
+        ...(body.error === undefined ? {} : { error: stringField(body, "error") }),
+      });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      const statusCode = code === "LIVE_WALLET_REQUEST_NOT_FOUND" ? 404 : 409;
+      throw new HttpError(statusCode, code, "钱包签名请求结果未被接受。");
+    }
+    success(response, { accepted: true });
     return;
   }
 
@@ -393,13 +514,24 @@ async function handleApi(context: RequestContext): Promise<void> {
             session.sessionId,
             options.now,
           );
-          const actions = await options.connectedLiveRuntimeFactory({
+          const connected = await options.connectedLiveRuntimeFactory({
             projectRoot: options.projectRoot,
             walletSession: session,
             walletSessionBinding,
           });
           walletSessionBinding.assertCurrent();
-          liveRuntimeActions.install(actions, walletSessionBinding);
+          if ("runtimeActions" in connected) {
+            liveRuntimeActions.install(
+              connected.runtimeActions,
+              walletSessionBinding,
+              connected.dispose,
+            );
+            if (liveGateActions instanceof MutableOperatorLiveGateActions) {
+              liveGateActions.install(connected.gateActions, walletSessionBinding);
+            }
+          } else {
+            liveRuntimeActions.install(connected, walletSessionBinding);
+          }
         }
       } catch (error) {
         await walletSessionManager.disconnect(session.sessionId);
@@ -426,22 +558,81 @@ async function handleApi(context: RequestContext): Promise<void> {
         : 404;
       throw new HttpError(statusCode, code, statusCode === 503 ? "钱包会话已断开，但 Live 紧急停用需要重试。" : "钱包会话不存在。");
     }
+    if (sessionId !== undefined) walletRequestBroker.cancelSession(sessionId);
     success(response, { session: walletSessionManager.snapshot(options.now), snapshot: dashboardSnapshot() });
     return;
   }
 
   if (request.method === "PUT" && path === "/api/operator/live/configuration") {
     const body = await readJson(request);
-    const walletAddress = stringField(body, "walletAddress");
-    const network = stringField(body, "network").toUpperCase();
-    if (network !== "POLYGON" && network !== "POLYGON_AMOY") {
+    const networkValue = body.network === undefined ? undefined : stringField(body, "network").toUpperCase();
+    if (networkValue !== undefined && networkValue !== "POLYGON" && networkValue !== "POLYGON_AMOY") {
       throw new HttpError(400, "LIVE_PRODUCTION_NETWORK_INVALID", "network 只能是 POLYGON 或 POLYGON_AMOY。");
     }
-    const config = saveLiveProductionConfig(options.projectRoot, {
-      walletAddress,
-      network,
+    const signatureType = body.signatureType === undefined
+      ? undefined
+      : stringField(body, "signatureType").toUpperCase();
+    if (
+      signatureType !== undefined
+      && !["EOA", "POLY_PROXY", "POLY_GNOSIS_SAFE", "POLY_1271"].includes(signatureType)
+    ) {
+      throw new HttpError(400, "LIVE_PRODUCTION_SIGNATURE_TYPE_INVALID", "钱包类型不受支持。");
+    }
+    const confirmLimits = body.confirmationText === undefined
+      ? false
+      : stringField(body, "confirmationText") === "CONFIRM SMALL LIVE LIMITS";
+    if (body.confirmationText !== undefined && !confirmLimits) {
+      throw new HttpError(400, "LIVE_LIMIT_CONFIRMATION_TEXT_MISMATCH", "小额 Live 限额确认词不正确。");
+    }
+    const acceptCompliance = body.acceptCompliance === true;
+    if (body.acceptCompliance !== undefined && typeof body.acceptCompliance !== "boolean") {
+      throw new HttpError(400, "LIVE_COMPLIANCE_ACCEPTANCE_INVALID", "合规确认必须是布尔值。");
+    }
+    let config;
+    try {
+      config = saveLiveProductionConfig(options.projectRoot, {
+        ...(body.walletAddress === undefined ? {} : { walletAddress: stringField(body, "walletAddress") }),
+        ...(body.tradingWalletAddress === undefined
+          ? {}
+          : { tradingWalletAddress: stringField(body, "tradingWalletAddress") }),
+        ...(signatureType === undefined
+          ? {}
+          : { signatureType: signatureType as LiveProductionSignatureType }),
+        ...(networkValue === undefined
+          ? {}
+          : { network: networkValue as "POLYGON" | "POLYGON_AMOY" }),
+        ...(body.liveBankrollMicros === undefined
+          ? {}
+          : { liveBankrollMicros: stringField(body, "liveBankrollMicros") }),
+        ...(body.maxTradeSizeMicros === undefined
+          ? {}
+          : { maxTradeSizeMicros: stringField(body, "maxTradeSizeMicros") }),
+        ...(body.maxExposureMicros === undefined
+          ? {}
+          : { maxExposureMicros: stringField(body, "maxExposureMicros") }),
+        ...(body.maxDailyLossMicros === undefined
+          ? {}
+          : { maxDailyLossMicros: stringField(body, "maxDailyLossMicros") }),
+        confirmLimits,
+        acceptCompliance,
+      }, options.now);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      throw new HttpError(400, code, "Live 生产配置未通过校验。");
+    }
+    const connectedSession = walletSessionManager.snapshot(options.now);
+    if (connectedSession.status === "CONNECTED" && connectedSession.sessionId !== null) {
+      await walletSessionManager.disconnect(connectedSession.sessionId);
+      walletRequestBroker.cancelSession(
+        connectedSession.sessionId,
+        "LIVE_CONFIGURATION_CHANGED_RECONNECT_REQUIRED",
+      );
+    }
+    success(response, {
+      config,
+      reconnectRequired: connectedSession.status === "CONNECTED",
+      snapshot: dashboardSnapshot(),
     });
-    success(response, { config, snapshot: dashboardSnapshot() });
     return;
   }
 
@@ -529,25 +720,52 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "POST" && path === "/api/operator/live/confirm") {
     const body = await readJson(request);
+    const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
     const result = await liveGateActions.confirmActivation({
-      actor: optionalString(body, "actor", "LOCAL_OPERATOR"),
+      actor,
       confirmationText: stringField(body, "confirmationText"),
     });
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 二次确认未通过。", result));
       return;
     }
-    success(response, { result, snapshot: dashboardSnapshot() });
+    const runtime = await liveRuntimeActions.start({
+      actor,
+      reason: "LIVE_GATE_CONFIRMED_START",
+    });
+    if (!runtime.accepted) {
+      await liveGateActions.emergencyDisable({
+        actor: "SYSTEM",
+        reason: `LIVE_RUNTIME_START_ROLLBACK:${runtime.code}`,
+      });
+      throw new HttpError(
+        409,
+        runtime.code,
+        "Live Gate 已回滚：运行时启动失败。",
+        { gate: result, runtime },
+      );
+    }
+    success(response, { result, runtime, snapshot: dashboardSnapshot() }, 202);
     return;
   }
 
   if (request.method === "POST" && path === "/api/operator/live/emergency-disable") {
     const body = await readJson(request);
+    const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
+    const reason = optionalString(body, "reason", "UI_EMERGENCY_DISABLE");
     await liveGateActions.emergencyDisable({
-      actor: optionalString(body, "actor", "LOCAL_OPERATOR"),
-      reason: optionalString(body, "reason", "UI_EMERGENCY_DISABLE"),
+      actor,
+      reason,
     });
-    success(response, { result: { accepted: true }, snapshot: dashboardSnapshot() });
+    const runtime = await liveRuntimeActions.stop({ actor, reason });
+    success(response, {
+      result: {
+        accepted: true,
+        runtimeStopped: runtime.accepted,
+        runtimeCode: runtime.code,
+      },
+      snapshot: dashboardSnapshot(),
+    }, 202);
     return;
   }
 
@@ -584,6 +802,17 @@ async function handleApi(context: RequestContext): Promise<void> {
     });
     if (!result.accepted) throw new HttpError(409, result.code, "Live 对账未执行。", result);
     success(response, { result, snapshot: dashboardSnapshot() }, 202);
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/live/wallet-setup") {
+    const body = await readJson(request);
+    const result = await liveRuntimeActions.prepareWallet({
+      actor: optionalString(body, "actor", "LOCAL_OPERATOR"),
+      reason: optionalString(body, "reason", "UI_WALLET_ALLOWANCE_SETUP"),
+    });
+    if (!result.accepted) throw new HttpError(409, result.code, "钱包交易授权未完成。", result);
+    success(response, { result, snapshot: dashboardSnapshot() });
     return;
   }
 
@@ -641,13 +870,18 @@ function staticRootFromOptions(options: OperatorUiServerOptions): string {
     : resolve(fileURLToPath(new URL("../../prototype/live-ui/", import.meta.url)));
 }
 
-export function createOperatorUiServer(options: OperatorUiServerOptions): Server {
+export function createOperatorUiServer(options: OperatorUiServerOptions): OperatorUiServer {
   const runtimeActions = options.runtimeActions ?? new DefaultOperatorRuntimeActions(options.projectRoot);
-  const liveGateActions = options.liveGateActions ?? new DefaultOperatorLiveGateActions(options.projectRoot);
+  const liveGateActions = new MutableOperatorLiveGateActions(
+    options.liveGateActions ?? new DefaultOperatorLiveGateActions(options.projectRoot),
+  );
   const liveRuntimeActions = new MutableOperatorLiveRuntimeActions(
     options.liveRuntimeActions ?? new UnconfiguredOperatorLiveRuntimeActions(),
   );
   const walletSessionManager = options.walletSessionManager ?? new LiveWalletSessionManager();
+  const walletRequestBroker = options.walletRequestBroker ?? new LiveWalletRequestBroker({
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
   const staticRoot = staticRootFromOptions(options);
   const server = createServer(async (request, response) => {
     setHeaders(response);
@@ -666,6 +900,7 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Server
           liveGateActions,
           liveRuntimeActions,
           walletSessionManager,
+          walletRequestBroker,
         });
       } else if (request.method === "GET" || request.method === "HEAD") {
         await serveStatic(response, staticRoot, url.pathname);
@@ -676,14 +911,59 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Server
       if (!response.headersSent) failure(response, error);
       else response.destroy(error instanceof Error ? error : undefined);
     }
-  });
+  }) as OperatorUiServer;
+  server.shutdownSafety = async (): Promise<void> => {
+    const failures: string[] = [];
+    let shouldDisableGate = false;
+    try {
+      const safety = operatorRuntimeSafety(options.projectRoot);
+      shouldDisableGate = safety.databaseAvailable
+        && safety.liveGateState !== "LIVE_DISABLED";
+    } catch (error) {
+      failures.push(`SAFETY:${error instanceof Error ? error.message : String(error)}`);
+      shouldDisableGate = existsSync(resolve(options.projectRoot, OPERATOR_DATABASE_FILE));
+    }
+    if (shouldDisableGate) {
+      try {
+        await liveGateActions.emergencyDisable({
+          actor: "SYSTEM",
+          reason: "OPERATOR_UI_SHUTDOWN",
+        });
+      } catch (error) {
+        failures.push(`GATE:${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const session = walletSessionManager.snapshot(options.now);
+    if (session.status === "CONNECTED" && session.sessionId !== null) {
+      try {
+        await walletSessionManager.disconnect(session.sessionId);
+      } catch (error) {
+        failures.push(`WALLET:${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        walletRequestBroker.cancelSession(
+          session.sessionId,
+          "LIVE_OPERATOR_UI_SHUTDOWN",
+        );
+      }
+    } else if (liveRuntimeActions.capability.execution === "AVAILABLE") {
+      const stopped = await liveRuntimeActions.stop({
+        actor: "SYSTEM",
+        reason: "OPERATOR_UI_SHUTDOWN",
+      });
+      if (!stopped.accepted) failures.push(`RUNTIME:${stopped.code}`);
+    }
+    liveRuntimeActions.dispose();
+    if (failures.length > 0) {
+      throw new Error(`OPERATOR_UI_SAFE_SHUTDOWN_FAILED:${failures.join(";")}`);
+    }
+  };
   return server;
 }
 
 export async function startOperatorUiServer(
   options: OperatorUiServerOptions,
   port = Number(process.env.OPERATOR_UI_PORT ?? 4173),
-): Promise<Server> {
+): Promise<OperatorUiServer> {
   const server = createOperatorUiServer(options);
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);

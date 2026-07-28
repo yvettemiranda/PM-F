@@ -19,7 +19,7 @@
 - 不可变 `signal_execution_context`：为 Paper 输出交易时间、市场结束时间状态、执行截止时间、市场元数据和逐 BUY 资金决策
 - Paper Executor：独立模拟账户、资金 reservation、完整深度 VWAP、模拟 FAK、独立 Position/Execution、止损、结算和审计账本
 - Phase 1A 架构优化：统一 Executor Interface、Risk Manager、Risk Decision 全链路关联、Portfolio Projection Service、Ruleset Registry、Live 安全占位、Settlement Service、PnL Model、不可变 Audit Log、Position `FROZEN` 保护态和核心对象版本字段
-- Phase 2/3：Live Gate Safety Layer、Live Executor 架构、Order/CLOB/Signer/Wallet/Redeem adapters、Live Order/Fill/Position/Ledger/Reconciliation/Crash Recovery/Emergency Stop。默认仍使用 disabled/fake adapter，不默认创建真实交易能力
+- Phase 2/3：Live Gate Safety Layer、Live Executor 架构、Order/CLOB/Signer/Wallet/Redeem adapters、Live Order/Fill/Position/Ledger/Reconciliation/Crash Recovery/Emergency Stop。可复用核心的无依赖构造仍默认使用 disabled/fake adapter；localhost Operator UI 只在正式 EOA 会话验证通过后自动装配生产 adapter
 - Phase 4：Final Validation Framework。统一验证入口会在 isolated snapshot database 上运行 Paper Replay、Consistency、Crash Recovery、Reconciliation、Live Gate fake path 和 Observe Only 检查，并生成可追溯 Validation Report
 - Phase 5：Operational Validation Framework。新增 Operational Runner、单实例锁、心跳、健康快照、运行 checkpoint、shadow risk observation、一致性/崩溃恢复检查和 Operational Report，用于证明系统可以被长期验证，而不是打开真实交易
 - Production hardening：公开 API 分页/运行时契约校验、Activity 时间游标增量采集、WAL-safe SQLite Online Backup、内容寻址压缩 capture、不可变证据表、历史 ruleset 执行、Live 信号序列游标与坏消息隔离、完整订单簿执行计划、真实/恢复共用 fill 校验、Live 账户资金口径绑定和外部现金/仓位对账
@@ -42,7 +42,22 @@
 
 目标钱包不再写死在启动脚本里。项目默认值在 `config/default-target-wallet.txt`，操作员选择写入被 Git 忽略的 `data/operator/target-wallet.txt`；因此换地址不会改变源码版本，也不会把旧地址的 Campaign、账户、基线或证明重新绑定。运行任务或残留安全锁存在时拒绝换地址。
 
- localhost `Hecatonchires` UI 复用 `operator-control` 控制面和 `operator-dashboard` 只读投影：它统一展示目标钱包、数据库安全状态、Campaign、Observe、Signal、Market、Risk、Paper/Live 账户、资金、执行、持仓、订单、成交、盈亏、账本、日志索引、对账、恢复、隔离异常、审计和目标/我的对照事件。Live 生产路径会展示正式钱包、Signer、只读余额、认证 CLOB、合规、地域、时钟、运行时和用户授权等逐项 readiness；页面支持通用 EIP-1193 钱包连接，后端以绑定 chainId 的一次性 `personal_sign` challenge 证明公开地址控制权，只保存公开地址、网络和内存会话，不接受私钥。连接后的 `LiveWalletSession` 可通过 `connectedLiveRuntimeFactory` 交给 `assembleConnectedLiveRuntime`，由受授权宿主一次性显式提供 secure signer、只读余额、认证 CLOB 和安全 provider；装配前会再次核对 signer、wallet provider 自身读取的真实 chainId 与会话地址，Polymarket proxy/funder 地址继续由既有 `LiveIdentityBinding` 核对，任何漂移都拒绝。钱包会话断开、过期或切换时，绑定运行时会中止并紧急停用；后台会等待停用结果并在失败时重试一次，仍失败则返回明确错误。Live 订单取消、执行重试和运行时恢复入口会根据后台 capability 开启；钱包和生产适配器未注入时以“待前置条件”状态保留入口并由后端拒绝。原始订单请求/响应与日志正文不进入 localhost 快照。若未来由受授权宿主显式注入完整 `LiveRuntime`/`LiveExecutor`，还需通过 `ConfiguredOperatorLiveRuntimeActions` 的 production capability overrides 提供各项真实 provider 已注入的事实，才会逐项解除 readiness 阻断；UI 服务器不会发现或加载凭据。Paper 策略/风险参数以完整、严格校验的不可变 profile 写入被 Git 忽略的 `data/operator/ruleset-profile.json`，进程启动时冻结；参数变化会改变 Paper ruleset/core identity，只能用于下一次 Campaign，不能把不同参数的验证时长混在一起。运行锁存在，或现有数据库不精确处于 `PAPER + LIVE_DISABLED` 时，目标、参数和生产钱包公开配置修改都会失败关闭；这几条独立门禁不能互相替代。基础设施容差、安全 Gate、执行模式和 Live-only 参数不开放编辑；模式切换、Live Gate、Paper 生命周期和恢复都由后台接口执行。Live Gate 可以从 UI 发起真实后台预检和审计，但当前 Live execution/order runtime 仍因无 signer、认证 CLOB、外部余额/合规/地理和时钟 provider 而保持 fail closed。
+localhost `Hecatonchires` UI 复用 `operator-control` 控制面和
+`operator-dashboard` 只读投影，统一展示目标/我的交易对照、账户、持仓、订单、
+成交、盈亏、明细和安全状态。普通 EOA 的 Live 生产路径已经接到默认 host：一次性
+`personal_sign` 只证明地址控制权；会话绑定 broker 只把精确 EIP-712 或交易请求
+交给浏览器钱包；CLOB L2 credentials 只在内存中惰性派生；真实余额/allowance/
+仓位、CLOB submit/cancel、Exchange V3 授权、二元 CTF redeem、geoblock、时钟、
+合规、身份、对账和 runtime 都由同一 wallet session 装配。UI 只开放默认
+`10 / 1 / 3 / 1 pUSD` 的小额参数闭环，保存配置会断开旧 session，进入 Live 还要
+经过钱包授权、Gate 请求、固定确认词、同步恢复和 runtime 启动；任一步失败都会
+保持或退回 `PAPER + LIVE_DISABLED`。断开、过期或换钱包会撤销 action 并紧急
+停用；后台循环异常也会 emergency stop；UI 宿主退出时先执行安全停用和会话撤销。
+私钥、助记词、API secret、signed order
+和原始订单请求/响应不进入配置、快照或日志。底层保留 Proxy/Safe/EIP-1271
+签名模型，但在官方 relayer/账户初始化未接入前，UI 不把它们声明为完整可用。
+Paper 参数继续以不可变 profile 只影响下一 Campaign。当前没有连接用户钱包、
+没有真实资金证据、没有真实订单，也没有发生最终 Live 二次授权。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -59,6 +74,7 @@ pnpm observe:run -- 0x目标地址 --duration-seconds=300 --poll-seconds=1 --rec
 pnpm paper:run -- --duration-seconds=300 --interval-seconds=1
 pnpm validate:final -- --type=all --campaign-id=PC-... --session-id=PS-...
 pnpm operational:validate -- --mode=health_monitor --duration-seconds=0
+pnpm validate:live-production
 ```
 
 `profile-overrides.json` 只提交名称和需要改变的 Paper 参数；`status` 返回当前值、hash 和允许编辑的 key，非法类型、越界关系、未知 key、Live-only key 或无实际变化都会失败关闭。例如：

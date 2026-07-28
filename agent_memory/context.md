@@ -7,7 +7,9 @@
 
 ## Safety boundary
 - 必须保持 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
-- 未再次明确授权前，禁止 private key/seed、真实 signer、认证 CLOB submit/cancel、approve、真实 redeem、真实订单、真实资金和链上写入。
+- 本轮禁止连接用户钱包、加载 private key/seed、启动 Paper、派生真实 CLOB
+  credentials、submit/cancel、approve、redeem、真实订单和链上写入；代码路径可以
+  完整实现和隔离验证，未来只有用户在 UI 中逐步确认后才可触达。
 - 禁止绕过 geoblock、时钟、安全 Gate、数据完整性 Gate，禁止覆盖历史失败证据。用户已明确授权把旧 Core 的有效 `12 h` 与新 Core 的有效 `12 h` 作为独立证据跨 Core 汇总，但不得篡改数据库或伪称同 Core Campaign 完成。
 - Gap、无法证明的跨源去重、证据不完整的 SPLIT/CONVERSION、无法证明完整 outcome set 的 MERGE 继续 fail closed。
 
@@ -55,19 +57,33 @@
 - 用户授权的 Paper 累计 `24 h` 和最终连续 `4 h` 已完成；但自然 FILL、POSITION_UPDATE、FEE、PnL 仍未发生，不能把隔离测试伪称为自然成交。
 - SPLIT/CONVERSION 采用“退出或隔离”而非真实链上复制，可能与目标组合的经济结果不同；必须在 Paper 报告中单独统计。
 - 历史 Phase 0 若只有特殊 Activity、没有本系统提交的完整证明，Replay 会保持 `INCOMPLETE`，不得人工降级通过。
-- 官方结束时间缺失的 Live 策略仍会阻断；真实 signer、认证凭据、真实资金证据和用户再次明确授权均不存在，因此不能启用真实 Live。阶段 3 只完成了显式依赖注入的后端能力和 fake/isolated 验证。
+- 官方结束时间缺失的 Live 策略仍会阻断；普通浏览器 EOA 的 signer、会话内认证
+  CLOB、只读 provider、真实 CLOB adapter、allowance/redeem 和默认 production
+  assembly 已完成，但真实钱包、真实凭据、真实资金证据和用户当次最终确认尚未发生。
 
 ## Operator workflow
 - 桌面入口：`/Users/d4clt/Desktop/Polymarket验证_点这里`；目标文件：`data/operator/target-wallet.txt`。运行锁存在时禁止切换目标。
-- `operator-control` 与 `operator-dashboard` 是当前 localhost UI 的统一控制面；UI 可读取真实后台投影、保存目标/规则集、启动/暂停/恢复 Paper，并通过真实 Live Gate 发起预检、请求、确认、恢复和紧急停用。Live execution/order runtime 由注入的 capability 驱动；默认仍报告未配置，执行、取消、重试、对账和恢复按钮会明确禁用，执行模式不能做成普通 UI 配置。
-- 最新生产准备方向：UI 与控制面按最终 Live 生产路径展示，Live capability 默认是 `PENDING_PREREQUISITES` 而不是永久隐藏；UI 使用通用 EIP-1193 `eth_requestAccounts`/`eth_chainId`/`personal_sign` 一次性、绑定 chain 的 challenge 连接钱包，后端仅以内存会话保存公开地址、网络和到期时间，配置文件也只保存公开地址和网络，绝不接收或读取私钥。`LiveWalletSession` 可交给 `assembleConnectedLiveRuntime`，由受授权宿主一次性显式创建 secure signer、只读余额、认证 CLOB、合规/geoblock/时钟 provider 与市场数据，并由 wallet provider 自身读取真实 provider chain；装配前核对 signer、provider chain 与钱包会话地址，proxy/funder 地址继续由既有 `LiveIdentityBinding` 核对。运行时绑定会监听钱包断开、过期和替换，过期由后台租约定时器主动触发，失效时自动撤销 Live action、触发 emergency stop，停用失败会重试一次并让接口返回明确错误，同时把 capability 降回 pending。正式钱包、上述 provider、宿主注入的 LiveRuntime 和 Gate 用户授权逐项 readiness 全部通过后，才允许真实运行入口转为 `AVAILABLE`；在此之前数据库仍固定 `PAPER + LIVE_DISABLED + liveAllowed=false`，后端 fail closed。
+- `operator-control` 与 `operator-dashboard` 是 localhost UI 的统一控制面。UI 可操作
+  Paper，并展示小额 Live 参数、EOA 钱包连接、allowance 设置、逐项 readiness、
+  Gate、对账、恢复和紧急停用；执行模式不能作为普通配置字段绕过 Gate。
+- `prototype/live-ui/server.mjs` 在 EIP-1193 session 证明通过后调用
+  `assembleDefaultConnectedLiveRuntime`。同一 session 装配 browser signer、惰性
+  CLOB L2 client、真实余额/allowance/仓位、CLOB submit/cancel、EOA approve/
+  redeem、官方 geoblock、时钟、合规、账户、身份绑定、Gate 和 runtime。配置变化
+  强制断开重连；启动前同步 recovery 必须 ready，启动失败回滚 Gate，后台循环异常
+  emergency stop；宿主退出先停 Gate/runtime 并撤销 session。持久化配置读取时也
+  执行小额硬上限；runtime database 和新备份强制 `0600`。UI 只开放完整闭环的
+  EOA；Proxy/Safe/1271 等待官方 relayer。
 
 ## Runtime handoff and valuation recovery
 - Paper 账户现在是跨 Campaign 的持久化组合容器。新 Core replacement 在旧 Campaign 已终止、没有等待中的 BUY/活动 reservation 且现金账本一致时复用同一 `paper_account_id` 和同一 `baseline_run_id`；旧仓位、旧 execution 和旧 ruleset 快照保持不可变，新账户运行时元数据更新到当前 Core，并在 Campaign transition evidence 中记录单向交接。
 - SQLite 迁移 `036_execution_runtime_handoff.sql` 移除 Campaign 对 `paper_account_id` 的列级唯一限制，改为可审计的 `(paper_account_id, created_at)` 索引，允许同一持久化 Paper 账户跨顺序 replacement Campaign 使用。
 - Paper final drain 与 Paper/Live 只读估值均使用有上限的重试和退避；最终估值短暂不完整会保留原始 blocker 和恢复证据，并允许同一 Core 后续恢复，而不是把仓位当成已结算或强行完成。
 - Paper BUY 在已有持仓且市场数据仍处于不可恢复冻结时不消费/不下新 BUY；Live BUY 在估值不完整时保留 Signal 待重试，不 quarantine、不消费。
-- Live 已具备禁用态 `handoffRuntime`、final valuation recovery、启动恢复、外部订单/成交/仓位对账、合规/geoblock/时钟 provider、钱包/signer 公共身份绑定、arming/kill switch 和显式依赖装配；全局 `PAPER + LIVE_DISABLED + liveAllowed=false`、无真实 signer/真实订单的安全边界不变。
+- Live 已具备禁用态 `handoffRuntime`、final valuation recovery、启动恢复、外部订单/
+  成交/仓位对账、合规/geoblock/时钟、浏览器 EOA signer、会话内认证 CLOB、真实
+  adapter、arming/kill switch 和默认 production assembly；全局
+  `PAPER + LIVE_DISABLED + liveAllowed=false`、无真实钱包/真实订单的事实不变。
 - Live `handoffRuntime` 现在还要求账户处于禁用态、没有未终态外部订单或活动 reservation、现金/保留账本非负且没有非零冻结仓位；Live Gate 全局 reconciliation 同时检查 Live 账本与孤儿/负仓位。`LiveRuntime` 仅组合 Gate 启动恢复、LiveExecutor 和 LiveRunner，不自行 arming 或发现凭据。
 - `LiveIdentityBinding` 在启动恢复、arming 申请/确认和轮询入口都核对注册账户、钱包状态、运行时钱包地址、authorized signer 地址、组件环境类型与源码版本；漂移时紧急禁用 Gate。`assembleLiveRuntime` 要求调用方显式注入全部 provider/adapter，不读取私钥或自动构造认证客户端。
 

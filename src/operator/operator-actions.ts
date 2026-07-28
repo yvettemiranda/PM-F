@@ -64,6 +64,7 @@ export interface OperatorLiveRuntimeResult {
 export interface OperatorLiveRuntimeCapability {
   execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
   orderManagement: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
+  walletSetup?: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
   production?: LiveProductionCapabilityOverrides;
 }
 
@@ -83,17 +84,19 @@ export interface OperatorLiveRuntimeActions {
     actor: string;
     reason: string;
   }): Promise<OperatorLiveRuntimeResult>;
+  prepareWallet?(input: {
+    actor: string;
+    reason: string;
+  }): Promise<OperatorLiveRuntimeResult>;
 }
 
 /**
- * Explicitly injected backend seam for an already-assembled LiveRuntime.
- *
- * The operator server never constructs this graph itself. A caller must
- * provide the complete LiveRuntime/LiveExecutor dependency graph, which keeps
- * credential discovery and production arming outside the UI process.
+ * Backend seam for an already-assembled LiveRuntime. The production localhost
+ * host constructs this graph only after a verified browser-wallet session;
+ * tests and alternate hosts can inject the same contract explicitly.
  */
 export interface OperatorLiveRuntimeBackend {
-  recoverOnStartup(accountId: string): Promise<{ ready: boolean; [key: string]: unknown }>;
+  recoverOnStartup(accountId: string): Promise<{ ready: boolean }>;
   run(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
   emergencyStop(accountId: string, reason: string, actor?: string): Promise<void>;
 }
@@ -111,6 +114,10 @@ export interface ConfiguredOperatorLiveRuntimeOptions {
   runOptions?: Omit<LiveRunnerOptions, "accountId">;
   production?: LiveProductionCapabilityOverrides;
   walletSessionBinding?: LiveWalletRuntimeBinding;
+  walletSetup?: {
+    prepare(): Promise<unknown>;
+  };
+  manageWalletInvalidation?: boolean;
 }
 
 class UnavailableLiveBalanceProvider implements LiveReadonlyBalanceProvider {
@@ -262,6 +269,61 @@ export class DefaultOperatorLiveGateActions implements OperatorLiveGateActions {
   }
 }
 
+/**
+ * Operator facade over the exact production gate owned by an assembled
+ * connected Live runtime. Unlike the default facade, this does not construct a
+ * second fail-closed gate with placeholder providers.
+ */
+export class ConfiguredOperatorLiveGateActions implements OperatorLiveGateActions {
+  constructor(
+    private readonly projectRoot: string,
+    private readonly gate: LiveGateService,
+    private readonly prerequisiteManager?: {
+      refreshStaticEvidence(): void;
+      authorizeActivation(input: { actor: string; reason: string }): Promise<void>;
+    },
+  ) {}
+
+  async preflight(): Promise<OperatorLiveGateResult> {
+    this.prerequisiteManager?.refreshStaticEvidence();
+    return this.withState(this.gate.preflight({ requestedExecutionMode: "LIVE" }));
+  }
+
+  async requestActivation(input: {
+    actor: string;
+    reason: string;
+  }): Promise<OperatorLiveGateResult> {
+    await this.prerequisiteManager?.authorizeActivation(input);
+    return this.withState(this.gate.requestLiveActivation(input));
+  }
+
+  async confirmActivation(input: {
+    actor: string;
+    confirmationText: string;
+  }): Promise<OperatorLiveGateResult> {
+    return this.withState(this.gate.confirmLiveActivation(input));
+  }
+
+  async emergencyDisable(input: { actor: string; reason: string }): Promise<void> {
+    await this.gate.emergencyDisable(input);
+  }
+
+  async recover(): Promise<OperatorLiveGateResult> {
+    return this.withState(this.gate.recoverOnStartup());
+  }
+
+  private async withState(resultPromise: Promise<LiveGateResult>): Promise<OperatorLiveGateResult> {
+    const result = await resultPromise;
+    const safety = operatorRuntimeSafety(this.projectRoot);
+    return {
+      ...result,
+      requestedExecutionMode: "LIVE",
+      executionMode: safety.executionMode ?? "PAPER",
+      liveGateState: safety.liveGateState ?? "LIVE_DISABLED",
+    };
+  }
+}
+
 export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
   readonly capability = {
     execution: "PENDING_PREREQUISITES",
@@ -319,13 +381,9 @@ export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRunti
 }
 
 /**
- * Bridges the UI operations to the existing LiveRuntime and LiveExecutor
- * contracts when a caller explicitly injects an assembled graph.
- *
- * This class is intentionally not the server default. In the current
- * repository safety state the server uses
- * `UnconfiguredOperatorLiveRuntimeActions`, so no signer, authenticated CLOB
- * adapter, or real account can be reached from the browser accidentally.
+ * Bridges UI operations to an assembled LiveRuntime and LiveExecutor. Starting
+ * performs a synchronous recovery/readiness check before the background loop
+ * is accepted; a later loop failure independently triggers emergency stop.
  */
 export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
   private readonly configuredCapability: OperatorLiveRuntimeCapability;
@@ -340,10 +398,13 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
       throw new Error("PRODUCTION_LIVE_RUNTIME_REQUIRES_WALLET_SESSION_BINDING");
     }
     options.walletSessionBinding?.assertCurrent();
-    options.walletSessionBinding?.onInvalidated((reason) => this.invalidateWalletSession(reason));
+    if (options.manageWalletInvalidation !== false) {
+      options.walletSessionBinding?.onInvalidated((reason) => this.invalidateWalletSession(reason));
+    }
     this.configuredCapability = {
       execution: "AVAILABLE",
       orderManagement: "AVAILABLE",
+      walletSetup: options.walletSetup === undefined ? "NOT_CONFIGURED" : "AVAILABLE",
       ...(options.production === undefined ? {} : { production: options.production }),
     };
   }
@@ -375,6 +436,29 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
         code: "LIVE_RUNTIME_ALREADY_RUNNING",
       };
     }
+    let recovery: { ready: boolean };
+    try {
+      recovery = await this.options.runtime.recoverOnStartup(this.options.accountId);
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_RUNTIME_STARTUP_RECOVERY_FAILED",
+        details: {
+          accountId: this.options.accountId,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+    if (!recovery.ready) {
+      return {
+        accepted: false,
+        code: "LIVE_RUNTIME_STARTUP_RECOVERY_BLOCKED",
+        details: {
+          accountId: this.options.accountId,
+          recovery,
+        },
+      };
+    }
     const controller = new AbortController();
     this.abortController = controller;
     this.running = true;
@@ -385,8 +469,19 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
         accountId: this.options.accountId,
       },
       controller.signal,
-    ).catch((error: unknown) => {
+    ).catch(async (error: unknown) => {
       this.lastRunError = error instanceof Error ? error.message : String(error);
+      try {
+        await this.options.runtime.emergencyStop(
+          this.options.accountId,
+          `LIVE_RUNTIME_BACKGROUND_FAILED:${this.lastRunError}`,
+          "SYSTEM",
+        );
+      } catch (stopError) {
+        this.lastRunError = `LIVE_RUNTIME_BACKGROUND_FAILED:${this.lastRunError};EMERGENCY_STOP_FAILED:${
+          stopError instanceof Error ? stopError.message : String(stopError)
+        }`;
+      }
     }).finally(() => {
       this.running = false;
       this.abortController = null;
@@ -511,6 +606,34 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
       return {
         accepted: false,
         code: "LIVE_EXECUTION_RETRY_FAILED",
+        details: {
+          actor: input.actor,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async prepareWallet(input: {
+    actor: string;
+    reason: string;
+  }): Promise<OperatorLiveRuntimeResult> {
+    const sessionFailure = this.walletSessionFailure();
+    if (sessionFailure !== null) return sessionFailure;
+    if (this.options.walletSetup === undefined) {
+      return { accepted: false, code: "LIVE_WALLET_SETUP_NOT_CONFIGURED" };
+    }
+    try {
+      const result = await this.options.walletSetup.prepare();
+      return {
+        accepted: true,
+        code: "LIVE_WALLET_SETUP_READY",
+        details: { actor: input.actor, reason: input.reason, result },
+      };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: "LIVE_WALLET_SETUP_FAILED",
         details: {
           actor: input.actor,
           reason: error instanceof Error ? error.message : String(error),

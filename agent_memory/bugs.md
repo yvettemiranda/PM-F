@@ -6,7 +6,9 @@
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 阶段 3 后端接口与隔离接线已完成；当前 localhost UI 已连接真实后台快照、Paper lifecycle 和 Live Gate。最新实现补上了最终 Live 生产准备投影：公开钱包配置和逐项 readiness 会显示在 UI，默认 capability 为 `PENDING_PREREQUISITES`，不是把 Live 永久标成未配置。真实 signer、认证 CLOB 凭据、真实钱包资金证据、Live execution/order runtime、最终统一验收和用户再次明确授权仍不存在，任何一项都不能被 fake/isolated 测试替代。
+- 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前真正的阻断项是
+  用户钱包未连接、真实 CLOB 凭据/余额/allowance/仓位未验收、没有真实交易证据，
+  以及用户当次最终确认未发生。隔离测试不能替代这些外部事实。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 
 ## Active risks
@@ -18,7 +20,9 @@
 - SPLIT/CONVERSION 当前不是链上复制：SPLIT 新腿隔离为 historical，CONVERSION 只退出 tracked source。它能避免全账户被普通特殊操作打断，但组合收益可能偏离目标，必须独立统计发生次数、受影响金额和退出结果。
 - 完整 SPLIT 证明依赖官方市场、同轮 Positions 和最终 `SYNCED` 对账；任何一个来源临时缺失都会延迟该轮提交。该取舍优先保证不凭空创建仓位。
 - Live 总权益 sizing 需要对所有开放仓位完成退出深度估值；估值不完整会退回可用现金，因此实际金额可能保守偏小。
-- 阶段 3 已完成运行时交接、估值恢复、合规 provider、外部订单恢复、身份绑定和 arming 审计接口；本轮 UI 已通过 `DefaultOperatorLiveGateActions` 连接真实 Gate 预检/请求/确认/恢复/紧急停用，但 Live execution/order actions 仍只保留显式注入 seam。`LiveRuntime`/`assembleLiveRuntime` 不创建凭据、不自动切换模式，当前仍没有真实 signer、认证 CLOB client、真实资金运行证据或获授权的生产启动入口。
+- 默认 production assembly 现在会在验证过的 EOA session 后创建 browser signer、惰性
+  authenticated CLOB、真实 provider/adapter、production account、Gate 和 runtime；
+  `LiveRuntime` 仍不自行 arming，当前没有真实资金运行证据或已发生的最终授权。
 - `ConfiguredComplianceProvider` 是显式配置的只读策略适配器，不是法律意见或远端权威合规服务；生产接入时仍需由用户确认适用政策来源、地域和账户资格，并保留新鲜证据。
 - Live readiness 的“可就绪”状态依赖宿主显式提供每项 provider capability override；仅保存公开钱包地址不会伪称钱包已连接，也不会让 Gate 自动通过。生产接入时必须把这些 override 与真实只读 provider、Signer 和认证 CLOB 的新鲜证据绑定，不能由浏览器或配置文件自行勾选。
 - 同一 `orderHash` 跨 Polygon transaction 的后续 fill 按用户确认视为独立经济成交，可能比目标原始订单数更多；UI 必须标明“经济成交次数”。
@@ -27,8 +31,14 @@
 - 不可变 Capture、盘口与特殊操作证据会持续增加磁盘占用；仍需 Campaign 归档和磁盘增长告警。
 - Observe 与 Replay 对特殊操作保留两套面向不同输出的投影编排；当前有一致性回归覆盖，但后续再改 SPLIT/CONVERSION 时应优先抽取共享纯 reducer，避免语义漂移。
 - `node:sqlite` 在 Node 24 仍有 experimental warning。
-- 当前 Live 仅在隔离 fake signer/order adapter 回归，不能把单元测试视为实盘就绪。
-- 钱包连接协议现在已可用，但连接只证明浏览器地址控制权，不自动生成 secure signer、认证 CLOB 凭据或只读/政策 provider；生产宿主必须调用 `assembleConnectedLiveRuntime` 显式装配并通过 identity/readiness/Gate。若宿主未注入，UI 仍显示等待安全宿主，真实 Live 保持 fail closed。
+- browser signer、authenticated CLOB、readonly provider、真实 CLOB adapter 和 EOA
+  链上交易构造均只做了隔离测试；不能把单元测试视为真实钱包/真实资金验收。
+- Live crash recovery 会在 SQLite 的 `live_orders.signed_payload_json` 持久化精确
+  signed order intent；该字段不进入 UI、快照、普通日志或审计包。runtime database
+  和新备份已强制 `0600`，Operator UI 使用 `umask 077`，但生产仍必须使用全盘
+  加密、受控系统账户和备份保留/访问控制。
+- UI 只开放 EOA 完整路径。底层 Proxy/Safe/EIP-1271 的 order signer 可用，但
+  allowance/redeem 缺官方 relayer；在补齐官方账户初始化和 relayer 前不得开放。
 - 钱包会话已经作为短期运行时租约绑定到 Live action：断开、过期或替换会话会撤销 action 并触发 emergency stop；这能防止 UI 地址与已装配 runtime 漂移，但生产宿主仍必须把真实 provider、signer、CLOB 和 Gate 授权绑定到同一会话，不能只依赖浏览器端地址。
 - 连接后的宿主 factory 只能通过服务端会话绑定 wrapper 暴露 action；钱包 provider 还必须自报并被装配入口核对 Polygon chainId。会话到期由后台定时器主动失效；紧急停用失败会重试一次并让断开接口返回 503，但若外部停机服务持续不可用，必须继续保持 Gate 禁用并人工处理。
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
@@ -56,5 +66,7 @@
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-- 未再次明确授权前，禁止 private key/seed、真实 signer、认证 CLOB client、submit/cancel、approve、真实 redeem、真实订单、真实资金和链上写入。
+- 当前任务完成前禁止连接钱包、private key/seed、派生真实 CLOB credentials、
+  submit/cancel、approve、redeem、真实订单、真实资金和链上写入；未来只能由用户
+  在 UI 内逐步确认触发。
 - 禁止覆盖历史失败证据、把用户授权的跨 Core 汇总伪称为同 Core Campaign 时长、降低数据/时钟/恢复/账本安全门或绕过 geoblock。

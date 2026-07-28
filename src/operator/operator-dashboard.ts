@@ -111,6 +111,7 @@ export interface OperatorDashboardSnapshot {
       activation: "LIVE_GATE" | "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION";
       execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
       orderManagement: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
+      walletSetup: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
       externalDependencies: readonly string[];
     };
     production: LiveProductionReadiness;
@@ -613,6 +614,7 @@ function emptySnapshot(
         activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
         execution: "PENDING_PREREQUISITES",
         orderManagement: "PENDING_PREREQUISITES",
+        walletSetup: "PENDING_PREREQUISITES",
         externalDependencies: [
           "LIVE_READONLY_BALANCE_PROVIDER",
           "COMPLIANCE_POLICY",

@@ -1,6 +1,7 @@
 import {
   OrderType,
   Side,
+  SignatureTypeV2,
   isV2Order,
   type ClobClient,
   type OpenOrder,
@@ -81,27 +82,28 @@ function isZeroBytes(value: string): boolean {
 }
 
 function validateSignedOrder(request: LiveOrderRequest, signedOrder: SignedOrder): void {
+  if (!isV2Order(signedOrder)) throw new Error("CLOB_V1_SIGNED_ORDER_UNSUPPORTED");
   if (signedOrder.tokenId !== request.assetId) throw new Error("SIGNED_ORDER_ASSET_MISMATCH");
   if (signedOrder.side !== PolymarketClobAdapter.officialSide(request.side)) {
     throw new Error("SIGNED_ORDER_SIDE_MISMATCH");
   }
-  if (signedOrder.signer.toLowerCase() !== request.signedPayload?.signerAddress.toLowerCase()) {
-    throw new Error("SIGNED_ORDER_SIGNER_MISMATCH");
+  if (request.signedPayload?.signerAddress.toLowerCase() !== request.authorizedSignerAddress.toLowerCase()) {
+    throw new Error("SIGNED_PAYLOAD_SIGNER_NOT_AUTHORIZED");
   }
-  if (signedOrder.signer.toLowerCase() !== request.authorizedSignerAddress.toLowerCase()) {
-    throw new Error("SIGNED_ORDER_SIGNER_NOT_AUTHORIZED");
+  const expectedOrderSigner = signedOrder.signatureType === SignatureTypeV2.POLY_1271
+    ? request.registeredWalletAddress
+    : request.authorizedSignerAddress;
+  if (signedOrder.signer.toLowerCase() !== expectedOrderSigner.toLowerCase()) {
+    throw new Error(signedOrder.signatureType === SignatureTypeV2.POLY_1271
+      ? "SIGNED_ORDER_1271_SIGNER_ACCOUNT_MISMATCH"
+      : "SIGNED_ORDER_SIGNER_NOT_AUTHORIZED");
   }
   if (signedOrder.maker.toLowerCase() !== request.registeredWalletAddress.toLowerCase()) {
     throw new Error("SIGNED_ORDER_MAKER_ACCOUNT_MISMATCH");
   }
-  if (integerString(String(signedOrder.feeRateBps), "SIGNED_ORDER_FEE_RATE_INVALID")
-    !== integerString(request.feeRateBps, "ORDER_FEE_RATE_INVALID")) {
-    throw new Error("SIGNED_ORDER_FEE_RATE_MISMATCH");
-  }
   if (signedOrder.signature !== request.signedPayload?.signature) {
     throw new Error("SIGNED_ORDER_SIGNATURE_MISMATCH");
   }
-  if (!isV2Order(signedOrder)) throw new Error("CLOB_V1_SIGNED_ORDER_UNSUPPORTED");
   if (!isZeroBytes(signedOrder.builder)) throw new Error("CLOB_BUILDER_FEE_UNSUPPORTED");
 
   const makerAmount = integerString(signedOrder.makerAmount, "SIGNED_ORDER_MAKER_AMOUNT_INVALID");

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,7 +36,12 @@ describe("Live production readiness", () => {
   it("reaches ready only after explicit host capability injection and Gate authorization", () => {
     const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-ready-"));
     roots.push(root);
-    saveLiveProductionConfig(root, { walletAddress: wallet.toUpperCase(), network: "POLYGON" });
+    saveLiveProductionConfig(root, {
+      walletAddress: wallet.toUpperCase(),
+      network: "POLYGON",
+      confirmLimits: true,
+      acceptCompliance: true,
+    });
     const readiness = liveProductionReadiness(root, {
       databaseAvailable: true,
       gatePrerequisites: [{ key: "USER_EXPLICIT_AUTHORIZATION", status: "PASSED" }],
@@ -79,5 +84,104 @@ describe("Live production readiness", () => {
       status: "PENDING",
     }));
     expect(readiness.nextStep).toBe("CONNECT_FORMAL_WALLET");
+  });
+
+  it("persists conservative Live limits and invalidates their confirmation after a change", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-limits-"));
+    roots.push(root);
+    const confirmed = saveLiveProductionConfig(root, {
+      walletAddress: wallet,
+      tradingWalletAddress: wallet,
+      signatureType: "EOA",
+      network: "POLYGON",
+      liveBankrollMicros: "10000000",
+      maxTradeSizeMicros: "1000000",
+      maxExposureMicros: "3000000",
+      maxDailyLossMicros: "1000000",
+      confirmLimits: true,
+    }, () => new Date("2026-07-28T01:00:00.000Z"));
+    expect(confirmed).toMatchObject({
+      schemaVersion: "live-production-config-v2",
+      walletBinding: "BROWSER_EIP1193",
+      limitsConfirmedAt: "2026-07-28T01:00:00.000Z",
+    });
+
+    const changed = saveLiveProductionConfig(root, {
+      maxTradeSizeMicros: "900000",
+    });
+    expect(changed.limitsConfirmedAt).toBeNull();
+    expect(changed.limitsConfirmationHash).toBeNull();
+    expect(() => saveLiveProductionConfig(root, {
+      liveBankrollMicros: "20000000",
+      maxTradeSizeMicros: "11000000",
+      maxExposureMicros: "12000000",
+    })).toThrow("LIVE_SMALL_LIMIT_HARD_CAP_EXCEEDED");
+  });
+
+  it("allows the operator to revoke a prior compliance acknowledgement", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-compliance-"));
+    roots.push(root);
+    saveLiveProductionConfig(root, {
+      walletAddress: wallet,
+      tradingWalletAddress: wallet,
+      signatureType: "EOA",
+      network: "POLYGON",
+      confirmLimits: true,
+      acceptCompliance: true,
+    }, () => new Date("2026-07-28T00:00:00.000Z"));
+
+    const revoked = saveLiveProductionConfig(root, {
+      acceptCompliance: false,
+    }, () => new Date("2026-07-28T00:01:00.000Z"));
+
+    expect(revoked.complianceAcceptedAt).toBeNull();
+    expect(revoked.limitsConfirmedAt).toBe("2026-07-28T00:00:00.000Z");
+  });
+
+  it("fails closed to a disconnected default when the stored file exceeds the small-Live hard caps", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-tampered-"));
+    roots.push(root);
+    const path = join(root, "data/operator/live-production.json");
+    mkdirSync(join(root, "data/operator"), { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: "live-production-config-v2",
+      walletAddress: wallet,
+      tradingWalletAddress: wallet,
+      signatureType: "EOA",
+      network: "POLYGON",
+      walletBinding: "BROWSER_EIP1193",
+      liveBankrollMicros: "100000001",
+      maxTradeSizeMicros: "1000000",
+      maxExposureMicros: "3000000",
+      maxDailyLossMicros: "1000000",
+      limitsConfirmedAt: "2026-07-28T00:00:00.000Z",
+      limitsConfirmationHash: "forged",
+      complianceAcceptedAt: "2026-07-28T00:00:00.000Z",
+      updatedAt: "2026-07-28T00:00:00.000Z",
+    }));
+
+    const readiness = liveProductionReadiness(root, {
+      databaseAvailable: true,
+      gatePrerequisites: [{ key: "USER_EXPLICIT_AUTHORIZATION", status: "PASSED" }],
+      executionCapability: "AVAILABLE",
+      injectedChecks: {
+        FORMAL_WALLET: true,
+        SECURE_SIGNER: true,
+        READONLY_BALANCE: true,
+        AUTHENTICATED_CLOB: true,
+        COMPLIANCE: true,
+        GEOBLOCK: true,
+        CLOCK_SAFETY: true,
+      },
+    });
+
+    expect(readiness.status).toBe("PENDING_PREREQUISITES");
+    expect(readiness.config).toMatchObject({
+      walletAddress: null,
+      network: null,
+      liveBankrollMicros: "10000000",
+      limitsConfirmedAt: null,
+      complianceAcceptedAt: null,
+    });
   });
 });

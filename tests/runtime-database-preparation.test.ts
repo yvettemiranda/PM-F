@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -207,6 +208,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, "new", "phase0.sqlite");
     const result = await prepareRuntimeDatabase({ databasePath, sourceVersion });
     expect(result).toMatchObject({ migrated: false, backupPath: null, schemaVersion: VERSIONS.schemaVersion });
+    expect(statSync(databasePath).mode & 0o777).toBe(0o600);
     const database = new DatabaseSync(databasePath, { readOnly: true });
     expect(database.prepare("SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'").get())
       .toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
@@ -237,6 +239,7 @@ describe("runtime database preparation", () => {
       sourceVersion,
     });
     expect(result).toMatchObject({ migrated: true, schemaVersion: VERSIONS.schemaVersion });
+    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
     const migrated = new DatabaseSync(databasePath, { readOnly: true });
     expect(migrated.prepare(
       "SELECT status,evidence_json,updated_at FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'",
