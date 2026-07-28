@@ -68,6 +68,9 @@
   控制台并打开浏览器，重复双击只复用现有服务；仓库新增
   `scripts/launch-hecatonchires-ui.command` 和 `README_主入口.md`。三个 Paper 按钮继续
   保留为当前测试阶段的内部工具，未混入 `操作入口/`，因此不改变 Paper core hash。
+- 外部审计文档已补充当前主入口、最新 `PASSED` 验证工件摘要、主入口短启动证据、
+  已完成工作清单和连接钱包前后的分阶段行动计划；并统一记录 Node.js `>=24.14.0 <25`
+  的运行要求。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。

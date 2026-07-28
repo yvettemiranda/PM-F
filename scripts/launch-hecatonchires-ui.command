@@ -34,7 +34,7 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 if ! command -v node >/dev/null 2>&1; then
-  print -u2 "找不到 Node.js。请先安装 Node.js 20+，再重新双击 Hecatonchires.command。"
+  print -u2 "找不到 Node.js。请先安装 Node.js 24.14+，再重新双击 Hecatonchires.command。"
   exit 1
 fi
 

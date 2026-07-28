@@ -62,6 +62,40 @@
 
 这不是投资建议、合规意见、法律意见或实时交易授权。
 
+### 0.1 当前交付快照（2026-07-28）
+
+本次审计交付在当前干净提交上新增了一个日常主入口，但没有把它放进 Paper
+核心兼容性清单，因此不会因为“打开 UI”改变 Paper Core hash：
+
+| 交付项 | 当前状态 | 说明 |
+|---|---|---|
+| 日常桌面入口 | 已完成 | `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command` |
+| 仓库启动脚本 | 已完成 | `scripts/launch-hecatonchires-ui.command` |
+| 重复启动保护 | 已完成 | 先检查 `/api/operator/snapshot`，已有 UI 时只打开页面 |
+| 本地服务边界 | 已完成 | 只监听 `127.0.0.1`，关闭入口终端会停止本次 UI 服务 |
+| Paper 测试按钮 | 保留 | 三个旧按钮继续作为开发/验收/安全暂停工具，不作为产品主入口 |
+| 最终 macOS `.app` | 尚未封装 | 等真实钱包验收和正式发布前检查完成后再打包 |
+
+本次交付不改变以下安全事实：未连接钱包、未加载私钥、未启动真实 Live、未发送
+订单或链上交易，系统继续固定为 `PAPER + LIVE_DISABLED + liveAllowed=false`。
+
+当前生产验证工件的关键字段为：
+
+```text
+artifact: data/operator/live-production-validation.json
+status: PASSED
+sourceCodeDirty: false
+testFileCount: 71
+testCount: 854
+typecheckPassed: true
+fullTestPassed: true
+diffCheckPassed: true
+```
+
+外部审计应以交付时 `git rev-parse HEAD` 与该工件的
+`sourceCodeCommit` 完全一致为准。工件同时记录最终 Paper 报告和隔离验证文件的
+SHA-256；它不把历史 Paper 报告伪装成当前提交重新产生的自然成交证据。
+
 ---
 
 ## 1. 文档控制与审计口径
@@ -593,7 +627,34 @@ UI 不决定：
 
 第 4、7、9 步必须由用户本人在未来实际操作。本轮开发没有代替用户执行这些步骤。
 
-### 5.4 视觉资源和许可证风险
+### 5.4 成品式日常入口与测试入口的边界
+
+当前测试阶段已经具备“像程序一样双击打开”的主入口，但还没有把 Node.js 运行时
+封装进最终 `.app`：
+
+1. 双击桌面 `Hecatonchires.command`；
+2. 入口先请求本地 `GET /api/operator/snapshot`；
+3. 如果控制台已经运行，只调用系统 `open` 打开现有
+   `http://127.0.0.1:4173/`，不创建第二个服务；
+4. 如果没有运行，入口启动 `pnpm operator:ui`，等待 snapshot 可读后再打开浏览器；
+5. 入口进程保持终端存活，用户关闭终端或按 `Ctrl-C` 时先停止本次 UI 服务；
+6. 入口脚本位于 `scripts/`，不属于 `操作入口/`，避免纯 UI 启动操作改变 Paper
+   Core compatibility manifest。
+
+三个旧桌面按钮的审计定位如下：
+
+| 按钮 | 用途 | 是否是产品主入口 |
+|---|---|---|
+| `1_开始或继续Paper累计验证.command` | 启动/继续 Paper 长时验证 | 否，开发/验收工具 |
+| `2_安全暂停并生成报告.command` | 安全停止 Observe/Paper 并生成报告 | 否，开发/验收工具 |
+| `3_查看进度和打开最新结果.command` | 查看累计进度并定位最新 ZIP | 否，开发/验收工具 |
+
+正式产品发布时，建议只保留一个 Hecatonchires 应用图标；三个按钮可以继续留在
+内部验收目录，但不应出现在最终用户的产品安装包中。当前主入口仍依赖本机
+`pnpm` 和 Node.js 20+，因此外部审计应把“已具备开发阶段可双击入口”和“已完成
+自带运行时的正式 macOS `.app`”分开判定。当前项目要求 Node.js `>=24.14.0 <25`。
+
+### 5.5 视觉资源和许可证风险
 
 当前使用独立实现的 Animal Island-inspired CSS 视觉，参考仓库为：
 
@@ -730,6 +791,23 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 最终有效测试数字以 commit-bound production validation artifact 为准；任何后续源码
 变更都会使该 artifact 与当前 commit 不一致并阻断默认生产装配。
 
+当前交付工件的精确记录为：
+
+```text
+status: PASSED
+sourceCodeDirty: false
+testFileCount: 71
+testCount: 854
+typecheckPassed: true
+fullTestPassed: true
+diffCheckPassed: true
+finalPaperReportSha256: e78c90143aba9a1ba3fece487c5deb96e49c41eae528a3cebd561445bf641bce
+isolatedVerificationSha256: 76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b0611babca75a63
+```
+
+审计方必须重新读取 `sourceCodeCommit`，不能只复制上述数字。只要源码、测试清单、
+审计文档或运行时实现发生新提交，就必须重新运行验证命令并更新该 artifact。
+
 ### 7.2 定向测试覆盖
 
 本轮重点测试：
@@ -779,6 +857,15 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 - 无浏览器控制台错误。
 
 审计方应在当前基线重新打开 UI，不能只依赖历史截图。
+
+本次主入口的实际短启动验收还包括：
+
+- 使用独立 localhost 端口启动 `scripts/launch-hecatonchires-ui.command`；
+- `/api/operator/snapshot` 可读，并返回 `PAPER/LIVE_DISABLED`；
+- 以相同端口重复执行入口时返回“已在运行”并复用现有服务；
+- 终止入口进程后，snapshot 不再可读，子服务被清理；
+- `zsh -n` 检查仓库入口和桌面 wrapper 通过；
+- 该入口未加入 `操作入口/`，不会进入 Paper core compatibility manifest。
 
 ---
 
@@ -919,6 +1006,34 @@ Node 24 的 `node:sqlite` experimental warning 是环境提示，不是测试失
 ## 10. 进入生产前必须完成的工作
 
 以下顺序不可跳过。
+
+### 10.0 当前最直接的下一步
+
+外部审计不需要从头猜测项目状态，建议按以下顺序推进：
+
+1. **先冻结审计基线**：记录 `HEAD`、`sourceCodeCommit`、工作树状态、依赖锁定文件、
+   数据库 Schema、Ruleset hash 和 `live-production-validation.json`。
+2. **审查当前代码安全边界**：重点看 wallet session、session-bound request broker、
+   Live Gate、identity binding、CLOB adapter、链上授权/赎回、日志脱敏和 emergency
+   stop；此时不要连接正式钱包。
+3. **决定是否接受历史 Paper 口径**：当前已有用户授权的跨 Core 24 小时独立汇总，
+   但没有自然 fill；如果审计要求同一提交重新产生全套自然证据，则在当前 clean
+   commit 重新跑 Observe/Paper。
+4. **完成至少连续 8 小时 Observe Only soak**：最终状态必须为 `SYNCED`，无未恢复
+   gap、`MAJOR_DESYNC`、checkpoint hash mismatch 或未解释的账户/账本差异。
+5. **连接正式 Polygon EOA 做只读验收**：只验证地址、chainId、signer、余额、
+   allowance、仓位、open orders、fills、geoblock、compliance 和 clock；这一步不等于
+   允许下单。
+6. **完成授权和最小 canary 的书面方案**：明确钱包、账户、网络、资金、单笔限额、
+   总敞口、日损失、运行时间、人工在场、停止和撤销方式。
+7. **由用户重新做最终授权**：技术测试、审计通过和历史 Paper 报告都不能替代这次
+   用户授权；在授权前继续保持 `LIVE_DISABLED`。
+8. **最后才做真实小额 canary**：先只读，再 allowance，再最小订单/取消/成交/对账，
+   然后验证 emergency stop 和恢复；任何异常都应回到 `PAPER + LIVE_DISABLED`。
+9. **canary 通过后再封装正式 `.app`**：把 Node.js 运行时、启动/停止、日志路径、
+   更新、卸载和权限策略一起固化，并从最终用户入口移除三个 Paper 测试按钮。
+
+上述第 5—8 步都属于新的外部事实和新的授权，不应由本次代码提交自动完成。
 
 ### 阶段 A：冻结和复核源码基线
 
@@ -1291,8 +1406,15 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 ### 15.1 项目说明
 
 - [`README.md`](../../README.md)
+- [`README_主入口.md`](../../README_主入口.md)
 - [`prototype/live-ui/README.md`](../../prototype/live-ui/README.md)
 - [`package.json`](../../package.json)
+
+桌面入口位于仓库外的本机路径，交付时应同时核对：
+
+- `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`
+- `/Users/d4clt/Desktop/Polymarket验证_点这里/说明_只需要看这个.txt`
+- [`scripts/launch-hecatonchires-ui.command`](../../scripts/launch-hecatonchires-ui.command)
 
 ### 15.2 Live 和安全边界
 
