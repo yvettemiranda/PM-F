@@ -12,6 +12,7 @@
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 
 ## Active risks
+- 桌面主入口依赖本机已有 `pnpm` 和 Node.js 20+；脚本会尝试从 pnpm 同级运行时补齐 Node PATH，若用户的系统没有 Node.js 仍会明确提示，尚未打包成自带运行时的正式 `.app`。
 - 本轮旧运行产物已移出仓库至临时可恢复目录；若外部审计需要被清理的原始日志、旧 Campaign ZIP 或 pre-2.30 备份，应从该目录恢复，不能从当前项目目录推断其仍然存在。
 - `reconciliation_issues` 是目标级长期证据；新修复只对 `POLYGON_TRADE_FEED_UNSAFE` 使用明确的 Observe Run 归属缩小阻断范围。归属缺失、JSON 损坏、同 Run 或其他类型 `MAJOR_DESYNC` 全部继续 fail closed；后续若新增可恢复事故类型，必须单独定义恢复证明，不能泛化跳过。
 - Polygon 的两块确认深度仍可能遇到浅层重组或负载均衡节点链视图不一致。新恢复只覆盖“上一锚点不变 + 被重组批次未发布目标成交”；否则继续 fail closed，避免撤销或漏记已发布 Signal。

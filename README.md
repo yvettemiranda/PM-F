@@ -30,11 +30,17 @@
 
 ## 本机验证
 
-不熟悉命令行时，只使用仓库里的 `操作入口/` 文件夹；旧的 `点这里运行/` 已移除，避免误点失效入口：
+不熟悉命令行时，日常只使用桌面上的 `Hecatonchires.command`；Paper 验证阶段再使用仓库或桌面上的三个测试按钮。旧的 `点这里运行/` 已移除，避免误点失效入口：
+
+日常使用时，双击桌面上的 `Hecatonchires.command`。它会自动启动本地控制台并打开浏览器；如果控制台已经运行，则只打开现有页面，不会重复启动。控制台运行期间请保留它打开的终端窗口，关闭终端会安全停止本次本地 UI 服务。
+
+Paper 累计验证阶段仍保留三个测试/恢复按钮：
 
 1. 双击 `1_开始或继续Paper累计验证.command`。第一次默认最多连续运行 4 小时；满 40 分钟记录资格里程碑但不强制重启，继续到 4 小时可同时满足连续门槛。后续继续使用同一个 Campaign 和 1000 pUSD 模拟账户累计到 24 小时。
 2. 想暂停或关机时，双击 `2_安全暂停并生成报告.command`。它会停止 Observe、让 Paper 安全收尾，并自动生成报告和诊断 ZIP。
 3. 双击 `3_查看进度和打开最新结果.command`。Finder 会选中应发给 Codex 的最新 ZIP，无需手工寻找数据库或日志。
+
+主入口脚本位于 `scripts/launch-hecatonchires-ui.command`。后续打包成正式 `.app` 时，桌面只需要保留一个 Hecatonchires 应用图标；上述三个按钮只作为开发/验收工具保留在内部。
 
 长期入口会使用 macOS `caffeinate` 防止系统睡眠（屏幕仍可关闭），并在 `data/operator/run/` 保存本次入口的精确进程记录。安全暂停只向这些已登记的本项目任务发送停止信号，不按进程名称扫描其他项目。每次启动都会通过 frozen lockfile 校验依赖；同一时间只允许一个长期入口运行。Observe/Paper 启动前还会检查数据库是否固定为 `PAPER + LIVE_DISABLED`；如需迁移，会先用 SQLite Online Backup 保存迁移前备份，成功后只保留最新 1 份，再执行 migration、`integrity_check` 和 `foreign_key_check`。
 

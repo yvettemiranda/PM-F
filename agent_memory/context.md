@@ -75,6 +75,11 @@
   执行小额硬上限；runtime database 和新备份强制 `0600`。UI 只开放完整闭环的
   EOA；Proxy/Safe/1271 等待官方 relayer。
 
+## Application entry
+- 日常主入口为桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`，它指向仓库内 `scripts/launch-hecatonchires-ui.command`。
+- 主入口检测 `GET /api/operator/snapshot`；已有 localhost UI 时只打开浏览器，未运行时补齐 Finder 启动时可能缺失的 Node PATH、启动 `pnpm operator:ui`，等待就绪后打开浏览器。终止终端会先停止本次 UI 服务。
+- 主入口故意不放进 `操作入口/`，避免把纯 UI 启动脚本纳入 Paper core compatibility manifest；`操作入口/` 的三个 `.command` 继续作为 Paper 验证/安全暂停/结果查看工具。
+
 ## Runtime handoff and valuation recovery
 - Paper 账户现在是跨 Campaign 的持久化组合容器。新 Core replacement 在旧 Campaign 已终止、没有等待中的 BUY/活动 reservation 且现金账本一致时复用同一 `paper_account_id` 和同一 `baseline_run_id`；旧仓位、旧 execution 和旧 ruleset 快照保持不可变，新账户运行时元数据更新到当前 Core，并在 Campaign transition evidence 中记录单向交接。
 - SQLite 迁移 `036_execution_runtime_handoff.sql` 移除 Campaign 对 `paper_account_id` 的列级唯一限制，改为可审计的 `(paper_account_id, created_at)` 索引，允许同一持久化 Paper 账户跨顺序 replacement Campaign 使用。

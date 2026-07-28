@@ -64,6 +64,10 @@
 - 外部审计文档已升级为
   `docs/audit/ni-k-external-audit-2026-07-28.md`，记录实际已实现生产路径、仍未发生
   的钱包/资金事实、操作顺序、风险、证据索引和外部审计判定口径。
+- 已补齐成品式日常入口：桌面新增 `Hecatonchires.command`，自动检测/启动 localhost
+  控制台并打开浏览器，重复双击只复用现有服务；仓库新增
+  `scripts/launch-hecatonchires-ui.command` 和 `README_主入口.md`。三个 Paper 按钮继续
+  保留为当前测试阶段的内部工具，未混入 `操作入口/`，因此不改变 Paper core hash。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
