@@ -1,6 +1,8 @@
 # Progress
 
 ## Current task
+- 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
+- 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
 - 最终报告标记 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION` 与 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION`，且没有改写原始数据库或同 Core Campaign 的内建计时。
 - 已完成 Paper/Live 运行时交接与最终估值恢复修复：同一 Paper 账户和 baseline 可在安全 replacement 中承接旧仓位；最终 drain/估值有界重试；估值未完成时新 BUY 延后且不消费；Live 仅保留禁用态交接与隔离恢复。
@@ -72,8 +74,8 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 当前代码复核、干净提交和 commit-bound `live-production-validation.json` 已完成；
-   源码再变化时必须重新运行 `pnpm validate:live-production`。
+1. 本轮清理后先完成类型检查、全量测试、UI 语法检查和 `git diff --check`；若源码或
+   进度文档进入新提交，必须重新运行 `pnpm validate:live-production`。
 2. 用户之后先按 UI 测试 Paper；准备小额实盘时按 UI 顺序连接 Polygon EOA、确认
    `10/1/3/1 pUSD` 或更低限额、完成 allowance 和真实只读核对。
 3. 只有用户当次输入最终确认词后才允许 Gate 尝试启动；在此之前继续保持

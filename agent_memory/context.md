@@ -87,6 +87,12 @@
 - Live `handoffRuntime` 现在还要求账户处于禁用态、没有未终态外部订单或活动 reservation、现金/保留账本非负且没有非零冻结仓位；Live Gate 全局 reconciliation 同时检查 Live 账本与孤儿/负仓位。`LiveRuntime` 仅组合 Gate 启动恢复、LiveExecutor 和 LiveRunner，不自行 arming 或发现凭据。
 - `LiveIdentityBinding` 在启动恢复、arming 申请/确认和轮询入口都核对注册账户、钱包状态、运行时钱包地址、authorized signer 地址、组件环境类型与源码版本；漂移时紧急禁用 Gate。`assembleLiveRuntime` 要求调用方显式注入全部 provider/adapter，不读取私钥或自动构造认证客户端。
 
+## 2026-07-28 workspace cleanup
+- 保留审计文档、最终 24 小时报告及压缩包、最终五个审计引用 Campaign、最终隔离验证、当前 Live 生产验证凭证和最新交接指针。
+- 已将过期的 pre-2.30 迁移备份、旧中间 evidence/log、未被最终报告引用的 `PC-2EB95BD31A8EB9693837` 与 `PC-305046D47E89A5529CDA` 文件、历史交接 ZIP、旧清理说明和 `.DS_Store` 移出仓库；临时可恢复目录由本轮工具输出给出。
+- 未删除 `data/phase0/phase0.sqlite`、历史 Capture、源码迁移、测试 fixture 或最终审计证据；这些仍是运行恢复、Replay 或外部审计所需资料。
+- 同轮复核删除了只被旧测试使用的 `LiveExecutorPlaceholder` 及其过时断言；正式 `LiveExecutor`、默认生产装配和安全 Gate 保持不变。
+
 ## Owner-selected delivery order
 - 用户明确要求按“3 → 2 → 1”推进：先完成全部 Live/后端接线、账户交接、外部订单恢复、合规与安全闸门等开发（但不得启用真实订单）；再开发可操作的 UI；最后统一做 Paper、隔离 Live 和安全门验证。
 - UI 完成后才进入最终验证；最终验证通过且用户再次明确授权前，仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。这里的“先做 3”表示先把能力开发完整，不表示提前接通或启用实盘。

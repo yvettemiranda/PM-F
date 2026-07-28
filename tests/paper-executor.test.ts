@@ -16,7 +16,6 @@ import {
 import type { MarketOrderConstraintEvidence } from "../src/execution/market-order-constraints.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
-import { LiveExecutorPlaceholder } from "../src/live/live-executor.js";
 import { PaperExecutor } from "../src/paper/paper-executor.js";
 import { PaperRunner } from "../src/paper/paper-runner.js";
 import type {
@@ -3852,7 +3851,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("uses one executor input contract for Paper and the Live placeholder", async () => {
+  it("persists the complete executor context required by Paper and Live", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "contract", createdAt: "2026-07-08T00:00:01.000Z" });
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
@@ -3878,61 +3877,6 @@ describe("PaperExecutor", () => {
     }
     db.close();
     expect(env.executor.mode).toBe("PAPER");
-    const live = new LiveExecutorPlaceholder();
-    expect(live.mode).toBe("LIVE");
-    await expect(live.executeBuy({
-      accountId: env.accountId,
-      signal: {
-        signalId: "contract",
-        targetId: env.targetId,
-        signalType: "TARGET_BUY",
-        eventClassification: "STANDARD_TRADE",
-        status: "PUBLISHED",
-        executionEligible: true,
-        executionBlockReason: null,
-        assetId,
-        conditionId,
-        targetPriceUnits: "500000000000000000",
-        targetSizeMicros: "10000000",
-        sellRatioNumerator: null,
-        sellRatioDenominator: null,
-        createdAt: "2026-07-08T00:00:01.000Z",
-        context: {
-          contextId: context.context_id as string,
-          targetId: context.target_id as string,
-          signalId: "contract",
-          capitalDecisionId: context.capital_decision_id as string | null,
-          targetTradeCapitalRatioPpm: context.target_trade_capital_ratio_ppm as string | null,
-          targetTradeTimestamp: context.target_trade_timestamp as string,
-          marketEndTime: context.market_end_time as string,
-          marketMetadataSnapshot: JSON.parse(context.market_metadata_snapshot_json as string),
-          marketMetadataHash: context.market_metadata_hash as string,
-          rulesetHash: context.ruleset_hash as string,
-          sourceCodeCommit: context.source_code_commit as string,
-          sourceCodeDirty: (context.source_code_dirty as number) !== 0,
-          configVersion: context.config_version as string,
-          createdAt: context.created_at as string,
-        },
-        capitalDecision: { status: "COMPLETE", confidence: "HIGH", ratioPpm: "100000", fallbackAmountMicros: "10000000" },
-      },
-      context: {
-        contextId: context.context_id as string,
-        targetId: context.target_id as string,
-        signalId: "contract",
-        capitalDecisionId: context.capital_decision_id as string | null,
-        targetTradeCapitalRatioPpm: context.target_trade_capital_ratio_ppm as string | null,
-        targetTradeTimestamp: context.target_trade_timestamp as string,
-        marketEndTime: context.market_end_time as string,
-        marketMetadataSnapshot: JSON.parse(context.market_metadata_snapshot_json as string),
-        marketMetadataHash: context.market_metadata_hash as string,
-        rulesetHash: context.ruleset_hash as string,
-        sourceCodeCommit: context.source_code_commit as string,
-        sourceCodeDirty: (context.source_code_dirty as number) !== 0,
-        configVersion: context.config_version as string,
-        createdAt: context.created_at as string,
-      },
-      riskDecisionId: "risk-contract",
-    })).rejects.toThrow("LIVE_EXECUTOR_NOT_IMPLEMENTED");
     env.executor.close();
   });
 
@@ -4438,15 +4382,9 @@ describe("PaperExecutor", () => {
 
   it("keeps Paper isolated from live signer or order dependencies", () => {
     const paperSource = readFileSync(new URL("../src/paper/paper-executor.ts", import.meta.url), "utf8");
-    const liveSource = readFileSync(new URL("../src/live/live-executor.ts", import.meta.url), "utf8");
     for (const forbidden of ["privateKey", "secret", "apiKey", "createOrder", "postOrder", "submitOrder", "signOrder"]) {
       expect(paperSource).not.toContain(forbidden);
     }
-    expect(liveSource).toContain("LIVE_EXECUTOR_NOT_IMPLEMENTED");
-    expect(liveSource).not.toContain("privateKey");
-    expect(liveSource).not.toContain("ClobClient");
-    expect(liveSource).not.toContain("postOrder");
-    expect(liveSource).toContain("checkExecution");
   });
 
   it("recovers idempotently after restart without duplicating risk decisions", async () => {
