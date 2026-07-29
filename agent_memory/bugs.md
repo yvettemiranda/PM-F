@@ -19,8 +19,6 @@
   Live arming，也不记录最终用户授权通过。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 - “Live 对账”当前不可点击是预期的安全阻断：只有验证过的钱包会话、Signer、只读余额、认证 CLOB 和已装配 LiveRuntime 全部就绪后才开放；未连接钱包时接口必须返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`。
-- 当前 Chrome 页面未注入 EIP-1193 `window.ethereum`（无 `request` 方法），因此连接钱包按钮无法完成钱包发现；需要在安装并启用 MetaMask/Rabby 等钱包扩展的同一 Chrome 配置文件中打开控制台。
-- OKX 流程已能从页面打开扩展授权弹窗；服务端回滚修复已部署到重启后的 localhost 服务。需重新完成一次 challenge/signature；在完整证明返回前保持 `DISCONNECTED` 仍是正确的安全状态。
 
 ## Active risks
 - 桌面主入口依赖本机已有 `pnpm` 和 Node.js 20+；脚本会尝试从 pnpm 同级运行时补齐 Node PATH，若用户的系统没有 Node.js 仍会明确提示，尚未打包成自带运行时的正式 `.app`。
