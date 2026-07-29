@@ -96,13 +96,29 @@ fi
 
 cd "$PROJECT_ROOT"
 print "正在启动 Hecatonchires 本地控制台（$UI_URL）……"
-pnpm operator:ui &
+node --import tsx prototype/live-ui/server.mjs &
 SERVER_PID=$!
+SERVER_STOPPED=0
 
 cleanup() {
-  if kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
+  if [[ "$SERVER_STOPPED" -eq 1 ]]; then
+    return
   fi
+  if kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    for ((stop_attempt = 0; stop_attempt < 100; stop_attempt++)); do
+      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_STOPPED=1
+        return
+      fi
+      sleep 0.1
+    done
+    print -u2 "控制台安全停止超时，正在终止本地服务进程。"
+    kill -KILL "$SERVER_PID" 2>/dev/null || true
+  fi
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_STOPPED=1
 }
 
 handle_signal() {
@@ -117,8 +133,13 @@ for ((attempt = 0; attempt < 80; attempt++)); do
   if ui_ready; then
     open_ui
     print "控制台已打开：$UI_URL"
-    wait "$SERVER_PID"
-    exit $?
+    if wait "$SERVER_PID"; then
+      SERVER_STATUS=0
+    else
+      SERVER_STATUS=$?
+    fi
+    SERVER_STOPPED=1
+    exit "$SERVER_STATUS"
   fi
 
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then

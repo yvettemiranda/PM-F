@@ -1,6 +1,13 @@
 # Progress
 
 ## Current task
+- 2026-07-29 在真实 `LIVE_ACTIVE` 后验证服务退出时发现，旧桌面入口持有的是 pnpm 外层
+  PID，外层先退出可能让 Node 来不及完成 `shutdownSafety()`，数据库残留
+  `LIVE_ACTIVE`。当时服务和 runtime 已停止、没有订单风险，并已立即通过正式
+  emergency-disable 接口恢复 `PAPER + LIVE_DISABLED`。入口现直接持有 Node PID，
+  `SIGTERM` 后最多等待 `10 s` 完成安全关机，再处理超时；新增 launcher 回归测试和
+  zsh 语法检查。新测试已登记进受审计测试清单，TypeScript、`git diff --check` 和全套
+  `77 files / 897 tests` 通过。
 - 2026-07-29 修正启动顺序后，真实 OKX/Safe 一键流程已首次到达
   `execution_mode=LIVE / live_gate_state=LIVE_ACTIVE / USER_CONFIRMED_LIVE_ACTIVE`；
   正式余额 `0 pUSD`、启动前 `5` 项仓位保持隔离、生产十项 readiness 全部 READY，未发送

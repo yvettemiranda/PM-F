@@ -6,8 +6,9 @@
   空仓假设。Schema `2.32.0` 已迁移并为真实 Safe 捕获 `5` 项不可变启动前仓位基线。最新
   一键流程进一步发现零余额时错误调用无 `token_id` 的 CONDITIONAL allowance API；已用
   红测复现并修复。随后暴露“先确认 ACTIVE、再执行会主动降级 ACTIVE 的启动恢复”这一
-  不可满足顺序；已改成 arming 恢复和空闲 runner 先启动、Gate 最后确认，仍需全套验证、
-  提交、生成同提交 production validation artifact、重启和真实一键复核。
+  不可满足顺序；已改成 arming 恢复和空闲 runner 先启动、Gate 最后确认。桌面入口安全
+  退出也已修复并纳入全套 `77 files / 897 tests`；待提交、生成同提交 production
+  validation artifact、重启和真实一键复核。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
@@ -65,6 +66,10 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 2026-07-29：桌面入口不再后台启动 pnpm 包装进程后只保存其 PID。它现在直接启动并持有
+  Node UI 服务，关闭终端时发送 `SIGTERM` 并等待 `shutdownSafety()` 最多 `10 s`，确保
+  Gate 和 runtime 安全停止；真实退出测试中发现的残留 `LIVE_ACTIVE` 已通过正式紧急停用
+  接口恢复，未创建订单。
 - 2026-07-29：Operator `liveAllowed` 不再是历史常量 `false`；它现在严格投影数据库 Gate，
   仅 `execution_mode=LIVE` 且 `live_gate_state=LIVE_ACTIVE` 时为 `true`，避免 UI 在真实
   激活后仍显示互相矛盾的状态。

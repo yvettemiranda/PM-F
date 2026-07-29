@@ -110,7 +110,10 @@
 
 ## Application entry
 - 日常主入口为桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`，它指向仓库内 `scripts/launch-hecatonchires-ui.command`。
-- 主入口检测 `GET /api/operator/snapshot`；已有 localhost UI 时只打开浏览器，未运行时补齐 Finder 启动时可能缺失的 Node PATH、启动 `pnpm operator:ui`，等待就绪后打开浏览器。终止终端会先停止本次 UI 服务。
+- 主入口检测 `GET /api/operator/snapshot`；已有 localhost UI 时只打开浏览器，未运行时
+  补齐 Finder 启动时可能缺失的 Node PATH，并直接持有 Node UI 服务 PID。终止终端会向
+  Node 发送 `SIGTERM`，等待 `shutdownSafety()` 完成 Gate 停用和 runtime 停止后再退出，
+  避免只终止 pnpm 外层进程而残留 `LIVE_ACTIVE`。
 - Chrome 已有同 URL 标签页时，主入口通过 AppleScript 聚焦并复用该标签页，不再创建
   重复控制台。UI 的钱包连接和 session wallet worker 使用 Web Locks 跨标签页互斥；
   钱包已授权本站时先复用 `eth_accounts`，不会伪装成仍需连接确认。

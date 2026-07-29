@@ -689,8 +689,10 @@ UI 不决定：
 2. 入口先请求本地 `GET /api/operator/snapshot`；
 3. 如果控制台已经运行，只调用系统 `open` 打开现有
    `http://127.0.0.1:4173/`，不创建第二个服务；
-4. 如果没有运行，入口启动 `pnpm operator:ui`，等待 snapshot 可读后再打开浏览器；
-5. 入口进程保持终端存活，用户关闭终端或按 `Ctrl-C` 时先停止本次 UI 服务；
+4. 如果没有运行，入口直接启动 Node UI 服务并持有其精确 PID，等待 snapshot 可读后再
+   打开浏览器；
+5. 入口进程保持终端存活，用户关闭终端或按 `Ctrl-C` 时向该 Node 进程发送
+   `SIGTERM`，等待 Gate 紧急停用和 runtime 停止完成后再退出；
 6. 入口脚本位于 `scripts/`，不属于 `操作入口/`，避免纯 UI 启动操作改变 Paper
    Core compatibility manifest。
 

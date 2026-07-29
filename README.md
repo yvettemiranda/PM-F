@@ -26,7 +26,7 @@
 - 完全相同成交的链上次数证明：只对官方 Polygon V2 Exchange 的成功回执解码 `OrderFilled`，并要求目标 maker、side、token、抵押金额、成交次数和不同 `orderHash` 全部精确一致；原始回执与派生 proof 随 Capture Manifest 内容寻址、不可变保存，任何缺失或不一致继续阻断 Replay
 - Live 下单边界加固：不可变 Signal/Execution Context 逐字段校验、钱包与 authorized signer 绑定、signed order 的 maker/signer/数量/限价/fee 复核、完整 Order Intent 快照及恢复 hash、账户级串行化、取消 CAS、启动恢复门槛和紧急停止竞态保护
 
-`Live Executor` 已有完整架构、官方 CLOB SDK adapter、合规/geoblock/时钟安全 provider、钱包与 signer 身份绑定、启动恢复、外部订单/成交/仓位对账、arming/kill switch 和完整依赖装配入口。装配入口只接受显式注入的 adapter，不会发现或加载私钥；localhost 控制台现在按最终 Live 生产路径展示前置条件、公开钱包配置、预检和运行入口。数据库状态仍固定为 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`。私钥接入、真实订单、approve、真实 redeem 和链上写操作均不属于当前默认运行状态；连接正式钱包前，所有 Live 执行入口继续由前置条件安全阻断。Phase 4/5 和自动化 hardening 只代表技术候选与验证框架可用，不代表最终验证通过，也不代表 Live 已获授权。
+`Live Executor` 已有完整架构、官方 CLOB SDK adapter、合规/geoblock/时钟安全 provider、钱包与 signer 身份绑定、启动恢复、外部订单/成交/仓位对账、arming/kill switch 和完整依赖装配入口。装配入口只接受显式注入的 adapter，不会发现或加载私钥；localhost 控制台现在按最终 Live 生产路径展示前置条件、公开钱包配置、预检和运行入口。主入口默认保持 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`；只有钱包身份、生产 Gate、外部对账、启动恢复和用户确认全部通过后才进入 Live。私钥不会接入，approve、真实 redeem 和链上交易仍必须由浏览器钱包逐笔确认。
 
 ## 本机验证
 
