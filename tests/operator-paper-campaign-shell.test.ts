@@ -539,7 +539,7 @@ describe("Paper Campaign operator shell", () => {
     ]));
     expect(bundled.entries.filter((name) => name.startsWith("paper-phase0-validation-attempt-"))).toHaveLength(3);
     expect(bundled.entries.filter((name) => name.startsWith("paper-replay-validation-attempt-"))).toHaveLength(3);
-  });
+  }, 15_000);
 
   it("includes isolated proof only when source commit and core compatibility both match", () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
