@@ -1,6 +1,7 @@
 # Progress
 
 ## Current task
+- 2026-07-29 钱包连接稳定性修复进行中：页面已加入独立的钱包发现层，优先通过 EIP-6963 识别 OKX，并兼容延迟注入、`ethereum.providers` 与传统 `window.ethereum`；服务重启/会话过期时 UI 会明确提示重新签名，不会把安全性误报成连接成功。
 - 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
 - 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
@@ -117,6 +118,10 @@
 - 用户明确授权当前 `10/1/3/1 pUSD` 小额限额后，重新连接并发起 Live Gate 请求；官方地域检查返回
   `GEOBLOCK_BLOCKED:US:CA`，请求在进入 arming 前失败关闭。当前钱包仍可见为已连接，但 Gate
   继续 `PAPER + LIVE_DISABLED + liveAllowed=false`，没有创建订单或链上写入。
+
+## Latest wallet-connection verification
+- 新增 `prototype/live-ui/wallet-provider.js` 和 `tests/wallet-provider.test.ts`：覆盖已注入 provider、延迟 EIP-6963 OKX announcement、无 provider 超时返回；当前 targeted/full Vitest 均通过 `72 files / 858 tests`，TypeScript、前端语法和 `git diff --check` 通过。
+- 当前服务仍应以最新源码重启后再打开新网页；重启会清除内存钱包会话，这是刻意的短期租约安全策略。重连只需重新通过 OKX 的地址控制权签名，不会授权交易。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。

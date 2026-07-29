@@ -267,6 +267,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/trade-multiplicity-evidence.test.ts",
   "tests/validation-framework.test.ts",
   "tests/wallet-identity.test.ts",
+  "tests/wallet-provider.test.ts",
 ] as const;
 
 function semanticTypeScript(source: string, relativePath: string): string {

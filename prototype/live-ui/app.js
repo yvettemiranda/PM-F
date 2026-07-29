@@ -11,6 +11,7 @@ const state = {
   refreshTimer: null,
   walletWorkerGeneration: 0,
   walletWorkerSessionId: null,
+  walletProvider: null,
   openPanels: new Set(),
   hasRenderedContent: false,
 };
@@ -343,6 +344,7 @@ function livePanel(snapshot) {
   const production = snapshot?.live?.production;
   const walletSession = snapshot?.live?.walletSession;
   const walletConnected = walletSession?.status === "CONNECTED";
+  const walletNeedsReconnect = !walletConnected && Boolean(production?.config?.walletAddress);
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
   const runtimeConfigured = snapshot?.live?.capability?.execution === "AVAILABLE";
   const walletSetupAvailable = snapshot?.live?.capability?.walletSetup === "AVAILABLE";
@@ -369,13 +371,19 @@ function livePanel(snapshot) {
       <div class="fold-content ops-content">
         <div class="gate-banner ${gate?.state === "LIVE_ACTIVE" ? "danger" : ""}">
           <strong>${escapeHtml(production?.status === "READY" ? "生产路径已就绪" : "生产路径待前置条件")}</strong>
-          <span>${escapeHtml(gate?.reason ?? "当前不会提交真实订单；连接正式钱包后继续完成预检。")}</span>
+          <span>${escapeHtml(walletNeedsReconnect
+            ? "本地服务已重启或会话已过期，请在 OKX 重新签名；这不会授权交易。"
+            : gate?.reason ?? "当前不会提交真实订单；连接正式钱包后继续完成预检。")}</span>
         </div>
         <div class="live-production-config">
           <div class="production-heading">
             <div><strong>生产钱包准备</strong><span>连接后只保存公开身份；每次签名和链上交易都由你的浏览器钱包确认。</span></div>
             <span class="production-status ${production?.status === "READY" ? "ready" : "pending"}">
-              ${escapeHtml(production?.status === "READY" ? "可预检" : walletConnected ? "已连接" : "等待连接")}
+              ${escapeHtml(production?.status === "READY"
+                ? "可预检"
+                : walletConnected
+                  ? "已连接"
+                  : walletNeedsReconnect ? "需重新签名" : "等待连接")}
             </span>
           </div>
           <div class="production-config-row">
@@ -393,7 +401,9 @@ function livePanel(snapshot) {
                   ${disabledAttr(Boolean(state.busy), "")}>连接钱包</button>`}
           </div>
           <div class="wallet-session-meta">
-            <span>钱包会话：${escapeHtml(walletConnected ? "已证明地址控制权" : "未连接")}</span>
+            <span>钱包会话：${escapeHtml(walletConnected
+              ? "已证明地址控制权"
+              : walletNeedsReconnect ? "未连接 · 请重新签名" : "未连接")}</span>
             <span>Signer：${escapeHtml(walletSession?.signerStatus === "READY"
               ? "钱包签名通道已准备"
               : walletConnected ? "正在装配" : "未连接")}</span>
@@ -776,6 +786,14 @@ async function refresh(silent = false) {
   }
 }
 
+function discoverWalletProvider() {
+  const discovery = window.HecatonchiresWalletProvider;
+  if (typeof discovery?.discover === "function") {
+    return discovery.discover({ timeoutMs: 1_500 });
+  }
+  return Promise.resolve(window.ethereum);
+}
+
 function setNotice(kind, title, message) {
   state.notice = { kind, title, message };
   window.setTimeout(() => {
@@ -869,12 +887,13 @@ async function restoreDefaults() {
 }
 
 async function connectLiveWallet() {
-  const provider = window.ethereum;
-  if (!provider || typeof provider.request !== "function") {
-    setNotice("error", "未检测到钱包", "当前浏览器没有 EIP-1193 钱包。请在带钱包扩展的浏览器中打开本地控制台。");
-    return;
-  }
   try {
+    const provider = await discoverWalletProvider();
+    if (!provider || typeof provider.request !== "function") {
+      setNotice("error", "未检测到钱包", "OKX 钱包尚未注入当前页面。请确认扩展已启用，再点击一次连接钱包。");
+      return;
+    }
+    state.walletProvider = provider;
     const accounts = await provider.request({ method: "eth_requestAccounts" });
     const walletAddress = Array.isArray(accounts) ? accounts[0] : "";
     if (typeof walletAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
@@ -1019,7 +1038,7 @@ async function processWalletRequest(provider, session, request) {
 }
 
 async function walletRequestWorker(generation) {
-  const provider = window.ethereum;
+  const provider = state.walletProvider ?? await discoverWalletProvider();
   while (generation === state.walletWorkerGeneration) {
     const session = state.snapshot?.live?.walletSession;
     if (!provider || typeof provider.request !== "function" || session?.status !== "CONNECTED") return;
