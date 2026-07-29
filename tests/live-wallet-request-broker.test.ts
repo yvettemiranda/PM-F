@@ -61,6 +61,13 @@ describe("LiveWalletRequestBroker", () => {
     expect(JSON.parse(String(request?.params[1]))).toMatchObject({
       primaryType: "ClobAuth",
       domain: { chainId: 137 },
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+        ],
+      },
     });
 
     const signature = `0x${"a".repeat(130)}`;

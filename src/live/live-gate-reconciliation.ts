@@ -37,6 +37,17 @@ export class LiveGateReconciliation {
     ];
   }
 
+  checkLiveOnly(): LiveGateCheck[] {
+    return [
+      this.liveCashLedgerCheck(),
+      this.liveReservationLedgerCheck(),
+      this.liveOrphanExecutionCheck(),
+      this.liveOrphanPositionCheck(),
+      this.liveNegativePositionCheck(),
+      this.liveFrozenPositionCheck(),
+    ];
+  }
+
   private cashLedgerCheck(): LiveGateCheck {
     const accounts = this.database.prepare(
       "SELECT paper_account_id,cash_balance_micros FROM paper_accounts",

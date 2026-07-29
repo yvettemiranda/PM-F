@@ -83,9 +83,23 @@ export class LiveWalletRequestBroker {
     if (!Object.hasOwn(input.types, primaryType)) {
       throw new Error("LIVE_WALLET_TYPED_DATA_PRIMARY_TYPE_UNKNOWN");
     }
+    const domainTypes = [
+      ...(typeof input.domain.name === "string" ? [{ name: "name", type: "string" }] : []),
+      ...(typeof input.domain.version === "string" ? [{ name: "version", type: "string" }] : []),
+      ...(typeof input.domain.chainId === "number" || typeof input.domain.chainId === "bigint"
+        ? [{ name: "chainId", type: "uint256" }]
+        : []),
+      ...(typeof input.domain.verifyingContract === "string"
+        ? [{ name: "verifyingContract", type: "address" }]
+        : []),
+      ...(typeof input.domain.salt === "string" ? [{ name: "salt", type: "bytes32" }] : []),
+    ];
     const typedData = {
       domain: input.domain,
-      types: input.types,
+      types: {
+        EIP712Domain: domainTypes,
+        ...input.types,
+      },
       primaryType,
       message: input.message,
     };

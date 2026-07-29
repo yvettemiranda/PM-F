@@ -1,6 +1,10 @@
 # Bugs And Risks
 
 ## Active blockers
+- 当前已连接的旧 localhost 进程仍运行提交 `3c9334b...`；真实重试已证明钱包 session 和
+  Signer 正常，但旧进程在生产 Gate 暴露 `Invalid L1 Request headers`、外部证据时序、
+  3 秒网络超时以及历史 Paper 全局 reconciliation 混入。源码修复已通过
+  `75 files / 880 tests`，但在提交、production validation 和重启前，旧进程不会热更新。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
@@ -11,9 +15,9 @@
   仍未验收。隔离测试不能替代这些外部事实。
 - 当前运行服务在源码未提交期间为 `source dirty`，钱包 session 未装配；提交、生成新验证
   artifact 和重启前，Gate/对账必然保持阻断。已保存限额仍有效，不应要求用户重复保存。
-- 前次用户授权请求在官方地域检查处被阻断：`GEOBLOCK_BLOCKED:US:CA`。不得绕过、伪造或
-  手工覆盖地域 provider；除非 provider 在实际允许地区给出新的 `ALLOWED` 证据，否则不进入
-  Live arming，也不记录最终用户授权通过。
+- 前次用户授权请求曾被 `GEOBLOCK_BLOCKED:US:CA` 阻断；本轮官方端点实测又返回
+  `blocked=false / KR`，说明出口地域会随实际网络路径变化。不得缓存允许结果、绕过、伪造或
+  手工覆盖 provider；每次 arming/执行仍必须取得新鲜官方结果。
 - 重复 Hecatonchires 标签页曾同时轮询钱包会话并可能争抢同一签名请求；现已由桌面入口
   标签页复用和 UI Web Locks 互斥解决。OKX 扩展确认不能被后台静默跳过；每个签名或交易
   仍必须在扩展弹窗中明确确认。

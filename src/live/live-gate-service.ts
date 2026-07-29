@@ -721,6 +721,7 @@ export class LiveGateService implements LiveGate {
       ? await this.readGeoblock(wallet)
       : { status: "UNAVAILABLE" as const, checkedAt: null, source: null, reason: "WALLET_METADATA_MISSING" };
     const clock = await this.readClockSafety();
+    const evidenceNow = this.now().toISOString();
     return {
       wallet,
       balance,
@@ -728,15 +729,17 @@ export class LiveGateService implements LiveGate {
         ...this.modeChecks(requestedExecutionMode),
         ...this.environmentChecks(),
         this.walletMetadataCheck(wallet),
-        this.balanceProviderCheck(balance, now),
-        this.geoblockCheck(geoblock, now),
-        await this.complianceCheck(wallet, now),
-        this.clockSafetyCheck(clock, now),
+        this.balanceProviderCheck(balance, evidenceNow),
+        this.geoblockCheck(geoblock, evidenceNow),
+        await this.complianceCheck(wallet),
+        this.clockSafetyCheck(clock, evidenceNow),
         ...this.configurationChecks(),
         ...this.riskParameterChecks(),
         ...this.liveAccountPreflightChecks(wallet, balance),
         ...this.databaseChecks(),
-        ...new LiveGateReconciliation(this.database).check(),
+        ...(this.runtimeEnvironment === "PRODUCTION"
+          ? new LiveGateReconciliation(this.database).checkLiveOnly()
+          : new LiveGateReconciliation(this.database).check()),
         ...this.prerequisiteChecks(now),
       ],
     };
@@ -899,7 +902,7 @@ export class LiveGateService implements LiveGate {
     return { name: "geoblock_compliance", passed: true, reason: "OK" };
   }
 
-  private async complianceCheck(wallet: LiveWalletMetadata | null, now: string): Promise<LiveGateCheck> {
+  private async complianceCheck(wallet: LiveWalletMetadata | null): Promise<LiveGateCheck> {
     if (!wallet) return { name: "compliance_policy", passed: false, reason: "WALLET_METADATA_MISSING" };
     if (this.runtimeEnvironment === "PRODUCTION" && this.complianceProvider.providerType !== "LIVE_READONLY") {
       return {
@@ -935,7 +938,7 @@ export class LiveGateService implements LiveGate {
     if (!result.policyVersion?.trim()) {
       return { name: "compliance_policy", passed: false, reason: "COMPLIANCE_POLICY_VERSION_MISSING" };
     }
-    if (!this.externalEvidenceFresh(result.checkedAt, result.source, now)) {
+    if (!this.externalEvidenceFresh(result.checkedAt, result.source, this.now().toISOString())) {
       return { name: "compliance_policy", passed: false, reason: "COMPLIANCE_EVIDENCE_STALE_OR_INVALID" };
     }
     return { name: "compliance_policy", passed: true, reason: "OK" };
@@ -1395,10 +1398,9 @@ export class LiveGateService implements LiveGate {
     const cashDifference = balanceValid
       ? BigInt(balance.balanceMicros as string) - expectedCash
       : 0n;
-    const absoluteDifference = cashDifference < 0n ? -cashDifference : cashDifference;
     const cashReconciled = balanceValid
       && accountValuesValid
-      && absoluteDifference <= BigInt(RULESET.reconciliationCashAbsToleranceMicros);
+      && cashDifference >= -BigInt(RULESET.reconciliationCashAbsToleranceMicros);
 
     return [
       { name: "live_account_preflight", passed: true, reason: "OK" },

@@ -761,7 +761,20 @@ describe("LiveGateService", () => {
     budgetGate.close();
   });
 
-  it("rejects unexplained external cash drift before Live activation", async () => {
+  it("rejects a wallet balance below the allocated Live bankroll", async () => {
+    const env = setup();
+    passPrerequisites(env.databasePath);
+    insertWallet(env.databasePath);
+    const db = new DatabaseSync(env.databasePath);
+    ensureLiveAccount(db);
+    db.close();
+    const gate = service(env.databasePath, "999979999");
+    const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
+    expect(result.blockedReasons).toContain("LIVE_ACCOUNT_CASH_MISMATCH");
+    gate.close();
+  });
+
+  it("accepts wallet funds above the allocated Live bankroll without expanding risk limits", async () => {
     const env = setup();
     passPrerequisites(env.databasePath);
     insertWallet(env.databasePath);
@@ -770,7 +783,7 @@ describe("LiveGateService", () => {
     db.close();
     const gate = service(env.databasePath, "1000020001");
     const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
-    expect(result.blockedReasons).toContain("LIVE_ACCOUNT_CASH_MISMATCH");
+    expect(result.blockedReasons).not.toContain("LIVE_ACCOUNT_CASH_MISMATCH");
     gate.close();
   });
 
@@ -853,6 +866,161 @@ describe("LiveGateService", () => {
     const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
     expect(result.allowed).toBe(false);
     expect(result.blockedReasons).toContain("CASH_LEDGER_MISMATCH:bad-account");
+    gate.close();
+  });
+
+  it("scopes production activation reconciliation to Live ledgers instead of historical Paper portfolios", async () => {
+    const env = setup();
+    passPrerequisites(env.databasePath, { environment: "PRODUCTION" });
+    insertWallet(env.databasePath);
+    const db = new DatabaseSync(env.databasePath);
+    ensureLiveAccount(db);
+    db.prepare(
+      `INSERT INTO paper_accounts(
+        paper_account_id,name,status,initial_balance_micros,cash_balance_micros,
+        reserved_balance_micros,realized_pnl_micros,signal_cutoff_at,schema_version,
+        strategy_version,risk_version,paper_version,ruleset_snapshot_json,ruleset_hash,
+        source_code_commit,source_code_dirty,created_at,updated_at
+      ) VALUES ('historical-paper','Historical','ACTIVE','1000','1000','0','0',?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ).run(
+      "2026-07-01T00:00:00.000Z",
+      VERSIONS.schemaVersion,
+      VERSIONS.strategyVersion,
+      VERSIONS.riskVersion,
+      VERSIONS.paperVersion,
+      RULESET_SNAPSHOT_JSON,
+      RULESET_HASH,
+      sourceVersion.commit,
+      "2026-07-01T00:00:00.000Z",
+      "2026-07-01T00:00:00.000Z",
+    );
+    db.close();
+    const gate = new LiveGateService(
+      env.databasePath,
+      {
+        providerType: "LIVE_READONLY",
+        async getBalance() {
+          return {
+            status: "AVAILABLE",
+            balanceMicros: "1000000000",
+            reason: null,
+            checkedAt: now,
+            source: "PRODUCTION_FIXTURE",
+          };
+        },
+      },
+      { ...defaultLiveGateConfig(), runtimeEnvironment: "PRODUCTION" },
+      {
+        sourceVersion,
+        now: () => new Date(now),
+        geoblockProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return { status: "ALLOWED", checkedAt: now, source: "PRODUCTION_FIXTURE", reason: null };
+          },
+        },
+        complianceProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return {
+              status: "ALLOWED",
+              checkedAt: now,
+              source: "PRODUCTION_FIXTURE",
+              policyVersion: "fixture-v1",
+              reason: null,
+            };
+          },
+        },
+        clockProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return {
+              status: "SAFE",
+              offsetMs: 0,
+              checkedAt: now,
+              source: "PRODUCTION_FIXTURE",
+              reason: null,
+            };
+          },
+        },
+      },
+    );
+    const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
+    expect(result.blockedReasons).not.toContain("CASH_LEDGER_MISMATCH:historical-paper");
+    gate.close();
+  });
+
+  it("evaluates fresh external evidence against preflight completion time", async () => {
+    const env = setup();
+    passPrerequisites(env.databasePath, { environment: "PRODUCTION" });
+    insertWallet(env.databasePath);
+    insertLiveAccount(env.databasePath);
+    let current = new Date(now);
+    const completedAt = "2026-07-09T00:00:01.000Z";
+    const finishNetworkRead = () => {
+      current = new Date(completedAt);
+      return completedAt;
+    };
+    const gate = new LiveGateService(
+      env.databasePath,
+      {
+        providerType: "LIVE_READONLY",
+        async getBalance() {
+          return {
+            status: "AVAILABLE",
+            balanceMicros: "1000000000",
+            reason: null,
+            checkedAt: finishNetworkRead(),
+            source: "PRODUCTION_FIXTURE",
+          };
+        },
+      },
+      { ...defaultLiveGateConfig(), runtimeEnvironment: "PRODUCTION" },
+      {
+        sourceVersion,
+        now: () => current,
+        geoblockProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return {
+              status: "ALLOWED",
+              checkedAt: finishNetworkRead(),
+              source: "PRODUCTION_FIXTURE",
+              reason: null,
+            };
+          },
+        },
+        complianceProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return {
+              status: "ALLOWED",
+              checkedAt: finishNetworkRead(),
+              source: "PRODUCTION_FIXTURE",
+              policyVersion: "fixture-v1",
+              reason: null,
+            };
+          },
+        },
+        clockProvider: {
+          providerType: "LIVE_READONLY",
+          async check() {
+            return {
+              status: "SAFE",
+              offsetMs: 0,
+              checkedAt: finishNetworkRead(),
+              source: "PRODUCTION_FIXTURE",
+              reason: null,
+            };
+          },
+        },
+      },
+    );
+    const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
+    expect(result.blockedReasons).not.toContain("BALANCE_EVIDENCE_STALE_OR_INVALID");
+    expect(result.blockedReasons).not.toContain("GEOBLOCK_EVIDENCE_STALE_OR_INVALID");
+    expect(result.blockedReasons).not.toContain("COMPLIANCE_EVIDENCE_STALE_OR_INVALID");
+    expect(result.blockedReasons).not.toContain("CLOCK_EVIDENCE_STALE_OR_INVALID");
     gate.close();
   });
 
@@ -1742,6 +1910,27 @@ describe("official readonly Live safety providers", () => {
     expect((await networkFailure.check({ walletAddress: wallet, network: "POLYGON" })).reason).toBe("GEOBLOCK_REQUEST_FAILED");
   });
 
+  it("retries a transient official geoblock request failure before failing closed", async () => {
+    let attempts = 0;
+    const provider = new OfficialGeoblockProvider({
+      fetchImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary network failure");
+        return new Response(JSON.stringify({
+          blocked: false,
+          ip: "203.0.113.42",
+          country: "IE",
+          region: "D",
+        }));
+      },
+    });
+    await expect(provider.check({ walletAddress: wallet, network: "POLYGON" })).resolves.toMatchObject({
+      status: "ALLOWED",
+      country: "IE",
+    });
+    expect(attempts).toBe(2);
+  });
+
   it("computes CLOB clock offset from the RTT midpoint without authentication", async () => {
     const times = [1_000_000, 1_000_200];
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
@@ -1757,6 +1946,20 @@ describe("official readonly Live safety providers", () => {
     expect(requests[0]?.url).toBe("https://clob.polymarket.com/time");
     expect(requests[0]?.init?.method).toBe("GET");
     expect(JSON.stringify(requests[0]?.init?.headers).toLowerCase()).not.toContain("authorization");
+  });
+
+  it("retries a transient CLOB clock request failure", async () => {
+    let attempts = 0;
+    const provider = new ClobClockSafetyProvider({
+      nowMs: () => 1_000_000,
+      fetchImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary network failure");
+        return new Response("1000");
+      },
+    });
+    await expect(provider.check()).resolves.toMatchObject({ status: "SAFE" });
+    expect(attempts).toBe(2);
   });
 
   it("fails CLOB clock closed for unsafe offset, excessive RTT and malformed/network responses", async () => {

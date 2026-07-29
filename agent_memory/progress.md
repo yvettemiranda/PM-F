@@ -1,6 +1,14 @@
 # Progress
 
 ## Current task
+- 2026-07-29 真实一键流程已在正式 OKX 会话中跑到生产 Gate，并定位/修复四个确定性阻断：
+  browser CLOB typed-data 请求补齐标准 `EIP712Domain`（旧请求虽能弹出签名，但 CLOB 以
+  `Invalid L1 Request headers` 拒绝）；官方 geoblock/CLOB time 默认改为 `10 s` 且对
+  瞬时网络/5xx 有界重试两次；Gate 以外部读取完成时间而非预检开始时间判断证据新鲜度；
+  production reconciliation 只检查 Live 账户/账本，不再让 7 月 25—26 日已审计保留的
+  Paper 冻结仓位和历史 major desync 阻断 7 月 29 日新建且零历史的 Live 组合。Live
+  bankroll 是资金风险分配上限，钱包余额可以高于上限但不能低于分配额。专项
+  `80/80`、TypeScript 和全套 `75 files / 880 tests` 已通过。
 - 2026-07-29 钱包/UI 稳定性与一键 Live 流程已完成代码和第一轮全量验证。桌面入口会复用已有
   `127.0.0.1:4173` Chrome 标签页，不再反复新开控制台；连接流程先用
   `eth_accounts` 识别既有站点授权，仅在确实未授权时请求连接，再明确进入 Polygon
@@ -160,6 +168,7 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 提交已验证源码并重新生成与该提交一致的 production validation artifact。
-2. 重启唯一 localhost 服务，从真实 Chrome/OKX 执行一次完整一键 Live 流程。
-3. 若官方 geoblock 返回禁止地区，保留真实阻断证据并停止；不得通过代码伪造放行。
+1. 提交本轮 Gate/CLOB 修复并重新生成与该提交一致的 production validation artifact。
+2. 重启唯一 localhost 服务，重新建立一次因重启而失效的 OKX 短期会话。
+3. 从真实 Chrome/OKX 再跑完整一键流程；若官方 geoblock、真实余额/allowance、CLOB
+   认证或链上授权仍给出真实阻断，保留原始原因并停止，不得伪造放行。
