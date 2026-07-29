@@ -89,6 +89,10 @@
   emergency stop；宿主退出先停 Gate/runtime 并撤销 session。持久化配置读取时也
   执行小额硬上限；runtime database 和新备份强制 `0600`。UI 只开放完整闭环的
   EOA；Proxy/Safe/1271 等待官方 relayer。
+- Live runtime 会捕获源码/验证工件在会话建立后发生的版本失配：在预检、arming 或恢复抛出
+  `LIVE_PRODUCTION_*_INVALID` 时撤销旧钱包租约、取消待签名请求并回到
+  `PAPER + LIVE_DISABLED`，返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`；更新源码或
+  验证工件后必须重启服务并重新连接。
 - UI 快照仍每 `3 s` 轮询；首次成功加载播放一次进入动画，后续整页快照替换带
   `refresh-render` 类并关闭进入动画，避免轮询导致页面闪烁。折叠面板状态仍由
   `openPanels` 恢复，编辑中的输入仍跳过静默刷新覆盖。

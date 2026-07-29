@@ -352,6 +352,78 @@ describe("operator UI server", () => {
     expect(connectedLiveRuntimeFactory).toHaveBeenCalledOnce();
   });
 
+  it("invalidates a stale connected runtime instead of surfacing an artifact error", async () => {
+    const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
+    const connectedActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(async () => ({ accepted: true, code: "STARTED" })),
+      stop: vi.fn(async () => ({ accepted: true, code: "STOPPED" })),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const staleGate: OperatorLiveGateActions = {
+      preflight: vi.fn(async () => {
+        throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+      }),
+      requestActivation: vi.fn(async () => {
+        throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+      }),
+      confirmActivation: vi.fn(async () => {
+        throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+      }),
+      emergencyDisable: vi.fn(async () => undefined),
+      recover: vi.fn(async () => {
+        throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+      }),
+    };
+    const connectedLiveRuntimeFactory: NonNullable<OperatorUiServerOptions["connectedLiveRuntimeFactory"]> = vi.fn(
+      async () => ({
+        runtimeActions: connectedActions,
+        gateActions: staleGate,
+        dispose: vi.fn(),
+      }),
+    );
+    const { baseUrl } = await listen({ connectedLiveRuntimeFactory });
+    const challengeResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/challenge", {
+      body: { chainId: "0x89" },
+    });
+    const challengePayload = await challengeResponse.json() as {
+      data: { challengeId: string; message: string };
+    };
+    const signature = await account.signMessage({ message: challengePayload.data.message });
+    const connectResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/connect", {
+      body: {
+        challengeId: challengePayload.data.challengeId,
+        walletAddress: account.address,
+        chainId: "0x89",
+        signature,
+      },
+    });
+    expect(connectResponse.status).toBe(200);
+
+    const preflightResponse = await mutation(baseUrl, "/api/operator/live/preflight", { body: {} });
+    expect(preflightResponse.status).toBe(409);
+    expect(await preflightResponse.json()).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_RUNTIME_STALE_RECONNECT_REQUIRED" },
+    });
+    const snapshot = await (await fetch(`${baseUrl}/api/operator/snapshot`)).json() as {
+      data: {
+        control: { safety: { executionMode: string; liveGateState: string; liveAllowed: boolean } };
+        live: { walletSession: { status: string }; capability: { execution: string } };
+      };
+    };
+    expect(snapshot.data.control.safety.liveAllowed).toBe(false);
+    expect(snapshot.data.live.walletSession.status).toBe("DISCONNECTED");
+    expect(snapshot.data.live.capability.execution).toBe("PENDING_PREREQUISITES");
+    expect(connectedActions.stop).toHaveBeenCalledWith(expect.objectContaining({
+      actor: "WALLET_SESSION_GUARD",
+      reason: "LIVE_WALLET_SESSION_DISCONNECTED",
+    }));
+  });
+
   it("serves and completes only the request bound to the connected wallet session", async () => {
     const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
     const broker = new LiveWalletRequestBroker();

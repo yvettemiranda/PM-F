@@ -329,6 +329,71 @@ function stringField(body: Record<string, unknown>, key: string): string {
   return value.trim();
 }
 
+const STALE_LIVE_RUNTIME_CODES = new Set([
+  "LIVE_PRODUCTION_SOURCE_DIRTY",
+  "LIVE_PRODUCTION_VALIDATION_ARTIFACT_MISSING",
+  "LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID",
+  "LIVE_PRODUCTION_FINAL_PAPER_EVIDENCE_INVALID",
+  "LIVE_PRODUCTION_ISOLATED_EVIDENCE_INVALID",
+]);
+
+function errorCode(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function failForStaleLiveRuntime(input: {
+  options: OperatorUiServerOptions;
+  walletSessionManager: LiveWalletSessionManager;
+  walletRequestBroker: LiveWalletRequestBroker;
+  staleCode: string;
+}): Promise<never> {
+  const session = input.walletSessionManager.snapshot(input.options.now);
+  let invalidationError: string | null = null;
+  if (session.status === "CONNECTED" && session.sessionId !== null) {
+    try {
+      await input.walletSessionManager.disconnect(session.sessionId);
+    } catch (error) {
+      invalidationError = errorCode(error);
+    } finally {
+      input.walletRequestBroker.cancelSession(
+        session.sessionId,
+        "LIVE_RUNTIME_SOURCE_STALE_RECONNECT_REQUIRED",
+      );
+    }
+  }
+  throw new HttpError(
+    409,
+    "LIVE_RUNTIME_STALE_RECONNECT_REQUIRED",
+    "当前钱包会话绑定了旧版本验证工件，已保持 PAPER 并安全断开；请重新连接钱包。",
+    {
+      staleCode: input.staleCode,
+      reconnectRequired: true,
+      safety: "PAPER + LIVE_DISABLED",
+      ...(invalidationError === null ? {} : { invalidationError }),
+    },
+  );
+}
+
+async function withLiveRuntimeFreshnessGuard<T>(input: {
+  options: OperatorUiServerOptions;
+  walletSessionManager: LiveWalletSessionManager;
+  walletRequestBroker: LiveWalletRequestBroker;
+  action: () => Promise<T>;
+}): Promise<T> {
+  try {
+    return await input.action();
+  } catch (error) {
+    const code = errorCode(error);
+    if (!STALE_LIVE_RUNTIME_CODES.has(code)) throw error;
+    return failForStaleLiveRuntime({
+      options: input.options,
+      walletSessionManager: input.walletSessionManager,
+      walletRequestBroker: input.walletRequestBroker,
+      staleCode: code,
+    });
+  }
+}
+
 function optionalString(body: Record<string, unknown>, key: string, fallback: string): string {
   const value = body[key];
   if (value === undefined) return fallback;
@@ -717,7 +782,12 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
 
   if (request.method === "POST" && path === "/api/operator/live/preflight") {
-    const result = await liveGateActions.preflight();
+    const result = await withLiveRuntimeFreshnessGuard({
+      options,
+      walletSessionManager,
+      walletRequestBroker,
+      action: () => liveGateActions.preflight(),
+    });
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 未通过。", result));
       return;
@@ -728,9 +798,14 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "POST" && path === "/api/operator/live/request") {
     const body = await readJson(request);
-    const result = await liveGateActions.requestActivation({
-      actor: optionalString(body, "actor", "LOCAL_OPERATOR"),
-      reason: optionalString(body, "reason", "UI_MODE_SWITCH"),
+    const result = await withLiveRuntimeFreshnessGuard({
+      options,
+      walletSessionManager,
+      walletRequestBroker,
+      action: () => liveGateActions.requestActivation({
+        actor: optionalString(body, "actor", "LOCAL_OPERATOR"),
+        reason: optionalString(body, "reason", "UI_MODE_SWITCH"),
+      }),
     });
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 未允许进入 Live。", result));
@@ -743,17 +818,27 @@ async function handleApi(context: RequestContext): Promise<void> {
   if (request.method === "POST" && path === "/api/operator/live/confirm") {
     const body = await readJson(request);
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
-    const result = await liveGateActions.confirmActivation({
-      actor,
-      confirmationText: stringField(body, "confirmationText"),
+    const result = await withLiveRuntimeFreshnessGuard({
+      options,
+      walletSessionManager,
+      walletRequestBroker,
+      action: () => liveGateActions.confirmActivation({
+        actor,
+        confirmationText: stringField(body, "confirmationText"),
+      }),
     });
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 二次确认未通过。", result));
       return;
     }
-    const runtime = await liveRuntimeActions.start({
-      actor,
-      reason: "LIVE_GATE_CONFIRMED_START",
+    const runtime = await withLiveRuntimeFreshnessGuard({
+      options,
+      walletSessionManager,
+      walletRequestBroker,
+      action: () => liveRuntimeActions.start({
+        actor,
+        reason: "LIVE_GATE_CONFIRMED_START",
+      }),
     });
     if (!runtime.accepted) {
       await liveGateActions.emergencyDisable({
@@ -792,7 +877,12 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
 
   if (request.method === "POST" && path === "/api/operator/live/recover") {
-    const result = await liveGateActions.recover();
+    const result = await withLiveRuntimeFreshnessGuard({
+      options,
+      walletSessionManager,
+      walletRequestBroker,
+      action: () => liveGateActions.recover(),
+    });
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 恢复检查未通过。", result));
       return;

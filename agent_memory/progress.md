@@ -123,6 +123,7 @@
 - 新增 `prototype/live-ui/wallet-provider.js` 和 `tests/wallet-provider.test.ts`：覆盖已注入 provider、延迟 EIP-6963 OKX announcement、无 provider 超时返回；当前 targeted/full Vitest 均通过 `72 files / 858 tests`，TypeScript、前端语法和 `git diff --check` 通过。
 - 最新提交服务重启后，在新的 Chrome 页面实际完成 OKX 账户请求和 `personal_sign`：页面显示“钱包会话：已证明地址控制权 / Signer：钱包签名通道已准备”，后台快照为 `CONNECTED`、Polygon `137`、`signerStatus=READY`。Gate 仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，没有启动 Live 或链上写入。
 - 收尾生产验证曾连续两次在全套并发下让三轮 Phase0/Replay 打包测试超过默认 `5 s`（`5.117 s`、`5.164 s`），单测独立运行在 `4.57 s` 通过；已与同文件其他重型打包用例一致改为显式 `15 s`，最终生产验证恢复 `72 files / 858 tests` 全绿，不改变运行时代码。
+- 复现并修复 `LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID`：钱包会话在旧源码版本上装配后，验证工件更新会让旧 Live Gate 在预检时抛出 500。现在服务捕获验证/证据版本失配，自动撤销旧会话、取消待签名请求并返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`，明确要求重新连接；回归测试覆盖旧会话、PAPER/LIVE_DISABLED 和无真实操作。修复后需以最新提交重新生成验证工件并重启 4173，钱包内存会话会按设计清掉。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。

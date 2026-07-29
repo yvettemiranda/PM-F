@@ -51,6 +51,7 @@
 - UI 只开放 EOA 完整路径。底层 Proxy/Safe/EIP-1271 的 order signer 可用，但
   allowance/redeem 缺官方 relayer；在补齐官方账户初始化和 relayer 前不得开放。
 - 钱包会话已经作为短期运行时租约绑定到 Live action：断开、过期或替换会话会撤销 action 并触发 emergency stop；这能防止 UI 地址与已装配 runtime 漂移，但生产宿主仍必须把真实 provider、signer、CLOB 和 Gate 授权绑定到同一会话，不能只依赖浏览器端地址。
+- 旧钱包会话与新源码/验证工件版本不一致时，预检可能抛出 `LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID`；现在该版本失配会自动安全断开会话、取消待签名请求并返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`，要求重新连接，不再暴露 500 内部错误。源码或验证工件更新后必须重启 localhost 服务并重新签名。
 - 连接后的宿主 factory 只能通过服务端会话绑定 wrapper 暴露 action；钱包 provider 还必须自报并被装配入口核对 Polygon chainId。会话到期由后台定时器主动失效；紧急停用失败会重试一次并让断开接口返回 503，但若外部停机服务持续不可用，必须继续保持 Gate 禁用并人工处理。
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
