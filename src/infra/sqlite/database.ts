@@ -770,6 +770,51 @@ export class Phase0Database {
         this.database.exec("PRAGMA foreign_keys=ON");
       }
     }
+    const liveWalletPositionBaselineApplied = this.database
+      .prepare("SELECT 1 applied FROM schema_migrations WHERE version = ?")
+      .get("2.32.0");
+    if (!liveWalletPositionBaselineApplied) {
+      const liveWalletPositionBaselineSql = readFileSync(
+        new URL("./037_live_wallet_position_baseline.sql", import.meta.url),
+        "utf8",
+      );
+      const baselineTable = this.database.prepare(
+        "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='live_wallet_position_baselines'",
+      ).get();
+      const baselineItemsTable = this.database.prepare(
+        "SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='live_wallet_position_baseline_items'",
+      ).get();
+      const baselineTriggerNames = [
+        "live_wallet_position_baselines_no_update",
+        "live_wallet_position_baselines_no_delete",
+        "live_wallet_position_baseline_items_insert_guard",
+        "live_wallet_position_baseline_items_no_update",
+        "live_wallet_position_baseline_items_no_delete",
+      ];
+      const baselineTriggerCount = baselineTriggerNames.filter((name) => this.database.prepare(
+        "SELECT 1 ok FROM sqlite_master WHERE type='trigger' AND name=?",
+      ).get(name)).length;
+      const baselineSchemaComplete = baselineTable !== undefined
+        && baselineItemsTable !== undefined
+        && baselineTriggerCount === baselineTriggerNames.length;
+      if (
+        (baselineTable !== undefined || baselineItemsTable !== undefined || baselineTriggerCount > 0)
+        && !baselineSchemaComplete
+      ) {
+        throw new Error("MIGRATION_037_PARTIAL_SCHEMA_PRESENT");
+      }
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        if (!baselineSchemaComplete) this.database.exec(liveWalletPositionBaselineSql);
+        this.database
+          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run("2.32.0", new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

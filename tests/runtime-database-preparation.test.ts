@@ -230,7 +230,7 @@ describe("runtime database preparation", () => {
        VALUES ('OBSERVE_ONLY_24H_SOAK','PASSED',?,?)`,
     ).run(evidence, "2026-07-20T00:00:00.000Z");
     legacy.prepare("DELETE FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'").run();
-    legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.28.0','2.29.0','2.30.0','2.31.0')").run();
+    legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.28.0','2.29.0','2.30.0','2.31.0','2.32.0')").run();
     legacy.close();
 
     const result = await prepareRuntimeDatabase({
@@ -260,7 +260,7 @@ describe("runtime database preparation", () => {
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const partial = new DatabaseSync(databasePath);
     partial.exec("DROP INDEX observe_signal_emissions_source_event_idx");
-    partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.29.0','2.30.0','2.31.0')").run();
+    partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.29.0','2.30.0','2.31.0','2.32.0')").run();
     partial.close();
 
     await expect(prepareRuntimeDatabase({
@@ -289,7 +289,7 @@ describe("runtime database preparation", () => {
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const partial = new DatabaseSync(databasePath);
     partial.exec(damageSql);
-    partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0')").run();
+    partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0','2.32.0')").run();
     partial.close();
 
     await expect(prepareRuntimeDatabase({
@@ -299,7 +299,7 @@ describe("runtime database preparation", () => {
     })).rejects.toThrow("MIGRATION_035_PARTIAL_SCHEMA_PRESENT");
 
     const checked = new DatabaseSync(databasePath, { readOnly: true });
-    expect(checked.prepare("SELECT 1 ok FROM schema_migrations WHERE version IN ('2.30.0','2.31.0')").get()).toBeUndefined();
+    expect(checked.prepare("SELECT 1 ok FROM schema_migrations WHERE version IN ('2.30.0','2.31.0','2.32.0')").get()).toBeUndefined();
     checked.close();
   });
 
@@ -308,7 +308,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, "complete-migration-035", "phase0.sqlite");
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const existing = new DatabaseSync(databasePath);
-    existing.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0')").run();
+    existing.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0','2.32.0')").run();
     existing.close();
 
     const result = await prepareRuntimeDatabase({
@@ -322,6 +322,28 @@ describe("runtime database preparation", () => {
     expect(checked.prepare("SELECT count(*) count FROM schema_migrations WHERE version='2.30.0'").get())
       .toEqual({ count: 1 });
     expect(checked.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    checked.close();
+  });
+
+  it("does not record migration 037 when the wallet position baseline schema is partial", async () => {
+    const root = directory();
+    const databasePath = join(root, "partial-migration-037", "phase0.sqlite");
+    await prepareRuntimeDatabase({ databasePath, sourceVersion });
+    const partial = new DatabaseSync(databasePath);
+    partial.exec("DROP TRIGGER live_wallet_position_baseline_items_no_update");
+    partial.prepare("DELETE FROM schema_migrations WHERE version='2.32.0'").run();
+    partial.close();
+
+    await expect(prepareRuntimeDatabase({
+      databasePath,
+      backupDirectory: join(root, "backups"),
+      sourceVersion,
+    })).rejects.toThrow("MIGRATION_037_PARTIAL_SCHEMA_PRESENT");
+
+    const checked = new DatabaseSync(databasePath, { readOnly: true });
+    expect(checked.prepare(
+      "SELECT 1 ok FROM schema_migrations WHERE version='2.32.0'",
+    ).get()).toBeUndefined();
     checked.close();
   });
 
@@ -353,7 +375,7 @@ describe("runtime database preparation", () => {
         DROP TABLE negative_risk_conversion_evidence;
       `);
       legacy.exec(downgradeSql);
-      legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.26.0','2.27.0','2.28.0','2.29.0','2.30.0','2.31.0')").run();
+      legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.26.0','2.27.0','2.28.0','2.29.0','2.30.0','2.31.0','2.32.0')").run();
       expect(legacy.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       legacy.exec("COMMIT");
     } catch (error) {

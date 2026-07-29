@@ -59,6 +59,7 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.29.0",
   "2.30.0",
   "2.31.0",
+  "2.32.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
@@ -112,6 +113,11 @@ export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
   "live_state_transitions_no_update",
   "live_valuation_snapshots_no_delete",
   "live_valuation_snapshots_no_update",
+  "live_wallet_position_baseline_items_insert_guard",
+  "live_wallet_position_baseline_items_no_delete",
+  "live_wallet_position_baseline_items_no_update",
+  "live_wallet_position_baselines_no_delete",
+  "live_wallet_position_baselines_no_update",
   "observe_checkpoints_projection_snapshot_required",
   "observe_checkpoints_no_delete",
   "observe_checkpoints_no_update",
@@ -253,6 +259,8 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     "paper_validation_checkpoints",
     "paper_validation_transitions",
     "paper_validation_reports",
+    "live_wallet_position_baselines",
+    "live_wallet_position_baseline_items",
   ];
   for (const table of requiredTables) {
     const row = database.prepare(

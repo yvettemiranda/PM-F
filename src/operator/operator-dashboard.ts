@@ -119,6 +119,11 @@ export interface OperatorDashboardSnapshot {
       status: string;
       observedAt: string;
     };
+    walletPositionBaseline: null | {
+      status: string;
+      positionCount: number;
+      capturedAt: string;
+    };
     capability: {
       activation: "LIVE_GATE" | "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION";
       execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
@@ -625,6 +630,7 @@ function emptySnapshot(
         signerStatus: "NOT_CONNECTED",
       },
       walletBalance: null,
+      walletPositionBaseline: null,
       capability: {
         activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
         execution: "PENDING_PREREQUISITES",
@@ -1033,6 +1039,20 @@ export function operatorDashboardSnapshot(
     ), { money: ["initial_bankroll_micros", "risk_budget_micros"] });
     const liveAccountId = nullableString(snapshot.live.accounts[0]?.live_account_id);
     if (liveAccountId !== null) {
+      const walletPositionBaseline = first(
+        database,
+        "live_wallet_position_baselines",
+        `SELECT status,position_count,captured_at
+         FROM live_wallet_position_baselines WHERE live_account_id=? LIMIT 1`,
+        [liveAccountId],
+      );
+      if (walletPositionBaseline !== null) {
+        snapshot.live.walletPositionBaseline = {
+          status: stringValue(walletPositionBaseline.status),
+          positionCount: integerValue(walletPositionBaseline.position_count),
+          capturedAt: stringValue(walletPositionBaseline.captured_at),
+        };
+      }
       snapshot.live.executions = decorateRows(all(
         database,
         "live_executions",

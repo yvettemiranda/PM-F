@@ -33,6 +33,15 @@
   再把默认 RTT 上限与既有 `10 s` 请求超时对齐；超时、HTTP 异常、非法 payload 和显式
   更严的 RTT 配置仍 fail closed。聚焦时钟/Gate 测试 `59/59`，TypeScript 与全套
   `76 files / 892 tests` 通过。
+- 时钟修复后的真实一键流程已继续越过生产 Gate 和 30 秒外部读取，暴露 Safe 里已有
+  `8.5211` 份 outcome token，而新 Live 账户为 0；旧逻辑错误假设生产钱包必须空仓。
+  Schema `2.32.0` / migration `037` 新增不可变启动前钱包仓位基线：只允许在账户无执行、
+  无内部仓位、无现金账本时首次捕获；基线不进入可卖仓位和风险敞口，后续严格对账
+  “基线 + 本系统仓位”。同资产叠加、基线漂移、迁移完整性、不可变触发器和 UI 基线计数
+  已有回归覆盖；真实账户三项活动计数均为 `0`，符合首次捕获条件。
+- Schema `2.32.0` 基线实现完成后，TypeScript、前端语法、`git diff --check` 与全套
+  `76 files / 895 tests` 全部通过。下一步只剩提交、生成绑定提交的 production validation
+  artifact、备份迁移真实数据库、重启并再次执行一键 Live。
 - TypeScript、前端语法、`git diff --check` 与全套测试均通过：
   `76 files / 892 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
   artifact、重启唯一 4173 服务并在真实 Chrome/OKX 上跑一键流程。

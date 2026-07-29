@@ -46,6 +46,8 @@ const protectedTables = [
   "live_valuation_snapshots",
   "live_signal_consumptions",
   "live_signal_quarantines",
+  "live_wallet_position_baselines",
+  "live_wallet_position_baseline_items",
   "signal_ingest_sequences",
   "rulesets",
   "ruleset_registry",

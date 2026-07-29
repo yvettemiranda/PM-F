@@ -2260,6 +2260,109 @@ export class LiveStore {
     return balances;
   }
 
+  externalPositionBaseline(accountId: string): Map<string, bigint> | null {
+    const baseline = this.database.prepare(
+      `SELECT status,position_count,snapshot_sha256
+       FROM live_wallet_position_baselines WHERE live_account_id=?`,
+    ).get(accountId) as {
+      status: string;
+      position_count: number;
+      snapshot_sha256: string;
+    } | undefined;
+    if (!baseline) return null;
+    if (baseline.status !== "CAPTURED" || !Number.isSafeInteger(baseline.position_count) || baseline.position_count < 0) {
+      throw new Error("LIVE_WALLET_POSITION_BASELINE_INVALID");
+    }
+    const rows = this.database.prepare(
+      `SELECT asset_id,balance_micros
+       FROM live_wallet_position_baseline_items
+       WHERE live_account_id=? ORDER BY asset_id`,
+    ).all(accountId) as unknown as Array<{ asset_id: string; balance_micros: string }>;
+    if (rows.length !== baseline.position_count) {
+      throw new Error("LIVE_WALLET_POSITION_BASELINE_COUNT_MISMATCH");
+    }
+    const snapshot = rows.map((row) => {
+      if (!row.asset_id || !/^\d+$/.test(row.balance_micros) || BigInt(row.balance_micros) <= 0n) {
+        throw new Error("LIVE_WALLET_POSITION_BASELINE_ITEM_INVALID");
+      }
+      return { assetId: row.asset_id, balanceMicros: row.balance_micros };
+    });
+    const snapshotSha256 = createHash("sha256").update(stableJson(snapshot)).digest("hex");
+    if (snapshotSha256 !== baseline.snapshot_sha256) {
+      throw new Error("LIVE_WALLET_POSITION_BASELINE_HASH_MISMATCH");
+    }
+    return new Map(snapshot.map((row) => [row.assetId, BigInt(row.balanceMicros)]));
+  }
+
+  canCaptureExternalPositionBaseline(accountId: string): boolean {
+    const account = this.database.prepare(
+      "SELECT 1 ok FROM live_accounts WHERE live_account_id=?",
+    ).get(accountId);
+    if (!account || this.externalPositionBaseline(accountId) !== null) return false;
+    const activity = this.database.prepare(
+      `SELECT
+        (SELECT count(*) FROM live_executions WHERE live_account_id=?)
+        + (SELECT count(*) FROM live_positions WHERE live_account_id=?)
+        + (SELECT count(*) FROM live_cash_ledger WHERE live_account_id=?)
+        AS count`,
+    ).get(accountId, accountId, accountId) as { count: number };
+    return activity.count === 0;
+  }
+
+  captureExternalPositionBaseline(
+    accountId: string,
+    balances: ReadonlyMap<string, bigint>,
+  ): Map<string, bigint> {
+    return this.transaction(() => {
+      const existing = this.externalPositionBaseline(accountId);
+      if (existing !== null) return existing;
+      if (!this.canCaptureExternalPositionBaseline(accountId)) {
+        throw new Error("LIVE_WALLET_POSITION_BASELINE_CAPTURE_NOT_PRISTINE");
+      }
+      const snapshot = [...balances.entries()]
+        .filter(([, balance]) => balance > 0n)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([assetId, balance]) => {
+          if (!assetId || balance <= 0n) throw new Error("LIVE_WALLET_POSITION_BASELINE_INPUT_INVALID");
+          return { assetId, balanceMicros: balance.toString() };
+        });
+      const snapshotSha256 = createHash("sha256").update(stableJson(snapshot)).digest("hex");
+      const capturedAt = this.now().toISOString();
+      this.database.prepare(
+        `INSERT INTO live_wallet_position_baselines(
+          live_account_id,status,position_count,snapshot_sha256,source_code_commit,
+          source_code_dirty,config_version,captured_at
+        ) VALUES (?, 'CAPTURED', ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        accountId,
+        snapshot.length,
+        snapshotSha256,
+        this.sourceVersion.commit,
+        this.sourceVersion.dirty ? 1 : 0,
+        VERSIONS.configVersion,
+        capturedAt,
+      );
+      const insertItem = this.database.prepare(
+        `INSERT INTO live_wallet_position_baseline_items(
+          live_account_id,asset_id,balance_micros,created_at
+        ) VALUES (?, ?, ?, ?)`,
+      );
+      for (const position of snapshot) {
+        insertItem.run(accountId, position.assetId, position.balanceMicros, capturedAt);
+      }
+      const captured = this.externalPositionBaseline(accountId);
+      if (captured === null) throw new Error("LIVE_WALLET_POSITION_BASELINE_CAPTURE_FAILED");
+      this.audit(
+        "LIVE_WALLET_POSITION_BASELINE",
+        accountId,
+        "captured",
+        "PREEXISTING_EXTERNAL_POSITIONS_ISOLATED",
+        { positionCount: snapshot.length, snapshotSha256 },
+      );
+      return captured;
+    });
+  }
+
   accountLedgerSnapshot(accountId: string): {
     initialBankrollMicros: bigint;
     reservedMicros: bigint;

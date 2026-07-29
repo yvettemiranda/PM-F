@@ -170,7 +170,7 @@ PolymarketBot 的代码、数据库、仓位模型、账本、执行逻辑或页
 - viem：`2.55.0`
 - SQLite：Node 24 `node:sqlite`
 - 当前源码目标版本：
-  - Schema `2.31.0`
+  - Schema `2.32.0`
   - Signal `1.11.0`
   - Strategy `2.9.0`
   - Risk `1.10.0`
@@ -545,10 +545,11 @@ UI 中接受任意 spender 或 Conditional Tokens 地址。
 - 不根据配置文件勾选真实 provider；
 - 不自动把钱包连接视为交易授权。
 
-当前 UI 只开放已经形成闭环的普通 EOA 浏览器钱包。Proxy、Safe 和 EIP-1271
-签名类型在底层 signer/identity 模型中保留，但链上 allowance/redeem 仍需要
-Polymarket 官方账户初始化或 relayer；因此它们没有被 UI 伪装成“一连接即可完整
-实盘”。如后续开放智能钱包，必须补齐官方 relayer、单独测试和审计。
+当前 UI 以浏览器 EOA 作为身份 signer，并会从 Polymarket Gamma profile 自动发现
+proxy/funder。若 funder 是 Gnosis Safe，后端必须用 Polygon `getOwners()` 证明当前
+EOA 是 owner，才按 `POLY_GNOSIS_SAFE` 装配 CLOB；EOA 与 Safe 地址不会混写。
+Safe 已有 allowance 可直接用于逐笔订单检查；需要新增链上 allowance/redeem 时仍需
+官方账户初始化或 relayer，并由浏览器钱包明确确认，不能静默代签。
 
 ### 4.6 钱包交易授权和链上写入边界
 
@@ -570,6 +571,14 @@ Polymarket 官方账户初始化或 relayer；因此它们没有被 UI 伪装成
 读取会退回未连接、未确认的安全默认状态，不能把超限配置带入生产装配。
 
 当前没有调用上述链上写入口；本轮验证仅覆盖隔离测试。
+
+生产钱包不要求空仓。Schema `2.32.0` 的 migration `037` 为全新 Live 账户捕获一次
+不可变的启动前 outcome-token 基线，前提是账户没有执行、内部仓位或现金账本：
+
+- 基线不会写入 `live_positions`，不进入本系统可卖仓位或风险敞口；
+- 后续对账严格比较“启动前基线 + 本系统管理仓位”和钱包外部实际仓位；
+- 基线及明细禁止 UPDATE/DELETE，快照哈希、数量和源码版本均持久化；
+- 基线或外部仓位后续漂移仍失败关闭，不能借基线掩盖未知订单或丢失成交。
 
 ### 4.7 快照和日志脱敏
 

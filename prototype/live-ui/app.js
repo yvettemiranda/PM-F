@@ -343,6 +343,7 @@ function livePanel(snapshot) {
   const production = snapshot?.live?.production;
   const walletSession = snapshot?.live?.walletSession;
   const walletBalance = snapshot?.live?.walletBalance;
+  const walletPositionBaseline = snapshot?.live?.walletPositionBaseline;
   const walletConnected = walletSession?.status === "CONNECTED";
   const walletNeedsReconnect = !walletConnected && Boolean(production?.config?.walletAddress);
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
@@ -416,6 +417,9 @@ function livePanel(snapshot) {
             <span>实际余额：${escapeHtml(walletBalance
               ? `${walletBalance.balance.display} pUSD`
               : "连接并检查 Gate 后显示")}</span>
+            <span>启动前仓位：${escapeHtml(walletPositionBaseline
+              ? `${walletPositionBaseline.positionCount} 项 · 已隔离`
+              : "尚未建立基线")}</span>
           </div>
           <form class="live-limit-form" id="live-config-form">
             <div class="live-limit-heading">

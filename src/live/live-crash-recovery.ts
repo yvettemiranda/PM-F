@@ -379,19 +379,31 @@ export class LiveCrashRecovery {
       if (size > 0n) external.set(position.assetId, size);
     }
     const local = this.store.outcomePositionBalances(accountId);
-    const assets = new Set([...local.keys(), ...external.keys()]);
+    let baseline = this.store.externalPositionBaseline(accountId);
+    if (baseline === null && this.store.canCaptureExternalPositionBaseline(accountId)) {
+      baseline = this.store.captureExternalPositionBaseline(accountId, external);
+    }
+    const expected = new Map(baseline ?? []);
+    for (const [assetId, managedSize] of local) {
+      expected.set(assetId, (expected.get(assetId) ?? 0n) + managedSize);
+    }
+    const assets = new Set([...expected.keys(), ...external.keys()]);
     for (const assetId of [...assets].sort()) {
-      const localSize = local.get(assetId) ?? 0n;
+      const expectedSize = expected.get(assetId) ?? 0n;
       const externalSize = external.get(assetId) ?? 0n;
-      if (localSize !== externalSize) {
+      if (expectedSize !== externalSize) {
         return {
           name: "external_wallet_positions",
           passed: false,
-          reason: `EXTERNAL_WALLET_POSITION_MISMATCH:${assetId}:${localSize}:${externalSize}`,
+          reason: `EXTERNAL_WALLET_POSITION_MISMATCH:${assetId}:${expectedSize}:${externalSize}`,
         };
       }
     }
-    return { name: "external_wallet_positions", passed: true, reason: "EXTERNAL_WALLET_POSITIONS_MATCH" };
+    return {
+      name: "external_wallet_positions",
+      passed: true,
+      reason: `EXTERNAL_WALLET_POSITIONS_MATCH:BASELINE=${baseline?.size ?? 0}:MANAGED=${local.size}`,
+    };
   }
 
   private async externalCashCheck(): Promise<LiveReconciliationCheck> {

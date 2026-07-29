@@ -39,8 +39,9 @@
 - Replay 只有收到相同的完整持久化证明才投影 SPLIT/CONVERSION；仅有历史 Activity 或市场元数据时保持 `INCOMPLETE`。
 
 ## Version and compatibility
-- 当前源码目标版本：Schema `2.31.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.18.0`、Live `1.16.0`、Validation `1.9.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
-- 当前运行数据库是 Schema `2.30.0`；本轮已完成迁移但异常 Session 未生成正式报告。后续启动仍必须沿用备份优先和既有入口。
+- 当前源码目标版本：Schema `2.32.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.18.0`、Live `1.16.0`、Validation `1.9.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
+- 当前运行数据库在服务重启前仍是 Schema `2.31.0`；迁移 `037` 会先按既有备份优先流程
+  新增不可变 Live 钱包启动前仓位基线，不改变 Paper 账户、Campaign 或历史账本。
 - `BUY_AMOUNT_POLICY_V4` 与 `followSellFullExitThresholdPpm=950000` 只由包含相应字段的新 Ruleset 解释；旧 Ruleset 固定按旧语义恢复，不得重解释历史执行。
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
 
@@ -92,7 +93,9 @@
   执行小额硬上限；runtime database 和新备份强制 `0600`。UI 会从已验证的 EOA 自动
   发现 Gamma profile 资金地址，并用 Polygon `getOwners()` 验证 Gnosis Safe 所有权；
   当前 OKX signer 对应 `POLY_GNOSIS_SAFE`。风险资金上限不是最低余额，任意非负实际余额
-  均可完成 Gate；余额/allowance 只在逐笔下单前检查。
+  均可完成 Gate；余额/allowance 只在逐笔下单前检查。首次启用且 Live 账户没有任何执行、
+  内部仓位或现金账本时，钱包已有 outcome token 会捕获为不可变只读基线；它不会进入
+  本系统可卖仓位或风险敞口，后续外部对账严格检查“启动前基线 + 本系统管理仓位”。
 - Live runtime 会捕获源码/验证工件在会话建立后发生的版本失配：在预检、arming 或恢复抛出
   `LIVE_PRODUCTION_*_INVALID` 时撤销旧钱包租约、取消待签名请求并回到
   `PAPER + LIVE_DISABLED`，返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`；更新源码或

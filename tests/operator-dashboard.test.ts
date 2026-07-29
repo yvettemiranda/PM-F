@@ -388,6 +388,15 @@ function installDatabase(root: string): void {
       '{"Authorization":"Bearer should-never-reach-ui"}',
       '{"apiKey":"should-never-reach-ui"}','${now}'
     );
+    CREATE TABLE live_wallet_position_baselines (
+      live_account_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      position_count INTEGER NOT NULL,
+      captured_at TEXT NOT NULL
+    );
+    INSERT INTO live_wallet_position_baselines VALUES (
+      'live-account-1','CAPTURED',1,'${now}'
+    );
   `);
   database.close();
 }
@@ -483,6 +492,11 @@ describe("operator dashboard", () => {
       balance: { micros: "34342000000", display: "34,342.00", currency: "pUSD" },
       status: "SAFE",
       observedAt: now,
+    });
+    expect(snapshot.live.walletPositionBaseline).toEqual({
+      status: "CAPTURED",
+      positionCount: 1,
+      capturedAt: now,
     });
     expect(snapshot.live.prerequisites).toEqual([
       expect.objectContaining({

@@ -4883,6 +4883,100 @@ describe("LiveExecutor", () => {
     checker.close();
   });
 
+  it("captures pre-existing wallet positions as an immutable baseline for a pristine Live account", async () => {
+    const env = setup();
+    const legacyAssetId = "legacy-wallet-asset";
+    const initial = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({
+        outcomePositions: { [legacyAssetId]: "8521100" },
+      }),
+      requireExternalPositionReconciliation: true,
+    });
+
+    await expect(initial.recoverOnStartup(accountId)).resolves.toMatchObject({
+      passed: true,
+      reason: "RECOVERY_RECONCILED",
+    });
+    initial.close();
+
+    const baselineDatabase = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(baselineDatabase.prepare(
+      `SELECT status,position_count FROM live_wallet_position_baselines
+       WHERE live_account_id=?`,
+    ).get(accountId)).toEqual({ status: "CAPTURED", position_count: 1 });
+    expect(baselineDatabase.prepare(
+      `SELECT asset_id,balance_micros FROM live_wallet_position_baseline_items
+       WHERE live_account_id=?`,
+    ).get(accountId)).toEqual({ asset_id: legacyAssetId, balance_micros: "8521100" });
+    expect((baselineDatabase.prepare(
+      "SELECT count(*) count FROM live_positions WHERE live_account_id=?",
+    ).get(accountId) as { count: number }).count).toBe(0);
+    baselineDatabase.close();
+
+    const unchanged = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({
+        outcomePositions: { [legacyAssetId]: "8521100" },
+      }),
+      requireExternalPositionReconciliation: true,
+    });
+    await expect(unchanged.recoverOnStartup(accountId)).resolves.toMatchObject({ passed: true });
+    unchanged.close();
+
+    const drifted = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({
+        outcomePositions: { [legacyAssetId]: "8521101" },
+      }),
+      requireExternalPositionReconciliation: true,
+    });
+    await expect(drifted.recoverOnStartup(accountId)).resolves.toMatchObject({
+      passed: false,
+      reason: "RECOVERY_RECONCILIATION_FAILED",
+    });
+    drifted.close();
+  });
+
+  it("reconciles the immutable wallet baseline plus positions managed by this Live account", async () => {
+    const env = setup();
+    const initial = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({
+        outcomePositions: { [assetId]: "8521100" },
+      }),
+      requireExternalPositionReconciliation: true,
+    });
+    await expect(initial.recoverOnStartup(accountId)).resolves.toMatchObject({ passed: true });
+    initial.close();
+
+    const buyer = liveExecutor(env.databasePath);
+    await buyer.executeBuy({
+      accountId,
+      signal: env.signal,
+      context: env.context,
+      riskDecisionId: "risk-live-buy",
+    });
+    buyer.close();
+
+    const positionDatabase = new DatabaseSync(env.databasePath, { readOnly: true });
+    const managedSize = (positionDatabase.prepare(
+      `SELECT current_size_micros FROM live_positions
+       WHERE live_account_id=? AND asset_id=?`,
+    ).get(accountId, assetId) as { current_size_micros: string }).current_size_micros;
+    positionDatabase.close();
+
+    const checker = liveExecutor(env.databasePath, {
+      walletProvider: new FakeWalletProvider({
+        outcomePositions: {
+          [assetId]: (8_521_100n + BigInt(managedSize)).toString(),
+        },
+      }),
+      requireExternalPositionReconciliation: true,
+    });
+    await expect(checker.recoverOnStartup(accountId)).resolves.toMatchObject({
+      passed: true,
+      reason: "RECOVERY_RECONCILED",
+    });
+    checker.close();
+  });
+
   it("records external pUSD cash without treating the configured risk allocation as wallet truth", async () => {
     const env = setup();
     const checker = liveExecutor(env.databasePath, {
