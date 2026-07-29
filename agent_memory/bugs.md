@@ -1,14 +1,17 @@
 # Bugs And Risks
 
 ## Active blockers
+- 最新真实运行已证明一键进入 `LIVE_ACTIVE`，但周期 `GET_OPEN_ORDERS` 的一次 `30 s`
+  只读超时使旧策略立即停用 Live。现已给只读恢复/对账增加最多一次瞬时故障重试，连续失败
+  仍 fail closed，写操作绝不重试；全套 `77 files / 899 tests` 已通过。待提交、生成新
+  commit-bound artifact、重启并完成最终真实持续运行复核。
 - 当前源码已修复 CLOB L1 签名、Safe 资金地址识别、余额/allowance 准入误判、外部现金
   对账、本机时钟偏差重复阻断、production 外部读取超时、CLOB time RTT 误判和生产钱包
   空仓假设。Schema `2.32.0` 已迁移并为真实 Safe 捕获 `5` 项不可变启动前仓位基线。最新
   一键流程进一步发现零余额时错误调用无 `token_id` 的 CONDITIONAL allowance API；已用
   红测复现并修复。随后暴露“先确认 ACTIVE、再执行会主动降级 ACTIVE 的启动恢复”这一
   不可满足顺序；已改成 arming 恢复和空闲 runner 先启动、Gate 最后确认。桌面入口安全
-  退出也已修复并纳入全套 `77 files / 897 tests`；待提交、生成同提交 production
-  validation artifact、重启和真实一键复核。
+  退出也已修复并纳入受审计测试。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。

@@ -1,6 +1,12 @@
 # Progress
 
 ## Current task
+- 2026-07-29 最终提交首次真实激活后约 `90 s`，周期外部对账的
+  `GET_OPEN_ORDERS` 单次 `30 s` 超时使 Gate 安全降回 Paper；当时 execution/order/
+  attempt/fill 均为 `0`，没有资产动作。根因是只读对账没有瞬时故障重试。现仅对
+  GET_OPEN_ORDERS/GET_ORDER/GET_FILLS/钱包余额与仓位读取的 timeout、网络错误或 5xx
+  有界重试一次；持续失败仍停用 Live，submit/cancel/redeem 不重试。两个红测已覆盖瞬时
+  恢复与连续失败关闭，TypeScript、`git diff --check` 和全套 `77 files / 899 tests` 通过。
 - 2026-07-29 在真实 `LIVE_ACTIVE` 后验证服务退出时发现，旧桌面入口持有的是 pnpm 外层
   PID，外层先退出可能让 Node 来不及完成 `shutdownSafety()`，数据库残留
   `LIVE_ACTIVE`。当时服务和 runtime 已停止、没有订单风险，并已立即通过正式

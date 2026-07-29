@@ -375,6 +375,25 @@ class HangingSubmissionAdapter extends FakeOrderAdapter {
   }
 }
 
+class TimeoutOnceOpenOrdersAdapter extends FakeOrderAdapter {
+  openOrderReads = 0;
+
+  override async getOpenOrders(): Promise<OrderStatus[]> {
+    this.openOrderReads += 1;
+    if (this.openOrderReads === 1) return new Promise<OrderStatus[]>(() => undefined);
+    return super.getOpenOrders();
+  }
+}
+
+class HangingOpenOrdersAdapter extends FakeOrderAdapter {
+  openOrderReads = 0;
+
+  override async getOpenOrders(): Promise<OrderStatus[]> {
+    this.openOrderReads += 1;
+    return new Promise<OrderStatus[]>(() => undefined);
+  }
+}
+
 class ThrowingBalanceWalletProvider extends FakeWalletProvider {
   override async getBalance(): Promise<never> {
     throw new Error("TEST_BALANCE_NETWORK_DOWN");
@@ -4481,6 +4500,54 @@ describe("LiveExecutor", () => {
     expect(gate).toMatchObject({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
     expect(gate.state_reason).toContain("LIVE_RECONCILIATION_FAILED");
     check.close();
+    executor.close();
+  });
+
+  it("retries one transient read-only reconciliation timeout without disabling Live", async () => {
+    const env = setup();
+    activateLiveGate(env.databasePath);
+    const adapter = new TimeoutOnceOpenOrdersAdapter();
+    const executor = liveExecutor(env.databasePath, {
+      orderAdapter: adapter,
+      externalCallTimeoutMs: 5,
+    });
+    const result = await executor.reconcile({
+      accountId,
+      reason: "TEST_TRANSIENT_EXTERNAL_TIMEOUT",
+    });
+    expect(result).toMatchObject({
+      mode: "LIVE",
+      frozenPositionCount: 0,
+      reason: "LIVE_RECONCILED",
+    });
+    expect(adapter.openOrderReads).toBe(2);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "LIVE", live_gate_state: "LIVE_ACTIVE" });
+    db.close();
+    executor.close();
+  });
+
+  it("still disables Live after repeated read-only reconciliation timeouts", async () => {
+    const env = setup();
+    activateLiveGate(env.databasePath);
+    const adapter = new HangingOpenOrdersAdapter();
+    const executor = liveExecutor(env.databasePath, {
+      orderAdapter: adapter,
+      externalCallTimeoutMs: 5,
+    });
+    const result = await executor.reconcile({
+      accountId,
+      reason: "TEST_REPEATED_EXTERNAL_TIMEOUT",
+    });
+    expect(result.reason).toBe("LIVE_RECONCILIATION_FAILED");
+    expect(adapter.openOrderReads).toBe(2);
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
+    db.close();
     executor.close();
   });
 

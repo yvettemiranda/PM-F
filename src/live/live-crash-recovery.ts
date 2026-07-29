@@ -14,6 +14,9 @@ interface ExternalOrderSnapshot {
   fills: LiveFillEvent[];
 }
 
+const EXTERNAL_READ_MAX_ATTEMPTS = 2;
+const EXTERNAL_READ_RETRY_DELAY_MS = 250;
+
 export interface LiveRecoveryResult {
   passed: boolean;
   reason: string;
@@ -53,6 +56,12 @@ function isTerminal(status: OrderStatus): boolean {
 
 function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : "RECOVERY_UNKNOWN_ERROR";
+}
+
+function isRetryableExternalReadFailure(error: unknown): boolean {
+  const reason = failureReason(error);
+  return reason.startsWith("LIVE_EXTERNAL_TIMEOUT:")
+    || /(?:fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|status code 5\d\d)/i.test(reason);
 }
 
 function validateOrderIntentEvidence(order: LiveRecoveryOrderRow): void {
@@ -200,9 +209,8 @@ export class LiveCrashRecovery {
       if (new Set(localExternalOrderIds).size !== localExternalOrderIds.length) {
         throw new Error("LOCAL_EXTERNAL_ORDER_ID_DUPLICATE");
       }
-      const externalOpenOrders = await withExternalTimeout(
+      const externalOpenOrders = await this.readExternal(
         "GET_OPEN_ORDERS",
-        this.externalCallTimeoutMs,
         () => this.orderAdapter.getOpenOrders(),
       );
       const localExternalIds = this.store.localExternalOrderIds(accountId);
@@ -217,17 +225,15 @@ export class LiveCrashRecovery {
       const snapshots: ExternalOrderSnapshot[] = [];
       for (const local of localOrders) {
         if (!local.external_order_id) throw new Error(`LOCAL_ORDER_EXTERNAL_ID_MISSING:${local.live_order_id}`);
-        const status = await withExternalTimeout(
+        const status = await this.readExternal(
           "GET_ORDER",
-          this.externalCallTimeoutMs,
           () => this.orderAdapter.getOrder(local.external_order_id!),
         );
         if (status.externalOrderId !== local.external_order_id) {
           throw new Error(`EXTERNAL_ORDER_ID_MISMATCH:${local.live_order_id}`);
         }
-        const fills = await withExternalTimeout(
+        const fills = await this.readExternal(
           "GET_FILLS",
-          this.externalCallTimeoutMs,
           () => this.orderAdapter.getFills(local.external_order_id!),
         );
         this.validateExternalSnapshot(local, status, fills);
@@ -349,9 +355,8 @@ export class LiveCrashRecovery {
   }
 
   private async externalPositionCheck(accountId: string): Promise<LiveReconciliationCheck> {
-    const snapshot = await withExternalTimeout(
+    const snapshot = await this.readExternal(
       "WALLET_OUTCOME_POSITIONS",
-      this.externalCallTimeoutMs,
       () => this.walletProvider.getOutcomePositions(),
     );
     if (snapshot.status !== "AVAILABLE") {
@@ -414,9 +419,8 @@ export class LiveCrashRecovery {
         reason: "TEST_EXTERNAL_CASH_CHECK_SKIPPED",
       };
     }
-    const snapshot = await withExternalTimeout(
+    const snapshot = await this.readExternal(
       "WALLET_BALANCE",
-      this.externalCallTimeoutMs,
       () => this.walletProvider.getBalance(),
     );
     if (
@@ -436,6 +440,20 @@ export class LiveCrashRecovery {
       passed: true,
       reason: `EXTERNAL_WALLET_CASH_OBSERVED:${external}`,
     };
+  }
+
+  private async readExternal<T>(operation: string, task: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= EXTERNAL_READ_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await withExternalTimeout(operation, this.externalCallTimeoutMs, task);
+      } catch (error) {
+        lastError = error;
+        if (attempt === EXTERNAL_READ_MAX_ATTEMPTS || !isRetryableExternalReadFailure(error)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, EXTERNAL_READ_RETRY_DELAY_MS));
+      }
+    }
+    throw lastError;
   }
 
   private validateExternalSnapshot(
