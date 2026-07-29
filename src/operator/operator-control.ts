@@ -26,7 +26,7 @@ export interface OperatorControlSnapshot {
   safety: {
     executionMode: string | null;
     liveGateState: string | null;
-    liveAllowed: false;
+    liveAllowed: boolean;
   };
   campaign: {
     latestCampaignId: string | null;
@@ -111,7 +111,8 @@ export function operatorControlSnapshot(projectRoot: string): OperatorControlSna
     safety: {
       executionMode: runtimeSafety.executionMode,
       liveGateState: runtimeSafety.liveGateState,
-      liveAllowed: false,
+      liveAllowed: runtimeSafety.executionMode === "LIVE"
+        && runtimeSafety.liveGateState === "LIVE_ACTIVE",
     },
     campaign: { latestCampaignId },
     ruleset: {

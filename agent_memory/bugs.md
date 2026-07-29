@@ -65,6 +65,9 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 2026-07-29：Operator `liveAllowed` 不再是历史常量 `false`；它现在严格投影数据库 Gate，
+  仅 `execution_mode=LIVE` 且 `live_gate_state=LIVE_ACTIVE` 时为 `true`，避免 UI 在真实
+  激活后仍显示互相矛盾的状态。
 - 2026-07-29：生产钱包不再被要求空仓。只有全新 Live 账户可首次捕获外部 outcome token
   为不可变基线；基线不写入 `live_positions`，不会被本系统卖出或计入风险敞口。对账继续
   精确比较外部实际值与“基线 + 本系统仓位”，外部手工漂移仍 fail closed。

@@ -111,7 +111,7 @@ describe("operator control", () => {
       overrides: { buyMaximumPricePpm: 940_000 },
     })).toThrow("RULESET_PROFILE_CHANGE_BLOCKED:DATABASE_NOT_PAPER_LIVE_DISABLED");
     expect(operatorControlSnapshot(root)).toMatchObject({
-      safety: { executionMode: "LIVE", liveGateState: "LIVE_ACTIVE", liveAllowed: false },
+      safety: { executionMode: "LIVE", liveGateState: "LIVE_ACTIVE", liveAllowed: true },
       controls: {
         targetWallet: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },
         paper: { available: false, blockedReason: "DATABASE_NOT_PAPER_LIVE_DISABLED" },

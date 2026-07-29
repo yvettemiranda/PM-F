@@ -1,6 +1,11 @@
 # Progress
 
 ## Current task
+- 2026-07-29 修正启动顺序后，真实 OKX/Safe 一键流程已首次到达
+  `execution_mode=LIVE / live_gate_state=LIVE_ACTIVE / USER_CONFIRMED_LIVE_ACTIVE`；
+  正式余额 `0 pUSD`、启动前 `5` 项仓位保持隔离、生产十项 readiness 全部 READY，未发送
+  订单或链上授权。随后发现控制台旧投影仍把 `liveAllowed` 常量写成 `false`；已添加红测并
+  改为只在数据库精确为 `LIVE + LIVE_ACTIVE` 时显示 `true`，其他状态继续为 `false`。
 - 2026-07-29 零余额 readiness 修复后的真实流程已通过钱包准备和最终 Gate 检查，但在
   `LIVE_RUNTIME_STARTUP_RECOVERY_BLOCKED` 回滚。根因是旧 UI 路由先确认
   `LIVE_ACTIVE` 再启动 runtime，而 `recoverOnStartup()` 按设计会把已激活 Gate 降回
