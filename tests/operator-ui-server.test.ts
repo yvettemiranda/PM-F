@@ -689,6 +689,145 @@ describe("operator UI server", () => {
     });
   });
 
+  it("runs Gate, reconciliation, wallet readiness and Live startup as one activation", async () => {
+    const calls: string[] = [];
+    const allowed = {
+      allowed: true,
+      runId: "gate-ready",
+      blockedReasons: [],
+      checks: [],
+      requestedExecutionMode: "LIVE" as const,
+      executionMode: "PAPER",
+      liveGateState: "LIVE_ARMING",
+    };
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(async () => {
+        calls.push("gate");
+        return allowed;
+      }),
+      confirmActivation: vi.fn(async () => {
+        calls.push("confirm");
+        return { ...allowed, executionMode: "LIVE", liveGateState: "LIVE_ACTIVE" };
+      }),
+      emergencyDisable: vi.fn(async () => {
+        calls.push("disable");
+      }),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: {
+        execution: "AVAILABLE",
+        orderManagement: "AVAILABLE",
+        walletSetup: "AVAILABLE",
+      },
+      start: vi.fn(async () => {
+        calls.push("start");
+        return { accepted: true, code: "LIVE_RUNTIME_STARTED" };
+      }),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(async () => {
+        calls.push("reconcile");
+        return { accepted: true, code: "LIVE_RECONCILED" };
+      }),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+      prepareWallet: vi.fn(async () => {
+        calls.push("wallet");
+        return { accepted: true, code: "LIVE_WALLET_SETUP_READY" };
+      }),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/activate", {
+      body: {
+        actor: "LOCAL_OPERATOR",
+        reason: "UI_ONE_CLICK_LIVE",
+        confirmationText: "ENABLE LIVE TRADING",
+      },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      data: {
+        result: { allowed: true, liveGateState: "LIVE_ACTIVE" },
+        runtime: { accepted: true, code: "LIVE_RUNTIME_STARTED" },
+        preparation: {
+          reconciliation: { accepted: true, code: "LIVE_RECONCILED" },
+          wallet: { accepted: true, code: "LIVE_WALLET_SETUP_READY" },
+        },
+      },
+    });
+    expect(calls).toEqual(["gate", "reconcile", "wallet", "gate", "confirm", "start"]);
+  });
+
+  it("rolls one-click Live activation back when reconciliation is blocked", async () => {
+    const allowed = {
+      allowed: true,
+      runId: "gate-ready",
+      blockedReasons: [],
+      checks: [],
+      requestedExecutionMode: "LIVE" as const,
+      executionMode: "PAPER",
+      liveGateState: "LIVE_ARMING",
+    };
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(async () => allowed),
+      confirmActivation: vi.fn(),
+      emergencyDisable: vi.fn(async () => undefined),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: {
+        execution: "AVAILABLE",
+        orderManagement: "AVAILABLE",
+        walletSetup: "AVAILABLE",
+      },
+      start: vi.fn(),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(async () => ({
+        accepted: false,
+        code: "LIVE_RECONCILIATION_FAILED",
+        details: { reason: "EXTERNAL_POSITION_MISMATCH" },
+      })),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+      prepareWallet: vi.fn(),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/activate", {
+      body: {
+        actor: "LOCAL_OPERATOR",
+        reason: "UI_ONE_CLICK_LIVE",
+        confirmationText: "ENABLE LIVE TRADING",
+      },
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_RECONCILIATION_FAILED",
+        details: {
+          stage: "RECONCILIATION",
+          safety: "PAPER + LIVE_DISABLED",
+        },
+      },
+    });
+    expect(liveGateActions.emergencyDisable).toHaveBeenCalledWith({
+      actor: "SYSTEM",
+      reason: "LIVE_ACTIVATION_RECONCILIATION_ROLLBACK:LIVE_RECONCILIATION_FAILED",
+    });
+    expect(liveRuntimeActions.prepareWallet).not.toHaveBeenCalled();
+    expect(liveGateActions.confirmActivation).not.toHaveBeenCalled();
+    expect(liveRuntimeActions.start).not.toHaveBeenCalled();
+  });
+
   it("stops an available Live runtime before the UI host shuts down", async () => {
     const liveRuntimeActions: OperatorLiveRuntimeActions = {
       capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },

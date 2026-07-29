@@ -11,8 +11,35 @@ ui_ready() {
   /usr/bin/curl -fsS --max-time 1 "$SNAPSHOT_URL" >/dev/null 2>&1
 }
 
-if ui_ready; then
+open_ui() {
+  local reuse_result
+  reuse_result="$(/usr/bin/osascript 2>/dev/null <<APPLESCRIPT
+set targetUrl to "$UI_URL"
+if application "Google Chrome" is running then
+  tell application "Google Chrome"
+    repeat with browserWindow in windows
+      repeat with tabIndex from 1 to (count of tabs of browserWindow)
+        if (URL of tab tabIndex of browserWindow as text) is targetUrl then
+          set active tab index of browserWindow to tabIndex
+          set index of browserWindow to 1
+          activate
+          return "reused"
+        end if
+      end repeat
+    end repeat
+  end tell
+end if
+return "missing"
+APPLESCRIPT
+)" || true
+  if [[ "$reuse_result" == "reused" ]]; then
+    return 0
+  fi
   /usr/bin/open "$UI_URL"
+}
+
+if ui_ready; then
+  open_ui
   print "Hecatonchires 已在运行，已打开现有控制台：$UI_URL"
   exit 0
 fi
@@ -88,7 +115,7 @@ trap handle_signal HUP INT TERM
 
 for ((attempt = 0; attempt < 80; attempt++)); do
   if ui_ready; then
-    /usr/bin/open "$UI_URL"
+    open_ui
     print "控制台已打开：$UI_URL"
     wait "$SERVER_PID"
     exit $?

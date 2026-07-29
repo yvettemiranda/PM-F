@@ -6,11 +6,12 @@
 - 当前唯一测试目标：`0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a`；旧地址和旧核心 Campaign 只能作为历史证据，不能改绑或混算时长。
 
 ## Safety boundary
-- 必须保持 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
-- 当前允许在 localhost UI 中连接浏览器钱包并执行仅用于证明公开地址控制权的
-  `personal_sign`；浏览器扩展内的确认必须由用户本人完成。仍禁止加载
-  private key/seed、启动 Paper、启用 Live、submit/cancel、approve、redeem、真实订单和
-  链上写入。钱包已连接只代表身份会话建立，不代表获得交易授权。
+- 所有生产前置条件、官方 geoblock、Gate、Live 对账和钱包授权真正通过前，必须保持
+  `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
+- 用户已明确授权按已保存的 `10/1/3/1 pUSD` 小额限额完成一次 Live 全流程。仍禁止加载
+  private key/seed 或伪造/绕过任何安全证据；OKX 的身份签名和链上授权仍必须在扩展中逐笔
+  明确确认。钱包已连接只代表身份会话建立，只有一键流程完成 Gate、对账、钱包准备和最终
+  启动后才进入 Live。
 - 禁止绕过 geoblock、时钟、安全 Gate、数据完整性 Gate，禁止覆盖历史失败证据。用户已明确授权把旧 Core 的有效 `12 h` 与新 Core 的有效 `12 h` 作为独立证据跨 Core 汇总，但不得篡改数据库或伪称同 Core Campaign 完成。
 - Gap、无法证明的跨源去重、证据不完整的 SPLIT/CONVERSION、无法证明完整 outcome set 的 MERGE 继续 fail closed。
 
@@ -103,6 +104,12 @@
 ## Application entry
 - 日常主入口为桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`，它指向仓库内 `scripts/launch-hecatonchires-ui.command`。
 - 主入口检测 `GET /api/operator/snapshot`；已有 localhost UI 时只打开浏览器，未运行时补齐 Finder 启动时可能缺失的 Node PATH、启动 `pnpm operator:ui`，等待就绪后打开浏览器。终止终端会先停止本次 UI 服务。
+- Chrome 已有同 URL 标签页时，主入口通过 AppleScript 聚焦并复用该标签页，不再创建
+  重复控制台。UI 的钱包连接和 session wallet worker 使用 Web Locks 跨标签页互斥；
+  钱包已授权本站时先复用 `eth_accounts`，不会伪装成仍需连接确认。
+- 活跃控制台的 `3 s` 心跳会续期短期钱包会话；页面关闭且没有心跳时仍会在 30 分钟后
+  自动失效。模式切换已收敛为“一次确认”：必要时先恢复钱包会话，再由后台依次执行
+  Gate、Live 对账、钱包授权准备、最终 Gate 和 runtime 启动，任何步骤失败自动回滚 Paper。
 - 桌面入口现在还会在 Finder 精简 PATH 中探测用户级/Homebrew/Codex bundled `pnpm`，再补齐同目录 Node；这修复了双击时找不到 pnpm 导致入口立即退出的问题。
 - 主入口故意不放进 `操作入口/`，避免把纯 UI 启动脚本纳入 Paper core compatibility manifest；`操作入口/` 的三个 `.command` 继续作为 Paper 验证/安全暂停/结果查看工具。
 

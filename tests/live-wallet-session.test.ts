@@ -144,4 +144,39 @@ describe("Live wallet session", () => {
       vi.useRealTimers();
     }
   });
+
+  it("renews the wallet lease while the localhost UI heartbeat is active", async () => {
+    vi.useFakeTimers({ now: new Date("2026-07-27T08:00:00.000Z") });
+    try {
+      const manager = new LiveWalletSessionManager();
+      const challenge = manager.createChallenge(137);
+      const signature = await account.signMessage({ message: challenge.message });
+      const session = await manager.connect({
+        challengeId: challenge.challengeId,
+        walletAddress: account.address,
+        chainId: 137,
+        signature,
+      });
+      const binding = manager.createRuntimeBinding(session.sessionId);
+      const invalidations: string[] = [];
+      binding.onInvalidated((reason) => {
+        invalidations.push(reason);
+      });
+
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      const heartbeat = manager.snapshot();
+      expect(heartbeat.status).toBe("CONNECTED");
+      expect(heartbeat.expiresAt).toBe("2026-07-27T08:50:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      expect(invalidations).toEqual([]);
+      binding.assertCurrent();
+
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(invalidations).toEqual(["EXPIRED"]);
+      expect(manager.snapshot().status).toBe("DISCONNECTED");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -1,11 +1,18 @@
 # Progress
 
 ## Current task
-- 2026-07-29 钱包/UI 稳定性第二轮修复已完成代码与自动验证：修复 3 秒全页 DOM
-  替换、错误同步时间、服务重启旧页、OKX 延迟/多钱包/legacy 注入、provider
-  账户/网络/断开事件和旧 Gate 证据误显示。真实 Chrome 已验证顶部时间推进、节点跨多轮
-  轮询保持可点击、服务重启自动换页、状态文本明确且控制台无错误；还需用户关闭遗留 OKX
-  弹窗后完成一次新的人工两步确认，以收尾真实扩展链路。
+- 2026-07-29 钱包/UI 稳定性与一键 Live 流程已完成代码和第一轮全量验证。桌面入口会复用已有
+  `127.0.0.1:4173` Chrome 标签页，不再反复新开控制台；连接流程先用
+  `eth_accounts` 识别既有站点授权，仅在确实未授权时请求连接，再明确进入 Polygon
+  网络与 `personal_sign` 阶段。连接和 session wallet worker 使用 Web Locks 跨标签页
+  互斥，所有钱包 RPC 有界等待并能把 `4001/-32002/timeout` 转成可操作提示。
+- 活跃页面现在会续期 30 分钟钱包租约，不再在页面正常打开时固定掉线。PAPER→LIVE 已合并
+  为一个后台事务式流程：初始 Gate、Live 对账、钱包 readiness、最终 Gate、确认和 runtime
+  启动；任一步失败自动 emergency-disable 并返回单一阶段原因。模式弹窗不再要求重复输入
+  固定确认词，已保存的 `10/1/3/1 pUSD` 会直接展示和复用；手动 Gate/对账按钮收进高级诊断。
+- TypeScript、前端语法、启动脚本语法、`git diff --check` 与全套测试均通过：
+  `75 files / 875 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
+  artifact、重启唯一 4173 服务并在真实 Chrome/OKX 上跑一键流程。
 - 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
 - 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
@@ -125,9 +132,10 @@
 
 ## Latest wallet-connection verification
 - 钱包发现现覆盖已注入 provider、延迟 EIP-6963 OKX announcement、多钱包时等待
-  OKX、`window.okxwallet` legacy 注入和无 provider 超时返回。新增纯 UI 状态投影与
-  effective Gate 证据测试；当前 TypeScript 和全套 Vitest 已通过
-  `74 files / 868 tests`，前端语法和 `git diff --check` 通过。
+  OKX、`window.okxwallet` legacy 注入和无 provider 超时返回；连接与 worker 另有
+  跨标签页互斥、既有授权复用和 RPC 超时恢复。新增纯 UI 状态投影、effective Gate
+  证据与 wallet-flow 测试；当前 TypeScript 和全套 Vitest 已通过
+  `75 files / 872 tests`，前端与启动脚本语法、`git diff --check` 通过。
 - 真实 Chrome 验证：顶部从 `12:21:55` 推进到 `12:22:25`；同一 DOM node 经过
   两轮以上 3 秒轮询仍可点击；服务重启后旧 node 变 stale、新页面自动载入并显示
   `后台在线 · 12:25:22`；生产状态明确显示“就绪/待完成”，旧源码证据显示 `STALE`；
@@ -152,9 +160,6 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 独立 Observe 两轮已完成，不需要继续累计；外部审计应同时保留两轮通过报告、
-   数据库和第三轮安全中止说明，不把短暂第三轮计入有效时长。
-2. 用户之后先按 UI 测试 Paper；准备小额实盘时按 UI 顺序连接 Polygon EOA、确认
-   `10/1/3/1 pUSD` 或更低限额、完成 allowance 和真实只读核对。
-3. 只有用户当次输入最终确认词后才允许 Gate 尝试启动；在此之前继续保持
-   `PAPER + LIVE_DISABLED + liveAllowed=false`。
+1. 提交已验证源码并重新生成与该提交一致的 production validation artifact。
+2. 重启唯一 localhost 服务，从真实 Chrome/OKX 执行一次完整一键 Live 流程。
+3. 若官方 geoblock 返回禁止地区，保留真实阻断证据并停止；不得通过代码伪造放行。

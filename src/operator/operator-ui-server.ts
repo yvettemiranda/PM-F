@@ -831,6 +831,179 @@ async function handleApi(context: RequestContext): Promise<void> {
     return;
   }
 
+  if (request.method === "POST" && path === "/api/operator/live/activate") {
+    const body = await readJson(request);
+    const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
+    const reason = optionalString(body, "reason", "UI_ONE_CLICK_LIVE");
+    const confirmationText = stringField(body, "confirmationText");
+    let stage = "GATE";
+    const rollback = async (code: string): Promise<void> => {
+      try {
+        await liveGateActions.emergencyDisable({
+          actor: "SYSTEM",
+          reason: `LIVE_ACTIVATION_${stage}_ROLLBACK:${code}`,
+        });
+      } catch {
+        // Preserve the original activation failure; the Gate remains fail-closed.
+      }
+    };
+    try {
+      const initialGate = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveGateActions.requestActivation({ actor, reason }),
+      });
+      if (!initialGate.allowed) {
+        failure(response, new HttpError(
+          409,
+          "LIVE_GATE_BLOCKED",
+          "Live Gate 未允许进入 Live。",
+          { ...initialGate, stage },
+        ));
+        return;
+      }
+
+      stage = "RECONCILIATION";
+      const reconciliation = await liveRuntimeActions.reconcile({
+        actor,
+        reason: "ONE_CLICK_LIVE_RECONCILIATION",
+      });
+      if (!reconciliation.accepted) {
+        await rollback(reconciliation.code);
+        throw new HttpError(
+          409,
+          reconciliation.code,
+          "Live 对账未通过，已自动回到 Paper。",
+          {
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+            result: reconciliation,
+          },
+        );
+      }
+
+      stage = "WALLET";
+      const wallet = await liveRuntimeActions.prepareWallet({
+        actor,
+        reason: "ONE_CLICK_LIVE_WALLET_READINESS",
+      });
+      if (!wallet.accepted) {
+        await rollback(wallet.code);
+        throw new HttpError(
+          409,
+          wallet.code,
+          "钱包交易授权未准备完成，已自动回到 Paper。",
+          {
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+            result: wallet,
+          },
+        );
+      }
+
+      stage = "GATE_REFRESH";
+      const refreshedGate = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveGateActions.requestActivation({
+          actor,
+          reason: `${reason}:AFTER_RECONCILIATION`,
+        }),
+      });
+      if (!refreshedGate.allowed) {
+        await rollback("LIVE_GATE_BLOCKED");
+        failure(response, new HttpError(
+          409,
+          "LIVE_GATE_BLOCKED",
+          "最终 Live Gate 检查未通过，已自动回到 Paper。",
+          {
+            ...refreshedGate,
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+          },
+        ));
+        return;
+      }
+
+      stage = "CONFIRMATION";
+      const result = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveGateActions.confirmActivation({
+          actor,
+          confirmationText,
+        }),
+      });
+      if (!result.allowed) {
+        await rollback("LIVE_GATE_BLOCKED");
+        failure(response, new HttpError(
+          409,
+          "LIVE_GATE_BLOCKED",
+          "Live 最终确认未通过，已自动回到 Paper。",
+          {
+            ...result,
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+          },
+        ));
+        return;
+      }
+
+      stage = "RUNTIME_START";
+      const runtime = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveRuntimeActions.start({
+          actor,
+          reason: "LIVE_GATE_CONFIRMED_START",
+        }),
+      });
+      if (!runtime.accepted) {
+        await rollback(runtime.code);
+        throw new HttpError(
+          409,
+          runtime.code,
+          "Live 运行时启动失败，Gate 已自动回滚。",
+          {
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+            result: runtime,
+          },
+        );
+      }
+      success(response, {
+        result,
+        runtime,
+        preparation: {
+          reconciliation,
+          wallet,
+          initialGate,
+          refreshedGate,
+        },
+        snapshot: dashboardSnapshot(),
+      }, 202);
+      return;
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      const code = errorCode(error);
+      await rollback(code);
+      throw new HttpError(
+        409,
+        code,
+        "Live 一键切换未完成，已保持 Paper。",
+        {
+          stage,
+          safety: "PAPER + LIVE_DISABLED",
+          reason: code,
+        },
+      );
+    }
+  }
+
   if (request.method === "POST" && path === "/api/operator/live/confirm") {
     const body = await readJson(request);
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");

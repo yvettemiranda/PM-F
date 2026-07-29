@@ -145,6 +145,7 @@ export const OPERATOR_BUILD_FILES = [
   "prototype/live-ui/server.mjs",
   "prototype/live-ui/styles.css",
   "prototype/live-ui/ui-state.js",
+  "prototype/live-ui/wallet-flow.js",
   "prototype/live-ui/wallet-provider.js",
   "src/cli/observe-only.ts",
   "src/cli/operator-control.ts",
@@ -276,6 +277,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/trade-multiplicity-evidence.test.ts",
   "tests/validation-framework.test.ts",
   "tests/wallet-identity.test.ts",
+  "tests/wallet-flow.test.ts",
   "tests/wallet-provider.test.ts",
 ] as const;
 

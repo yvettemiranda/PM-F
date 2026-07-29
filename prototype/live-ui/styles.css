@@ -1755,6 +1755,24 @@ body::after {
   opacity: 0.55;
 }
 
+.live-advanced-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.live-advanced-actions > summary {
+  width: fit-content;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 10px;
+  list-style-position: inside;
+}
+
+.live-advanced-actions[open] > summary {
+  margin-bottom: 9px;
+  color: var(--ink-muted);
+}
+
 .ops-note {
   margin: 0;
   color: var(--ink-faint);

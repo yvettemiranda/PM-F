@@ -9,17 +9,14 @@
 - 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前钱包身份已连接，
   但真实 CLOB 凭据/余额/allowance/仓位、生产 provider、干净审计源码和用户当次最终确认
   仍未验收。隔离测试不能替代这些外部事实。
-- 当前 UI 的生产路径仍是 `PENDING_PREREQUISITES`，但重连后的钱包会话、Signer、生产
-  provider、认证 CLOB、LiveRuntime 和小额限额均已装配为 `READY`；唯一 readiness 阻断是
-  `USER_AUTHORIZATION=PENDING`，且全局 Gate 仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-  UI/数据库中遗留的 `LIVE_WALLET_SESSION_DISCONNECTED` 属于此前重连前预检记录，不代表当前
-  钱包会话断开。不得把“钱包已连接”误解为“可以启动实盘”。
-- 最新用户授权请求在官方地域检查处被阻断：`GEOBLOCK_BLOCKED:US:CA`。不得绕过、伪造或
+- 当前运行服务在源码未提交期间为 `source dirty`，钱包 session 未装配；提交、生成新验证
+  artifact 和重启前，Gate/对账必然保持阻断。已保存限额仍有效，不应要求用户重复保存。
+- 前次用户授权请求在官方地域检查处被阻断：`GEOBLOCK_BLOCKED:US:CA`。不得绕过、伪造或
   手工覆盖地域 provider；除非 provider 在实际允许地区给出新的 `ALLOWED` 证据，否则不进入
   Live arming，也不记录最终用户授权通过。
-- 当前 Chrome 仍有一个服务重启前遗留的 OKX connect 弹窗；该请求已经失效，必须由用户
-  关闭后再从最新 Hecatonchires 页面发起新连接。浏览器安全策略不允许自动化工具代点或
-  绕过扩展确认。
+- 重复 Hecatonchires 标签页曾同时轮询钱包会话并可能争抢同一签名请求；现已由桌面入口
+  标签页复用和 UI Web Locks 互斥解决。OKX 扩展确认不能被后台静默跳过；每个签名或交易
+  仍必须在扩展弹窗中明确确认。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 - “Live 对账”当前不可点击是预期的安全阻断：只有验证过的钱包会话、Signer、只读余额、认证 CLOB 和已装配 LiveRuntime 全部就绪后才开放；未连接钱包时接口必须返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`。
 
@@ -59,6 +56,10 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 2026-07-29 一键 Live 稳定性修复：活跃 localhost 心跳会滑动续期钱包租约；PAPER→LIVE
+  后台按 Gate→Live 对账→钱包 readiness→新鲜 Gate→确认→runtime 启动执行，任何阶段失败
+  自动回滚 `PAPER + LIVE_DISABLED`。UI 只需一次模式二次确认，不再重复输入确认词或手动
+  依次点击 Gate/对账；手动操作保留在高级诊断。
 - 2026-07-29 第二轮稳定性修复：3 秒轮询不再因纯时间变化整体替换 DOM；钱包流程、
   输入、弹窗和操作期间延后重绘；顶部改用最新后台快照时间并能显示连接异常。服务实例
   变化自动 reload，真实 Chrome 的时间推进、稳定 node 和重启换页均通过。
@@ -107,7 +108,7 @@
 
 ## Safety boundary
 - 必须保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
-- 当前任务完成前禁止连接钱包、private key/seed、派生真实 CLOB credentials、
-  submit/cancel、approve、redeem、真实订单、真实资金和链上写入；未来只能由用户
-  在 UI 内逐步确认触发。
+- 允许在 localhost UI 连接浏览器钱包并执行仅用于公开地址控制权证明的
+  `personal_sign`；禁止加载 private key/seed，禁止未经用户逐步确认的 CLOB credential、
+  submit/cancel、approve、redeem、真实订单、真实资金和链上写入。
 - 禁止覆盖历史失败证据、把用户授权的跨 Core 汇总伪称为同 Core Campaign 时长、降低数据/时钟/恢复/账本安全门或绕过 geoblock。

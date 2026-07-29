@@ -182,11 +182,7 @@ export class LiveWalletSessionManager {
     };
     if (this.currentSession !== null) await this.invalidateCurrent("REPLACED");
     this.currentSession = session;
-    this.expiryTimer = setTimeout(() => {
-      if (this.currentSession?.sessionId !== session.sessionId) return;
-      void this.invalidateCurrent("EXPIRED").catch(() => undefined);
-    }, SESSION_TTL_MS);
-    this.expiryTimer.unref?.();
+    this.scheduleExpiry(session);
     return { ...session };
   }
 
@@ -223,6 +219,8 @@ export class LiveWalletSessionManager {
       };
     }
     session.lastSeenAt = observedAt.toISOString();
+    session.expiresAt = new Date(observedAt.getTime() + SESSION_TTL_MS).toISOString();
+    this.scheduleExpiry(session);
     return {
       status: session.status,
       sessionId: session.sessionId,
@@ -235,6 +233,15 @@ export class LiveWalletSessionManager {
       expiresAt: session.expiresAt,
       signerStatus: "PENDING_HOST_SIGNER",
     };
+  }
+
+  private scheduleExpiry(session: LiveWalletSession): void {
+    if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
+    this.expiryTimer = setTimeout(() => {
+      if (this.currentSession?.sessionId !== session.sessionId) return;
+      void this.invalidateCurrent("EXPIRED").catch(() => undefined);
+    }, SESSION_TTL_MS);
+    this.expiryTimer.unref?.();
   }
 
   async disconnect(sessionId?: string): Promise<void> {

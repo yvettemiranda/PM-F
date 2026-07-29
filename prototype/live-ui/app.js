@@ -11,6 +11,7 @@ const state = {
   refreshTimer: null,
   walletWorkerGeneration: 0,
   walletWorkerSessionId: null,
+  walletWorkerRetryTimer: null,
   walletProvider: null,
   walletProviderCleanup: null,
   walletFlowActive: false,
@@ -471,23 +472,30 @@ function livePanel(snapshot) {
             : `<span class="empty-inline">数据库初始化后显示 Gate 前置条件</span>`}
         </div>
         <div class="ops-actions">
-          <button class="secondary-button" data-action="live-wallet-setup" type="button"
-            ${disabledAttr(
-              Boolean(state.busy) || !walletConnected || !walletSetupAvailable,
-              walletConnected ? "钱包链上授权运行时尚未准备" : "请先连接正式钱包",
-            )}>检查 / 设置交易授权</button>
-          <button class="secondary-button" data-action="live-preflight" type="button"
-            ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>检查 Gate</button>
-          <button class="secondary-button" data-action="live-recover" type="button"
-            ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>恢复 Gate</button>
-          <button class="secondary-button" data-action="live-reconcile" type="button"
-            ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "连接钱包后自动装配 LiveRuntime")}>Live 对账</button>
+          <button class="confirm-button" data-action="live-activate" type="button"
+            ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>一键检查并切换 LIVE</button>
           <button class="secondary-button danger-button" data-action="live-disable" type="button"
             ${disabledAttr(Boolean(state.busy) || gate?.state === "LIVE_DISABLED", "Live 当前已禁用")}>紧急停用 Live</button>
         </div>
+        <details class="live-advanced-actions">
+          <summary>高级诊断</summary>
+          <div class="ops-actions">
+            <button class="secondary-button" data-action="live-wallet-setup" type="button"
+              ${disabledAttr(
+                Boolean(state.busy) || !walletConnected || !walletSetupAvailable,
+                walletConnected ? "钱包链上授权运行时尚未准备" : "请先连接正式钱包",
+              )}>仅检查交易授权</button>
+            <button class="secondary-button" data-action="live-preflight" type="button"
+              ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>仅检查 Gate</button>
+            <button class="secondary-button" data-action="live-recover" type="button"
+              ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>仅恢复 Gate</button>
+            <button class="secondary-button" data-action="live-reconcile" type="button"
+              ${disabledAttr(Boolean(state.busy) || !runtimeConfigured, runtimeConfigured ? "" : "连接钱包后自动装配 LiveRuntime")}>仅执行 Live 对账</button>
+          </div>
+        </details>
         <p class="ops-note">${escapeHtml(production?.status === "READY"
-          ? "生产前置条件已齐备，下一步由用户执行正式预检与 Gate 二次确认。"
-          : `当前待完成：${blocked.length ? blocked.join("、") : "钱包和确认步骤"}。连接钱包后，本机后端会自动装配生产组件；全部检查完成前不会下单，浏览器永远不接触私钥。`)}</p>
+          ? "生产前置条件已齐备；点击一次即可自动检查并切换，无需重新保存参数。"
+          : `当前待完成：${blocked.length ? blocked.join("、") : "钱包和确认步骤"}。点击一键切换后系统会自动逐项处理；失败时保持 Paper，不需要重填已保存参数。`)}</p>
       </div>
     </details>
   `;
@@ -860,6 +868,17 @@ function discoverWalletProvider() {
   return Promise.resolve(window.okxwallet?.ethereum ?? window.okxwallet ?? window.ethereum);
 }
 
+function walletFlow() {
+  const flow = window.HecatonchiresWalletFlow;
+  if (!flow) throw new Error("WALLET_FLOW_HELPERS_UNAVAILABLE");
+  return flow;
+}
+
+function setWalletProgress(title, message) {
+  state.notice = { kind: "processing", title, message };
+  render();
+}
+
 function setNotice(kind, title, message) {
   state.notice = { kind, title, message };
   window.setTimeout(() => {
@@ -881,7 +900,9 @@ async function runAction(label, path, init = {}, options = {}) {
     setNotice("success", "已完成", options.success ?? label);
     return data;
   } catch (error) {
-    const reason = error.details?.blockedReasons?.join("、") ?? error.message;
+    const reason = typeof options.formatError === "function"
+      ? options.formatError(error)
+      : error.details?.blockedReasons?.join("、") ?? error.message;
     setNotice("error", "操作未执行", reason);
     throw error;
   } finally {
@@ -1020,79 +1041,137 @@ function bindWalletProvider(provider) {
 }
 
 async function connectLiveWallet() {
-  if (state.walletFlowActive) return;
+  if (state.walletFlowActive) return false;
   state.walletFlowActive = true;
   state.busy = "连接钱包";
-  state.notice = {
-    kind: "processing",
-    title: "正在连接 OKX",
-    message: "请在 OKX 中先确认连接，再确认只用于证明地址控制权的签名。",
-  };
+  state.notice = { kind: "processing", title: "正在检查 OKX", message: "正在确认钱包扩展和既有授权状态。" };
   render();
   try {
-    const provider = await discoverWalletProvider();
-    if (!provider || typeof provider.request !== "function") {
+    const flow = walletFlow();
+    const coordinated = await flow.runExclusive(
+      window.navigator?.locks ?? null,
+      "hecatonchires:wallet-connect",
+      async () => {
+        const provider = await discoverWalletProvider();
+        if (!provider || typeof provider.request !== "function") {
+          throw new Error(
+            "当前页面没有收到 OKX 钱包。请确认扩展已启用，然后只保留一个 Hecatonchires 页面并刷新重试。",
+          );
+        }
+        state.walletProvider = provider;
+
+        let accounts = [];
+        try {
+          accounts = await flow.requestWithTimeout(
+            provider,
+            { method: "eth_accounts" },
+            { timeoutMs: 10_000, label: "读取已授权账户" },
+          );
+        } catch {
+          // The explicit connection request below remains authoritative if a
+          // read-only probe races with an extension wake-up.
+        }
+        let walletAddress = flow.firstValidAddress(accounts);
+        if (!walletAddress) {
+          setWalletProgress(
+            "等待 OKX 连接确认",
+            "请在 OKX 中确认把当前账户连接到 Hecatonchires；这一步不会签名或移动资金。",
+          );
+          accounts = await flow.requestWithTimeout(
+            provider,
+            { method: "eth_requestAccounts" },
+            { timeoutMs: 90_000, label: "连接钱包" },
+          );
+          walletAddress = flow.firstValidAddress(accounts);
+        } else {
+          setWalletProgress(
+            "已识别 OKX 账户",
+            "本站已有连接授权，因此不会重复弹出连接窗口；下一步只会请求身份签名。",
+          );
+        }
+        if (!walletAddress) throw new Error("钱包没有返回有效地址");
+
+        let chainId = await flow.requestWithTimeout(
+          provider,
+          { method: "eth_chainId" },
+          { timeoutMs: 10_000, label: "读取钱包网络" },
+        );
+        const parsedChainId = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
+          ? Number.parseInt(chainId, 16)
+          : Number.NaN;
+        if (parsedChainId !== 137) {
+          setWalletProgress("等待网络切换", "请在 OKX 中确认切换到 Polygon 主网。");
+          await flow.requestWithTimeout(
+            provider,
+            {
+              method: "wallet_switchEthereumChain",
+              params: [{ chainId: "0x89" }],
+            },
+            { timeoutMs: 90_000, label: "切换 Polygon 主网" },
+          );
+          chainId = await flow.requestWithTimeout(
+            provider,
+            { method: "eth_chainId" },
+            { timeoutMs: 10_000, label: "确认钱包网络" },
+          );
+          if (
+            typeof chainId !== "string"
+            || !/^0x[0-9a-f]+$/i.test(chainId)
+            || Number.parseInt(chainId, 16) !== 137
+          ) {
+            throw new Error("请把钱包切换到 Polygon 主网");
+          }
+        }
+        const challenge = await api("/api/operator/live/wallet-session/challenge", {
+          body: JSON.stringify({ chainId }),
+        });
+        setWalletProgress(
+          "等待身份签名",
+          "请在 OKX 确认 Hecatonchires 身份签名；签名只证明地址控制权，不授权交易或移动资金。",
+        );
+        const signature = await flow.requestWithTimeout(
+          provider,
+          {
+            method: "personal_sign",
+            params: [challenge.message, walletAddress],
+          },
+          { timeoutMs: 120_000, label: "身份签名" },
+        );
+        if (typeof signature !== "string" || !signature.startsWith("0x")) {
+          throw new Error("钱包没有返回签名");
+        }
+        const connection = await runAction("连接正式钱包", "/api/operator/live/wallet-session/connect", {
+          body: JSON.stringify({
+            challengeId: challenge.challengeId,
+            walletAddress,
+            chainId,
+            signature,
+          }),
+        }, { success: "钱包已连接，Live 签名通道已准备。" });
+        if (connection.runtime?.accepted === false) {
+          setNotice(
+            "success",
+            "钱包已连接",
+            `身份已证明，但 LiveRuntime 暂未装配：${connection.runtime.code}`,
+          );
+          render();
+        }
+        bindWalletProvider(provider);
+        startWalletRequestWorker();
+      },
+    );
+    if (!coordinated.acquired) {
       setNotice(
         "error",
-        "未检测到钱包",
-        "当前页面没有收到 OKX provider。请在扩展管理中允许 OKX 访问 127.0.0.1，然后刷新本页重试。",
+        "另一个页面正在连接钱包",
+        "请切回已经打开的 Hecatonchires 页面完成 OKX 确认；本页没有重复发送请求。",
       );
-      return;
+      return false;
     }
-    state.walletProvider = provider;
-    const accounts = await provider.request({ method: "eth_requestAccounts" });
-    const walletAddress = Array.isArray(accounts) ? accounts[0] : "";
-    if (typeof walletAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
-      throw new Error("钱包没有返回有效地址");
-    }
-    let chainId = await provider.request({ method: "eth_chainId" });
-    const parsedChainId = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
-      ? Number.parseInt(chainId, 16)
-      : Number.NaN;
-    if (parsedChainId !== 137) {
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x89" }],
-      });
-      chainId = await provider.request({ method: "eth_chainId" });
-      if (
-        typeof chainId !== "string"
-        || !/^0x[0-9a-f]+$/i.test(chainId)
-        || Number.parseInt(chainId, 16) !== 137
-      ) {
-        throw new Error("请把钱包切换到 Polygon 主网");
-      }
-    }
-    const challenge = await api("/api/operator/live/wallet-session/challenge", {
-      body: JSON.stringify({ chainId }),
-    });
-    const signature = await provider.request({
-      method: "personal_sign",
-      params: [challenge.message, walletAddress],
-    });
-    if (typeof signature !== "string" || !signature.startsWith("0x")) {
-      throw new Error("钱包没有返回签名");
-    }
-    const connection = await runAction("连接正式钱包", "/api/operator/live/wallet-session/connect", {
-      body: JSON.stringify({
-        challengeId: challenge.challengeId,
-        walletAddress,
-        chainId,
-        signature,
-      }),
-    }, { success: "钱包已连接，Live 签名通道已准备。" });
-    if (connection.runtime?.accepted === false) {
-      setNotice(
-        "success",
-        "钱包已连接",
-        `身份已证明，但 LiveRuntime 暂未装配：${connection.runtime.code}`,
-      );
-      render();
-    }
-    bindWalletProvider(provider);
-    startWalletRequestWorker();
+    return state.snapshot?.live?.walletSession?.status === "CONNECTED";
   } catch (error) {
-    setNotice("error", "钱包未连接", error.message ?? "钱包连接被取消或未通过安全证明。");
+    setNotice("error", "钱包未连接", walletFlow().walletErrorMessage(error));
+    return false;
   } finally {
     state.walletFlowActive = false;
     state.busy = null;
@@ -1106,6 +1185,10 @@ async function disconnectLiveWallet() {
   try {
     state.walletWorkerGeneration += 1;
     state.walletWorkerSessionId = null;
+    if (state.walletWorkerRetryTimer !== null) {
+      window.clearTimeout(state.walletWorkerRetryTimer);
+      state.walletWorkerRetryTimer = null;
+    }
     await runAction("断开钱包", "/api/operator/live/wallet-session/disconnect", {
       body: JSON.stringify({ sessionId }),
     }, { success: "钱包会话已断开，Live 继续保持禁用。" });
@@ -1168,24 +1251,34 @@ async function completeWalletRequest(sessionId, requestId, result) {
 }
 
 async function processWalletRequest(provider, session, request) {
-  const activeChainId = await provider.request({ method: "eth_chainId" });
+  const flow = walletFlow();
+  const activeChainId = await flow.requestWithTimeout(
+    provider,
+    { method: "eth_chainId" },
+    { timeoutMs: 10_000, label: "确认钱包网络" },
+  );
   const parsedChainId = typeof activeChainId === "string" && /^0x[0-9a-f]+$/i.test(activeChainId)
     ? Number.parseInt(activeChainId, 16)
     : Number.NaN;
   if (parsedChainId !== request.chainId || parsedChainId !== session.chainId) {
     throw new Error("钱包网络已变化，请切回 Polygon 主网");
   }
-  const accounts = await provider.request({ method: "eth_accounts" });
-  const activeAddress = Array.isArray(accounts) ? accounts[0] : "";
+  const accounts = await flow.requestWithTimeout(
+    provider,
+    { method: "eth_accounts" },
+    { timeoutMs: 10_000, label: "确认钱包账户" },
+  );
+  const activeAddress = flow.firstValidAddress(accounts);
   if (typeof activeAddress !== "string"
     || activeAddress.toLowerCase() !== request.walletAddress.toLowerCase()
     || activeAddress.toLowerCase() !== session.walletAddress.toLowerCase()) {
     throw new Error("钱包账户已变化，请重新连接");
   }
-  const result = await provider.request({
-    method: request.method,
-    params: request.params,
-  });
+  const result = await flow.requestWithTimeout(
+    provider,
+    { method: request.method, params: request.params },
+    { timeoutMs: 120_000, label: request.purpose },
+  );
   if (typeof result !== "string") throw new Error("钱包没有返回有效结果");
   await completeWalletRequest(session.sessionId, request.requestId, { result });
 }
@@ -1228,47 +1321,73 @@ async function walletRequestWorker(generation) {
 function startWalletRequestWorker() {
   const sessionId = state.snapshot?.live?.walletSession?.sessionId;
   if (!sessionId || state.walletWorkerSessionId === sessionId) return;
+  if (state.walletWorkerRetryTimer !== null) {
+    window.clearTimeout(state.walletWorkerRetryTimer);
+    state.walletWorkerRetryTimer = null;
+  }
   state.walletWorkerGeneration += 1;
   state.walletWorkerSessionId = sessionId;
   const generation = state.walletWorkerGeneration;
-  void walletRequestWorker(generation).finally(() => {
-    if (generation === state.walletWorkerGeneration) state.walletWorkerSessionId = null;
+  void walletFlow().runExclusive(
+    window.navigator?.locks ?? null,
+    `hecatonchires:wallet-worker:${sessionId}`,
+    () => walletRequestWorker(generation),
+  ).finally(() => {
+    if (generation !== state.walletWorkerGeneration) return;
+    state.walletWorkerSessionId = null;
+    if (state.snapshot?.live?.walletSession?.sessionId === sessionId) {
+      state.walletWorkerRetryTimer = window.setTimeout(() => {
+        state.walletWorkerRetryTimer = null;
+        startWalletRequestWorker();
+      }, 1_500);
+    }
   });
 }
 
-async function liveRequest() {
+function activationFailureReason(error) {
+  const details = error?.details ?? {};
+  const stageLabels = {
+    GATE: "Gate",
+    RECONCILIATION: "Live 对账",
+    WALLET: "钱包授权",
+    GATE_REFRESH: "最终 Gate",
+    CONFIRMATION: "最终确认",
+    RUNTIME_START: "Live 启动",
+  };
+  const stage = stageLabels[details.stage] ?? "Live 准备";
+  const reason = details.reason
+    ?? details.result?.details?.reason
+    ?? details.result?.code
+    ?? details.blockedReasons?.[0]
+    ?? error?.message
+    ?? "未知原因";
+  return `${stage}未通过：${reason}`;
+}
+
+async function activateLive() {
   try {
-    const data = await runAction("检查 Live Gate", "/api/operator/live/request", {
-      body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_MODE_SWITCH" }),
+    if (state.snapshot?.live?.walletSession?.status !== "CONNECTED") {
+      const connected = await connectLiveWallet();
+      if (!connected) return;
+    }
+    await runAction("一键切换 Live", "/api/operator/live/activate", {
+      body: JSON.stringify({
+        actor: "LOCAL_OPERATOR",
+        reason: "UI_ONE_CLICK_LIVE",
+        confirmationText: "ENABLE LIVE TRADING",
+      }),
+    }, {
+      success: "Live 已启动；Gate、对账、钱包准备和运行时均已通过。",
+      formatError: activationFailureReason,
     });
-    if (data.result?.allowed) showLiveConfirmation();
   } catch (error) {
     showModal(
-      "Live 仍保持禁用",
-      `<p>安全 Gate 没有允许切换，所有 Paper 数据保持不变。</p>`,
-      error.details?.blockedReasons?.join("、") ?? error.message,
+      "仍保持 PAPER",
+      `<p>${escapeHtml(activationFailureReason(error))}</p>`,
+      "失败步骤已经自动回滚，不需要重新保存参数。",
       "知道了",
     );
   }
-}
-
-function showLiveConfirmation() {
-  showModal(
-    "二次确认进入 Live",
-    `<p>请确认你已理解 Live 会连接外部账户。输入固定确认词后才会再次检查 Gate。</p><input class="modal-input" id="confirmation-text" value="" placeholder="ENABLE LIVE TRADING" autocomplete="off" />`,
-    "当前 UI 仍不会加载私钥；缺少任何外部依赖时后台会拒绝。",
-    "确认进入 Live",
-    async (modalRoot) => {
-      const confirmationText = modalRoot.querySelector("#confirmation-text")?.value ?? "";
-      try {
-        await runAction("确认 Live", "/api/operator/live/confirm", {
-          body: JSON.stringify({ actor: "LOCAL_OPERATOR", confirmationText }),
-        }, { success: "Live 已确认并启动，小额实盘开始受 Gate 持续监控。" });
-      } catch {
-        // runAction and the following modal contain the authoritative reason.
-      }
-    },
-  );
 }
 
 function showModeModal() {
@@ -1291,12 +1410,19 @@ function showModeModal() {
     );
     return;
   }
+  const config = state.snapshot?.live?.production?.config;
+  const limits = [
+    `资金 ${microsToPusd(config?.liveBankrollMicros) || "—"} pUSD`,
+    `单笔 ${microsToPusd(config?.maxTradeSizeMicros) || "—"} pUSD`,
+    `总敞口 ${microsToPusd(config?.maxExposureMicros) || "—"} pUSD`,
+    `单日止损 ${microsToPusd(config?.maxDailyLossMicros) || "—"} pUSD`,
+  ].join(" · ");
   showModal(
     "切换到 LIVE",
-    `<div class="mode-preview"><span class="current"><i></i>PAPER</span><svg viewBox="0 0 20 20"><path d="m6 4 6 6-6 6" /></svg><span>LIVE</span></div><p>第一次确认只会请求后台 Gate 检查，不会直接提交订单。</p>`,
-    "Live 生产路径已准备；正式钱包、Signer 和外部服务未齐全前，后台会保持阻断。",
-    "请求 Live 检查",
-    liveRequest,
+    `<div class="mode-preview"><span class="current"><i></i>PAPER</span><svg viewBox="0 0 20 20"><path d="m6 4 6 6-6 6" /></svg><span>LIVE</span></div><p>确认后系统会自动连接钱包、检查 Gate、完成 Live 对账、检查必要授权并启动；缺少条件时自动回到 Paper。</p><p><strong>${escapeHtml(limits)}</strong></p>`,
+    "OKX 仍可能要求确认身份签名或链上授权；系统不会读取私钥，也不会跳过官方地域检查。",
+    "确认并切换 LIVE",
+    activateLive,
   );
 }
 
@@ -1309,6 +1435,7 @@ async function actionClick(action, input = {}) {
   if (action === "live-recover") await runAction("恢复 Live Gate", "/api/operator/live/recover", { body: "{}" }, { success: "Live Gate 恢复检查完成。" });
   if (action === "live-wallet-connect") await connectLiveWallet();
   if (action === "live-wallet-disconnect") await disconnectLiveWallet();
+  if (action === "live-activate") showModeModal();
   if (action === "live-wallet-setup") {
     showModal(
       "设置交易授权",
