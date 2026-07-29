@@ -2,10 +2,11 @@
 
 ## Active blockers
 - 当前源码已修复 CLOB L1 签名、Safe 资金地址识别、余额/allowance 准入误判、外部现金
-  对账、本机时钟偏差重复阻断、production 外部仓位读取被 `3 s` 过早截断，以及成功返回的
-  CLOB time 因固定 `2 s` RTT 门槛被误判。最新真实流程进一步发现钱包既有仓位被空仓假设
-  阻断；已实现只读不可变启动基线，仍需全量验证、提交、迁移 Schema `2.32.0`、生成同提交
-  production validation artifact、重启并完成真实一键流程复核。
+  对账、本机时钟偏差重复阻断、production 外部读取超时、CLOB time RTT 误判和生产钱包
+  空仓假设。Schema `2.32.0` 已迁移并为真实 Safe 捕获 `5` 项不可变启动前仓位基线。最新
+  一键流程进一步发现零余额时错误调用无 `token_id` 的 CONDITIONAL allowance API；已用
+  红测复现并修复，全套 `895` 测试通过，仍需提交、生成同提交 production validation
+  artifact、重启和真实一键复核。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
@@ -14,8 +15,9 @@
 - 普通浏览器 EOA signer 与其经链上验证的 Polymarket Gnosis Safe 资金地址已接到默认
   localhost host；真实 CLOB 凭据、生产 provider、Safe 仓位和官方地域结果仍须在重启后
   验收。钱包余额可以为零，不再是 Gate blocker；隔离测试仍不能替代外部事实。
-- 当前运行服务在源码未提交期间为 `source dirty`，钱包 session 未装配；提交、生成新验证
-  artifact 和重启前，Gate/对账必然保持阻断。已保存限额仍有效，不应要求用户重复保存。
+- 当前运行服务仍基于上一干净提交，旧钱包 session 已连接但本轮修复尚未加载。提交、生成
+  新验证 artifact 和重启后旧 session 会按版本绑定规则撤销；已保存限额、合规确认和启动
+  基线仍有效，只需重新做一次钱包身份证明，不应要求用户重复保存参数。
 - 前次用户授权请求曾被 `GEOBLOCK_BLOCKED:US:CA` 阻断；本轮官方端点实测又返回
   `blocked=false / KR`，说明出口地域会随实际网络路径变化。不得缓存允许结果、绕过、伪造或
   手工覆盖 provider；每次 arming/执行仍必须取得新鲜官方结果。
@@ -65,6 +67,9 @@
 - 2026-07-29：生产钱包不再被要求空仓。只有全新 Live 账户可首次捕获外部 outcome token
   为不可变基线；基线不写入 `live_positions`，不会被本系统卖出或计入风险敞口。对账继续
   精确比较外部实际值与“基线 + 本系统仓位”，外部手工漂移仍 fail closed。
+- 2026-07-29：余额为零的钱包准备不再调用缺少 `token_id` 的 CONDITIONAL allowance
+  API。它会直接返回 `LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL`，不发送授权交易并允许
+  一键流程继续；未来具体订单仍执行余额和 token-specific allowance 检查。
 - 2026-07-29：官方 CLOB time 实测五次全部 HTTP 200，但当前网络响应耗时
   `2.3–8.2 s`；旧默认 `2 s` RTT 门槛导致 `CLOCK_RTT_UNSAFE`。默认 RTT 预算现与
   `10 s` 请求超时一致，仍保留最多两次请求、超时/HTTP/payload 失败关闭，以及调用方显式

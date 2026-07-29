@@ -184,9 +184,6 @@ export class BrowserWalletAllowanceManager {
     const collateral = await this.options.clobClient.getBalanceAllowance({
       asset_type: AssetType.COLLATERAL,
     });
-    const outcome = await this.options.clobClient.getBalanceAllowance({
-      asset_type: AssetType.CONDITIONAL,
-    });
     const actualCollateral = integer(collateral.balance, "LIVE_COLLATERAL_BALANCE_INVALID");
     const requiredCollateral = actualCollateral < configuredCap ? actualCollateral : configuredCap;
     if (requiredCollateral === 0n) {
@@ -197,6 +194,9 @@ export class BrowserWalletAllowanceManager {
         reason: "LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL",
       };
     }
+    const outcome = await this.options.clobClient.getBalanceAllowance({
+      asset_type: AssetType.CONDITIONAL,
+    });
     const collateralReady = requiredAllowance(
       collateral,
       this.contracts.exchangeV3,

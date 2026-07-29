@@ -1,6 +1,14 @@
 # Progress
 
 ## Current task
+- 2026-07-29 最新真实一键流程已完成 Gate、CLOB/时钟/地域读取和外部仓位对账；Safe
+  的 `5` 项既有 outcome-token 仓位已捕获为 Schema `2.32.0` 不可变启动基线。随后钱包
+  readiness 暴露确定性实现错误：余额为 `0 pUSD` 时仍先调用不带 `token_id` 的
+  `CONDITIONAL` balance/allowance API，官方返回 `assetId invalid value -1`。已先添加
+  红测，再改为 collateral 为零时直接返回 `LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL`，
+  不创建授权交易、不查询无效 ERC-1155 参数。聚焦测试、TypeScript 与全套
+  `76 files / 895 tests` 已通过；待提交、生成 commit-bound production artifact、重启并
+  重新完成一次钱包身份证明和一键 Live 复核。
 - 2026-07-29 真实一键流程已在正式 OKX 会话中跑到生产 Gate，并定位/修复四个确定性阻断：
   browser CLOB typed-data 请求补齐标准 `EIP712Domain`（旧请求虽能弹出签名，但 CLOB 以
   `Invalid L1 Request headers` 拒绝）；官方 geoblock/CLOB time 默认改为 `10 s` 且对
@@ -192,9 +200,8 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 提交本轮钱包自动识别、余额语义、Gate/CLOB/时钟和 UI 修复，并重新生成与该提交一致的
-   production validation artifact。
-2. 重启唯一 localhost 服务，重新建立一次因重启而失效的 OKX 短期会话。
-3. 从真实 Chrome/OKX 再跑完整一键流程；`0 pUSD` 不得阻断 Live 准备，但会在真实订单
-   提交前以余额不足跳过该笔。若官方 geoblock、钱包归属、CLOB 认证或账本完整性仍给出
-   真实阻断，保留原始原因并停止，不得伪造放行。
+1. 提交零余额钱包 readiness 修复，并生成与该提交一致的 production validation artifact。
+2. 重启唯一 localhost 服务；源码版本变化会按设计撤销旧内存钱包租约，因此需要重新完成
+   一次 OKX 身份签名。
+3. 再跑真实一键流程，确认 `0 pUSD` 进入 Live、启动前 `5` 项仓位继续隔离、LiveRuntime
+   启动且没有历史 Signal 被回放成交；余额不足只在未来具体 BUY 下单前阻断该笔。

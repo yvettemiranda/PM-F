@@ -40,8 +40,9 @@
 
 ## Version and compatibility
 - 当前源码目标版本：Schema `2.32.0`、Signal `1.11.0`、Strategy `2.9.0`、Risk `1.10.0`、Replay `2.5.0`、Paper `1.18.0`、Live `1.16.0`、Validation `1.9.0`、Operational `1.9.0`、Ruleset `v1.11.0`、Config `v1.7.0`。
-- 当前运行数据库在服务重启前仍是 Schema `2.31.0`；迁移 `037` 会先按既有备份优先流程
-  新增不可变 Live 钱包启动前仓位基线，不改变 Paper 账户、Campaign 或历史账本。
+- 当前运行数据库已迁移到 Schema `2.32.0`。迁移 `037` 已按既有备份优先流程新增不可变
+  Live 钱包启动前仓位基线，不改变 Paper 账户、Campaign 或历史账本；当前 Safe 的
+  `5` 项既有 outcome-token 仓位已捕获并隔离。
 - `BUY_AMOUNT_POLICY_V4` 与 `followSellFullExitThresholdPpm=950000` 只由包含相应字段的新 Ruleset 解释；旧 Ruleset 固定按旧语义恢复，不得重解释历史执行。
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
 
@@ -75,9 +76,10 @@
 - 用户授权的 Paper 累计 `24 h` 和最终连续 `4 h` 已完成；但自然 FILL、POSITION_UPDATE、FEE、PnL 仍未发生，不能把隔离测试伪称为自然成交。
 - SPLIT/CONVERSION 采用“退出或隔离”而非真实链上复制，可能与目标组合的经济结果不同；必须在 Paper 报告中单独统计。
 - 历史 Phase 0 若只有特殊 Activity、没有本系统提交的完整证明，Replay 会保持 `INCOMPLETE`，不得人工降级通过。
-- 官方结束时间缺失的 Live 策略仍会阻断；普通浏览器 EOA 的 signer、会话内认证
-  CLOB、只读 provider、真实 CLOB adapter、allowance/redeem 和默认 production
-  assembly 已完成，但真实钱包、真实凭据、真实资金证据和用户当次最终确认尚未发生。
+- 官方结束时间缺失的 Live 策略仍会阻断；OKX EOA 到 Polymarket Gnosis Safe 的
+  signer、会话内认证 CLOB、只读 provider、真实 CLOB adapter、allowance/redeem 和默认
+  production assembly 已完成真实连接验收。当前钱包实际余额为 `0 pUSD`，已有 `5` 项
+  outcome-token 仓位已作为启动前基线隔离；尚无本系统真实订单、成交或资金损益证据。
 
 ## Operator workflow
 - 桌面入口：`/Users/d4clt/Desktop/Polymarket验证_点这里`；目标文件：`data/operator/target-wallet.txt`。运行锁存在时禁止切换目标。
