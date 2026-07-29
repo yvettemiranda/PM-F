@@ -55,6 +55,7 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 三轮 Phase0/Replay 证据打包测试在全套并发下稳定略超默认 `5 s`，但独立执行可通过，属于测试时限而非产物错误；该重型用例现在使用与相邻打包测试一致的 `15 s` 显式时限，生产逻辑未变。
 - 2026-07-29：钱包连接只使用 `window.ethereum` 时，OKX 延迟注入或多扩展并存会出现“扩展弹窗完成但页面未连接”。新增 EIP-6963 discovery，优先 OKX/OKEX，兼容 `ethereum.providers` 和传统注入；服务重启后的 disconnected 状态也改成明确的“需重新签名”提示。新增 3 个回归用例，未改变 `PAPER + LIVE_DISABLED + liveAllowed=false`。
 - OKX personal-sign 已验证后，默认 LiveRuntime 因源码未清洁抛出
   `LIVE_PRODUCTION_SOURCE_DIRTY`，旧路由会把刚建立的钱包会话一并回滚，造成“弹窗成功但
