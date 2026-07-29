@@ -407,6 +407,13 @@ function freshSnapshot(
   return snapshot;
 }
 
+function canKeepWalletSessionWhenRuntimeAssemblyIsBlocked(code: string): boolean {
+  // A verified wallet identity is still useful for showing readiness while a
+  // clean, audited source tree is prepared. This must not apply to identity,
+  // network, or chain-verification failures.
+  return code === "LIVE_PRODUCTION_SOURCE_DIRTY";
+}
+
 async function handleApi(context: RequestContext): Promise<void> {
   const {
     request,
@@ -497,52 +504,67 @@ async function handleApi(context: RequestContext): Promise<void> {
       : typeof chainIdValue === "string" && /^0x[0-9a-f]+$/i.test(chainIdValue)
         ? Number.parseInt(chainIdValue, 16)
         : Number.NaN;
+    let session: LiveWalletSession;
     try {
-      const session = await walletSessionManager.connect({
+      session = await walletSessionManager.connect({
         challengeId,
         walletAddress,
         chainId,
         signature,
       }, options.now);
-      try {
-        saveLiveProductionConfig(options.projectRoot, {
-          walletAddress: session.walletAddress,
-          network: session.network,
-        }, options.now);
-        if (options.connectedLiveRuntimeFactory !== undefined) {
-          const walletSessionBinding = walletSessionManager.createRuntimeBinding(
-            session.sessionId,
-            options.now,
-          );
-          const connected = await options.connectedLiveRuntimeFactory({
-            projectRoot: options.projectRoot,
-            walletSession: session,
-            walletSessionBinding,
-          });
-          walletSessionBinding.assertCurrent();
-          if ("runtimeActions" in connected) {
-            liveRuntimeActions.install(
-              connected.runtimeActions,
-              walletSessionBinding,
-              connected.dispose,
-            );
-            if (liveGateActions instanceof MutableOperatorLiveGateActions) {
-              liveGateActions.install(connected.gateActions, walletSessionBinding);
-            }
-          } else {
-            liveRuntimeActions.install(connected, walletSessionBinding);
-          }
-        }
-      } catch (error) {
-        await walletSessionManager.disconnect(session.sessionId);
-        throw error;
-      }
-      success(response, { session, snapshot: dashboardSnapshot() });
     } catch (error) {
       const code = error instanceof Error ? error.message : String(error);
       const statusCode = code === "LIVE_WALLET_SIGNATURE_INVALID" ? 401 : 400;
       throw new HttpError(statusCode, code, "钱包连接证明未通过。");
     }
+    try {
+      saveLiveProductionConfig(options.projectRoot, {
+        walletAddress: session.walletAddress,
+        network: session.network,
+      }, options.now);
+      if (options.connectedLiveRuntimeFactory !== undefined) {
+        const walletSessionBinding = walletSessionManager.createRuntimeBinding(
+          session.sessionId,
+          options.now,
+        );
+        const connected = await options.connectedLiveRuntimeFactory({
+          projectRoot: options.projectRoot,
+          walletSession: session,
+          walletSessionBinding,
+        });
+        walletSessionBinding.assertCurrent();
+        if ("runtimeActions" in connected) {
+          liveRuntimeActions.install(
+            connected.runtimeActions,
+            walletSessionBinding,
+            connected.dispose,
+          );
+          if (liveGateActions instanceof MutableOperatorLiveGateActions) {
+            liveGateActions.install(connected.gateActions, walletSessionBinding);
+          }
+        } else {
+          liveRuntimeActions.install(connected, walletSessionBinding);
+        }
+      }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      if (canKeepWalletSessionWhenRuntimeAssemblyIsBlocked(code)) {
+        success(response, {
+          session,
+          runtime: {
+            accepted: false,
+            code,
+            details: { safety: "PAPER + LIVE_DISABLED" },
+          },
+          snapshot: dashboardSnapshot(),
+        });
+        return;
+      }
+      await walletSessionManager.disconnect(session.sessionId);
+      const statusCode = code === "LIVE_WALLET_SIGNATURE_INVALID" ? 401 : 400;
+      throw new HttpError(statusCode, code, "钱包连接证明未通过。");
+    }
+    success(response, { session, snapshot: dashboardSnapshot() });
     return;
   }
 

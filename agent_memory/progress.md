@@ -62,8 +62,15 @@
   `umask 077`。审计文档已如实披露 crash recovery 所需 signed order intent 的
   本地持久化及其残余风险。
 - 外部审计文档已升级为
-  `docs/audit/ni-k-external-audit-2026-07-28.md`，记录实际已实现生产路径、仍未发生
+  `docs/audit/ni-k-external-audit-2026-07-29.md`，记录实际已实现生产路径、仍未发生
   的钱包/资金事实、操作顺序、风险、证据索引和外部审计判定口径。
+- 已补充当前提交的两轮 8 小时 10 分钟 Observe 证据、第三轮 KeepAlive 安全中止
+  说明，并生成便携外部审计包
+  `data/operator/final-reports/Hecatonchires-external-audit-2026-07-29.zip` 及其
+  `.sha256` 校验文件。包内不含完整运行数据库、原始日志、私钥或 signed order intent。
+- 修复桌面 `Hecatonchires.command` 在 Finder 精简 PATH 下找不到 `pnpm` 而直接退出的
+  启动问题：入口现在会从常见用户安装位置和 Codex 自带运行时补齐 pnpm/Node PATH。
+  Finder-like 环境与桌面 wrapper 回归均能启动 localhost snapshot，退出后无残留 UI 进程。
 - 已补齐成品式日常入口：桌面新增 `Hecatonchires.command`，自动检测/启动 localhost
   控制台并打开浏览器，重复双击只复用现有服务；仓库新增
   `scripts/launch-hecatonchires-ui.command` 和 `README_主入口.md`。三个 Paper 按钮继续
@@ -71,9 +78,46 @@
 - 外部审计文档已补充当前主入口、最新 `PASSED` 验证工件摘要、主入口短启动证据、
   已完成工作清单和连接钱包前后的分阶段行动计划；并统一记录 Node.js `>=24.14.0 <25`
   的运行要求。
+- 修复 UI 3 秒快照轮询造成的闪烁：首次成功加载保留进入动画，后续后台刷新标记为
+  `refresh-render` 并禁用首屏/折叠内容重播；未改变轮询、数据或安全逻辑。
+- 本轮验证：前端 `node --check`、定向 Operator UI/Actions 测试 `2 files / 17 tests`、
+  `pnpm typecheck` 和 `git diff --check` 均通过。
+- 复核“Live 对账”按钮：当前 `PAPER + LIVE_DISABLED`、钱包会话断开且
+  `liveRuntimeActions.capability.execution=PENDING_PREREQUISITES`，按钮按安全设计禁用；
+  直接调用接口也只返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`，未产生任何外部操作。
+- 在用户当前 Chrome 中完成只读复核：`CONFIRM SMALL LIVE LIMITS` 已实际写入配置，
+  小额限额与合规确认时间均已更新；该 Chrome 页面没有注入 `window.ethereum`，所以
+  “连接钱包”无法建立 EIP-1193 会话。未点击连接、未签名、未授权、未启动 Live。
+- 用户再次点击连接后已复现：OKX Wallet 扩展弹窗实际打开，但主页面仍保持“钱包会话：未连接”，
+  说明流程停在扩展授权/账户确认阶段；扩展内部页面不可由本工具读取或代确认，已保留弹窗供用户处理。
+- 用户在 OKX 中点击确认后复核：弹窗关闭但页面仍为“钱包会话：未连接 / Signer：未连接”，
+  后端未收到完整钱包证明；当前没有交易、链上授权或 Live 启动。
+- 已定位并修复该现象的服务端回滚路径：签名验证成功但默认 LiveRuntime 因
+  `LIVE_PRODUCTION_SOURCE_DIRTY` 阻断时，现在保留已验证的 `CONNECTED` 钱包会话，返回
+  `runtime.accepted=false` 和 `PAPER + LIVE_DISABLED` 安全状态；身份、网络、签名等验证
+  错误仍会断开会话。前端会明确提示“钱包已连接，LiveRuntime 暂未装配”，不会开放下单。
+  新增回归测试；定向 `2 files / 18 tests`、全量 `71 files / 855 tests`、TypeScript、
+  前端语法和 `git diff --check` 均通过。4173 localhost 服务已重启，待用户重新连接一次验证。
+- 已重启 4173 本地 UI 服务并通过真实快照复核 `PAPER + LIVE_DISABLED + liveAllowed=false`；
+  `pnpm validate:live-production` 仍按设计以 `LIVE_PRODUCTION_VALIDATION_REQUIRES_CLEAN_WORKTREE`
+  拒绝当前脏工作区，未提交或清理用户现有改动。
+- 用户重新完成 OKX challenge/signature 后，真实快照已确认钱包会话为 `CONNECTED`、Polygon
+  `137`、Signer `PENDING_HOST_SIGNER`；`FORMAL_WALLET` 与 `LIVE_LIMITS` 为 `READY`，其余
+  生产依赖、LiveRuntime 和最终业主授权仍为 `PENDING`。未启动 Live、未创建订单、未发生链上写入。
+- 用户在 UI 执行 Gate 预检后得到 `PREFLIGHT_FAILED`；截图与快照一致，失败项是生产依赖/审计
+  前置条件，不是钱包签名失败。当前不需要继续点击 Live 按钮；下一步应在安全禁用态补齐
+  `SECURE_SIGNER`、只读余额/allowance、认证 CLOB、合规/地域/时钟 provider、LiveRuntime
+  装配及最终授权前的验证证据。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
+- 独立 Observe 两轮 8 小时 10 分钟验证均已正常完成：第一轮
+  `3a9f1686-ba4a-4dd1-9426-da20cd8b36b8` 成功轮询 `10,988`、失败 `43`；第二轮
+  `aead6def-fc4d-466a-87c6-d665255acde0` 成功轮询 `11,843`、失败 `26`。两轮均无
+  scheduling gap、major desync 或未恢复连接缺口，最终 `SYNCED`，验收 blocker 为空。
+- 当前主报告 `data/observe/observe-8h.json` 固定为第二轮通过报告；两轮通过报告和
+  自动重启后短暂第三轮的安全中止报告均已按 run id 归档。Observe launchctl job 已移除
+  并保持 disabled，不会继续自动重启。
 - 最终 `PC-53F4B34D814FCDDFB663 / PS-04B30EBA4C1C49656AF7` 正常完成并计入 `14,400,002 ms`；独立业主累计为 `86,400,012 ms`，达到 24 小时。
 - 最终轮 `25` 个事件、`13` 个 Signal、`11` 个可执行 BUY 全部 Risk ALLOW 并被 Paper 消费；因安全限价/截止时间，`1,239` 个订单均零成交，当前无 Paper 持仓、手续费或盈亏。
 - Observe 最终 `SYNCED`，scheduling gap/major desync 为 `0`；数据库 Schema `2.30.0`、`quick_check=ok`、外键问题 `0`。
@@ -81,8 +125,8 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 本轮清理后先完成类型检查、全量测试、UI 语法检查和 `git diff --check`；若源码或
-   进度文档进入新提交，必须重新运行 `pnpm validate:live-production`。
+1. 独立 Observe 两轮已完成，不需要继续累计；外部审计应同时保留两轮通过报告、
+   数据库和第三轮安全中止说明，不把短暂第三轮计入有效时长。
 2. 用户之后先按 UI 测试 Paper；准备小额实盘时按 UI 顺序连接 Polygon EOA、确认
    `10/1/3/1 pUSD` 或更低限额、完成 allowance 和真实只读核对。
 3. 只有用户当次输入最终确认词后才允许 Gate 尝试启动；在此之前继续保持

@@ -6,10 +6,16 @@
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前真正的阻断项是
-  用户钱包未连接、真实 CLOB 凭据/余额/allowance/仓位未验收、没有真实交易证据，
-  以及用户当次最终确认未发生。隔离测试不能替代这些外部事实。
+- 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前钱包身份已连接，
+  但真实 CLOB 凭据/余额/allowance/仓位、生产 provider、干净审计源码和用户当次最终确认
+  仍未验收。隔离测试不能替代这些外部事实。
+- 当前 UI 的 `PREFLIGHT_FAILED` 是预期的 fail-closed 结果：钱包身份和小额限额已就绪，
+  但生产 provider、Secure Signer、LiveRuntime、审计源码提交和最终授权仍未满足。不得把
+  “钱包已连接”误解为“可以启动实盘”。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
+- “Live 对账”当前不可点击是预期的安全阻断：只有验证过的钱包会话、Signer、只读余额、认证 CLOB 和已装配 LiveRuntime 全部就绪后才开放；未连接钱包时接口必须返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`。
+- 当前 Chrome 页面未注入 EIP-1193 `window.ethereum`（无 `request` 方法），因此连接钱包按钮无法完成钱包发现；需要在安装并启用 MetaMask/Rabby 等钱包扩展的同一 Chrome 配置文件中打开控制台。
+- OKX 流程已能从页面打开扩展授权弹窗；服务端回滚修复已部署到重启后的 localhost 服务。需重新完成一次 challenge/signature；在完整证明返回前保持 `DISCONNECTED` 仍是正确的安全状态。
 
 ## Active risks
 - 桌面主入口依赖本机已有 `pnpm` 和 Node.js 20+；脚本会尝试从 pnpm 同级运行时补齐 Node PATH，若用户的系统没有 Node.js 仍会明确提示，尚未打包成自带运行时的正式 `.app`。
@@ -46,6 +52,21 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- OKX personal-sign 已验证后，默认 LiveRuntime 因源码未清洁抛出
+  `LIVE_PRODUCTION_SOURCE_DIRTY`，旧路由会把刚建立的钱包会话一并回滚，造成“弹窗成功但
+  页面仍未连接”。现在仅对这个明确的装配前置条件失败保留 `CONNECTED` 会话并返回待装配
+  状态；身份、网络或签名失败仍 fail closed。用户需在服务重启后重新连接一次。
+- UI 每 3 秒轮询会整页替换 DOM，重复触发 `reveal`、header 和折叠内容进入动画，表现为
+  页面闪一下；现在只有首次成功加载播放进入动画，后台刷新使用 `refresh-render` 禁止
+  动画重播，保留数据轮询和面板状态恢复。
+- Finder 双击 `.command` 时没有加载用户 PATH，旧入口在 `command -v pnpm` 处直接退出，
+  表现为终端一闪而过且浏览器不打开。`launch-hecatonchires-ui.command` 现在会探测
+  用户级 pnpm、Homebrew pnpm 和 Codex bundled pnpm，再沿用同一 Node PATH 推导；在
+  精简 PATH 下的实际 wrapper 回归已通过。
+- 8 小时 Observe 临时托管使用 `launchctl submit` 时被系统推断为 KeepAlive，导致第一、
+  第二轮自然完成后自动重启。第二轮完成后已按用户要求保留两轮通过报告，移除并禁用
+  精确 job；短暂第三轮以 `ABORTED` 保留原始数据库证据，未删除或改写历史运行记录。
+  后续一次性 Observe 不得再依赖该隐式 KeepAlive 方式。
 - 用户授权的独立跨 Core Paper 汇总已达到 `86,400,012 ms`；最终连续 4 小时运行完整、安全，原始数据库与各 Campaign 的内建计时未改写。
 - 上一 Observe Run 的全局 `POLYGON_TRADE_FEED_UNSAFE` 曾永久阻断后续新 Run 的所有标的，造成两个正常 BUY Signal 在 Paper 中被误拒；现在事故只阻断其所属 Run，历史记录不删除，同 Run 和不可证明归属仍拒绝。
 - Polygon confirmed cursor 哈希变化曾无条件终止 Observe，即使该批次没有目标成交、上一锚点未变且可安全重扫；现在会二次核验并仅在可证明无经济事件冲突时回退重扫。

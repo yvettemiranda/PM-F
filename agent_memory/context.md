@@ -43,6 +43,21 @@
 - Core compatibility 已纳入共享 SELL policy 和迁移 `035_special_activity_projection.sql`。新核心必须创建新 Campaign；跨 Core 时长只允许按用户授权在独立最终报告中汇总，不得写回 Campaign 内建计时。
 
 ## Current runtime and evidence
+- 2026-07-29 的独立 Observe 验证已连续完成两轮，每轮 `29,400,xxx ms`
+  （8 小时 10 分钟），均为 `DURATION_COMPLETE`、`SHORT_SOAK_PASSED`、
+  `liveStabilityEligible=true`，scheduling gap/major desync/unrecovered connection gap
+  均为 `0`，最终均为 `SYNCED`。第二轮报告为
+  `data/observe/observe-8h.json`，并归档为
+  `data/observe/archive/observe-8h-run-aead6def-fc4d-466a-87c6-d665255acde0-passed.json`；
+  第一轮归档为
+  `data/observe/archive/observe-8h-run-3a9f1686-ba4a-4dd1-9426-da20cd8b36b8-passed.json`。
+- Observe 的临时 API 失败和 minor diff 均已恢复，两个最终报告只保留
+  `RECOVERED_API_FAILURES_OBSERVED` 与 `TRANSIENT_MINOR_DIFF_OBSERVED` 警告，
+  没有验收 blocker。整个过程未加载私钥、未包含订单逻辑、未创建订单。
+- `launchctl submit` 推断出的 KeepAlive 在第二轮完成后曾启动第三轮；该轮仅运行约
+  77 秒后按用户要求安全中止，证据归档为
+  `data/observe/archive/observe-8h-run-4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b-aborted.json`。
+  对应 job 已 `remove` 且保持 disabled，当前无 Observe/Paper/Supervisor 进程。
 - Paper 跨 Core 累计验证已于 `2026-07-27 02:41:48 +08:00` 完成。最终独立报告为 `data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`，验收标记为 `OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION`。
 - 固定计入：旧 Core 三轮 `43,200,006 ms`；Core `a8fbf2...` 正常轮 `14,400,002 ms`；同 Core 最终估值超时轮按 `OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION` 仅在独立业主汇总计入 `14,400,002 ms`；最终修复验证轮 `14,400,002 ms`。合计 `86,400,012 ms`。
 - 原始数据库和 Session/Campaign 报告均未改写；跨 Core 结果没有伪称为单一 Campaign 的内建 24 小时完成。
@@ -74,10 +89,14 @@
   emergency stop；宿主退出先停 Gate/runtime 并撤销 session。持久化配置读取时也
   执行小额硬上限；runtime database 和新备份强制 `0600`。UI 只开放完整闭环的
   EOA；Proxy/Safe/1271 等待官方 relayer。
+- UI 快照仍每 `3 s` 轮询；首次成功加载播放一次进入动画，后续整页快照替换带
+  `refresh-render` 类并关闭进入动画，避免轮询导致页面闪烁。折叠面板状态仍由
+  `openPanels` 恢复，编辑中的输入仍跳过静默刷新覆盖。
 
 ## Application entry
 - 日常主入口为桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`，它指向仓库内 `scripts/launch-hecatonchires-ui.command`。
 - 主入口检测 `GET /api/operator/snapshot`；已有 localhost UI 时只打开浏览器，未运行时补齐 Finder 启动时可能缺失的 Node PATH、启动 `pnpm operator:ui`，等待就绪后打开浏览器。终止终端会先停止本次 UI 服务。
+- 桌面入口现在还会在 Finder 精简 PATH 中探测用户级/Homebrew/Codex bundled `pnpm`，再补齐同目录 Node；这修复了双击时找不到 pnpm 导致入口立即退出的问题。
 - 主入口故意不放进 `操作入口/`，避免把纯 UI 启动脚本纳入 Paper core compatibility manifest；`操作入口/` 的三个 `.command` 继续作为 Paper 验证/安全暂停/结果查看工具。
 
 ## Runtime handoff and valuation recovery

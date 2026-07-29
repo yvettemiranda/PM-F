@@ -12,6 +12,7 @@ const state = {
   walletWorkerGeneration: 0,
   walletWorkerSessionId: null,
   openPanels: new Set(),
+  hasRenderedContent: false,
 };
 
 const SETTING_META = {
@@ -700,8 +701,9 @@ function render() {
     return;
   }
   const snapshot = state.snapshot;
+  const initialContentRender = !state.hasRenderedContent;
   app.innerHTML = `
-    <div class="app-shell">
+    <div class="app-shell${initialContentRender ? "" : " refresh-render"}">
       ${header(snapshot)}
       <main class="page">
         ${state.notice ? `<div class="ui-notice ${state.notice.kind}"><strong>${escapeHtml(state.notice.title)}</strong><span>${escapeHtml(state.notice.message)}</span></div>` : ""}
@@ -725,6 +727,7 @@ function render() {
     panel.open = state.openPanels.has(panel.dataset.panelId);
   }
   bindEvents();
+  state.hasRenderedContent = true;
 }
 
 async function api(path, init = {}) {
@@ -905,7 +908,7 @@ async function connectLiveWallet() {
     if (typeof signature !== "string" || !signature.startsWith("0x")) {
       throw new Error("钱包没有返回签名");
     }
-    await runAction("连接正式钱包", "/api/operator/live/wallet-session/connect", {
+    const connection = await runAction("连接正式钱包", "/api/operator/live/wallet-session/connect", {
       body: JSON.stringify({
         challengeId: challenge.challengeId,
         walletAddress,
@@ -913,6 +916,14 @@ async function connectLiveWallet() {
         signature,
       }),
     }, { success: "钱包已连接，Live 签名通道已准备。" });
+    if (connection.runtime?.accepted === false) {
+      setNotice(
+        "success",
+        "钱包已连接",
+        `身份已证明，但 LiveRuntime 暂未装配：${connection.runtime.code}`,
+      );
+      render();
+    }
     startWalletRequestWorker();
   } catch (error) {
     setNotice("error", "钱包未连接", error.message ?? "钱包连接被取消或未通过安全证明。");

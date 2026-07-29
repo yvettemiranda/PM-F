@@ -3035,6 +3035,17 @@ body::after {
   animation-duration: 300ms;
 }
 
+/* Silent snapshot polling replaces the view every few seconds. Keep the
+   one-time entrance animation, but never replay it on a background refresh. */
+.app-shell.refresh-render .topbar,
+.app-shell.refresh-render .reveal,
+.app-shell.refresh-render .fold-content,
+.app-shell.refresh-render .execution-wrap {
+  opacity: 1;
+  transform: none;
+  animation: none !important;
+}
+
 @media (max-width: 760px) {
   .topbar-inner {
     min-height: 64px;

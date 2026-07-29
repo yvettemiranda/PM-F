@@ -17,6 +17,35 @@ if ui_ready; then
   exit 0
 fi
 
+# Finder 启动 .command 时通常只给 /usr/bin:/bin 等系统 PATH，
+# 这时 command -v pnpm 会失败，即使本机已经有可用的 pnpm。
+# 先从常见用户安装位置和 Codex 自带运行时中补齐 pnpm，再继续下面的
+# Node PATH 推导；这样双击入口和终端入口走同一套依赖探测。
+resolve_pnpm() {
+  local home_dir="${HOME:-}"
+  local candidate
+  setopt local_options null_glob
+  for candidate in \
+    "$home_dir/.local/share/pnpm/pnpm" \
+    "$home_dir/Library/pnpm/pnpm" \
+    "$home_dir/.cache/codex-runtimes/"*/dependencies/bin/fallback/pnpm \
+    "/opt/homebrew/bin/pnpm" \
+    "/usr/local/bin/pnpm"; do
+    if [[ -x "$candidate" ]]; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  PNPM_FALLBACK="$(resolve_pnpm || true)"
+  if [[ -n "$PNPM_FALLBACK" ]]; then
+    export PATH="$(dirname "$PNPM_FALLBACK"):$PATH"
+  fi
+fi
+
 if ! command -v pnpm >/dev/null 2>&1; then
   print -u2 "找不到 pnpm。请先在项目目录完成依赖安装，再重新双击 Hecatonchires.command。"
   exit 1

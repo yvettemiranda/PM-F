@@ -1,7 +1,7 @@
 # ni-k / Hecatonchires 外部审计文档
 
 > 文档用途：交给外部审计、技术尽调、生产接入和安全复核人员使用。
-> 文档日期：2026-07-28（Asia/Shanghai）
+> 文档日期：2026-07-29（Asia/Shanghai）
 > 审计基线源码提交：以交付时 `git rev-parse HEAD` 和
 > `data/operator/live-production-validation.json.sourceCodeCommit` 的一致值为准。
 > 项目目录：`/Users/d4clt/Documents/Codex/2026-07-07/ni-k`
@@ -31,6 +31,9 @@
    钱包 session 并清除内存依赖。
 9. 当前代码的全量类型检查、测试数量和证据文件由
    `pnpm validate:live-production` 在干净提交上重新生成并绑定到该 commit。
+10. 当前源码提交 `15d96a74e828148e9bb96c38f7597430da04a901` 上连续完成两轮
+    Observe Only，每轮 8 小时 10 分钟，均为 `DURATION_COMPLETE`、最终
+    `SYNCED`、`liveStabilityEligible=true`，且没有验收 blocker。
 
 本项目目前**没有**完成，也没有声称完成：
 
@@ -62,7 +65,7 @@
 
 这不是投资建议、合规意见、法律意见或实时交易授权。
 
-### 0.1 当前交付快照（2026-07-28）
+### 0.1 当前交付快照（2026-07-29）
 
 本次审计交付在当前干净提交上新增了一个日常主入口，但没有把它放进 Paper
 核心兼容性清单，因此不会因为“打开 UI”改变 Paper Core hash：
@@ -95,6 +98,47 @@ diffCheckPassed: true
 外部审计应以交付时 `git rev-parse HEAD` 与该工件的
 `sourceCodeCommit` 完全一致为准。工件同时记录最终 Paper 报告和隔离验证文件的
 SHA-256；它不把历史 Paper 报告伪装成当前提交重新产生的自然成交证据。
+
+### 0.2 当前提交的两轮 8 小时 Observe 补充证据
+
+在未启动 Paper、未连接钱包、未加载私钥、未装配订单逻辑的前提下，当前提交
+`15d96a74e828148e9bb96c38f7597430da04a901` 连续完成两轮独立 Observe Only：
+
+| 指标 | 第一轮 | 第二轮 |
+|---|---:|---:|
+| Observe run | `3a9f1686-ba4a-4dd1-9426-da20cd8b36b8` | `aead6def-fc4d-466a-87c6-d665255acde0` |
+| 开始时间（UTC） | `2026-07-28T08:09:24.185Z` | `2026-07-28T16:19:30.734Z` |
+| 结束时间（UTC） | `2026-07-28T16:19:24.788Z` | `2026-07-29T00:29:32.652Z` |
+| 有效时长 | `29,400,603 ms` | `29,401,918 ms` |
+| 成功/失败轮询 | `10,988 / 43` | `11,843 / 26` |
+| 处理事件/发布 Signal | `62 / 31` | `29 / 10` |
+| scheduling gap | `0` | `0` |
+| major desync | `0` | `0` |
+| unrecovered connection gap | `false` | `false` |
+| checkpoint hash mismatch | `false` | `false` |
+| 最终同步 | `SYNCED` | `SYNCED` |
+| Observe 验收 | `SHORT_SOAK_PASSED` | `SHORT_SOAK_PASSED` |
+| Live 稳定性资格 | `true` | `true` |
+| blocker | `[]` | `[]` |
+
+两轮均出现已恢复的 API 失败和最终已消失的 minor diff，因此保留
+`RECOVERED_API_FAILURES_OBSERVED` 与 `TRANSIENT_MINOR_DIFF_OBSERVED` 警告；这两个
+警告没有被删除或降级，但不构成当前 Observe 验收 blocker。
+
+第二轮自然结束后，`launchctl submit` 推断的 KeepAlive 曾自动启动第三轮
+`4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b`。该轮仅运行 `77,452 ms`，随后按用户要求
+安全中止；数据库原始状态保留为 `ABORTED`，报告明确
+`liveStabilityEligible=false`、blocker 为 `MINIMUM_SOAK_NOT_REACHED`。该短轮不计入
+任何 8 小时时长，也不影响前两轮通过结论。KeepAlive job 已移除并禁用。
+
+两轮通过报告、短轮中止报告及其 SHA-256 均纳入最新版外部审计包。
+
+审计注意：运行数据库中的默认 `live_gate_state` 行创建于
+`2026-07-23T21:57:46.680Z`，其持久化 `source_code_commit` 为更早的默认禁用状态提交
+`7a640a71a384e8ad02cb9c36046496daaf4538a8`。本次 Observe Only 没有激活 Live Gate，
+因此没有为了“追齐”源码提交而改写这条历史元数据。它只证明默认 Gate 仍为
+`PAPER / LIVE_DISABLED`，不作为当前提交的生产验证证明；当前提交证明以两轮 Observe
+报告、`live-production-validation.json` 和精确源码归档为准。
 
 ---
 
@@ -770,6 +814,34 @@ OWNER_AUTHORIZED_EXTERNAL_FINALIZATION_EXCEPTION
 | 真实 Live order | 没有 | 否 |
 | 真实资金 PnL | 没有 | 否 |
 
+### 6.5 当前提交的 Observe 长时证据
+
+当前源码提交已经补齐两轮独立的 8 小时 10 分钟 Observe Only。两轮都满足：
+
+- `sourceCodeDirty=false`；
+- `DURATION_COMPLETE`；
+- `schedulingGapCount=0`；
+- `majorDesyncCount=0`；
+- `unrecoveredConnectionGap=false`；
+- `checkpointProjectionHashMismatch=false`；
+- `finalSyncStatus=SYNCED`；
+- `liveStabilityEligible=true`；
+- `liveStabilityBlockers=[]`；
+- `privateKeyLoaded=false`；
+- `orderLogicPresent=false`；
+- `ordersCreated=0`。
+
+证据文件：
+
+```text
+data/observe/archive/observe-8h-run-3a9f1686-ba4a-4dd1-9426-da20cd8b36b8-passed.json
+data/observe/archive/observe-8h-run-aead6def-fc4d-466a-87c6-d665255acde0-passed.json
+data/observe/archive/observe-8h-run-4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b-aborted.json
+```
+
+其中第三个文件是 KeepAlive 自动重启后的短时中止证据，不是通过证据，不能计入
+8 小时验证。外部审计应同时查看它，以确认系统没有删除失败/中止历史。
+
 ---
 
 ## 7. 当前验证证据
@@ -873,7 +945,7 @@ isolatedVerificationSha256: 76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b06
 
 | 能力 | 当前状态 | 证据 | 是否可直接用于真实资金 |
 |---|---|---|---|
-| Observe 目标交易识别 | 已实现 | Observe、Capture、reconciliation、测试 | 否，仍需当前基线重新 soak |
+| Observe 目标交易识别 | 已实现，当前提交已完成两轮 8h10m | Observe 报告、Capture、reconciliation、测试 | 否，不等同真实资金执行 |
 | Signal/Risk | 已实现 | Signal context、Risk tests | 否 |
 | Paper 模拟执行 | 已实现 | Paper executor、账本、Paper report | 否 |
 | Paper 24h 独立汇总 | 已完成 | final report | 否，且不是单 Campaign 原生 24h |
@@ -931,15 +1003,16 @@ isolatedVerificationSha256: 76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b06
 - 当前控制：不放宽限价、不伪造 fill、不把 fake/isolated 样本称为自然成交。
 - 必须完成：在当前源码基线继续自然市场 Paper 观察，或者由审计方明确接受“逻辑覆盖与自然覆盖分离”。
 
-### R-005：历史 Observe/Paper 证据与当前源码基线不同
+### R-005：历史 Paper 证据与当前源码基线不同
 
-- 状态：Open / Gate prerequisite
-- 影响：短时运行或 4 小时验证不能替代 README 中要求的 Live Gate 前连续 Observe soak。
-- 当前控制：owner-accepted 历史报告和隔离验证都以 SHA-256 写入当前 commit 的
-  production validation artifact；运行时 Gate 仍检查实时 `SYNCED`、gap、
-  checkpoint、dirty tree 和新鲜度。
-- 必须完成：外部审计方若不接受“历史运行证据 + 当前代码全量回归”的组合口径，
-  应在当前 commit 重新跑至少 8 小时 Observe 和所需 Paper 时长。
+- 状态：Partially closed；当前提交 Observe 已补齐，Paper 24 小时仍是历史提交证据
+- 影响：当前提交已有两轮 8 小时 10 分钟 Observe，但用户授权的 Paper 24 小时独立
+  汇总仍引用较早 Core/commit，且没有自然 fill。
+- 当前控制：两轮 Observe 报告直接绑定当前提交；owner-accepted 历史 Paper 报告和
+  隔离验证以 SHA-256 写入当前 commit 的 production validation artifact；运行时 Gate
+  仍检查实时 `SYNCED`、gap、checkpoint、dirty tree 和新鲜度。
+- 必须完成：外部审计方决定是否接受“当前提交两轮 Observe + 历史 Paper 24 小时 +
+  当前代码全量回归”的组合口径；若不接受，再在冻结提交上重跑所需 Paper 时长。
 
 ### R-006：跨 Core 24h 是独立汇总，不是单 Campaign 原生时长
 
@@ -1019,8 +1092,9 @@ isolatedVerificationSha256: 76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b06
 3. **决定是否接受历史 Paper 口径**：当前已有用户授权的跨 Core 24 小时独立汇总，
    但没有自然 fill；如果审计要求同一提交重新产生全套自然证据，则在当前 clean
    commit 重新跑 Observe/Paper。
-4. **完成至少连续 8 小时 Observe Only soak**：最终状态必须为 `SYNCED`，无未恢复
-   gap、`MAJOR_DESYNC`、checkpoint hash mismatch 或未解释的账户/账本差异。
+4. **复核已完成的两轮 Observe Only soak**：当前提交已有两轮各 8 小时 10 分钟，
+   均最终 `SYNCED`，无 scheduling gap、`MAJOR_DESYNC`、checkpoint hash mismatch
+   或未恢复连接缺口；审计方应核对原始报告和 SHA-256，而不是再次盲目累计时长。
 5. **连接正式 Polygon EOA 做只读验收**：只验证地址、chainId、signer、余额、
    allowance、仓位、open orders、fills、geoblock、compliance 和 clock；这一步不等于
    允许下单。
@@ -1104,11 +1178,11 @@ isolatedVerificationSha256: 76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b06
 
 ### 阶段 D：重新执行完整验证
 
-至少完成：
+当前状态与待审计项：
 
 1. 当前源码基线的全量测试；
-2. 至少连续 8 小时 Observe；
-3. 累计 24 小时 Paper；
+2. 至少连续 8 小时 Observe：**已在当前提交连续完成两轮**；
+3. 累计 24 小时 Paper：**已有用户授权的历史跨 Core 汇总，是否接受由审计方决定**；
 4. Crash Recovery；
 5. 长时间账本和仓位一致性；
 6. 估值恢复；
@@ -1206,6 +1280,10 @@ canary 期间仍不得关闭任何 gap、reorg、clock、geoblock、balance、le
 ### 11.3 Paper/Observe 证据
 
 - `data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`；
+- `data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.zip`；
+- `data/observe/archive/observe-8h-run-3a9f1686-ba4a-4dd1-9426-da20cd8b36b8-passed.json`；
+- `data/observe/archive/observe-8h-run-aead6def-fc4d-466a-87c6-d665255acde0-passed.json`；
+- `data/observe/archive/observe-8h-run-4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b-aborted.json`；
 - `data/paper-validation/campaigns/` 下涉及的 Campaign；
 - Session 报告；
 - Observe report；
@@ -1483,6 +1561,10 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 ### 15.6 运行和报告
 
 - [`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`](../../data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md)
+- [`data/observe/observe-8h.json`](../../data/observe/observe-8h.json)
+- [`data/observe/archive/observe-8h-run-3a9f1686-ba4a-4dd1-9426-da20cd8b36b8-passed.json`](../../data/observe/archive/observe-8h-run-3a9f1686-ba4a-4dd1-9426-da20cd8b36b8-passed.json)
+- [`data/observe/archive/observe-8h-run-aead6def-fc4d-466a-87c6-d665255acde0-passed.json`](../../data/observe/archive/observe-8h-run-aead6def-fc4d-466a-87c6-d665255acde0-passed.json)
+- [`data/observe/archive/observe-8h-run-4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b-aborted.json`](../../data/observe/archive/observe-8h-run-4f36e7c7-d3ae-4648-8d65-343e0f7c3e0b-aborted.json)
 - `data/paper-validation/campaigns/`
 - `data/operator/paper-campaign-isolated-verification.json`
 - `data/operator/live-production-validation.json`（ignored、本机生成、绑定当前 commit）
@@ -1540,7 +1622,8 @@ PAPER + LIVE_DISABLED + liveAllowed=false
 
 - 用户本轮正式钱包连接和签名；
 - 真实钱包余额、allowance、仓位和 CLOB 凭据的验收；
-- 当前基线的长时自然市场验证（若外部审计要求重新执行）；
+- 当前提交两轮 Observe 已完成；若审计不接受历史 Paper 口径，仍需在冻结提交重跑
+  所需 Paper 时长和自然市场样本；
 - 自然成交和真实资金证据；
 - 外部审计签字；
 - 用户新的明确 Live 授权；

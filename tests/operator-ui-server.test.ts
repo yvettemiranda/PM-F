@@ -308,6 +308,50 @@ describe("operator UI server", () => {
     }));
   });
 
+  it("keeps a verified wallet session when LiveRuntime assembly is blocked by dirty source", async () => {
+    const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
+    const connectedLiveRuntimeFactory = vi.fn(async () => {
+      throw new Error("LIVE_PRODUCTION_SOURCE_DIRTY");
+    });
+    const { baseUrl } = await listen({ connectedLiveRuntimeFactory });
+    const challengeResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/challenge", {
+      body: { chainId: "0x89" },
+    });
+    const challengePayload = await challengeResponse.json() as {
+      data: { challengeId: string; message: string };
+    };
+    const signature = await account.signMessage({ message: challengePayload.data.message });
+    const connectResponse = await mutation(baseUrl, "/api/operator/live/wallet-session/connect", {
+      body: {
+        challengeId: challengePayload.data.challengeId,
+        walletAddress: account.address,
+        chainId: "0x89",
+        signature,
+      },
+    });
+    expect(connectResponse.status).toBe(200);
+    expect(await connectResponse.json()).toMatchObject({
+      ok: true,
+      data: {
+        session: {
+          status: "CONNECTED",
+          walletAddress: account.address.toLowerCase(),
+        },
+        runtime: {
+          accepted: false,
+          code: "LIVE_PRODUCTION_SOURCE_DIRTY",
+        },
+        snapshot: {
+          live: {
+            walletSession: { status: "CONNECTED" },
+            capability: { execution: "PENDING_PREREQUISITES" },
+          },
+        },
+      },
+    });
+    expect(connectedLiveRuntimeFactory).toHaveBeenCalledOnce();
+  });
+
   it("serves and completes only the request bound to the connected wallet session", async () => {
     const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
     const broker = new LiveWalletRequestBroker();
