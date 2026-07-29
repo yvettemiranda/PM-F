@@ -4,7 +4,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assembleDefaultConnectedLiveRuntime } from "../src/operator/default-connected-live-runtime.js";
+import {
+  assembleDefaultConnectedLiveRuntime,
+  PRODUCTION_LIVE_EXTERNAL_TIMEOUT_MS,
+} from "../src/operator/default-connected-live-runtime.js";
 import { saveLiveProductionConfig } from "../src/operator/live-production-readiness.js";
 import { LiveWalletRequestBroker } from "../src/operator/live-wallet-request-broker.js";
 import {
@@ -43,6 +46,10 @@ function binding(): LiveWalletRuntimeBinding {
 }
 
 describe("assembleDefaultConnectedLiveRuntime", () => {
+  it("allows production reconciliation enough time for bounded API retries", () => {
+    expect(PRODUCTION_LIVE_EXTERNAL_TIMEOUT_MS).toBe(30_000);
+  });
+
   it("builds the complete production runtime without deriving credentials or sending a transaction", async () => {
     const root = mkdtempSync(join(tmpdir(), "ni-k-default-live-runtime-"));
     roots.push(root);

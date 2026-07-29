@@ -37,6 +37,8 @@ import type {
 import { ensureProductionLiveAccount } from "./production-live-account.js";
 import { ProductionLivePrerequisiteManager } from "./production-live-prerequisites.js";
 
+export const PRODUCTION_LIVE_EXTERNAL_TIMEOUT_MS = 30_000;
+
 function signatureType(value: string): PolymarketWalletSignatureType {
   if (value === "EOA") return SignatureTypeV2.EOA;
   if (value === "POLY_PROXY") return SignatureTypeV2.POLY_PROXY;
@@ -160,6 +162,7 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
           redeemAdapter,
           marketDataProvider: new PublicClobLiveMarketDataProvider(),
           requireExternalPositionReconciliation: true,
+          externalCallTimeoutMs: PRODUCTION_LIVE_EXTERNAL_TIMEOUT_MS,
         };
       },
     },
