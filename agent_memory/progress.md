@@ -113,7 +113,10 @@
   均为 `READY`。生产路径仍为 `PENDING_PREREQUISITES`，唯一生产 readiness 项是
   `USER_AUTHORIZATION=PENDING`；全局 Gate 仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，
   没有启动 Live、订单或链上写入。旧 Gate 的 `LIVE_WALLET_SESSION_DISCONNECTED` 只是重连前一次
- 预检的历史原因，当前钱包会话已连接。
+  预检的历史原因，当前钱包会话已连接。
+- 用户明确授权当前 `10/1/3/1 pUSD` 小额限额后，重新连接并发起 Live Gate 请求；官方地域检查返回
+  `GEOBLOCK_BLOCKED:US:CA`，请求在进入 arming 前失败关闭。当前钱包仍可见为已连接，但 Gate
+  继续 `PAPER + LIVE_DISABLED + liveAllowed=false`，没有创建订单或链上写入。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。
