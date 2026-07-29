@@ -67,13 +67,18 @@ export class ClobClockSafetyProvider implements ClockSafetyProvider {
         }
         const midpointMs = startedAt + roundTripMs / 2;
         const offsetMs = Math.round(serverSeconds * 1_000 - midpointMs);
-        const status = Math.abs(offsetMs) <= this.unsafeOffsetThresholdMs ? "SAFE" : "UNSAFE";
+        // Authenticated CLOB clients are configured with useServerTime=true.
+        // The local offset is therefore diagnostic, not a minimum requirement
+        // for entering Live. Availability, response shape and RTT still fail
+        // closed because those determine whether official server time is
+        // trustworthy.
+        const offsetObserved = Math.abs(offsetMs) > this.unsafeOffsetThresholdMs;
         return {
-          status,
+          status: "SAFE",
           offsetMs,
           checkedAt: new Date(completedAt).toISOString(),
           source: CLOB_TIME_ENDPOINT,
-          reason: status === "SAFE" ? null : "CLOCK_OFFSET_EXCEEDED",
+          reason: offsetObserved ? "CLOCK_OFFSET_OBSERVED_USING_SERVER_TIME" : null,
         };
       } catch {
         lastFailure = "CLOCK_REQUEST_FAILED";

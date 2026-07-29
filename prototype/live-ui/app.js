@@ -342,6 +342,7 @@ function livePanel(snapshot) {
   const prerequisites = snapshot?.live?.prerequisites ?? [];
   const production = snapshot?.live?.production;
   const walletSession = snapshot?.live?.walletSession;
+  const walletBalance = snapshot?.live?.walletBalance;
   const walletConnected = walletSession?.status === "CONNECTED";
   const walletNeedsReconnect = !walletConnected && Boolean(production?.config?.walletAddress);
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
@@ -359,6 +360,12 @@ function livePanel(snapshot) {
     LIVE_LIMITS: "小额限额",
     LIVE_RUNTIME: "LiveRuntime",
     USER_AUTHORIZATION: "用户授权",
+  };
+  const signatureTypeLabels = {
+    EOA: "普通浏览器钱包（EOA）",
+    POLY_PROXY: "Polymarket Proxy",
+    POLY_GNOSIS_SAFE: "Polymarket Gnosis Safe",
+    POLY_1271: "Polymarket Deposit Wallet",
   };
   return `
     <details class="fold-panel ops-panel reveal" data-panel-id="live" style="--delay: 125ms">
@@ -406,6 +413,9 @@ function livePanel(snapshot) {
             <span>Signer：${escapeHtml(walletSession?.signerStatus === "READY"
               ? "钱包签名通道已准备"
               : walletConnected ? "正在装配" : "未连接")}</span>
+            <span>实际余额：${escapeHtml(walletBalance
+              ? `${walletBalance.balance.display} pUSD`
+              : "连接并检查 Gate 后显示")}</span>
           </div>
           <form class="live-limit-form" id="live-config-form">
             <div class="live-limit-heading">
@@ -415,14 +425,16 @@ function livePanel(snapshot) {
             <div class="live-limit-grid">
               <label class="settings-field">
                 <span>钱包类型</span>
-                <input name="signatureType" value="EOA" type="hidden" />
-                <div class="readonly-field">普通浏览器钱包（EOA）</div>
+                <input name="signatureType" value="${escapeHtml(production?.config?.signatureType ?? "EOA")}" type="hidden" />
+                <div class="readonly-field">${escapeHtml(
+                  signatureTypeLabels[production?.config?.signatureType] ?? "等待自动识别",
+                )}</div>
               </label>
               <label class="settings-field live-wallet-field">
                 <span>交易资金地址</span>
                 <input name="tradingWalletAddress" value="${escapeHtml(
                   production?.config?.tradingWalletAddress ?? production?.config?.walletAddress ?? "",
-                )}" placeholder="0x…" spellcheck="false" />
+                )}" placeholder="连接后自动识别" spellcheck="false" readonly />
               </label>
               ${[
                 ["liveBankroll", "Live 资金上限", "liveBankrollMicros"],

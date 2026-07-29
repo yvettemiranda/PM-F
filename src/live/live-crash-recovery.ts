@@ -6,7 +6,7 @@ import type { LiveRecoveryOrderRow, LiveStore } from "./live-store.js";
 import type { LiveExecutionState, LiveFillEvent, LiveOrderState, LiveReconciliationCheck, OrderStatus } from "./live-types.js";
 import { withExternalTimeout } from "./external-timeout.js";
 import { validateLiveOrderFills } from "./fill-validation.js";
-import { RULESET, stableJson } from "../domain/versioning.js";
+import { stableJson } from "../domain/versioning.js";
 
 interface ExternalOrderSnapshot {
   local: LiveRecoveryOrderRow;
@@ -319,7 +319,7 @@ export class LiveCrashRecovery {
         reason: "EXTERNAL_ORDER_STATE_SYNCED",
       };
       const externalPositionCheck = await this.externalPositionCheck(accountId);
-      const externalCashCheck = await this.externalCashCheck(accountId);
+      const externalCashCheck = await this.externalCashCheck();
       const local = this.reconciliation.run(accountId, [externalCheck, externalPositionCheck, externalCashCheck]);
       this.store.updateCheckpoint(accountId, { reconciliationRunId: local.runId });
       return {
@@ -394,7 +394,7 @@ export class LiveCrashRecovery {
     return { name: "external_wallet_positions", passed: true, reason: "EXTERNAL_WALLET_POSITIONS_MATCH" };
   }
 
-  private async externalCashCheck(accountId: string): Promise<LiveReconciliationCheck> {
+  private async externalCashCheck(): Promise<LiveReconciliationCheck> {
     if (!this.requireExternalPositions) {
       return {
         name: "external_wallet_cash",
@@ -419,19 +419,10 @@ export class LiveCrashRecovery {
       };
     }
     const external = BigInt(snapshot.balanceMicros);
-    const expected = this.store.expectedCashBalance(accountId);
-    const difference = external >= expected ? external - expected : expected - external;
-    if (difference > BigInt(RULESET.reconciliationCashAbsToleranceMicros)) {
-      return {
-        name: "external_wallet_cash",
-        passed: false,
-        reason: `EXTERNAL_WALLET_CASH_MISMATCH:${expected}:${external}:${difference}`,
-      };
-    }
     return {
       name: "external_wallet_cash",
       passed: true,
-      reason: `EXTERNAL_WALLET_CASH_MATCH:${difference}`,
+      reason: `EXTERNAL_WALLET_CASH_OBSERVED:${external}`,
     };
   }
 

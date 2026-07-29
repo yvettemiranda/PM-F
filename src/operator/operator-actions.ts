@@ -625,9 +625,13 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
     }
     try {
       const result = await this.options.walletSetup.prepare();
+      const deferred = typeof result === "object"
+        && result !== null
+        && "ready" in result
+        && result.ready === false;
       return {
         accepted: true,
-        code: "LIVE_WALLET_SETUP_READY",
+        code: deferred ? "LIVE_WALLET_SETUP_DEFERRED_TO_ORDER" : "LIVE_WALLET_SETUP_READY",
         details: { actor: input.actor, reason: input.reason, result },
       };
     } catch (error) {

@@ -153,6 +153,7 @@ export interface WalletAllowancePreparationResult {
   collateralApprovalTransaction: string | null;
   outcomeApprovalTransaction: string | null;
   ready: boolean;
+  reason?: string;
 }
 
 export class BrowserWalletAllowanceManager {
@@ -177,28 +178,46 @@ export class BrowserWalletAllowanceManager {
 
   async prepare(): Promise<WalletAllowancePreparationResult> {
     this.options.walletBinding.assertCurrent();
-    if (
-      this.options.signatureType !== "EOA"
-      || this.options.tradingWalletAddress !== this.options.walletBinding.session.walletAddress
-    ) {
-      throw new Error("LIVE_SMART_WALLET_ALLOWANCE_REQUIRES_POLYMARKET_ACCOUNT_SETUP");
-    }
-    const requiredCollateral = integer(this.options.bankrollMicros, "LIVE_BANKROLL_INVALID");
+    const directEoa = this.options.signatureType === "EOA"
+      && this.options.tradingWalletAddress === this.options.walletBinding.session.walletAddress;
+    const configuredCap = integer(this.options.bankrollMicros, "LIVE_BANKROLL_INVALID");
     const collateral = await this.options.clobClient.getBalanceAllowance({
       asset_type: AssetType.COLLATERAL,
     });
     const outcome = await this.options.clobClient.getBalanceAllowance({
       asset_type: AssetType.CONDITIONAL,
     });
+    const actualCollateral = integer(collateral.balance, "LIVE_COLLATERAL_BALANCE_INVALID");
+    const requiredCollateral = actualCollateral < configuredCap ? actualCollateral : configuredCap;
+    if (requiredCollateral === 0n) {
+      return {
+        collateralApprovalTransaction: null,
+        outcomeApprovalTransaction: null,
+        ready: false,
+        reason: "LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL",
+      };
+    }
+    const collateralReady = requiredAllowance(
+      collateral,
+      this.contracts.exchangeV3,
+      "LIVE_COLLATERAL_ALLOWANCE_INVALID",
+    ) >= requiredCollateral;
+    const outcomeReady = requiredAllowance(
+      outcome,
+      this.contracts.exchangeV3,
+      "LIVE_OUTCOME_ALLOWANCE_INVALID",
+    ) > 0n;
+    if (!directEoa && (!collateralReady || !outcomeReady)) {
+      return {
+        collateralApprovalTransaction: null,
+        outcomeApprovalTransaction: null,
+        ready: false,
+        reason: "LIVE_SMART_WALLET_ALLOWANCE_DEFERRED",
+      };
+    }
     let collateralApprovalTransaction: string | null = null;
     let outcomeApprovalTransaction: string | null = null;
-    if (
-      requiredAllowance(
-        collateral,
-        this.contracts.exchangeV3,
-        "LIVE_COLLATERAL_ALLOWANCE_INVALID",
-      ) < requiredCollateral
-    ) {
+    if (!collateralReady) {
       const data = encodeFunctionData({
         abi: ERC20_ABI,
         functionName: "approve",
@@ -215,13 +234,7 @@ export class BrowserWalletAllowanceManager {
       await this.options.receiptProvider.waitForSuccess(collateralApprovalTransaction);
       await this.options.clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     }
-    if (
-      requiredAllowance(
-        outcome,
-        this.contracts.exchangeV3,
-        "LIVE_OUTCOME_ALLOWANCE_INVALID",
-      ) === 0n
-    ) {
+    if (!outcomeReady) {
       const data = encodeFunctionData({
         abi: ERC1155_ABI,
         functionName: "setApprovalForAll",

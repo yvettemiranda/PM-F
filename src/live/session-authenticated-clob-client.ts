@@ -146,7 +146,7 @@ export class SessionAuthenticatedClobClient {
   }
 
   private async authenticate(): Promise<ClobClient> {
-    const credentials = await this.bootstrapClient.createOrDeriveApiKey();
+    const credentials = await this.createOrRecoverCredentials();
     this.assertCurrent();
     if (
       !credentials
@@ -166,6 +166,17 @@ export class SessionAuthenticatedClobClient {
     this.assertCurrent();
     this.authenticated = authenticated;
     return authenticated;
+  }
+
+  private async createOrRecoverCredentials(): Promise<Awaited<ReturnType<ClobClient["deriveApiKey"]>>> {
+    try {
+      return await this.bootstrapClient.createOrDeriveApiKey();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("could not create api key")) throw error;
+      this.assertCurrent();
+      return this.bootstrapClient.deriveApiKey();
+    }
   }
 
   private baseOptions(): ClobClientOptions {

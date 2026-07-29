@@ -26,9 +26,14 @@ import { OPERATOR_RULESET_PROFILE_CONTEXT } from "../domain/versioning.js";
 import { saveSelectedTargetWallet } from "./target-wallet.js";
 import {
   liveProductionReadiness,
+  readLiveProductionConfig,
   saveLiveProductionConfig,
   type LiveProductionSignatureType,
 } from "./live-production-readiness.js";
+import {
+  discoverPolymarketTradingWallet,
+  type PolymarketTradingWallet,
+} from "./polymarket-trading-wallet-discovery.js";
 import {
   LiveWalletSessionManager,
   type LiveWalletRuntimeBinding,
@@ -57,6 +62,7 @@ export interface OperatorUiServerOptions {
   liveRuntimeActions?: OperatorLiveRuntimeActions;
   walletSessionManager?: LiveWalletSessionManager;
   walletRequestBroker?: LiveWalletRequestBroker;
+  tradingWalletDiscovery?: (walletAddress: string) => Promise<PolymarketTradingWallet>;
   connectedLiveRuntimeFactory?: (input: {
     projectRoot: string;
     walletSession: LiveWalletSession;
@@ -490,7 +496,9 @@ function canKeepWalletSessionWhenRuntimeAssemblyIsBlocked(code: string): boolean
   // A verified wallet identity is still useful for showing readiness while a
   // clean, audited source tree is prepared. This must not apply to identity,
   // network, or chain-verification failures.
-  return code === "LIVE_PRODUCTION_SOURCE_DIRTY";
+  return code === "LIVE_PRODUCTION_SOURCE_DIRTY"
+    || code.startsWith("LIVE_PRODUCTION_SAFE_OWNER_LOOKUP_FAILED:")
+    || code === "LIVE_PRODUCTION_TRADING_WALLET_OWNER_MISMATCH";
 }
 
 async function handleApi(context: RequestContext): Promise<void> {
@@ -599,9 +607,35 @@ async function handleApi(context: RequestContext): Promise<void> {
       throw new HttpError(statusCode, code, "钱包连接证明未通过。");
     }
     try {
+      const previousConfig = readLiveProductionConfig(options.projectRoot);
+      const persistedIdentityIsReusable = previousConfig.walletAddress === session.walletAddress
+        && previousConfig.tradingWalletAddress !== null
+        && previousConfig.signatureType === "POLY_GNOSIS_SAFE";
+      const tradingWallet = persistedIdentityIsReusable
+        ? {
+          walletAddress: session.walletAddress,
+          tradingWalletAddress: previousConfig.tradingWalletAddress!,
+          signatureType: previousConfig.signatureType,
+          source: "GAMMA_PROFILE_GNOSIS_SAFE" as const,
+        }
+        : await (
+          options.tradingWalletDiscovery ?? discoverPolymarketTradingWallet
+        )(session.walletAddress);
+      if (tradingWallet.walletAddress !== session.walletAddress) {
+        throw new Error("LIVE_PRODUCTION_TRADING_WALLET_SIGNER_MISMATCH");
+      }
+      const preserveAuthorization = previousConfig.walletAddress === session.walletAddress;
       saveLiveProductionConfig(options.projectRoot, {
         walletAddress: session.walletAddress,
+        tradingWalletAddress: tradingWallet.tradingWalletAddress,
+        signatureType: tradingWallet.signatureType,
         network: session.network,
+        ...(preserveAuthorization && previousConfig.limitsConfirmedAt !== null
+          ? { confirmLimits: true }
+          : {}),
+        ...(preserveAuthorization && previousConfig.complianceAcceptedAt !== null
+          ? { acceptCompliance: true }
+          : {}),
       }, options.now);
       if (options.connectedLiveRuntimeFactory !== undefined) {
         const walletSessionBinding = walletSessionManager.createRuntimeBinding(

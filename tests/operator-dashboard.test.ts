@@ -64,6 +64,25 @@ function installDatabase(root: string): void {
     INSERT INTO live_gate_prerequisites VALUES (
       'USER_EXPLICIT_AUTHORIZATION','MISSING','{}','${now}'
     );
+    CREATE TABLE risk_snapshots (
+      risk_snapshot_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      wallet_address TEXT,
+      balance_micros TEXT,
+      exposure_micros TEXT NOT NULL,
+      daily_loss_micros TEXT NOT NULL,
+      risk_status TEXT NOT NULL,
+      checks_json TEXT NOT NULL,
+      live_gate_run_id TEXT NOT NULL,
+      source_code_commit TEXT NOT NULL,
+      source_code_dirty INTEGER NOT NULL,
+      config_version TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO risk_snapshots VALUES (
+      'risk-snapshot-1','PAPER','${wallet}','34342000000','0','0','SAFE','[]',
+      'gate-run-1','test-commit',0,'test-config','${now}'
+    );
 
     CREATE TABLE observe_runs (
       observe_run_id TEXT PRIMARY KEY,
@@ -458,6 +477,12 @@ describe("operator dashboard", () => {
       executionMode: "PAPER",
       state: "LIVE_DISABLED",
       reason: "DEFAULT_DISABLED",
+    });
+    expect(snapshot.live.walletBalance).toEqual({
+      walletAddress: wallet,
+      balance: { micros: "34342000000", display: "34,342.00", currency: "pUSD" },
+      status: "SAFE",
+      observedAt: now,
     });
     expect(snapshot.live.prerequisites).toEqual([
       expect.objectContaining({

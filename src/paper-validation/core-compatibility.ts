@@ -257,6 +257,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/paper-validation-campaign.test.ts",
   "tests/polymarket-clob-adapter.test.ts",
   "tests/polymarket-readonly-wallet-provider.test.ts",
+  "tests/polymarket-trading-wallet-discovery.test.ts",
   "tests/polygon-order-filled-feed.test.ts",
   "tests/position-baseline.test.ts",
   "tests/position-projector-sell-threshold.test.ts",

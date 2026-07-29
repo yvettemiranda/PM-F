@@ -669,14 +669,18 @@ describe("LiveGateService", () => {
     gate.close();
   });
 
-  it("rejects preflight when balance is below bankroll", async () => {
+  it("observes a non-negative wallet balance without treating the risk cap as a minimum", async () => {
     const env = setup();
     passPrerequisites(env.databasePath);
     insertWallet(env.databasePath);
+    const db = new DatabaseSync(env.databasePath);
+    ensureLiveAccount(db);
+    db.close();
     const gate = service(env.databasePath, "999");
     const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
-    expect(result.allowed).toBe(false);
-    expect(result.blockedReasons).toContain("BALANCE_BELOW_BANKROLL");
+    expect(result.allowed).toBe(true);
+    expect(result.blockedReasons).not.toContain("BALANCE_BELOW_BANKROLL");
+    expect(result.blockedReasons).not.toContain("LIVE_ACCOUNT_CASH_MISMATCH");
     gate.close();
   });
 
@@ -761,16 +765,17 @@ describe("LiveGateService", () => {
     budgetGate.close();
   });
 
-  it("rejects a wallet balance below the allocated Live bankroll", async () => {
+  it("allows a zero wallet balance at activation while preserving configured risk caps", async () => {
     const env = setup();
     passPrerequisites(env.databasePath);
     insertWallet(env.databasePath);
     const db = new DatabaseSync(env.databasePath);
     ensureLiveAccount(db);
     db.close();
-    const gate = service(env.databasePath, "999979999");
+    const gate = service(env.databasePath, "0");
     const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
-    expect(result.blockedReasons).toContain("LIVE_ACCOUNT_CASH_MISMATCH");
+    expect(result.allowed).toBe(true);
+    expect(result.blockedReasons).not.toContain("LIVE_ACCOUNT_CASH_MISMATCH");
     gate.close();
   });
 
@@ -1324,6 +1329,48 @@ describe("LiveGateService", () => {
     clockStatus = "UNSAFE";
     expect((await gate.checkExecution(executionInput("fresh-safety", "risk-fresh-safety"))).blockedReasons)
       .toContain("CLOCK_OFFSET_EXCEEDED");
+    gate.close();
+  });
+
+  it("does not turn an observed local offset into a Gate blocker when CLOB server time is in use", async () => {
+    const env = setup();
+    passPrerequisites(env.databasePath);
+    insertWallet(env.databasePath);
+    const db = new DatabaseSync(env.databasePath);
+    ensureLiveAccount(db);
+    db.close();
+    const gate = new LiveGateService(
+      env.databasePath,
+      new MockBalanceProvider({
+        status: "AVAILABLE",
+        balanceMicros: "0",
+        reason: null,
+        checkedAt: now,
+        source: "TEST_FIXTURE",
+      }),
+      { ...defaultLiveGateConfig(), runtimeEnvironment: "TEST" },
+      {
+        sourceVersion,
+        now: () => new Date(now),
+        geoblockProvider: new FakeGeoblockProvider({
+          status: "ALLOWED",
+          checkedAt: now,
+          source: "TEST_FIXTURE",
+          reason: null,
+        }),
+        clockProvider: new FakeClockSafetyProvider({
+          status: "SAFE",
+          offsetMs: 10_000,
+          checkedAt: now,
+          source: "TEST_FIXTURE",
+          reason: "CLOCK_OFFSET_OBSERVED_USING_SERVER_TIME",
+        }),
+      },
+    );
+
+    const result = await gate.preflight({ requestedExecutionMode: "LIVE" });
+    expect(result.allowed).toBe(true);
+    expect(result.blockedReasons).not.toContain("CLOCK_OFFSET_EXCEEDED");
     gate.close();
   });
 
@@ -1962,13 +2009,16 @@ describe("official readonly Live safety providers", () => {
     expect(attempts).toBe(2);
   });
 
-  it("fails CLOB clock closed for unsafe offset, excessive RTT and malformed/network responses", async () => {
+  it("records local clock offset but only fails closed when official CLOB time is not trustworthy", async () => {
     const unsafeTimes = [1_000_000, 1_000_100];
     const unsafe = new ClobClockSafetyProvider({
       nowMs: () => unsafeTimes.shift() as number,
       fetchImpl: async () => new Response("1010"),
     });
-    expect(await unsafe.check()).toMatchObject({ status: "UNSAFE", reason: "CLOCK_OFFSET_EXCEEDED" });
+    expect(await unsafe.check()).toMatchObject({
+      status: "SAFE",
+      reason: "CLOCK_OFFSET_OBSERVED_USING_SERVER_TIME",
+    });
 
     const slowTimes = [1_000_000, 1_003_000];
     const slow = new ClobClockSafetyProvider({

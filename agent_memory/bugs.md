@@ -1,18 +1,17 @@
 # Bugs And Risks
 
 ## Active blockers
-- 当前已连接的旧 localhost 进程仍运行提交 `3c9334b...`；真实重试已证明钱包 session 和
-  Signer 正常，但旧进程在生产 Gate 暴露 `Invalid L1 Request headers`、外部证据时序、
-  3 秒网络超时以及历史 Paper 全局 reconciliation 混入。源码修复已通过
-  `75 files / 880 tests`，但在提交、production validation 和重启前，旧进程不会热更新。
+- 当前源码已修复 CLOB L1 签名、Safe 资金地址识别、余额/allowance 准入误判、外部现金
+  对账和本机时钟重复阻断，并通过 `76 files / 890 tests`；但 localhost 旧进程不会热更新。
+  必须先提交、生成同提交 production validation artifact 并重启，再做真实 Gate 验证。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
 - 历史 Replay 没有本系统提交的 SPLIT/CONVERSION 完整证明时保持 `INCOMPLETE`；不能只凭 Activity 或市场元数据猜测。
 - 官方市场结束时间不可得时仅允许 bounded Paper，Live 继续拒绝。
-- 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前钱包身份已连接，
-  但真实 CLOB 凭据/余额/allowance/仓位、生产 provider、干净审计源码和用户当次最终确认
-  仍未验收。隔离测试不能替代这些外部事实。
+- 普通浏览器 EOA signer 与其经链上验证的 Polymarket Gnosis Safe 资金地址已接到默认
+  localhost host；真实 CLOB 凭据、生产 provider、Safe 仓位和官方地域结果仍须在重启后
+  验收。钱包余额可以为零，不再是 Gate blocker；隔离测试仍不能替代外部事实。
 - 当前运行服务在源码未提交期间为 `source dirty`，钱包 session 未装配；提交、生成新验证
   artifact 和重启前，Gate/对账必然保持阻断。已保存限额仍有效，不应要求用户重复保存。
 - 前次用户授权请求曾被 `GEOBLOCK_BLOCKED:US:CA` 阻断；本轮官方端点实测又返回
@@ -52,8 +51,9 @@
   signed order intent；该字段不进入 UI、快照、普通日志或审计包。runtime database
   和新备份已强制 `0600`，Operator UI 使用 `umask 077`，但生产仍必须使用全盘
   加密、受控系统账户和备份保留/访问控制。
-- UI 只开放 EOA 完整路径。底层 Proxy/Safe/EIP-1271 的 order signer 可用，但
-  allowance/redeem 缺官方 relayer；在补齐官方账户初始化和 relayer 前不得开放。
+- 已有 Polymarket Gnosis Safe 由 EOA owner 通过 `POLY_GNOSIS_SAFE` 签名类型使用；
+  UI 不再把资金地址误写回 EOA。Safe allowance 不足会延后到具体订单，不阻断 Live
+  准备；需要链上授权的订单仍必须由浏览器钱包明确确认。
 - 钱包会话已经作为短期运行时租约绑定到 Live action：断开、过期或替换会话会撤销 action 并触发 emergency stop；这能防止 UI 地址与已装配 runtime 漂移，但生产宿主仍必须把真实 provider、signer、CLOB 和 Gate 授权绑定到同一会话，不能只依赖浏览器端地址。
 - 旧钱包会话与新源码/验证工件版本不一致时，预检可能抛出 `LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID`；现在该版本失配会自动安全断开会话、取消待签名请求并返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`，要求重新连接，不再暴露 500 内部错误。源码或验证工件更新后必须重启 localhost 服务并重新签名。
 - 连接后的宿主 factory 只能通过服务端会话绑定 wrapper 暴露 action；钱包 provider 还必须自报并被装配入口核对 Polygon chainId。会话到期由后台定时器主动失效；紧急停用失败会重试一次并让断开接口返回 503，但若外部停机服务持续不可用，必须继续保持 Gate 禁用并人工处理。

@@ -44,6 +44,7 @@ async function listen(input: {
   liveRuntimeActions?: OperatorLiveRuntimeActions;
   connectedLiveRuntimeFactory?: OperatorUiServerOptions["connectedLiveRuntimeFactory"];
   walletRequestBroker?: LiveWalletRequestBroker;
+  tradingWalletDiscovery?: OperatorUiServerOptions["tradingWalletDiscovery"];
 } = {}) {
   const fixture = project();
   const serverOptions: OperatorUiServerOptions = {
@@ -58,6 +59,12 @@ async function listen(input: {
     ...(input.walletRequestBroker === undefined
       ? {}
       : { walletRequestBroker: input.walletRequestBroker }),
+    tradingWalletDiscovery: input.tradingWalletDiscovery ?? (async (walletAddress) => ({
+      walletAddress,
+      tradingWalletAddress: walletAddress,
+      signatureType: "EOA",
+      source: "SIGNER_EOA",
+    })),
   };
   const server = createOperatorUiServer(serverOptions);
   servers.push(server);
@@ -112,6 +119,46 @@ describe("operator UI server", () => {
     const pageResponse = await fetch(`${baseUrl}/`);
     expect(pageResponse.status).toBe(200);
     expect(await pageResponse.text()).toContain("Hecatonchires");
+  });
+
+  it("persists the verified Polymarket trading wallet identity during browser-wallet connection", async () => {
+    const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
+    const tradingWalletAddress = "0xfdcc2ff22afc959ed0483e55ba0f71917bc21321";
+    const tradingWalletDiscovery = vi.fn(async (walletAddress: string) => ({
+      walletAddress,
+      tradingWalletAddress,
+      signatureType: "POLY_GNOSIS_SAFE" as const,
+      source: "GAMMA_PROFILE_GNOSIS_SAFE" as const,
+    }));
+    const { baseUrl, root } = await listen({ tradingWalletDiscovery });
+    const challenge = await mutation(baseUrl, "/api/operator/live/wallet-session/challenge", {
+      body: { chainId: "0x89" },
+    });
+    const challengeBody = await challenge.json() as {
+      data: { challengeId: string; message: string };
+    };
+    const signature = await account.signMessage({ message: challengeBody.data.message });
+
+    const response = await mutation(baseUrl, "/api/operator/live/wallet-session/connect", {
+      body: {
+        challengeId: challengeBody.data.challengeId,
+        walletAddress: account.address,
+        chainId: "0x89",
+        signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(tradingWalletDiscovery).toHaveBeenCalledWith(account.address.toLowerCase());
+    expect(JSON.parse(readFileSync(
+      join(root, "data/operator/live-production.json"),
+      "utf8",
+    ))).toMatchObject({
+      walletAddress: account.address.toLowerCase(),
+      tradingWalletAddress,
+      signatureType: "POLY_GNOSIS_SAFE",
+      network: "POLYGON",
+    });
   });
 
   it("connects target and complete ruleset mutations to the existing operator services", async () => {

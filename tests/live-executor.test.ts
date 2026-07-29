@@ -4883,7 +4883,7 @@ describe("LiveExecutor", () => {
     checker.close();
   });
 
-  it("fails closed when external pUSD cash drifts beyond reconciliation tolerance", async () => {
+  it("records external pUSD cash without treating the configured risk allocation as wallet truth", async () => {
     const env = setup();
     const checker = liveExecutor(env.databasePath, {
       walletProvider: new FakeWalletProvider({
@@ -4895,14 +4895,14 @@ describe("LiveExecutor", () => {
 
     const recovery = await checker.recoverOnStartup(accountId);
 
-    expect(recovery.passed).toBe(false);
+    expect(recovery.passed).toBe(true);
     const db = new DatabaseSync(env.databasePath, { readOnly: true });
     const check = db.prepare(
       `SELECT checks_json FROM live_reconciliation_runs
-       WHERE live_account_id=? AND checks_json LIKE '%EXTERNAL_WALLET_CASH_MISMATCH%'
+       WHERE live_account_id=? AND checks_json LIKE '%EXTERNAL_WALLET_CASH_OBSERVED%'
        ORDER BY created_at DESC LIMIT 1`,
     ).get(accountId) as { checks_json: string } | undefined;
-    expect(check?.checks_json).toContain("EXTERNAL_WALLET_CASH_MISMATCH:1000000000:999000000:1000000");
+    expect(check?.checks_json).toContain("EXTERNAL_WALLET_CASH_OBSERVED:999000000");
     db.close();
     checker.close();
   });

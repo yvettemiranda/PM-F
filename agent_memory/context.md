@@ -89,8 +89,10 @@
   redeem、官方 geoblock、时钟、合规、账户、身份绑定、Gate 和 runtime。配置变化
   强制断开重连；启动前同步 recovery 必须 ready，启动失败回滚 Gate，后台循环异常
   emergency stop；宿主退出先停 Gate/runtime 并撤销 session。持久化配置读取时也
-  执行小额硬上限；runtime database 和新备份强制 `0600`。UI 只开放完整闭环的
-  EOA；Proxy/Safe/1271 等待官方 relayer。
+  执行小额硬上限；runtime database 和新备份强制 `0600`。UI 会从已验证的 EOA 自动
+  发现 Gamma profile 资金地址，并用 Polygon `getOwners()` 验证 Gnosis Safe 所有权；
+  当前 OKX signer 对应 `POLY_GNOSIS_SAFE`。风险资金上限不是最低余额，任意非负实际余额
+  均可完成 Gate；余额/allowance 只在逐笔下单前检查。
 - Live runtime 会捕获源码/验证工件在会话建立后发生的版本失配：在预检、arming 或恢复抛出
   `LIVE_PRODUCTION_*_INVALID` 时撤销旧钱包租约、取消待签名请求并回到
   `PAPER + LIVE_DISABLED`，返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`；更新源码或

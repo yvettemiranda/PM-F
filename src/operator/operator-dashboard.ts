@@ -113,6 +113,12 @@ export interface OperatorDashboardSnapshot {
   };
   live: {
     walletSession: LiveWalletSessionSnapshot;
+    walletBalance: null | {
+      walletAddress: string;
+      balance: MoneyView;
+      status: string;
+      observedAt: string;
+    };
     capability: {
       activation: "LIVE_GATE" | "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION";
       execution: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
@@ -618,6 +624,7 @@ function emptySnapshot(
         expiresAt: null,
         signerStatus: "NOT_CONNECTED",
       },
+      walletBalance: null,
       capability: {
         activation: "GATE_AVAILABLE_AFTER_DATABASE_INITIALIZATION",
         execution: "PENDING_PREREQUISITES",
@@ -996,6 +1003,26 @@ export function operatorDashboardSnapshot(
        FROM live_gate_runs ORDER BY created_at DESC,live_gate_run_id DESC LIMIT ?`,
       [limit],
     ), { json: ["blocked_reasons_json", "checks_json"] });
+    const latestRiskSnapshot = first(
+      database,
+      "risk_snapshots",
+      `SELECT wallet_address,balance_micros,risk_status,created_at
+       FROM risk_snapshots
+       WHERE wallet_address IS NOT NULL AND balance_micros IS NOT NULL
+       ORDER BY created_at DESC,risk_snapshot_id DESC LIMIT 1`,
+    );
+    if (
+      latestRiskSnapshot !== null
+      && nullableString(latestRiskSnapshot.wallet_address) !== null
+      && nullableString(latestRiskSnapshot.balance_micros) !== null
+    ) {
+      snapshot.live.walletBalance = {
+        walletAddress: stringValue(latestRiskSnapshot.wallet_address),
+        balance: money(latestRiskSnapshot.balance_micros),
+        status: stringValue(latestRiskSnapshot.risk_status),
+        observedAt: stringValue(latestRiskSnapshot.created_at),
+      };
+    }
     snapshot.live.accounts = decorateRows(all(
       database,
       "live_accounts",

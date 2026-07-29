@@ -97,6 +97,87 @@ describe("browser wallet on-chain operations", () => {
     expect(requestTransaction).not.toHaveBeenCalled();
   });
 
+  it("accepts an already-approved Gnosis Safe without asking the owner EOA to approve again", async () => {
+    const contracts = getContractConfig(Chain.POLYGON);
+    const requestTransaction = vi.fn();
+    const manager = new BrowserWalletAllowanceManager({
+      walletBinding: binding(),
+      requestBroker: { requestTransaction },
+      receiptProvider: { waitForSuccess: vi.fn() },
+      clobClient: {
+        getBalanceAllowance: vi.fn(async () => ({
+          balance: "10000000",
+          allowances: { [contracts.exchangeV3]: "10000000" },
+        })),
+        updateBalanceAllowance: vi.fn(),
+      },
+      bankrollMicros: "10000000",
+      signatureType: "POLY_GNOSIS_SAFE",
+      tradingWalletAddress: "0xfdcc2ff22afc959ed0483e55ba0f71917bc21321",
+    });
+
+    await expect(manager.prepare()).resolves.toEqual({
+      collateralApprovalTransaction: null,
+      outcomeApprovalTransaction: null,
+      ready: true,
+    });
+    expect(requestTransaction).not.toHaveBeenCalled();
+  });
+
+  it("defers a Gnosis Safe allowance until an actual order needs it", async () => {
+    const contracts = getContractConfig(Chain.POLYGON);
+    const manager = new BrowserWalletAllowanceManager({
+      walletBinding: binding(),
+      requestBroker: { requestTransaction: vi.fn() },
+      receiptProvider: { waitForSuccess: vi.fn() },
+      clobClient: {
+        getBalanceAllowance: vi.fn(async () => ({
+          balance: "10000000",
+          allowances: { [contracts.exchangeV3]: "0" },
+        })),
+        updateBalanceAllowance: vi.fn(),
+      },
+      bankrollMicros: "10000000",
+      signatureType: "POLY_GNOSIS_SAFE",
+      tradingWalletAddress: "0xfdcc2ff22afc959ed0483e55ba0f71917bc21321",
+    });
+
+    await expect(manager.prepare()).resolves.toEqual({
+      collateralApprovalTransaction: null,
+      outcomeApprovalTransaction: null,
+      ready: false,
+      reason: "LIVE_SMART_WALLET_ALLOWANCE_DEFERRED",
+    });
+  });
+
+  it("does not request an EOA approval when the wallet currently has no collateral", async () => {
+    const contracts = getContractConfig(Chain.POLYGON);
+    const requestTransaction = vi.fn();
+    const manager = new BrowserWalletAllowanceManager({
+      walletBinding: binding(),
+      requestBroker: { requestTransaction },
+      receiptProvider: { waitForSuccess: vi.fn() },
+      clobClient: {
+        getBalanceAllowance: vi.fn(async () => ({
+          balance: "0",
+          allowances: { [contracts.exchangeV3]: "0" },
+        })),
+        updateBalanceAllowance: vi.fn(),
+      },
+      bankrollMicros: "10000000",
+      signatureType: "EOA",
+      tradingWalletAddress: wallet,
+    });
+
+    await expect(manager.prepare()).resolves.toEqual({
+      collateralApprovalTransaction: null,
+      outcomeApprovalTransaction: null,
+      ready: false,
+      reason: "LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL",
+    });
+    expect(requestTransaction).not.toHaveBeenCalled();
+  });
+
   it("redeems a binary resolved EOA position only after a confirmed receipt", async () => {
     const contracts = getContractConfig(Chain.POLYGON);
     const requestTransaction = vi.fn(async () => tx1);

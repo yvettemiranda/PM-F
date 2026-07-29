@@ -874,10 +874,6 @@ export class LiveGateService implements LiveGate {
     if (!this.isInteger(balance.balanceMicros) || BigInt(balance.balanceMicros) < 0n) {
       return { name: "balance_provider", passed: false, reason: "BALANCE_INVALID" };
     }
-    const bankroll = this.config.bankrollMicros;
-    if (bankroll && this.isInteger(bankroll) && BigInt(balance.balanceMicros) < BigInt(bankroll)) {
-      return { name: "balance_provider", passed: false, reason: "BALANCE_BELOW_BANKROLL" };
-    }
     return { name: "balance_provider", passed: true, reason: "OK" };
   }
 
@@ -962,14 +958,11 @@ export class LiveGateService implements LiveGate {
     if (!this.externalEvidenceFresh(result.checkedAt, result.source, now)) {
       return { name: "clock_safety", passed: false, reason: "CLOCK_EVIDENCE_STALE_OR_INVALID" };
     }
-    const offsetSafe = result.offsetMs !== null
-      && Number.isFinite(result.offsetMs)
-      && Math.abs(result.offsetMs) <= RULESET.clockUnsafeThresholdMs;
-    const passed = offsetSafe;
+    const passed = result.offsetMs !== null && Number.isFinite(result.offsetMs);
     return {
       name: "clock_safety",
       passed,
-      reason: passed ? "OK" : result.reason ?? (result.status === "SAFE" ? "CLOCK_OFFSET_EXCEEDED" : `CLOCK_${result.status}`),
+      reason: passed ? result.reason ?? "OK" : "CLOCK_OFFSET_INVALID",
     };
   }
 
@@ -1172,11 +1165,6 @@ export class LiveGateService implements LiveGate {
        WHERE live_account_id=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')`,
     ).all(accountId) as unknown as Array<{ remaining_cost_micros: string }>;
     return rows.reduce((total, row) => total + BigInt(row.remaining_cost_micros), 0n);
-  }
-
-  private sumTextRows(query: string, ...parameters: string[]): bigint {
-    const rows = this.database.prepare(query).all(...parameters) as unknown as Array<{ value: string }>;
-    return rows.reduce((total, row) => total + BigInt(row.value), 0n);
   }
 
   private dailyLossMicros(accountId: string | null, now: string): bigint {
@@ -1389,18 +1377,6 @@ export class LiveGateService implements LiveGate {
     const balanceValid = balance.status === "AVAILABLE"
       && this.isInteger(balance.balanceMicros ?? "")
       && BigInt(balance.balanceMicros as string) >= 0n;
-    const expectedCash = accountValuesValid
-      ? accountBankroll + this.sumTextRows(
-        "SELECT cash_delta_micros value FROM live_cash_ledger WHERE live_account_id=?",
-        row.live_account_id,
-      )
-      : 0n;
-    const cashDifference = balanceValid
-      ? BigInt(balance.balanceMicros as string) - expectedCash
-      : 0n;
-    const cashReconciled = balanceValid
-      && accountValuesValid
-      && cashDifference >= -BigInt(RULESET.reconciliationCashAbsToleranceMicros);
 
     return [
       { name: "live_account_preflight", passed: true, reason: "OK" },
@@ -1426,9 +1402,9 @@ export class LiveGateService implements LiveGate {
         reason: budgetValid ? "OK" : "LIVE_ACCOUNT_RISK_BUDGET_INVALID",
       },
       {
-        name: "live_account_cash_reconciliation",
-        passed: cashReconciled,
-        reason: cashReconciled ? "OK" : "LIVE_ACCOUNT_CASH_MISMATCH",
+        name: "live_account_external_balance_observed",
+        passed: balanceValid,
+        reason: balanceValid ? "OK" : "LIVE_ACCOUNT_BALANCE_UNAVAILABLE",
       },
     ];
   }

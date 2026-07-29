@@ -49,6 +49,11 @@ function createHarness() {
     secret: "session-secret",
     passphrase: "session-passphrase",
   }));
+  const deriveApiKey = vi.fn(async () => ({
+    key: "derived-session-key",
+    secret: "derived-session-secret",
+    passphrase: "derived-session-passphrase",
+  }));
   const getOpenOrders = vi.fn(async () => []);
   const postOrder = vi.fn(async () => ({
     success: true,
@@ -62,6 +67,7 @@ function createHarness() {
   const factory = vi.fn((options: ClobClientOptions) => {
     const client = {
       createOrDeriveApiKey,
+      deriveApiKey,
       getOpenOrders,
       postOrder,
       getFeeExponent: vi.fn(async () => 2),
@@ -69,7 +75,7 @@ function createHarness() {
     instances.push({ options, client });
     return client;
   });
-  return { factory, instances, createOrDeriveApiKey, getOpenOrders, postOrder };
+  return { factory, instances, createOrDeriveApiKey, deriveApiKey, getOpenOrders, postOrder };
 }
 
 describe("SessionAuthenticatedClobClient", () => {
@@ -96,6 +102,45 @@ describe("SessionAuthenticatedClobClient", () => {
       passphrase: "session-passphrase",
     });
     expect(harness.getOpenOrders).toHaveBeenCalledTimes(2);
+  });
+
+  it("derives an existing API key when SDK key creation reports that one already exists", async () => {
+    const session = bindingHarness();
+    const harness = createHarness();
+    harness.createOrDeriveApiKey.mockRejectedValueOnce(new Error("Could not create api key"));
+    const client = new SessionAuthenticatedClobClient({
+      walletBinding: session.binding,
+      signer: { account: { address: wallet } } as never,
+      signatureType: SignatureTypeV2.EOA,
+      funderAddress: wallet,
+      clientFactory: harness.factory,
+    });
+
+    await expect(client.getOpenOrders()).resolves.toEqual([]);
+
+    expect(harness.createOrDeriveApiKey).toHaveBeenCalledTimes(1);
+    expect(harness.deriveApiKey).toHaveBeenCalledTimes(1);
+    expect(harness.instances[1]?.options.creds).toEqual({
+      key: "derived-session-key",
+      secret: "derived-session-secret",
+      passphrase: "derived-session-passphrase",
+    });
+  });
+
+  it("does not mask unrelated API credential failures with a derive attempt", async () => {
+    const session = bindingHarness();
+    const harness = createHarness();
+    harness.createOrDeriveApiKey.mockRejectedValueOnce(new Error("Invalid L1 Request headers"));
+    const client = new SessionAuthenticatedClobClient({
+      walletBinding: session.binding,
+      signer: { account: { address: wallet } } as never,
+      signatureType: SignatureTypeV2.EOA,
+      funderAddress: wallet,
+      clientFactory: harness.factory,
+    });
+
+    await expect(client.getOpenOrders()).rejects.toThrow("Invalid L1 Request headers");
+    expect(harness.deriveApiKey).not.toHaveBeenCalled();
   });
 
   it("drops the authenticated client and refuses every later call after wallet invalidation", async () => {

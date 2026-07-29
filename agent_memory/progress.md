@@ -6,9 +6,16 @@
   `Invalid L1 Request headers` 拒绝）；官方 geoblock/CLOB time 默认改为 `10 s` 且对
   瞬时网络/5xx 有界重试两次；Gate 以外部读取完成时间而非预检开始时间判断证据新鲜度；
   production reconciliation 只检查 Live 账户/账本，不再让 7 月 25—26 日已审计保留的
-  Paper 冻结仓位和历史 major desync 阻断 7 月 29 日新建且零历史的 Live 组合。Live
-  bankroll 是资金风险分配上限，钱包余额可以高于上限但不能低于分配额。专项
-  `80/80`、TypeScript 和全套 `75 files / 880 tests` 已通过。
+  Paper 冻结仓位和历史 major desync 阻断 7 月 29 日新建且零历史的 Live 组合。
+- 2026-07-29 更正 Live 余额语义：`liveBankrollMicros` 只限制本系统最多可动用的资金，
+  不是钱包最低余额。Gate 接受任意非负真实 pUSD 余额（包括 `0`），UI 展示链上实际余额；
+  余额和 allowance 不足仅在具体订单执行前阻断该订单。Live 对账不再要求外部钱包现金等于
+  内部风险分配；外部 outcome token 仓位仍须严格对账。CLOB 使用服务端时间，可靠端点/
+  payload/RTT 继续 fail closed，但本机时钟偏差只记录诊断，不再重复硬阻断。
+- OKX EOA `0xfb54...5da4` 会自动发现并链上验证其 Polymarket Gnosis Safe
+  `0xfdcc...1321`，按 `POLY_GNOSIS_SAFE` 装配；同一 signer 的已保存 `10/1/3/1 pUSD`
+  限额与合规确认会保留。CLOB API key 创建返回“已存在”时只对该精确错误回退
+  `deriveApiKey()`，其他 L1 认证错误不被掩盖。
 - 2026-07-29 钱包/UI 稳定性与一键 Live 流程已完成代码和第一轮全量验证。桌面入口会复用已有
   `127.0.0.1:4173` Chrome 标签页，不再反复新开控制台；连接流程先用
   `eth_accounts` 识别既有站点授权，仅在确实未授权时请求连接，再明确进入 Polygon
@@ -18,8 +25,8 @@
   为一个后台事务式流程：初始 Gate、Live 对账、钱包 readiness、最终 Gate、确认和 runtime
   启动；任一步失败自动 emergency-disable 并返回单一阶段原因。模式弹窗不再要求重复输入
   固定确认词，已保存的 `10/1/3/1 pUSD` 会直接展示和复用；手动 Gate/对账按钮收进高级诊断。
-- TypeScript、前端语法、启动脚本语法、`git diff --check` 与全套测试均通过：
-  `75 files / 875 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
+- TypeScript、前端语法、`git diff --check` 与全套测试均通过：
+  `76 files / 890 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
   artifact、重启唯一 4173 服务并在真实 Chrome/OKX 上跑一键流程。
 - 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
 - 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。
@@ -168,7 +175,9 @@
 - 最终报告：`data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md`。
 
 ## Next steps
-1. 提交本轮 Gate/CLOB 修复并重新生成与该提交一致的 production validation artifact。
+1. 提交本轮钱包自动识别、余额语义、Gate/CLOB/时钟和 UI 修复，并重新生成与该提交一致的
+   production validation artifact。
 2. 重启唯一 localhost 服务，重新建立一次因重启而失效的 OKX 短期会话。
-3. 从真实 Chrome/OKX 再跑完整一键流程；若官方 geoblock、真实余额/allowance、CLOB
-   认证或链上授权仍给出真实阻断，保留原始原因并停止，不得伪造放行。
+3. 从真实 Chrome/OKX 再跑完整一键流程；`0 pUSD` 不得阻断 Live 准备，但会在真实订单
+   提交前以余额不足跳过该笔。若官方 geoblock、钱包归属、CLOB 认证或账本完整性仍给出
+   真实阻断，保留原始原因并停止，不得伪造放行。
