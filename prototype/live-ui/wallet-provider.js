@@ -3,6 +3,8 @@
 // extensions are installed or when injection finishes after the page loads.
 (function installHecatonchiresWalletDiscovery(global) {
   const DEFAULT_TIMEOUT_MS = 1_500;
+  const candidates = [];
+  const seen = new Set();
 
   function isProvider(value) {
     return value !== null
@@ -10,42 +12,86 @@
       && typeof value.request === "function";
   }
 
-  function providerScore(info) {
+  function providerScore(info, provider) {
     const name = String(info?.name ?? "").toLowerCase();
     const rdns = String(info?.rdns ?? "").toLowerCase();
-    if (name.includes("okx") || name.includes("okex") || rdns.includes("okx") || rdns.includes("okex")) {
+    if (
+      provider?.isOkxWallet === true
+      || provider?.isOKExWallet === true
+      || name.includes("okx")
+      || name.includes("okex")
+      || rdns.includes("okx")
+      || rdns.includes("okex")
+    ) {
       return 100;
+    }
+    if (
+      provider?.isMetaMask === true
+      || provider?.isCoinbaseWallet === true
+      || provider?.isBraveWallet === true
+    ) {
+      return 1;
     }
     return 10;
   }
+
+  function addCandidate(provider, info = null) {
+    if (!isProvider(provider) || seen.has(provider)) return;
+    seen.add(provider);
+    candidates.push({ provider, info, score: providerScore(info, provider) });
+  }
+
+  function addInjectedCandidates(windowObject) {
+    const legacyOkx = windowObject.okxwallet;
+    addCandidate(legacyOkx?.ethereum, { name: "OKX Wallet", rdns: "com.okx.wallet" });
+    addCandidate(legacyOkx, { name: "OKX Wallet", rdns: "com.okx.wallet" });
+    const injected = windowObject.ethereum;
+    if (Array.isArray(injected?.providers)) {
+      injected.providers.forEach((provider) => addCandidate(provider));
+    }
+    addCandidate(injected);
+  }
+
+  function choose() {
+    return candidates
+      .slice()
+      .sort((left, right) => right.score - left.score)[0] ?? null;
+  }
+
+  function requestAnnouncements(windowObject) {
+    try {
+      const event = typeof windowObject.Event === "function"
+        ? new windowObject.Event("eip6963:requestProvider")
+        : { type: "eip6963:requestProvider" };
+      windowObject.dispatchEvent?.(event);
+    } catch {
+      // Legacy injection can still be discovered without EIP-6963.
+    }
+  }
+
+  global.addEventListener?.("eip6963:announceProvider", (event) => {
+    const detail = event?.detail;
+    addCandidate(detail?.provider, detail?.info ?? null);
+  });
+  addInjectedCandidates(global);
+  requestAnnouncements(global);
 
   function discover(options = {}) {
     const windowObject = options.windowObject ?? global;
     const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
       ? options.timeoutMs
       : DEFAULT_TIMEOUT_MS;
-    const candidates = [];
-    const seen = new Set();
     let settled = false;
     let timer = null;
 
-    const addCandidate = (provider, info = null) => {
-      if (!isProvider(provider) || seen.has(provider)) return;
-      seen.add(provider);
-      candidates.push({ provider, info, score: providerScore(info) });
-    };
-
-    const injected = windowObject.ethereum;
-    if (Array.isArray(injected?.providers)) {
-      injected.providers.forEach((provider) => addCandidate(provider));
+    addInjectedCandidates(windowObject);
+    const current = choose();
+    const injectedProviders = windowObject.ethereum?.providers;
+    const shouldWaitForPreferredWallet = current?.score === 1
+      || Array.isArray(injectedProviders) && injectedProviders.length > 1;
+    if (current?.score === 100 || current !== null && !shouldWaitForPreferredWallet) {
+      return Promise.resolve(current.provider);
     }
-    addCandidate(injected);
-
-    const choose = () => candidates
-      .slice()
-      .sort((left, right) => right.score - left.score)[0]?.provider ?? null;
-
-    if (candidates.length > 0) return Promise.resolve(choose());
 
     return new Promise((resolve) => {
       const finish = () => {
@@ -53,26 +99,20 @@
         settled = true;
         if (timer !== null) windowObject.clearTimeout(timer);
         windowObject.removeEventListener?.("eip6963:announceProvider", onAnnouncement);
-        resolve(choose() ?? (isProvider(windowObject.ethereum) ? windowObject.ethereum : null));
+        addInjectedCandidates(windowObject);
+        resolve(choose()?.provider ?? null);
       };
       const onAnnouncement = (event) => {
         const detail = event?.detail;
         addCandidate(detail?.provider, detail?.info ?? null);
         // One announcement is enough when it identifies OKX; otherwise keep
         // the short discovery window open for another wallet announcement.
-        if (providerScore(detail?.info) === 100) finish();
+        if (providerScore(detail?.info, detail?.provider) === 100) finish();
       };
 
       windowObject.addEventListener?.("eip6963:announceProvider", onAnnouncement);
       timer = windowObject.setTimeout(finish, timeoutMs);
-      try {
-        const event = typeof windowObject.Event === "function"
-          ? new windowObject.Event("eip6963:requestProvider")
-          : { type: "eip6963:requestProvider" };
-        windowObject.dispatchEvent?.(event);
-      } catch {
-        // The injected provider fallback below still has a chance to resolve.
-      }
+      requestAnnouncements(windowObject);
     });
   }
 

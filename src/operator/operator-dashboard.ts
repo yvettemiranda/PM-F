@@ -11,6 +11,7 @@ import {
   type LiveProductionReadiness,
 } from "./live-production-readiness.js";
 import type { LiveWalletSessionSnapshot } from "./live-wallet-session.js";
+import type { SourceVersion } from "../infra/source-version.js";
 
 const MONEY_SCALE_DIGITS = 6;
 const PRICE_SCALE_DIGITS = 18;
@@ -33,6 +34,11 @@ export interface MoneyView {
 export interface OperatorDashboardSnapshot {
   schemaVersion: "operator-dashboard-v1";
   generatedAt: string;
+  service?: {
+    instanceId: string;
+    startedAt: string;
+    sourceVersion: SourceVersion;
+  };
   database: {
     status: "AVAILABLE" | "NOT_INITIALIZED" | "ERROR";
     path: string;
@@ -128,6 +134,8 @@ export interface OperatorDashboardSnapshot {
       status: string;
       evidence: unknown;
       updatedAt: string;
+      effectiveStatus?: string;
+      effectiveReason?: "SOURCE_DIRTY" | "SOURCE_COMMIT_MISMATCH" | null;
     }>;
     gateRuns: Row[];
     accounts: Row[];

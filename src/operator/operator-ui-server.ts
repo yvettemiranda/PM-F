@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, normalize, resolve } from "node:path";
@@ -34,6 +35,8 @@ import {
   type LiveWalletSession,
 } from "./live-wallet-session.js";
 import { LiveWalletRequestBroker } from "./live-wallet-request-broker.js";
+import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
+import { effectiveLivePrerequisites } from "./operator-status.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -96,6 +99,11 @@ interface RequestContext {
   liveRuntimeActions: MutableOperatorLiveRuntimeActions;
   walletSessionManager: LiveWalletSessionManager;
   walletRequestBroker: LiveWalletRequestBroker;
+  service: {
+    instanceId: string;
+    startedAt: string;
+    sourceVersion: SourceVersion;
+  };
 }
 
 class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
@@ -436,10 +444,16 @@ function freshSnapshot(
   options: OperatorUiServerOptions,
   liveRuntimeActions: OperatorLiveRuntimeActions,
   walletSessionManager: LiveWalletSessionManager,
+  service: RequestContext["service"],
 ): OperatorDashboardSnapshot {
   const snapshot = options.now === undefined
     ? operatorDashboardSnapshot(options.projectRoot)
     : operatorDashboardSnapshot(options.projectRoot, { now: options.now });
+  snapshot.service = service;
+  snapshot.live.prerequisites = effectiveLivePrerequisites(
+    snapshot.live.prerequisites,
+    service.sourceVersion,
+  );
   snapshot.live.capability.execution = liveRuntimeActions.capability.execution;
   snapshot.live.capability.orderManagement = liveRuntimeActions.capability.orderManagement;
   snapshot.live.capability.walletSetup = liveRuntimeActions.capability.walletSetup
@@ -490,11 +504,13 @@ async function handleApi(context: RequestContext): Promise<void> {
     liveRuntimeActions,
     walletSessionManager,
     walletRequestBroker,
+    service,
   } = context;
   const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(
     options,
     liveRuntimeActions,
     walletSessionManager,
+    service,
   );
   if (isMutation(request.method ?? "GET")) assertRequestOrigin(request);
   const path = url.pathname;
@@ -995,6 +1011,11 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const staticRoot = staticRootFromOptions(options);
+  const service = {
+    instanceId: randomUUID(),
+    startedAt: (options.now ?? (() => new Date()))().toISOString(),
+    sourceVersion: resolveSourceVersion(options.projectRoot),
+  };
   const server = createServer(async (request, response) => {
     setHeaders(response);
     try {
@@ -1013,6 +1034,7 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
           liveRuntimeActions,
           walletSessionManager,
           walletRequestBroker,
+          service,
         });
       } else if (request.method === "GET" || request.method === "HEAD") {
         await serveStatic(response, staticRoot, url.pathname);

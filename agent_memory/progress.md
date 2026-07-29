@@ -1,7 +1,11 @@
 # Progress
 
 ## Current task
-- 2026-07-29 钱包连接稳定性修复已完成：页面加入独立钱包发现层，优先通过 EIP-6963 识别 OKX，并兼容延迟注入、`ethereum.providers` 与传统 `window.ethereum`；服务重启/会话过期时 UI 明确提示重新签名，不会把安全性误报成连接成功。
+- 2026-07-29 钱包/UI 稳定性第二轮修复已完成代码与自动验证：修复 3 秒全页 DOM
+  替换、错误同步时间、服务重启旧页、OKX 延迟/多钱包/legacy 注入、provider
+  账户/网络/断开事件和旧 Gate 证据误显示。真实 Chrome 已验证顶部时间推进、节点跨多轮
+  轮询保持可点击、服务重启自动换页、状态文本明确且控制台无错误；还需用户关闭遗留 OKX
+  弹窗后完成一次新的人工两步确认，以收尾真实扩展链路。
 - 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
 - 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。
 - Paper 跨 Core 累计 24 小时验证已经完成；当前只保留最终证据和进入小额 Live 前的独立阻断项。
@@ -120,7 +124,14 @@
   继续 `PAPER + LIVE_DISABLED + liveAllowed=false`，没有创建订单或链上写入。
 
 ## Latest wallet-connection verification
-- 新增 `prototype/live-ui/wallet-provider.js` 和 `tests/wallet-provider.test.ts`：覆盖已注入 provider、延迟 EIP-6963 OKX announcement、无 provider 超时返回；当前 targeted/full Vitest 均通过 `72 files / 858 tests`，TypeScript、前端语法和 `git diff --check` 通过。
+- 钱包发现现覆盖已注入 provider、延迟 EIP-6963 OKX announcement、多钱包时等待
+  OKX、`window.okxwallet` legacy 注入和无 provider 超时返回。新增纯 UI 状态投影与
+  effective Gate 证据测试；当前 TypeScript 和全套 Vitest 已通过
+  `74 files / 868 tests`，前端语法和 `git diff --check` 通过。
+- 真实 Chrome 验证：顶部从 `12:21:55` 推进到 `12:22:25`；同一 DOM node 经过
+  两轮以上 3 秒轮询仍可点击；服务重启后旧 node 变 stale、新页面自动载入并显示
+  `后台在线 · 12:25:22`；生产状态明确显示“就绪/待完成”，旧源码证据显示 `STALE`；
+  浏览器控制台无错误。
 - 最新提交服务重启后，在新的 Chrome 页面实际完成 OKX 账户请求和 `personal_sign`：页面显示“钱包会话：已证明地址控制权 / Signer：钱包签名通道已准备”，后台快照为 `CONNECTED`、Polygon `137`、`signerStatus=READY`。Gate 仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，没有启动 Live 或链上写入。
 - 收尾生产验证曾连续两次在全套并发下让三轮 Phase0/Replay 打包测试超过默认 `5 s`（`5.117 s`、`5.164 s`），单测独立运行在 `4.57 s` 通过；已与同文件其他重型打包用例一致改为显式 `15 s`，最终生产验证恢复 `72 files / 858 tests` 全绿，不改变运行时代码。
 - 复现并修复 `LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID`：钱包会话在旧源码版本上装配后，验证工件更新会让旧 Live Gate 在预检时抛出 500。现在服务捕获验证/证据版本失配，自动撤销旧会话、取消待签名请求并返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`，明确要求重新连接；回归测试覆盖旧会话、PAPER/LIVE_DISABLED 和无真实操作。修复后需以最新提交重新生成验证工件并重启 4173，钱包内存会话会按设计清掉。

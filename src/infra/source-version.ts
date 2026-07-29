@@ -1,4 +1,7 @@
-import { execFileSync } from "node:child_process";
+import {
+  execFileSync,
+  type ExecFileSyncOptionsWithStringEncoding,
+} from "node:child_process";
 
 export interface SourceVersion {
   commit: string;
@@ -11,8 +14,13 @@ export function resolveSourceVersion(
 ): SourceVersion {
   const environmentCommit = environment.SOURCE_CODE_COMMIT?.trim();
   try {
-    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
-    const status = execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).trim();
+    const commandOptions: ExecFileSyncOptionsWithStringEncoding = {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    };
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], commandOptions).trim();
+    const status = execFileSync("git", ["status", "--porcelain"], commandOptions).trim();
     const environmentMismatch = environmentCommit !== undefined && environmentCommit !== commit;
     const environmentMarksDirty = environment.SOURCE_CODE_DIRTY !== undefined
       && environment.SOURCE_CODE_DIRTY !== "0";

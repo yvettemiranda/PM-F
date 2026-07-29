@@ -64,7 +64,7 @@ export interface LiveProductionReadiness {
 
 export interface LiveProductionReadinessInput {
   databaseAvailable: boolean;
-  gatePrerequisites: readonly { key: string; status: string }[];
+  gatePrerequisites: readonly { key: string; status: string; effectiveStatus?: string }[];
   executionCapability: "AVAILABLE" | "PENDING_PREREQUISITES" | "NOT_CONFIGURED";
   injectedChecks?: LiveProductionCapabilityOverrides;
   walletSession?: {
@@ -305,10 +305,13 @@ export function saveLiveProductionConfig(
 }
 
 function prerequisitePassed(
-  prerequisites: readonly { key: string; status: string }[],
+  prerequisites: readonly { key: string; status: string; effectiveStatus?: string }[],
   key: string,
 ): boolean {
-  return prerequisites.some((item) => item.key === key && item.status === "PASSED");
+  return prerequisites.some((item) => (
+    item.key === key
+    && (item.effectiveStatus ?? item.status) === "PASSED"
+  ));
 }
 
 export function liveProductionReadiness(

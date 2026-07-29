@@ -17,6 +17,9 @@
 - 最新用户授权请求在官方地域检查处被阻断：`GEOBLOCK_BLOCKED:US:CA`。不得绕过、伪造或
   手工覆盖地域 provider；除非 provider 在实际允许地区给出新的 `ALLOWED` 证据，否则不进入
   Live arming，也不记录最终用户授权通过。
+- 当前 Chrome 仍有一个服务重启前遗留的 OKX connect 弹窗；该请求已经失效，必须由用户
+  关闭后再从最新 Hecatonchires 页面发起新连接。浏览器安全策略不允许自动化工具代点或
+  绕过扩展确认。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 - “Live 对账”当前不可点击是预期的安全阻断：只有验证过的钱包会话、Signer、只读余额、认证 CLOB 和已装配 LiveRuntime 全部就绪后才开放；未连接钱包时接口必须返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`。
 
@@ -56,15 +59,24 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 2026-07-29 第二轮稳定性修复：3 秒轮询不再因纯时间变化整体替换 DOM；钱包流程、
+  输入、弹窗和操作期间延后重绘；顶部改用最新后台快照时间并能显示连接异常。服务实例
+  变化自动 reload，真实 Chrome 的时间推进、稳定 node 和重启换页均通过。
+- 钱包发现不再在先看到 MetaMask 等非 OKX provider 时过早返回；现在持久接收 EIP-6963、
+  优先 OKX/OKEX，并兼容 `window.okxwallet(.ethereum)`。连接后监听 accounts/chain/
+  disconnect，漂移时安全撤销后台会话。
+- Gate prerequisite 的数据库原始状态继续保留，但 UI 依据当前服务源码生成
+  `effectiveStatus`；证据 commit 不匹配或服务源码 dirty 时显示 `STALE`。生产能力 badge
+  明确显示“就绪/待完成”，不再只靠颜色或把历史 `PASSED` 当成当前通过。
 - 三轮 Phase0/Replay 证据打包测试在全套并发下稳定略超默认 `5 s`，但独立执行可通过，属于测试时限而非产物错误；该重型用例现在使用与相邻打包测试一致的 `15 s` 显式时限，生产逻辑未变。
 - 2026-07-29：钱包连接只使用 `window.ethereum` 时，OKX 延迟注入或多扩展并存会出现“扩展弹窗完成但页面未连接”。新增 EIP-6963 discovery，优先 OKX/OKEX，兼容 `ethereum.providers` 和传统注入；服务重启后的 disconnected 状态也改成明确的“需重新签名”提示。新增 3 个回归用例，未改变 `PAPER + LIVE_DISABLED + liveAllowed=false`。
 - OKX personal-sign 已验证后，默认 LiveRuntime 因源码未清洁抛出
   `LIVE_PRODUCTION_SOURCE_DIRTY`，旧路由会把刚建立的钱包会话一并回滚，造成“弹窗成功但
   页面仍未连接”。现在仅对这个明确的装配前置条件失败保留 `CONNECTED` 会话并返回待装配
   状态；身份、网络或签名失败仍 fail closed。用户需在服务重启后重新连接一次。
-- UI 每 3 秒轮询会整页替换 DOM，重复触发 `reveal`、header 和折叠内容进入动画，表现为
-  页面闪一下；现在只有首次成功加载播放进入动画，后台刷新使用 `refresh-render` 禁止
-  动画重播，保留数据轮询和面板状态恢复。
+- UI 早期仅通过 `refresh-render` 禁止动画重播，但仍每 3 秒替换整页 DOM，按钮和钱包
+  异步流程仍会失效；现已升级为 snapshot render key，纯时间刷新只原位更新顶部状态，
+  不再替换节点。
 - Finder 双击 `.command` 时没有加载用户 PATH，旧入口在 `command -v pnpm` 处直接退出，
   表现为终端一闪而过且浏览器不打开。`launch-hecatonchires-ui.command` 现在会探测
   用户级 pnpm、Homebrew pnpm 和 Codex bundled pnpm，再沿用同一 Node PATH 推导；在

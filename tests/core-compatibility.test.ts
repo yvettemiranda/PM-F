@@ -43,6 +43,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function createProjectFixture(): string {
   const fixture = mkdtempSync(join(tmpdir(), "ni-k-core-compatibility-"));
   cpSync(join(projectRoot, "src"), join(fixture, "src"), { recursive: true });
+  cpSync(join(projectRoot, "prototype"), join(fixture, "prototype"), { recursive: true });
   cpSync(join(projectRoot, "操作入口"), join(fixture, "操作入口"), { recursive: true });
   cpSync(join(projectRoot, "tests"), join(fixture, "tests"), { recursive: true });
   cpSync(join(projectRoot, "package.json"), join(fixture, "package.json"));
@@ -207,6 +208,11 @@ describe("Paper Campaign core compatibility", () => {
       appendFileSync(join(fixture, "操作入口/README_只需看这里.txt"), "\noperator-presentation-mutation\n");
       expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
       expect(computeOperatorBuildHash(fixture)).not.toBe(baselineOperator);
+
+      const operatorBeforeUiMutation = computeOperatorBuildHash(fixture);
+      appendFileSync(join(fixture, "prototype/live-ui/app.js"), "\nvoid \"ui-stability-mutation\";\n");
+      expect(computeCoreCompatibilityHash(buildCurrentCoreCompatibilityManifest(fixture))).toBe(baselineCore);
+      expect(computeOperatorBuildHash(fixture)).not.toBe(operatorBeforeUiMutation);
 
       const operatorBeforeCliMutation = computeOperatorBuildHash(fixture);
       const campaignCliPath = join(fixture, "src/cli/paper-campaign-run.ts");

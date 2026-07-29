@@ -6,6 +6,7 @@ const source = readFileSync(new URL("../prototype/live-ui/wallet-provider.js", i
 
 class FakeWindow {
   ethereum: { request(): Promise<unknown> } | null = null;
+  okxwallet: { request(): Promise<unknown> } | null = null;
   readonly Event = class {
     constructor(readonly type: string) {}
   };
@@ -67,6 +68,39 @@ describe("browser wallet provider discovery", () => {
     });
 
     await expect(pending).resolves.toBe(okxProvider);
+  });
+
+  it("waits for a delayed OKX announcement instead of selecting another injected wallet", async () => {
+    const windowObject = new FakeWindow();
+    const otherProvider = {
+      isMetaMask: true,
+      request: async () => null,
+    };
+    const okxProvider = {
+      isOkxWallet: true,
+      request: async () => null,
+    };
+    windowObject.ethereum = otherProvider;
+    const wallet = load(windowObject);
+    const pending = wallet.discover({ timeoutMs: 100 });
+    windowObject.dispatchEvent({
+      type: "eip6963:announceProvider",
+      detail: {
+        info: { name: "OKX Wallet", rdns: "com.okx.wallet" },
+        provider: okxProvider,
+      },
+    });
+
+    await expect(pending).resolves.toBe(okxProvider);
+  });
+
+  it("recognizes the OKX legacy injection point", async () => {
+    const windowObject = new FakeWindow();
+    const okxProvider = { request: async () => null };
+    windowObject.okxwallet = okxProvider;
+    const wallet = load(windowObject);
+
+    await expect(wallet.discover()).resolves.toBe(okxProvider);
   });
 
   it("returns null instead of hanging when no wallet announces", async () => {

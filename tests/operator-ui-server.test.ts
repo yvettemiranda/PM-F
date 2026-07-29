@@ -96,6 +96,14 @@ describe("operator UI server", () => {
       ok: true,
       data: {
         schemaVersion: "operator-dashboard-v1",
+        service: {
+          instanceId: expect.any(String),
+          startedAt: expect.any(String),
+          sourceVersion: {
+            commit: expect.any(String),
+            dirty: expect.any(Boolean),
+          },
+        },
         targetRuntime: null,
         comparisons: [],
       },

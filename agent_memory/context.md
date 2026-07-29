@@ -7,9 +7,10 @@
 
 ## Safety boundary
 - 必须保持 `execution_mode=PAPER`、`live_gate_state=LIVE_DISABLED`、`liveAllowed=false`。
-- 本轮禁止连接用户钱包、加载 private key/seed、启动 Paper、派生真实 CLOB
-  credentials、submit/cancel、approve、redeem、真实订单和链上写入；代码路径可以
-  完整实现和隔离验证，未来只有用户在 UI 中逐步确认后才可触达。
+- 当前允许在 localhost UI 中连接浏览器钱包并执行仅用于证明公开地址控制权的
+  `personal_sign`；浏览器扩展内的确认必须由用户本人完成。仍禁止加载
+  private key/seed、启动 Paper、启用 Live、submit/cancel、approve、redeem、真实订单和
+  链上写入。钱包已连接只代表身份会话建立，不代表获得交易授权。
 - 禁止绕过 geoblock、时钟、安全 Gate、数据完整性 Gate，禁止覆盖历史失败证据。用户已明确授权把旧 Core 的有效 `12 h` 与新 Core 的有效 `12 h` 作为独立证据跨 Core 汇总，但不得篡改数据库或伪称同 Core Campaign 完成。
 - Gap、无法证明的跨源去重、证据不完整的 SPLIT/CONVERSION、无法证明完整 outcome set 的 MERGE 继续 fail closed。
 
@@ -93,9 +94,11 @@
   `LIVE_PRODUCTION_*_INVALID` 时撤销旧钱包租约、取消待签名请求并回到
   `PAPER + LIVE_DISABLED`，返回 `LIVE_RUNTIME_STALE_RECONNECT_REQUIRED`；更新源码或
   验证工件后必须重启服务并重新连接。
-- UI 快照仍每 `3 s` 轮询；首次成功加载播放一次进入动画，后续整页快照替换带
-  `refresh-render` 类并关闭进入动画，避免轮询导致页面闪烁。折叠面板状态仍由
-  `openPanels` 恢复，编辑中的输入仍跳过静默刷新覆盖。
+- UI 快照仍每 `3 s` 轮询，但 `generatedAt`、readiness `checkedAt` 和钱包
+  `lastSeenAt/expiresAt` 等纯时间字段不会再触发整页 DOM 替换；顶部“后台在线”时间原位更新。
+  真正的数据变化才重绘，且输入编辑、弹窗、后台操作和钱包连接期间延后重绘。服务提供
+  instance id/source version，服务重启后页面会自动刷新到新实例。Gate 前置条件同时展示
+  当前源码上的 `effectiveStatus`，旧提交或 dirty 源码证据显示为 `STALE`。
 
 ## Application entry
 - 日常主入口为桌面 `/Users/d4clt/Desktop/Polymarket验证_点这里/Hecatonchires.command`，它指向仓库内 `scripts/launch-hecatonchires-ui.command`。

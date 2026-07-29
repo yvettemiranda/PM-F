@@ -12,8 +12,12 @@ const state = {
   walletWorkerGeneration: 0,
   walletWorkerSessionId: null,
   walletProvider: null,
+  walletProviderCleanup: null,
+  walletFlowActive: false,
   openPanels: new Set(),
   hasRenderedContent: false,
+  lastRenderKey: null,
+  serviceInstanceId: null,
 };
 
 const SETTING_META = {
@@ -110,13 +114,7 @@ function currentMode(snapshot) {
 }
 
 function statusText(snapshot) {
-  if (!snapshot) return "正在连接 · —";
-  if (snapshot.database.status === "ERROR") return "后台异常";
-  if (snapshot.database.status === "NOT_INITIALIZED") return "等待初始化";
-  const runtime = snapshot.runtime.state;
-  if (runtime === "RUNNING") return "同步中 · 运行";
-  if (runtime === "RECOVERY_REQUIRED") return "需要恢复";
-  return `同步正常 · ${formatTime(snapshot.targetRuntime?.updatedAt)}`;
+  return window.HecatonchiresUiState.statusText(snapshot, state.error);
 }
 
 function header(snapshot) {
@@ -128,7 +126,7 @@ function header(snapshot) {
       <div class="topbar-inner">
         <div class="brand">${logo()}<span>Hecatonchires</span></div>
         <div class="top-actions">
-          <span class="sync-state ${snapshot?.runtime?.state === "RECOVERY_REQUIRED" ? "warning" : ""}">
+          <span class="sync-state ${snapshot?.runtime?.state === "RECOVERY_REQUIRED" ? "warning" : ""}" data-role="backend-status">
             <i></i><span>${escapeHtml(statusText(snapshot))}</span>
           </span>
           <button class="mode-button" id="mode-button" type="button" aria-label="当前模式 ${escapeHtml(mode)}"
@@ -453,14 +451,23 @@ function livePanel(snapshot) {
         </div>
         <div class="production-check-list">
           ${(production?.checks ?? []).map((item) => `
-            <span class="production-check ${item.status === "READY" ? "ready" : "pending"}">
-              <i></i>${escapeHtml(checkLabels[item.key] ?? item.key)}
+            <span class="production-check ${item.status === "READY" ? "ready" : "pending"}"
+              title="${escapeHtml(item.reason ?? "")}">
+              <i></i>${escapeHtml(checkLabels[item.key] ?? item.key)} · ${item.status === "READY" ? "就绪" : "待完成"}
             </span>
           `).join("")}
         </div>
         <div class="prerequisite-list">
           ${prerequisites.length
-            ? prerequisites.slice(0, 8).map((item) => `<span class="prerequisite ${item.status === "PASSED" ? "passed" : "blocked"}">${escapeHtml(item.key)} · ${escapeHtml(item.status)}</span>`).join("")
+            ? prerequisites.slice(0, 8).map((item) => {
+              const visibleStatus = item.effectiveStatus ?? item.status;
+              const title = item.effectiveReason === "SOURCE_DIRTY"
+                ? "当前运行源码含未验证改动"
+                : item.effectiveReason === "SOURCE_COMMIT_MISMATCH"
+                  ? "证据属于旧版本，需要重新验证"
+                  : "";
+              return `<span class="prerequisite ${visibleStatus === "PASSED" ? "passed" : "blocked"}"${title ? ` title="${escapeHtml(title)}"` : ""}>${escapeHtml(item.key)} · ${escapeHtml(visibleStatus)}</span>`;
+            }).join("")
             : `<span class="empty-inline">数据库初始化后显示 Gate 前置条件</span>`}
         </div>
         <div class="ops-actions">
@@ -738,16 +745,34 @@ function render() {
   }
   bindEvents();
   state.hasRenderedContent = true;
+  state.lastRenderKey = window.HecatonchiresUiState.snapshotRenderKey(snapshot);
 }
 
 async function api(path, init = {}) {
   const requestInit = { ...init };
+  const timeoutMs = requestInit.timeoutMs;
+  delete requestInit.timeoutMs;
+  const controller = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? new AbortController()
+    : null;
+  const timeout = controller === null
+    ? null
+    : window.setTimeout(() => controller.abort(), timeoutMs);
   if (!requestInit.method && requestInit.body !== undefined) requestInit.method = "POST";
-  const response = await fetch(path, {
-    cache: "no-store",
-    ...requestInit,
-    headers: { "content-type": "application/json", ...(init.headers ?? {}) },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      cache: "no-store",
+      ...requestInit,
+      ...(controller === null ? {} : { signal: controller.signal }),
+      headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("后台响应超时");
+    throw error;
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout);
+  }
   let payload;
   try {
     payload = await response.json();
@@ -764,34 +789,75 @@ async function api(path, init = {}) {
   return payload.data;
 }
 
-async function refresh(silent = false) {
-  const activeEditor = silent
-    && document.activeElement?.matches(
+function updateHeaderStatus() {
+  const element = document.querySelector('[data-role="backend-status"]');
+  if (!element) return;
+  const text = element.querySelector("span");
+  if (text) text.textContent = statusText(state.snapshot);
+  element.classList.toggle(
+    "warning",
+    Boolean(state.error) || state.snapshot?.runtime?.state === "RECOVERY_REQUIRED",
+  );
+}
+
+function refreshInteractionActive() {
+  return Boolean(
+    state.busy
+    || state.walletFlowActive
+    || document.querySelector("#modal-backdrop")
+    || document.activeElement?.matches(
       "#target-input, #settings-form input, #live-config-form input, #live-config-form select",
-    );
+    ),
+  );
+}
+
+async function refresh(silent = false) {
+  if (state.refreshing) return;
   if (!silent) state.loading = state.snapshot === null;
   state.refreshing = true;
   if (!state.snapshot) render();
+  let renderRequired = !silent || !state.hasRenderedContent;
+  let serviceReplaced = false;
   try {
-    const data = await api("/api/operator/snapshot", { method: "GET", headers: {} });
+    const data = await api("/api/operator/snapshot", {
+      method: "GET",
+      headers: {},
+      timeoutMs: 8_000,
+    });
+    if (
+      window.HecatonchiresUiState.serviceInstanceChanged(
+        state.serviceInstanceId,
+        data,
+      )
+    ) {
+      serviceReplaced = true;
+      window.location.reload();
+      return;
+    }
+    state.serviceInstanceId = data?.service?.instanceId ?? state.serviceInstanceId;
+    renderRequired = renderRequired
+      || window.HecatonchiresUiState.snapshotRenderKey(data) !== state.lastRenderKey;
     state.snapshot = data;
     state.error = null;
     if (state.snapshot?.live?.walletSession?.status === "CONNECTED") startWalletRequestWorker();
   } catch (error) {
     state.error = error.message;
+    renderRequired = state.snapshot === null;
   } finally {
     state.loading = false;
     state.refreshing = false;
-    if (!activeEditor) render();
+    if (serviceReplaced) return;
+    if (renderRequired && (!silent || !refreshInteractionActive())) render();
+    else updateHeaderStatus();
   }
 }
 
 function discoverWalletProvider() {
   const discovery = window.HecatonchiresWalletProvider;
   if (typeof discovery?.discover === "function") {
-    return discovery.discover({ timeoutMs: 1_500 });
+    return discovery.discover({ timeoutMs: 3_000 });
   }
-  return Promise.resolve(window.ethereum);
+  return Promise.resolve(window.okxwallet?.ethereum ?? window.okxwallet ?? window.ethereum);
 }
 
 function setNotice(kind, title, message) {
@@ -886,11 +952,91 @@ async function restoreDefaults() {
   }
 }
 
+function clearWalletProviderBinding() {
+  state.walletProviderCleanup?.();
+  state.walletProviderCleanup = null;
+}
+
+async function invalidateConnectedWallet(message) {
+  if (state.busy === "断开失效钱包") return;
+  const sessionId = state.snapshot?.live?.walletSession?.sessionId;
+  state.walletWorkerGeneration += 1;
+  state.walletWorkerSessionId = null;
+  clearWalletProviderBinding();
+  state.walletProvider = null;
+  if (!sessionId) {
+    setNotice("error", "钱包会话已失效", message);
+    return;
+  }
+  state.busy = "断开失效钱包";
+  try {
+    const data = await api("/api/operator/live/wallet-session/disconnect", {
+      body: JSON.stringify({ sessionId }),
+    });
+    if (data.snapshot) state.snapshot = data.snapshot;
+  } catch {
+    // The next snapshot remains authoritative if the old session already expired.
+  } finally {
+    state.busy = null;
+    setNotice("error", "钱包会话已失效", `${message} 请重新连接钱包。`);
+    render();
+  }
+}
+
+function bindWalletProvider(provider) {
+  clearWalletProviderBinding();
+  if (typeof provider?.on !== "function") return;
+  const accountsChanged = (accounts) => {
+    const expected = state.snapshot?.live?.walletSession?.walletAddress?.toLowerCase();
+    const actual = Array.isArray(accounts) && typeof accounts[0] === "string"
+      ? accounts[0].toLowerCase()
+      : null;
+    if (expected && actual !== expected) {
+      void invalidateConnectedWallet("OKX 当前账户已经变化。");
+    }
+  };
+  const chainChanged = (chainId) => {
+    const parsed = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
+      ? Number.parseInt(chainId, 16)
+      : Number.NaN;
+    if (state.snapshot?.live?.walletSession?.status === "CONNECTED" && parsed !== 137) {
+      void invalidateConnectedWallet("OKX 已离开 Polygon 主网。");
+    }
+  };
+  const disconnected = () => {
+    if (state.snapshot?.live?.walletSession?.status === "CONNECTED") {
+      void invalidateConnectedWallet("OKX 已断开当前网页。");
+    }
+  };
+  provider.on("accountsChanged", accountsChanged);
+  provider.on("chainChanged", chainChanged);
+  provider.on("disconnect", disconnected);
+  state.walletProviderCleanup = () => {
+    if (typeof provider.removeListener !== "function") return;
+    provider.removeListener("accountsChanged", accountsChanged);
+    provider.removeListener("chainChanged", chainChanged);
+    provider.removeListener("disconnect", disconnected);
+  };
+}
+
 async function connectLiveWallet() {
+  if (state.walletFlowActive) return;
+  state.walletFlowActive = true;
+  state.busy = "连接钱包";
+  state.notice = {
+    kind: "processing",
+    title: "正在连接 OKX",
+    message: "请在 OKX 中先确认连接，再确认只用于证明地址控制权的签名。",
+  };
+  render();
   try {
     const provider = await discoverWalletProvider();
     if (!provider || typeof provider.request !== "function") {
-      setNotice("error", "未检测到钱包", "OKX 钱包尚未注入当前页面。请确认扩展已启用，再点击一次连接钱包。");
+      setNotice(
+        "error",
+        "未检测到钱包",
+        "当前页面没有收到 OKX provider。请在扩展管理中允许 OKX 访问 127.0.0.1，然后刷新本页重试。",
+      );
       return;
     }
     state.walletProvider = provider;
@@ -943,9 +1089,14 @@ async function connectLiveWallet() {
       );
       render();
     }
+    bindWalletProvider(provider);
     startWalletRequestWorker();
   } catch (error) {
     setNotice("error", "钱包未连接", error.message ?? "钱包连接被取消或未通过安全证明。");
+  } finally {
+    state.walletFlowActive = false;
+    state.busy = null;
+    render();
   }
 }
 
@@ -958,6 +1109,8 @@ async function disconnectLiveWallet() {
     await runAction("断开钱包", "/api/operator/live/wallet-session/disconnect", {
       body: JSON.stringify({ sessionId }),
     }, { success: "钱包会话已断开，Live 继续保持禁用。" });
+    clearWalletProviderBinding();
+    state.walletProvider = null;
   } catch {
     // runAction already surfaces the backend reason.
   }
@@ -1039,6 +1192,10 @@ async function processWalletRequest(provider, session, request) {
 
 async function walletRequestWorker(generation) {
   const provider = state.walletProvider ?? await discoverWalletProvider();
+  if (provider && typeof provider.request === "function") {
+    state.walletProvider = provider;
+    bindWalletProvider(provider);
+  }
   while (generation === state.walletWorkerGeneration) {
     const session = state.snapshot?.live?.walletSession;
     if (!provider || typeof provider.request !== "function" || session?.status !== "CONNECTED") return;
@@ -1256,6 +1413,10 @@ document.addEventListener("keydown", (event) => {
 
 refresh();
 state.refreshTimer = window.setInterval(() => refresh(true), 3000);
+window.addEventListener("focus", () => refresh(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refresh(true);
+});
 window.setTimeout(() => {
   if (state.snapshot?.live?.walletSession?.status === "CONNECTED") startWalletRequestWorker();
 }, 0);

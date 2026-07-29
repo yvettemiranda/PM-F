@@ -140,6 +140,12 @@ export const VALIDATION_POLICY_FILES = [
 ] as const;
 
 export const OPERATOR_BUILD_FILES = [
+  "prototype/live-ui/app.js",
+  "prototype/live-ui/index.html",
+  "prototype/live-ui/server.mjs",
+  "prototype/live-ui/styles.css",
+  "prototype/live-ui/ui-state.js",
+  "prototype/live-ui/wallet-provider.js",
   "src/cli/observe-only.ts",
   "src/cli/operator-control.ts",
   "src/cli/paper-campaign-evidence.ts",
@@ -167,6 +173,7 @@ export const OPERATOR_BUILD_FILES = [
   "src/operator/operator-actions.ts",
   "src/operator/operator-dashboard.ts",
   "src/operator/operator-mutation-guard.ts",
+  "src/operator/operator-status.ts",
   "src/operator/operator-ui-server.ts",
   "src/operator/production-live-account.ts",
   "src/operator/production-live-prerequisites.ts",
@@ -231,6 +238,8 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/operator-control.test.ts",
   "tests/operator-actions.test.ts",
   "tests/operator-dashboard.test.ts",
+  "tests/operator-status.test.ts",
+  "tests/operator-ui-state.test.ts",
   "tests/operator-ui-server.test.ts",
   "tests/operator-paper-campaign-shell.test.ts",
   "tests/operator-process-lifecycle.test.ts",
