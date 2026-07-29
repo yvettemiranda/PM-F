@@ -5881,6 +5881,40 @@ describe("LiveRuntime", () => {
     runtime.close();
   });
 
+  it("marks successful startup recovery ready while the Gate is still waiting for explicit confirmation", async () => {
+    const env = setup();
+    const executor = liveExecutor(env.databasePath);
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, () => new Date(now));
+    const binding = new LiveIdentityBinding(
+      env.databasePath,
+      new FakeWalletProvider({ address: wallet }),
+      new FakeSigner(wallet),
+      "TEST",
+      sourceVersion,
+    );
+    const runtime = new LiveRuntime(new FakeGate(true), executor, consumer, binding);
+    const recovery = await runtime.recoverOnStartup(accountId);
+    expect(recovery.ready).toBe(true);
+    expect(recovery.gate.allowed).toBe(true);
+    expect(recovery.execution.passed).toBe(true);
+    expect(recovery.identity.ready).toBe(true);
+    let currentTime = new Date(now).valueOf();
+    const run = await runtime.runAfterRecovery({
+      accountId,
+      durationMs: 1,
+      now: () => new Date(currentTime++),
+      wait: async () => {},
+    });
+    expect(run.report.recovery).toEqual(recovery.execution);
+    await expect(runtime.runAfterRecovery({
+      accountId,
+      durationMs: 1,
+      now: () => new Date(currentTime++),
+      wait: async () => {},
+    })).rejects.toThrow("LIVE_RUNTIME_STARTUP_RECOVERY_REQUIRED");
+    runtime.close();
+  });
+
   it("rechecks identity at the polling entrypoint and disables the Gate on drift", async () => {
     const env = setup();
     const gate = new FakeGate(false, "LIVE_DISABLED_IN_TEST");

@@ -90,12 +90,15 @@ export class LiveRunner {
     this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
-  async run(signal?: AbortSignal): Promise<LiveRunnerReport> {
+  async run(
+    signal?: AbortSignal,
+    preparedRecovery?: { passed: boolean; reason: string; recoveryRunId: string },
+  ): Promise<LiveRunnerReport> {
     const startedAt = this.now().toISOString();
     const deadline = this.options.durationMs
       ? this.now().valueOf() + this.options.durationMs
       : Number.POSITIVE_INFINITY;
-    const recovery = await this.executor.recoverOnStartup(this.options.accountId);
+    const recovery = preparedRecovery ?? await this.executor.recoverOnStartup(this.options.accountId);
     const errors: LiveRunnerReport["errors"] = [];
     let errorCount = 0;
     const recordError = (operation: string, message: string): void => {

@@ -5,8 +5,9 @@
   对账、本机时钟偏差重复阻断、production 外部读取超时、CLOB time RTT 误判和生产钱包
   空仓假设。Schema `2.32.0` 已迁移并为真实 Safe 捕获 `5` 项不可变启动前仓位基线。最新
   一键流程进一步发现零余额时错误调用无 `token_id` 的 CONDITIONAL allowance API；已用
-  红测复现并修复，全套 `895` 测试通过，仍需提交、生成同提交 production validation
-  artifact、重启和真实一键复核。
+  红测复现并修复。随后暴露“先确认 ACTIVE、再执行会主动降级 ACTIVE 的启动恢复”这一
+  不可满足顺序；已改成 arming 恢复和空闲 runner 先启动、Gate 最后确认，仍需全套验证、
+  提交、生成同提交 production validation artifact、重启和真实一键复核。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
@@ -70,14 +71,17 @@
 - 2026-07-29：余额为零的钱包准备不再调用缺少 `token_id` 的 CONDITIONAL allowance
   API。它会直接返回 `LIVE_WALLET_SETUP_DEFERRED_NO_COLLATERAL`，不发送授权交易并允许
   一键流程继续；未来具体订单仍执行余额和 token-specific allowance 检查。
+- 2026-07-29：一键 Live 不再先确认 Gate 后运行 startup recovery。恢复和 runner 在
+  `LIVE_ARMING` 下完成，runner 复用已经通过的 execution recovery，避免二次恢复把 Gate
+  降级；最后确认才进入 `LIVE_ACTIVE`。确认失败会先停止空闲 runner，再 emergency-disable。
 - 2026-07-29：官方 CLOB time 实测五次全部 HTTP 200，但当前网络响应耗时
   `2.3–8.2 s`；旧默认 `2 s` RTT 门槛导致 `CLOCK_RTT_UNSAFE`。默认 RTT 预算现与
   `10 s` 请求超时一致，仍保留最多两次请求、超时/HTTP/payload 失败关闭，以及调用方显式
   更严格 RTT 上限的能力。
 - 2026-07-29 一键 Live 稳定性修复：活跃 localhost 心跳会滑动续期钱包租约；PAPER→LIVE
-  后台按 Gate→Live 对账→钱包 readiness→新鲜 Gate→确认→runtime 启动执行，任何阶段失败
-  自动回滚 `PAPER + LIVE_DISABLED`。UI 只需一次模式二次确认，不再重复输入确认词或手动
-  依次点击 Gate/对账；手动操作保留在高级诊断。
+  后台按 Gate→Live 对账→钱包 readiness→新鲜 Gate→arming 启动恢复和空闲 runtime→最终
+  确认执行，任何阶段失败自动回滚 `PAPER + LIVE_DISABLED`。UI 只需一次模式二次确认，
+  不再重复输入确认词或手动依次点击 Gate/对账；手动操作保留在高级诊断。
 - 2026-07-29 第二轮稳定性修复：3 秒轮询不再因纯时间变化整体替换 DOM；钱包流程、
   输入、弹窗和操作期间延后重绘；顶部改用最新后台快照时间并能显示连接异常。服务实例
   变化自动 reload，真实 Chrome 的时间推进、稳定 node 和重启换页均通过。

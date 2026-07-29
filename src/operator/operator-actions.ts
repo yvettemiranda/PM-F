@@ -98,6 +98,7 @@ export interface OperatorLiveRuntimeActions {
 export interface OperatorLiveRuntimeBackend {
   recoverOnStartup(accountId: string): Promise<{ ready: boolean }>;
   run(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
+  runAfterRecovery?(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
   emergencyStop(accountId: string, reason: string, actor?: string): Promise<void>;
 }
 
@@ -463,7 +464,9 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
     this.abortController = controller;
     this.running = true;
     this.lastRunError = null;
-    void this.options.runtime.run(
+    const run = this.options.runtime.runAfterRecovery?.bind(this.options.runtime)
+      ?? this.options.runtime.run.bind(this.options.runtime);
+    void run(
       {
         ...(this.options.runOptions ?? {}),
         accountId: this.options.accountId,

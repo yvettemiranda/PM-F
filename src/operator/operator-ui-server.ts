@@ -9,6 +9,7 @@ import {
   DefaultOperatorRuntimeActions,
   UnconfiguredOperatorLiveRuntimeActions,
   type OperatorLiveGateActions,
+  type OperatorLiveGateResult,
   type OperatorLiveRuntimeActions,
   type OperatorLiveRuntimeResult,
   type OperatorRuntimeActions,
@@ -871,7 +872,19 @@ async function handleApi(context: RequestContext): Promise<void> {
     const reason = optionalString(body, "reason", "UI_ONE_CLICK_LIVE");
     const confirmationText = stringField(body, "confirmationText");
     let stage = "GATE";
+    let runtimeStarted = false;
     const rollback = async (code: string): Promise<void> => {
+      if (runtimeStarted) {
+        try {
+          await liveRuntimeActions.stop({
+            actor: "SYSTEM",
+            reason: `LIVE_ACTIVATION_${stage}_ROLLBACK:${code}`,
+          });
+        } catch {
+          // Continue to disable the Gate even if the idle runtime cannot stop cleanly.
+        }
+        runtimeStarted = false;
+      }
       try {
         await liveGateActions.emergencyDisable({
           actor: "SYSTEM",
@@ -961,6 +974,31 @@ async function handleApi(context: RequestContext): Promise<void> {
         return;
       }
 
+      stage = "RUNTIME_START";
+      const runtime = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveRuntimeActions.start({
+          actor,
+          reason: "LIVE_GATE_ARMED_RUNTIME_START",
+        }),
+      });
+      if (!runtime.accepted) {
+        await rollback(runtime.code);
+        throw new HttpError(
+          409,
+          runtime.code,
+          "Live 运行时启动失败，Gate 已自动回滚。",
+          {
+            stage,
+            safety: "PAPER + LIVE_DISABLED",
+            result: runtime,
+          },
+        );
+      }
+      runtimeStarted = true;
+
       stage = "CONFIRMATION";
       const result = await withLiveRuntimeFreshnessGuard({
         options,
@@ -985,30 +1023,6 @@ async function handleApi(context: RequestContext): Promise<void> {
         ));
         return;
       }
-
-      stage = "RUNTIME_START";
-      const runtime = await withLiveRuntimeFreshnessGuard({
-        options,
-        walletSessionManager,
-        walletRequestBroker,
-        action: () => liveRuntimeActions.start({
-          actor,
-          reason: "LIVE_GATE_CONFIRMED_START",
-        }),
-      });
-      if (!runtime.accepted) {
-        await rollback(runtime.code);
-        throw new HttpError(
-          409,
-          runtime.code,
-          "Live 运行时启动失败，Gate 已自动回滚。",
-          {
-            stage,
-            safety: "PAPER + LIVE_DISABLED",
-            result: runtime,
-          },
-        );
-      }
       success(response, {
         result,
         runtime,
@@ -1022,9 +1036,11 @@ async function handleApi(context: RequestContext): Promise<void> {
       }, 202);
       return;
     } catch (error) {
-      if (error instanceof HttpError) throw error;
       const code = errorCode(error);
-      await rollback(code);
+      const runtimeWasStarted = runtimeStarted;
+      if (runtimeWasStarted) await rollback(code);
+      if (error instanceof HttpError) throw error;
+      if (!runtimeWasStarted) await rollback(code);
       throw new HttpError(
         409,
         code,
@@ -1041,26 +1057,14 @@ async function handleApi(context: RequestContext): Promise<void> {
   if (request.method === "POST" && path === "/api/operator/live/confirm") {
     const body = await readJson(request);
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
-    const result = await withLiveRuntimeFreshnessGuard({
-      options,
-      walletSessionManager,
-      walletRequestBroker,
-      action: () => liveGateActions.confirmActivation({
-        actor,
-        confirmationText: stringField(body, "confirmationText"),
-      }),
-    });
-    if (!result.allowed) {
-      failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 二次确认未通过。", result));
-      return;
-    }
+    const confirmationText = stringField(body, "confirmationText");
     const runtime = await withLiveRuntimeFreshnessGuard({
       options,
       walletSessionManager,
       walletRequestBroker,
       action: () => liveRuntimeActions.start({
         actor,
-        reason: "LIVE_GATE_CONFIRMED_START",
+        reason: "LIVE_GATE_ARMED_RUNTIME_START",
       }),
     });
     if (!runtime.accepted) {
@@ -1072,8 +1076,42 @@ async function handleApi(context: RequestContext): Promise<void> {
         409,
         runtime.code,
         "Live Gate 已回滚：运行时启动失败。",
-        { gate: result, runtime },
+        { runtime },
       );
+    }
+    let result: OperatorLiveGateResult;
+    try {
+      result = await withLiveRuntimeFreshnessGuard({
+        options,
+        walletSessionManager,
+        walletRequestBroker,
+        action: () => liveGateActions.confirmActivation({
+          actor,
+          confirmationText,
+        }),
+      });
+    } catch (error) {
+      await liveRuntimeActions.stop({
+        actor: "SYSTEM",
+        reason: "LIVE_GATE_CONFIRMATION_ROLLBACK",
+      });
+      await liveGateActions.emergencyDisable({
+        actor: "SYSTEM",
+        reason: "LIVE_GATE_CONFIRMATION_ROLLBACK",
+      });
+      throw error;
+    }
+    if (!result.allowed) {
+      await liveRuntimeActions.stop({
+        actor: "SYSTEM",
+        reason: "LIVE_GATE_CONFIRMATION_ROLLBACK",
+      });
+      await liveGateActions.emergencyDisable({
+        actor: "SYSTEM",
+        reason: "LIVE_GATE_CONFIRMATION_ROLLBACK",
+      });
+      failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 二次确认未通过。", result));
+      return;
     }
     success(response, { result, runtime, snapshot: dashboardSnapshot() }, 202);
     return;

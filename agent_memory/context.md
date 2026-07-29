@@ -116,7 +116,9 @@
   钱包已授权本站时先复用 `eth_accounts`，不会伪装成仍需连接确认。
 - 活跃控制台的 `3 s` 心跳会续期短期钱包会话；页面关闭且没有心跳时仍会在 30 分钟后
   自动失效。模式切换已收敛为“一次确认”：必要时先恢复钱包会话，再由后台依次执行
-  Gate、Live 对账、钱包授权准备、最终 Gate 和 runtime 启动，任何步骤失败自动回滚 Paper。
+  Gate、Live 对账、钱包授权准备、最终 Gate 检查、`LIVE_ARMING` 下的同步启动恢复和空闲
+  runtime 启动，最后才确认 `LIVE_ACTIVE`。空闲 runtime 在确认前不能消费 Signal；任何
+  步骤失败会先停止 runtime 再回滚 Paper。
 - 桌面入口现在还会在 Finder 精简 PATH 中探测用户级/Homebrew/Codex bundled `pnpm`，再补齐同目录 Node；这修复了双击时找不到 pnpm 导致入口立即退出的问题。
 - 主入口故意不放进 `操作入口/`，避免把纯 UI 启动脚本纳入 Paper core compatibility manifest；`操作入口/` 的三个 `.command` 继续作为 Paper 验证/安全暂停/结果查看工具。
 

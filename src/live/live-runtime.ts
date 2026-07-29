@@ -36,6 +36,8 @@ export interface LiveRuntimeRunResult {
  * disabled until the persisted Gate is independently armed.
  */
 export class LiveRuntime {
+  private readonly preparedRecoveries = new Map<string, LiveRuntimeRecovery>();
+
   constructor(
     private readonly gate: Pick<
       LiveGate,
@@ -50,12 +52,15 @@ export class LiveRuntime {
     const gate = await this.gate.recoverOnStartup();
     const execution = await this.executor.recoverOnStartup(accountId);
     const identity = await this.checkIdentity(accountId);
-    return {
+    const recovery = {
       gate,
       execution,
       identity,
-      ready: gate.allowed && execution.passed && identity.ready && this.executor.isGateActive(),
+      ready: gate.allowed && execution.passed && identity.ready,
     };
+    if (recovery.ready) this.preparedRecoveries.set(accountId, recovery);
+    else this.preparedRecoveries.delete(accountId);
+    return recovery;
   }
 
   async requestActivation(accountId: string, input: LiveActivationInput): Promise<LiveGateResult> {
@@ -80,12 +85,26 @@ export class LiveRuntime {
     return { gateRecovery, identity, report };
   }
 
+  async runAfterRecovery(options: LiveRunnerOptions, signal?: AbortSignal): Promise<LiveRuntimeRunResult> {
+    const recovery = this.preparedRecoveries.get(options.accountId);
+    if (recovery === undefined) throw new Error("LIVE_RUNTIME_STARTUP_RECOVERY_REQUIRED");
+    this.preparedRecoveries.delete(options.accountId);
+    const identity = await this.checkIdentity(options.accountId);
+    if (!identity.ready) throw new Error("LIVE_RUNTIME_IDENTITY_NOT_READY");
+    const report = await new LiveRunner(this.executor, this.consumer, options).run(
+      signal,
+      recovery.execution,
+    );
+    return { gateRecovery: recovery.gate, identity, report };
+  }
+
   async emergencyStop(accountId: string, reason: string, actor = "SYSTEM"): Promise<void> {
     await this.executor.emergencyStop(accountId, reason);
     await this.gate.emergencyDisable({ actor, reason });
   }
 
   close(): void {
+    this.preparedRecoveries.clear();
     this.identityBinding.close();
     this.consumer.close();
     this.executor.close();

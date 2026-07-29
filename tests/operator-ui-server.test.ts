@@ -670,7 +670,7 @@ describe("operator UI server", () => {
     });
   });
 
-  it("starts Live only after Gate confirmation and couples wallet setup and emergency stop to the runtime", async () => {
+  it("starts the recovered idle runtime before Gate confirmation and couples emergency stop", async () => {
     const allowed = {
       allowed: true,
       runId: "gate-ready",
@@ -719,7 +719,7 @@ describe("operator UI server", () => {
     expect(liveGateActions.confirmActivation).toHaveBeenCalledOnce();
     expect(liveRuntimeActions.start).toHaveBeenCalledWith({
       actor: "TEST",
-      reason: "LIVE_GATE_CONFIRMED_START",
+      reason: "LIVE_GATE_ARMED_RUNTIME_START",
     });
 
     const disable = await mutation(baseUrl, "/api/operator/live/emergency-disable", {
@@ -736,7 +736,7 @@ describe("operator UI server", () => {
     });
   });
 
-  it("runs Gate, reconciliation, wallet readiness and Live startup as one activation", async () => {
+  it("starts the recovered idle runtime before final Gate confirmation", async () => {
     const calls: string[] = [];
     const allowed = {
       allowed: true,
@@ -807,7 +807,7 @@ describe("operator UI server", () => {
         },
       },
     });
-    expect(calls).toEqual(["gate", "reconcile", "wallet", "gate", "confirm", "start"]);
+    expect(calls).toEqual(["gate", "reconcile", "wallet", "gate", "start", "confirm"]);
   });
 
   it("rolls one-click Live activation back when reconciliation is blocked", async () => {

@@ -1,6 +1,14 @@
 # Progress
 
 ## Current task
+- 2026-07-29 零余额 readiness 修复后的真实流程已通过钱包准备和最终 Gate 检查，但在
+  `LIVE_RUNTIME_STARTUP_RECOVERY_BLOCKED` 回滚。根因是旧 UI 路由先确认
+  `LIVE_ACTIVE` 再启动 runtime，而 `recoverOnStartup()` 按设计会把已激活 Gate 降回
+  `LIVE_ARMING`；同时 `LiveRuntimeRecovery.ready` 又错误要求 Gate 已激活，形成不可满足
+  的循环。现改为在 `LIVE_ARMING` 下完成同步恢复、复用该恢复启动空闲 runner，最后才确认
+  `LIVE_ACTIVE`；确认前 runner 不能消费 Signal，确认失败会停止 runner 并禁用 Gate。
+  两个红测已复现旧顺序和错误 ready 状态，修复后 runtime/operator 聚焦测试
+  `150/150` 与 TypeScript 通过。
 - 2026-07-29 最新真实一键流程已完成 Gate、CLOB/时钟/地域读取和外部仓位对账；Safe
   的 `5` 项既有 outcome-token 仓位已捕获为 Schema `2.32.0` 不可变启动基线。随后钱包
   readiness 暴露确定性实现错误：余额为 `0 pUSD` 时仍先调用不带 `token_id` 的
