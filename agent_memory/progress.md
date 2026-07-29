@@ -108,6 +108,12 @@
   前置条件，不是钱包签名失败。当前不需要继续点击 Live 按钮；下一步应在安全禁用态补齐
   `SECURE_SIGNER`、只读余额/allowance、认证 CLOB、合规/地域/时钟 provider、LiveRuntime
   装配及最终授权前的验证证据。
+- 用户重新签名后复核成功：快照显示钱包会话 `CONNECTED`、Polygon `137`、`signerStatus=READY`；
+  生产钱包、Secure Signer、只读余额、认证 CLOB、合规、地域、时钟、小额限额和 LiveRuntime
+  均为 `READY`。生产路径仍为 `PENDING_PREREQUISITES`，唯一生产 readiness 项是
+  `USER_AUTHORIZATION=PENDING`；全局 Gate 仍为 `PAPER + LIVE_DISABLED + liveAllowed=false`，
+  没有启动 Live、订单或链上写入。旧 Gate 的 `LIVE_WALLET_SESSION_DISCONNECTED` 只是重连前一次
+ 预检的历史原因，当前钱包会话已连接。
 
 ## Runtime state
 - 当前无 Observe/Paper/Supervisor/launcher 进程，operator lock、marker、FIFO 均已清理。

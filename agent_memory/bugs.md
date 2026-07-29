@@ -9,9 +9,11 @@
 - 普通浏览器 EOA 的生产代码路径已完整接到默认 localhost host；当前钱包身份已连接，
   但真实 CLOB 凭据/余额/allowance/仓位、生产 provider、干净审计源码和用户当次最终确认
   仍未验收。隔离测试不能替代这些外部事实。
-- 当前 UI 的 `PREFLIGHT_FAILED` 是预期的 fail-closed 结果：钱包身份和小额限额已就绪，
-  但生产 provider、Secure Signer、LiveRuntime、审计源码提交和最终授权仍未满足。不得把
-  “钱包已连接”误解为“可以启动实盘”。
+- 当前 UI 的生产路径仍是 `PENDING_PREREQUISITES`，但重连后的钱包会话、Signer、生产
+  provider、认证 CLOB、LiveRuntime 和小额限额均已装配为 `READY`；唯一 readiness 阻断是
+  `USER_AUTHORIZATION=PENDING`，且全局 Gate 仍保持 `PAPER + LIVE_DISABLED + liveAllowed=false`。
+  UI/数据库中遗留的 `LIVE_WALLET_SESSION_DISCONNECTED` 属于此前重连前预检记录，不代表当前
+  钱包会话断开。不得把“钱包已连接”误解为“可以启动实盘”。
 - UI 现在只提供日志/报告索引和结构化失败原因，不返回 `live_order_attempts.request_json/response_json` 或原始日志尾部；Live 执行、取消、重试、对账和恢复入口按后台 capability 禁用，避免把确定失败的点击呈现成可用操作。
 - “Live 对账”当前不可点击是预期的安全阻断：只有验证过的钱包会话、Signer、只读余额、认证 CLOB 和已装配 LiveRuntime 全部就绪后才开放；未连接钱包时接口必须返回 `LIVE_RECONCILIATION_RUNTIME_NOT_CONFIGURED`。
 - 当前 Chrome 页面未注入 EIP-1193 `window.ethereum`（无 `request` 方法），因此连接钱包按钮无法完成钱包发现；需要在安装并启用 MetaMask/Rabby 等钱包扩展的同一 Chrome 配置文件中打开控制台。
