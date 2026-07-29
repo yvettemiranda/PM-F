@@ -28,8 +28,13 @@
 - 真实一键 Gate 已在正确的 Safe 地址上以实际余额 `0 pUSD` 通过，证明余额不再是准入门槛；
   随后的外部仓位对账暴露 production 仍沿用 `3 s` 总超时，截断了 Public API 自带的有界
   重试。production 外部调用预算已独立提高到 `30 s`，仍保持有界且不放宽仓位一致性要求。
+- 重启后的新一键流程只剩 `CLOCK_RTT_UNSAFE`：实测官方 CLOB time 五次均成功返回，但耗时
+  `2.3–8.2 s`，原默认 `2 s` RTT 门槛会把正常可达接口稳定误判为不可用。现已先添加红测，
+  再把默认 RTT 上限与既有 `10 s` 请求超时对齐；超时、HTTP 异常、非法 payload 和显式
+  更严的 RTT 配置仍 fail closed。聚焦时钟/Gate 测试 `59/59`，TypeScript 与全套
+  `76 files / 892 tests` 通过。
 - TypeScript、前端语法、`git diff --check` 与全套测试均通过：
-  `76 files / 891 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
+  `76 files / 892 tests`。下一步是提交当前干净版本、生成绑定新提交的 production validation
   artifact、重启唯一 4173 服务并在真实 Chrome/OKX 上跑一键流程。
 - 2026-07-28 对仓库和本机运行产物做了定向清理：保留最终审计证据和当前运行入口，移出过期报告、重复交接包、旧中间日志/证据、过期迁移备份、未引用的旧 Campaign 文件和 `.DS_Store`；源码入口、数据库迁移和当前 Paper 数据未改动。
 - 删除了唯一残留的 `LiveExecutorPlaceholder` 和旧测试断言，测试改为验证 Paper/Live 共用执行上下文完整性；没有改变正式 Live 执行链路。

@@ -2,9 +2,9 @@
 
 ## Active blockers
 - 当前源码已修复 CLOB L1 签名、Safe 资金地址识别、余额/allowance 准入误判、外部现金
-  对账、本机时钟重复阻断和 production 外部仓位读取被 `3 s` 过早截断，并通过
-  `76 files / 891 tests`；但 localhost 旧进程不会热更新。
-  必须先提交、生成同提交 production validation artifact 并重启，再做真实 Gate 验证。
+  对账、本机时钟偏差重复阻断、production 外部仓位读取被 `3 s` 过早截断，以及成功返回的
+  CLOB time 因固定 `2 s` RTT 门槛被误判；已通过 `76 files / 892 tests`。仍需提交、
+  生成同提交 production validation artifact、重启并完成真实一键流程复核。
 - Paper 跨 Core 累计 24 小时已完成，没有剩余 Paper 运行 blocker。
 - 自然运行没有产生 FILL、POSITION_UPDATE、FEE 或 PnL 样本；若将来需要这些自然覆盖，必须继续 Paper 等待市场自然触发，不能为强行覆盖而放宽安全限价或风控。
 - 无法证明完整 outcome set、余额或退出价格的 MERGE 继续硬阻断。
@@ -61,6 +61,10 @@
 - Animal Island UI 参考仓库为 CC BY-NC 4.0 且限制商业使用；当前原型只做独立 CSS 视觉借鉴，没有复制其代码/资源。若未来把该方向落到商业产品，必须重新设计或完成明确许可审查。
 
 ## Resolved in current implementation
+- 2026-07-29：官方 CLOB time 实测五次全部 HTTP 200，但当前网络响应耗时
+  `2.3–8.2 s`；旧默认 `2 s` RTT 门槛导致 `CLOCK_RTT_UNSAFE`。默认 RTT 预算现与
+  `10 s` 请求超时一致，仍保留最多两次请求、超时/HTTP/payload 失败关闭，以及调用方显式
+  更严格 RTT 上限的能力。
 - 2026-07-29 一键 Live 稳定性修复：活跃 localhost 心跳会滑动续期钱包租约；PAPER→LIVE
   后台按 Gate→Live 对账→钱包 readiness→新鲜 Gate→确认→runtime 启动执行，任何阶段失败
   自动回滚 `PAPER + LIVE_DISABLED`。UI 只需一次模式二次确认，不再重复输入确认词或手动

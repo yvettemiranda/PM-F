@@ -28,7 +28,7 @@ export class ClobClockSafetyProvider implements ClockSafetyProvider {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.maxAttempts = options.maxAttempts ?? 2;
-    this.maxRttMs = options.maxRttMs ?? 2_000;
+    this.maxRttMs = options.maxRttMs ?? this.timeoutMs;
     this.unsafeOffsetThresholdMs = options.unsafeOffsetThresholdMs ?? RULESET.clockUnsafeThresholdMs;
     this.nowMs = options.nowMs ?? Date.now;
     for (const value of [this.timeoutMs, this.maxAttempts, this.maxRttMs, this.unsafeOffsetThresholdMs]) {

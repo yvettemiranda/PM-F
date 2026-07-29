@@ -2041,4 +2041,20 @@ describe("official readonly Live safety providers", () => {
     });
     expect((await network.check()).reason).toBe("CLOCK_REQUEST_FAILED");
   });
+
+  it("accepts a valid official CLOB time response that completes within the request timeout", async () => {
+    const times = [1_000_000, 1_008_000];
+    const provider = new ClobClockSafetyProvider({
+      nowMs: () => times.shift() as number,
+      maxAttempts: 1,
+      timeoutMs: 10_000,
+      fetchImpl: async () => new Response("1004"),
+    });
+
+    await expect(provider.check()).resolves.toMatchObject({
+      status: "SAFE",
+      offsetMs: 0,
+      reason: null,
+    });
+  });
 });
