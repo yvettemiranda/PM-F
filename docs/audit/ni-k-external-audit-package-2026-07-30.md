@@ -1,6 +1,8 @@
 # Hecatonchires 外部审计包说明（2026-07-30）
 
-这是当前版本的便携审计包说明。完整程序审计见
+这是当前版本的便携审计包说明。最完整的外部审计见
+[`ni-k-external-audit-complete-2026-07-30.md`](./ni-k-external-audit-complete-2026-07-30.md)；
+程序审计摘要见
 [`ni-k-program-audit-2026-07-30.md`](./ni-k-program-audit-2026-07-30.md)；包内的
 `evidence/validation/live-production-validation.json` 是与运行时代码提交绑定的最新验证凭证。
 
@@ -15,12 +17,13 @@
 
 ## 建议阅读顺序
 
-1. `docs/ni-k-program-audit-2026-07-30.md`
-2. `evidence/validation/live-production-validation.json`
-3. `evidence/database/live-safety-snapshot.json`、`integrity-check.txt` 和 schema
-4. `evidence/observe/`、`evidence/paper/` 中的历史验证证据
-5. `source/` 中绑定精确提交的源码归档
-6. 根目录 `SHA256SUMS`
+1. `docs/ni-k-external-audit-complete-2026-07-30.md`
+2. `docs/ni-k-program-audit-2026-07-30.md`
+3. `evidence/validation/live-production-validation.json`
+4. `evidence/database/live-safety-snapshot.json`、`integrity-check.txt` 和 schema
+5. `evidence/observe/`、`evidence/paper/` 中的历史验证证据
+6. `source/` 中绑定精确提交的源码归档
+7. 根目录 `SHA256SUMS`
 
 ## 包内边界
 
@@ -48,6 +51,7 @@ shasum -a 256 -c SHA256SUMS
 
 ## 当前本机复核
 
-生成包前已只读检查 SQLite `quick_check`、外键、Gate 和 Live 计数，并安全重启
-`Hecatonchires.command`。最终页面显示 `PAPER`、`LIVE_DISABLED`、顶部时间持续变化，
-Live 钱包余额显示 `0.00 pUSD · 数据已过期`；没有连接钱包、签名或链上操作。
+生成包前已只读检查 SQLite `quick_check`、外键、Gate 和 Live 计数，并在临时端口完成
+启动、时间推进和安全停止。审计时主端口可能已经关闭，但数据库仍保持
+`PAPER + LIVE_DISABLED`；没有连接钱包、签名或链上操作。电脑可以正常关机和重启，
+下次启动不会自动进入 Live。
