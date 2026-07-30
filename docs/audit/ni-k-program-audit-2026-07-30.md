@@ -213,17 +213,17 @@ pnpm validate:live-production
 
 ```text
 Test Files  77 passed
-Tests       937 passed
+Tests       939 passed
 ```
 
 验证工件当前为 `data/operator/live-production-validation.json`，状态为
 `live-production-validation-v2 / PASSED`。受验证的运行时提交以工件的 `sourceCodeCommit`
 为准；若 `git rev-parse HEAD` 只因后续文档提交而更新，可以不同，但 `liveRuntimeHash` 必须
 完全一致且 `runtimeSourceDirty=false`。当前运行时哈希为
-`8666fb967926282f4f74a3a8f5db56fba5612d4a1370ed757567219bd77a9579`，绑定运行时代码
-提交 `2cc17618d4bc9f572a1a5be385296b668fe13409`。工件同时记录
+`85fb3f113414c4e95181e9057ede31b5fce065b58831c1e6e47ae60846115d2c`，绑定运行时代码
+提交 `b1aaa7d8d12e1c8308bc0df909eb302ebd12f7ae`。工件同时记录
 `typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
-`937` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
+`939` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
 工件的 `runtimeSourceDirty` 仍应为 `false`，但 `sourceCodeDirty` 会如实记录整个工作树状态。
 
 ### 5.1 本轮实际启停复核
