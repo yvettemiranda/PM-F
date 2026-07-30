@@ -1,7 +1,7 @@
 # Bugs And Risks
 
 ## Active blockers
-- 本轮没有未解决的产品 blocker。已完成 `77 files / 910 tests`、TypeScript、语法、差异
+- 本轮没有未解决的产品 blocker。已完成 `77 files / 911 tests`、TypeScript、语法、差异
   检查和 `live-production-validation-v2` 工件验证；临时端口启动、时间推进、安全退出、
   端口关闭和重启也已通过。
 - 当前数据库已通过正式账户装配流程完成安全交接：空旧账户已审计停用，当前 Safe 账户为

@@ -1,7 +1,13 @@
 # Progress
 
+## 2026-07-30 服务器节点维护
+- 已复核腾讯云实例 `43.159.113.129`：Xray/VLESS 的 Freedom 出站为 `UseIPv4`，`xray` 与
+  `hysteria-new` 均为 active，TCP `443` 与 UDP `50035` 正在监听；本轮未改动 Hysteria。
+- 已按当前 `/usr/local/etc/xray/client-values.txt` 生成新的 VLESS Reality 导入 URI，供
+  Shadowrocket 直接导入；仅更新交付链接，不替换 UUID、Reality 公钥或短 ID。
+
 ## Current task
-- 2026-07-30 全程序审计收尾已完成：`77 files / 910 tests`、TypeScript、UI/launcher 语法、
+- 2026-07-30 全程序审计收尾已完成：`77 files / 911 tests`、TypeScript、UI/launcher 语法、
   `git diff --check` 和 v2 validation artifact 均通过。已补齐安全退出、启动前 Gate 复位、
   参数显式化、版本/测试哈希绑定、钱包账户切换保护，并完成主审计文档
   `docs/audit/ni-k-program-audit-2026-07-30.md`。
@@ -9,6 +15,8 @@
   Polygon Gnosis Safe 账户保持 `ACTIVE`；没有未终态订单、reservation、执行或非零仓位。
   全局 Gate 保持 `PAPER + LIVE_DISABLED`，Live executions/orders/attempts/fills 和非零
   Live 仓位均为 `0`。
+- 账户交接复核还确认旧 EOA 的 wallet metadata 已同步为 `DISABLED`，当前 Safe 是唯一
+  `ACTIVE` 钱包；切换到有业务状态的旧账户仍会先阻断，不会静默丢弃。
 - 已在临时端口 `4179` 实测启动、连续快照时间推进、安全退出、端口关闭和再次重启；两次
   服务实例 ID 不同，均回到 `PAPER + LIVE_DISABLED + liveAllowed=false`。用户已取消关机，
   不执行关机；最终只停止本地服务。
@@ -260,3 +268,4 @@
 - 未发现 Nginx/Apache/MySQL 等网站服务或用户级 systemd 服务。系统服务、Docker/containerd、腾讯云 `tat_agent`/`cloud-init` 等暂列系统/管理基础设施，不应无确认删除。
 - 可选空间项：`~/.rustup` 约 1.4G、`~/.npm` 约 1.2G、`~/.cache` 约 2.9G；通用缓存/开发工具链用途未确认，等待用户决定是否清理。
 - 用户确认“只删 RustDesk”后，已删除 Docker 容器 `hbbs`/`hbbr`、镜像 `rustdesk/rustdesk-server:latest`、挂载数据 `/home/ubuntu/rustdesk-server` 及 `.rustdesk-server`。复核无 RustDesk 容器/镜像/数据残留，21115-21119 端口已关闭；`hysteria-new.service` 与 `xray.service` 仍为 `active/enabled`，443 端口仍监听。
+- 2026-07-30 VLESS 修复：Xray VLESS Reality 配置本身语法、`xtls-rprx-vision` 和服务均正常，但服务器无公网 IPv6，Freedom 出站默认 `AsIs` 会按 Xray 官方说明通常优先 IPv6；已备份 `/usr/local/etc/xray/config.json` 为 `config.json.bak-20260730-before-ipv4`，仅将 `direct` 出站 `settings.domainStrategy` 改为 `UseIPv4`。Xray 配置测试通过、重启成功；`xray` 与 `hysteria-new` 均 `active`，443/TCP 与 50035/UDP 仍监听。尚需用户从 Shadowrocket/v2rayN/路由器做端到端体验验证。
