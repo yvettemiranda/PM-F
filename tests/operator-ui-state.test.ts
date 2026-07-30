@@ -139,6 +139,18 @@ describe("operator UI state projection", () => {
     expect(ui.snapshotRenderKey(after)).toBe(ui.snapshotRenderKey(before));
   });
 
+  it("requests a render when the Live freshness bucket changes", () => {
+    const ui = load();
+    const before = snapshot({
+      generatedAt: "2026-07-29T04:00:00.000Z",
+    });
+    const after = snapshot({
+      generatedAt: "2026-07-29T04:02:00.000Z",
+    });
+
+    expect(ui.snapshotRenderKey(after)).not.toBe(ui.snapshotRenderKey(before));
+  });
+
   it("detects a backend service replacement", () => {
     const ui = load();
 

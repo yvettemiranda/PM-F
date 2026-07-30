@@ -42,7 +42,11 @@
 
   function snapshotRenderKey(snapshot) {
     if (!snapshot) return "null";
-    return JSON.stringify(snapshot, (key, value) => {
+    const generatedTimestamp = Date.parse(snapshot.generatedAt ?? "");
+    const freshnessBucket = Number.isFinite(generatedTimestamp)
+      ? Math.floor(generatedTimestamp / LIVE_DATA_STALE_AFTER_MS)
+      : null;
+    return JSON.stringify({ snapshot, freshnessBucket }, (key, value) => {
       if (
         key === "generatedAt"
         || key === "checkedAt"
