@@ -1,19 +1,20 @@
 {
   "schemaVersion": "live-production-validation-v2",
   "status": "PASSED",
-  "sourceCodeCommit": "b1aaa7d8d12e1c8308bc0df909eb302ebd12f7ae",
-  "sourceCodeDirty": true,
+  "sourceCodeCommit": "c76ce368cd7ce56c2595c061df25555a54363fc0",
+  "sourceCodeDirty": false,
   "liveRuntimeHash": "85fb3f113414c4e95181e9057ede31b5fce065b58831c1e6e47ae60846115d2c",
   "runtimeSourceDirty": false,
-  "generatedAt": "2026-07-30T02:49:06.442Z",
+  "generatedAt": "2026-07-30T06:40:10.926Z",
   "typecheckPassed": true,
   "fullTestPassed": true,
   "testFileCount": 77,
   "testCount": 939,
   "diffCheckPassed": true,
+  "finalPaperReportSha256": "e78c90143aba9a1ba3fece487c5deb96e49c41eae528a3cebd561445bf641bce",
+  "isolatedVerificationSha256": "76752e4788a8e37d4f1a2a2cd9cf85634c7fc662aa8cd9393b0611babca75a63",
   "notes": [
     "This is a sanitized validation summary; it contains no database, wallet session, private key, API key or signed order payload.",
-    "sourceCodeDirty=true records non-runtime workspace changes present when the artifact was generated; runtimeSourceDirty=false is the runtime safety boundary.",
-    "A new validation run is required after any runtime source change."
+    "runtimeSourceDirty=false is the runtime safety boundary; a new validation run is required after any runtime source change."
   ]
 }
