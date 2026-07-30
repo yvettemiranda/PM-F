@@ -188,7 +188,7 @@ Tests       910 passed
 
 验证工件当前为 `data/operator/live-production-validation.json`，状态为
 `live-production-validation-v2 / PASSED`，绑定源码提交
-`08cbe4b5d9e8c4230959bc42208631bf411bfdc0`，运行时哈希为
+`b724cb735fcee45c1db756e7d433f2b8880ea473`，运行时哈希为
 `5cb827c5fbdb1ddbde881e5820d6c5cd4b87568edf6e85a6c2844122f8ff2d80`。工件同时记录
 `typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
 `910` 个测试；运行时文件没有 dirty 变化。
