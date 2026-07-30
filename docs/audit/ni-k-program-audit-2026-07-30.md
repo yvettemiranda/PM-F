@@ -129,6 +129,28 @@ Live 风险参数现在只有一套来源：UI 中可见、保存并确认的配
 类型检查、全套测试和差异检查结果。生产装配只接受与当前运行时哈希一致的工件；源码或
 测试发生变化后必须重新验证并重启服务。纯文档或纯视觉调整不会让业务运行时误报过期。
 
+### 3.5 UI 状态、账户和执行结果真值
+
+本轮继续按“页面显示必须来自当前执行上下文”的口径复核，修正并锁定以下行为：
+
+- Live 账户、余额、估值、仓位和执行记录必须绑定当前配置的交易资金地址，不能因为旧账户
+  更新时间更晚就误选旧账户，也不能读取另一个钱包的余额快照。
+- 首页仓位数量使用数据库聚合值，不受页面最多加载多少条明细的限制；旧的截断列表不能把
+  有仓位账户误判为“现金-only”。
+- Live 余额和估值显示采集时间；超过 60 秒会明确标为“数据已过期”。估值不完整时总权益、
+  持仓价值和未实现盈亏显示“待同步”，不会把部分结果当成精确值。
+- Paper 估值不完整时同样显示“待估值”，不再用缺失价格计算出的部分总权益冒充完整组合。
+- 跟单卡片按当前 Gate 模式读取 Paper 或 Live 的 Risk、Execution、Position 和 PnL；
+  SELL 的已实现盈亏绑定该笔执行的账本记录，不能误取同一 Signal 下其他仓位的累计盈亏。
+- 顶部时间继续来自每次后台快照；Live 模式显示 LiveRuntime 状态，不再拿 Paper runtime
+  状态代替。若 Gate 已回到 Paper 但 Live 后台仍在运行或报错，页面会持续警告并保留
+  “紧急停用 Live”按钮。
+- 手动启动 Live 和重试 Live 执行都要求数据库已是 `LIVE + LIVE_ACTIVE`；一键切换或最终
+  确认失败时，Gate 写回和 runtime 停止分别核验。任一步未完成会返回明确的“不完整回滚”
+  错误，不能向用户宣称已经安全完成。
+- OKX 扩展重载后优先使用最新重新注入的 provider；Polygon chain id 同时兼容标准十六进制、
+  数值和十进制字符串表示，避免扩展实现差异导致假断线。
+
 ## 4. 日常操作手册
 
 ### 4.1 开启
@@ -191,16 +213,17 @@ pnpm validate:live-production
 
 ```text
 Test Files  77 passed
-Tests       913 passed
+Tests       937 passed
 ```
 
 验证工件当前为 `data/operator/live-production-validation.json`，状态为
 `live-production-validation-v2 / PASSED`。受验证的运行时提交以工件的 `sourceCodeCommit`
 为准；若 `git rev-parse HEAD` 只因后续文档提交而更新，可以不同，但 `liveRuntimeHash` 必须
 完全一致且 `runtimeSourceDirty=false`。当前运行时哈希为
-`d20fe18a5107785cffd0d336df3bff79f0c104f73f4f8620aaf4cb21ef490a1b`。工件同时记录
+`8666fb967926282f4f74a3a8f5db56fba5612d4a1370ed757567219bd77a9579`，绑定运行时代码
+提交 `2cc17618d4bc9f572a1a5be385296b668fe13409`。工件同时记录
 `typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
-`913` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
+`937` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
 工件的 `runtimeSourceDirty` 仍应为 `false`，但 `sourceCodeDirty` 会如实记录整个工作树状态。
 
 ### 5.1 本轮实际启停复核
@@ -224,7 +247,11 @@ Tests       913 passed
 - UI 安全退出 API 和宿主关闭回调；
 - 入口直接持有 Node PID、信号退出和重启；
 - 钱包重复保存、参数变化断开和旧账户安全停用；
-- Live 总览不得读取 Paper 组合，且无估值时只允许使用真实钱包现金或显示“待同步”；
+- Live 总览不得读取 Paper/旧钱包组合，且无估值时只允许使用当前钱包现金或显示“待同步”；
+- Paper/Live 执行对照、SELL 单笔 PnL、聚合仓位数量和过期余额提示；
+- Gate 禁用后的残留 LiveRuntime 告警、紧急停止以及不完整回滚错误；
+- Live 手动启动和执行重试必须由持久化 `LIVE_ACTIVE` Gate 授权；
+- OKX provider 重注入选择和多种 Polygon chain id 表示；
 - 0 pUSD 余额的生产准备；
 - 任意已确认 Live 限额、五次历史亏损不触发隐藏阻断；
 - 测试源码变化使验证哈希失效；
