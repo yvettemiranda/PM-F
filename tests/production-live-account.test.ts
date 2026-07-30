@@ -151,6 +151,15 @@ describe("ensureProductionLiveAccount", () => {
         "SELECT status FROM live_accounts WHERE live_account_id=?",
       ).get(oldAccount.accountId)).toEqual({ status: "DISABLED" });
       expect(database.prepare(
+        `SELECT w.status
+         FROM live_wallets w
+         JOIN live_accounts a ON a.live_wallet_id=w.live_wallet_id
+         WHERE a.live_account_id=?`,
+      ).get(oldAccount.accountId)).toEqual({ status: "DISABLED" });
+      expect(database.prepare(
+        "SELECT COUNT(*) count FROM live_wallets WHERE status='ACTIVE'",
+      ).get()).toEqual({ count: 1 });
+      expect(database.prepare(
         "SELECT COUNT(*) count FROM audit_log WHERE entity_id=? AND action='disabled'",
       ).get(oldAccount.accountId)).toEqual({ count: 1 });
     } finally {

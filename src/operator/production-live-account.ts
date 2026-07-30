@@ -100,6 +100,7 @@ function deactivateSupersededAccounts(
       liveAccountId: account.live_account_id,
       actor: "PRODUCTION_RUNTIME",
       reason: "SUPERSEDED_BY_CURRENT_TRADING_WALLET",
+      disableWallet: true,
     });
   }
 }

@@ -36,6 +36,8 @@ export interface ChangeLiveAccountStateInput {
   liveAccountId: string;
   actor: string;
   reason: string;
+  /** Superseded accounts also retire their wallet metadata until rebound. */
+  disableWallet?: boolean;
 }
 
 interface LiveAccountRow {
@@ -187,22 +189,37 @@ export class LiveAccountRegistry {
     const actor = required(input.actor, "LIVE_ACCOUNT_ACTOR_REQUIRED");
     const reason = required(input.reason, "LIVE_ACCOUNT_REASON_REQUIRED");
     if (account.status === "CLOSED") throw new Error("LIVE_ACCOUNT_CLOSED");
-    if (account.status === "DISABLED") return account;
+    if (account.status === "DISABLED" && (!input.disableWallet || account.walletStatus === "DISABLED")) {
+      return account;
+    }
     const now = this.now().toISOString();
     this.transaction(() => {
-      this.database.prepare(
-        `UPDATE live_accounts
-         SET status='DISABLED',source_code_commit=?,source_code_dirty=?,config_version=?,updated_at=?
-         WHERE live_account_id=? AND status='ACTIVE'`,
-      ).run(
-        this.sourceVersion.commit,
-        this.sourceVersion.dirty ? 1 : 0,
-        VERSIONS.configVersion,
-        now,
-        account.liveAccountId,
-      );
-      this.recordTransition(account.liveAccountId, "ACTIVE", "DISABLED", reason, actor, now);
-      this.audit(account.liveAccountId, "disabled", reason, actor, now, { liveWalletId: account.liveWalletId });
+      if (account.status === "ACTIVE") {
+        this.database.prepare(
+          `UPDATE live_accounts
+           SET status='DISABLED',source_code_commit=?,source_code_dirty=?,config_version=?,updated_at=?
+           WHERE live_account_id=? AND status='ACTIVE'`,
+        ).run(
+          this.sourceVersion.commit,
+          this.sourceVersion.dirty ? 1 : 0,
+          VERSIONS.configVersion,
+          now,
+          account.liveAccountId,
+        );
+        this.recordTransition(account.liveAccountId, "ACTIVE", "DISABLED", reason, actor, now);
+      }
+      if (input.disableWallet && account.walletStatus !== "DISABLED") {
+        const walletUpdate = this.database.prepare(
+          `UPDATE live_wallets
+           SET status='DISABLED',updated_at=?
+           WHERE live_wallet_id=? AND status<>'DISABLED'`,
+        ).run(now, account.liveWalletId);
+        if (walletUpdate.changes !== 1) throw new Error("LIVE_WALLET_DISABLE_FAILED");
+      }
+      this.audit(account.liveAccountId, "disabled", reason, actor, now, {
+        liveWalletId: account.liveWalletId,
+        walletDisabled: input.disableWallet === true,
+      });
     });
     return this.require(account.liveAccountId);
   }
