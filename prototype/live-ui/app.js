@@ -408,8 +408,9 @@ function livePanel(snapshot) {
     POLY_1271: "Polymarket Deposit Wallet",
   };
   const financials = window.HecatonchiresUiState.overviewFinancials(snapshot);
+  const liveFreshness = window.HecatonchiresUiState.liveDataFreshness(snapshot);
   const balanceLabel = walletBalance
-    ? `${walletBalance.balance.display} pUSD · ${financials.stale ? "数据已过期" : `更新 ${formatTime(financials.observedAt)}`}`
+    ? `${walletBalance.balance.display} pUSD · ${liveFreshness.stale ? "数据已过期" : `更新 ${formatTime(liveFreshness.observedAt)}`}`
     : "连接并检查 Gate 后显示";
   return `
     <details class="fold-panel ops-panel reveal" data-panel-id="live" style="--delay: 125ms">

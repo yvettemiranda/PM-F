@@ -318,6 +318,47 @@ describe("operator UI state projection", () => {
     expect(html).toMatch(/data-action="live-activate"[^>]*disabled/);
   });
 
+  it("marks a stale Live wallet balance even while the active mode is Paper", () => {
+    const html = loadLivePanel()({
+      generatedAt: "2026-07-29T04:00:00.000Z",
+      control: {
+        controls: {
+          live: { gateAvailable: true },
+        },
+      },
+      live: {
+        gate: {
+          executionMode: "PAPER",
+          state: "LIVE_DISABLED",
+          reason: "USER_STOP",
+        },
+        runtime: { state: "STOPPED", lastError: null },
+        capability: {
+          execution: "PENDING_PREREQUISITES",
+          walletSetup: "PENDING_PREREQUISITES",
+          externalDependencies: [],
+        },
+        walletSession: { status: "DISCONNECTED" },
+        walletBalance: {
+          balance: { display: "0.00", micros: "0", currency: "pUSD" },
+          observedAt: "2026-07-29T03:00:00.000Z",
+        },
+        production: {
+          status: "PENDING_PREREQUISITES",
+          config: {},
+          checks: [],
+        },
+        prerequisites: [],
+        valuations: [],
+        positions: [],
+      },
+      paper: { positions: [] },
+    });
+
+    expect(html).toContain("数据已过期");
+    expect(html).not.toContain("更新 03:00:00");
+  });
+
   it("keeps Live execution retry disabled while the Gate is in Paper", () => {
     const html = loadDomainDetails()({
       runtime: {},

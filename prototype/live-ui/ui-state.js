@@ -88,6 +88,23 @@
     return positions.filter((position) => String(position?.current_size_micros ?? "0") !== "0").length;
   }
 
+  function liveDataFreshness(snapshot) {
+    const valuation = Array.isArray(snapshot?.live?.valuations)
+      ? snapshot.live.valuations[0]
+      : null;
+    const observedAt = valuation?.created_at
+      ?? snapshot?.live?.walletBalance?.observedAt
+      ?? null;
+    const generatedTimestamp = Date.parse(snapshot?.generatedAt ?? "");
+    const observedTimestamp = Date.parse(observedAt ?? "");
+    return {
+      observedAt,
+      stale: Number.isFinite(generatedTimestamp)
+        && Number.isFinite(observedTimestamp)
+        && generatedTimestamp - observedTimestamp > LIVE_DATA_STALE_AFTER_MS,
+    };
+  }
+
   /**
    * Selects the financial source for the four compact overview cards.
    * Paper uses its projection; Live must never fall back to that projection.
@@ -132,14 +149,8 @@
       ? snapshot.live.valuations[0]
       : null;
     const walletBalance = snapshot?.live?.walletBalance?.balance ?? null;
-    const observedAt = valuation?.created_at
-      ?? snapshot?.live?.walletBalance?.observedAt
-      ?? null;
-    const generatedAt = Date.parse(snapshot?.generatedAt ?? "");
-    const observedTimestamp = Date.parse(observedAt ?? "");
-    const stale = Number.isFinite(generatedAt)
-      && Number.isFinite(observedTimestamp)
-      && generatedAt - observedTimestamp > LIVE_DATA_STALE_AFTER_MS;
+    const freshness = liveDataFreshness(snapshot);
+    const { observedAt, stale } = freshness;
     const positionCount = livePositionCount(snapshot);
     const valuationComplete = valuation?.valuation_status === "COMPLETE"
       && Number(valuation?.unpriced_position_count ?? 0) === 0;
@@ -184,6 +195,7 @@
 
   global.HecatonchiresUiState = {
     executionMode,
+    liveDataFreshness,
     overviewFinancials,
     formatTime,
     serviceInstanceChanged,
