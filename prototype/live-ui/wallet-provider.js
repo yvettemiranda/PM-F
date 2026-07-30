@@ -4,7 +4,7 @@
 (function installHecatonchiresWalletDiscovery(global) {
   const DEFAULT_TIMEOUT_MS = 1_500;
   const candidates = [];
-  const seen = new Set();
+  let candidateSequence = 0;
 
   function isProvider(value) {
     return value !== null
@@ -36,9 +36,17 @@
   }
 
   function addCandidate(provider, info = null) {
-    if (!isProvider(provider) || seen.has(provider)) return;
-    seen.add(provider);
-    candidates.push({ provider, info, score: providerScore(info, provider) });
+    if (!isProvider(provider)) return;
+    const score = providerScore(info, provider);
+    const sequence = ++candidateSequence;
+    const existing = candidates.find((candidate) => candidate.provider === provider);
+    if (existing) {
+      if (score >= existing.score) existing.info = info;
+      existing.score = Math.max(existing.score, score);
+      existing.sequence = sequence;
+      return;
+    }
+    candidates.push({ provider, info, score, sequence });
   }
 
   function addInjectedCandidates(windowObject) {
@@ -55,7 +63,7 @@
   function choose() {
     return candidates
       .slice()
-      .sort((left, right) => right.score - left.score)[0] ?? null;
+      .sort((left, right) => right.score - left.score || right.sequence - left.sequence)[0] ?? null;
   }
 
   function requestAnnouncements(windowObject) {

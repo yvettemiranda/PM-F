@@ -129,12 +129,14 @@ function header(snapshot) {
   const mode = currentMode(snapshot);
   const gateAvailable = snapshot?.control?.controls?.live?.gateAvailable === true;
   const modeBlockedReason = snapshot?.control?.controls?.live?.blockedReason ?? "Live Gate 尚不可用";
+  const liveRuntimeAnomaly = snapshot?.live?.runtime?.state === "ERROR"
+    || (mode !== "LIVE" && snapshot?.live?.runtime?.state === "RUNNING");
   return `
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">${logo()}<span>Hecatonchires</span></div>
         <div class="top-actions">
-          <span class="sync-state ${snapshot?.runtime?.state === "RECOVERY_REQUIRED" ? "warning" : ""}" data-role="backend-status">
+          <span class="sync-state ${snapshot?.runtime?.state === "RECOVERY_REQUIRED" || liveRuntimeAnomaly ? "warning" : ""}" data-role="backend-status">
             <i></i><span>${escapeHtml(statusText(snapshot))}</span>
           </span>
           <button class="mode-button" id="mode-button" type="button" aria-label="当前模式 ${escapeHtml(mode)}"
@@ -162,7 +164,18 @@ function overview(snapshot) {
     ["持仓价值", portfolio?.positionValue, `${financials.positionCount} 个仓位`],
     ["已实现盈亏", portfolio?.realizedPnl, "pUSD", portfolio?.realizedPnl?.micros?.startsWith("-") ? "" : "positive"],
   ];
-  const missingValue = financials.mode === "LIVE" ? "待同步" : "暂无";
+  const missingValue = financials.mode === "LIVE"
+    ? "待同步"
+    : financials.valuationStatus && financials.valuationStatus !== "COMPLETE"
+      ? "待估值"
+      : "暂无";
+  const freshness = financials.mode === "LIVE"
+    ? financials.observedAt === null
+      ? "Live 数据等待首次同步"
+      : financials.stale
+        ? `Live 数据已过期 · 上次 ${formatTime(financials.observedAt)}`
+        : `Live 数据已同步 · ${formatTime(financials.observedAt)}`
+    : null;
   return `
     <section class="overview-card reveal" style="--delay: 40ms">
       <div class="target-row">
@@ -187,6 +200,7 @@ function overview(snapshot) {
           </div>
         `).join("")}
       </div>
+      ${freshness ? `<div class="overview-freshness ${financials.stale ? "stale" : ""}">${escapeHtml(freshness)}</div>` : ""}
     </section>
   `;
 }
@@ -280,27 +294,37 @@ function runtimePanel(snapshot) {
   const paper = snapshot?.paper;
   const campaign = runtime?.campaign;
   const liveMode = mode === "LIVE";
+  const liveRuntime = snapshot?.live?.runtime;
+  const displayedRuntimeState = liveMode
+    ? liveRuntime?.state ?? "NOT_CONFIGURED"
+    : runtime?.state ?? "STOPPED";
   const paperControl = snapshot?.control?.controls?.paper;
   const liveCapability = snapshot?.live?.capability?.execution;
   const runtimeAvailable = liveMode
     ? liveCapability === "AVAILABLE"
     : paperControl?.available === true;
+  const liveGateActive = snapshot?.live?.gate?.executionMode === "LIVE"
+    && snapshot?.live?.gate?.state === "LIVE_ACTIVE";
+  const startAvailable = runtimeAvailable && (!liveMode || liveGateActive);
   const unavailableReason = liveMode
     ? "Live 生产链路已准备，等待正式钱包与生产前置条件"
     : paperControl?.blockedReason ?? "Paper 当前不可运行";
-  const startDisabled = Boolean(state.busy) || !runtimeAvailable || runtime?.state === "RUNNING";
-  const stopDisabled = Boolean(state.busy) || !runtimeAvailable || runtime?.state !== "RUNNING";
+  const startUnavailableReason = liveMode && runtimeAvailable && !liveGateActive
+    ? "Live Gate 尚未处于 LIVE_ACTIVE，请使用一键切换 LIVE"
+    : unavailableReason;
+  const startDisabled = Boolean(state.busy) || !startAvailable || displayedRuntimeState === "RUNNING";
+  const stopDisabled = Boolean(state.busy) || !runtimeAvailable || displayedRuntimeState !== "RUNNING";
   const recoverDisabled = Boolean(state.busy)
     || !runtimeAvailable
     || (!liveMode && runtime?.state !== "RECOVERY_REQUIRED");
-  const startBlockedReason = !runtimeAvailable
-    ? unavailableReason
-    : runtime?.state === "RUNNING"
+  const startBlockedReason = !startAvailable
+    ? startUnavailableReason
+    : displayedRuntimeState === "RUNNING"
       ? `${mode} 正在运行`
       : "";
   const stopBlockedReason = !runtimeAvailable
     ? unavailableReason
-    : runtime?.state !== "RUNNING"
+    : displayedRuntimeState !== "RUNNING"
       ? `${mode} 当前未运行`
       : "";
   const recoverBlockedReason = !runtimeAvailable
@@ -309,22 +333,22 @@ function runtimePanel(snapshot) {
       ? "没有需要恢复的遗留 Paper 运行"
       : "";
   const accountStatus = liveMode
-    ? snapshot?.live?.accounts?.[0]?.status ?? "未配置"
+    ? snapshot?.live?.selectedAccount?.status ?? "未配置"
     : paper?.account?.status ?? "未初始化";
   return `
     <details class="fold-panel ops-panel reveal" data-panel-id="runtime" style="--delay: 105ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">▶</i><strong>运行与恢复</strong></span>
         <span class="fold-summary">${escapeHtml(
-          runtime?.state === "RECOVERY_REQUIRED"
+          displayedRuntimeState === "RECOVERY_REQUIRED"
             ? "发现遗留运行，建议先恢复"
-            : `${mode} · ${runtime?.state ?? "等待连接"}${campaign?.state ? ` · Campaign ${campaign.state}` : ""}`,
+            : `${mode} · ${displayedRuntimeState}${!liveMode && campaign?.state ? ` · Campaign ${campaign.state}` : ""}`,
         )}</span>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
       </summary>
       <div class="fold-content ops-content">
         <div class="ops-status">
-          <div><span>后台状态</span><strong>${escapeHtml(runtime?.state ?? "—")}</strong></div>
+          <div><span>${liveMode ? "Live" : "Paper"} 运行</span><strong>${escapeHtml(displayedRuntimeState)}</strong></div>
           <div><span>${liveMode ? "Live" : "Paper"} 账户</span><strong>${escapeHtml(accountStatus)}</strong></div>
           <div><span>最新 Observe</span><strong>${escapeHtml(runtime?.observe?.state ?? "—")}</strong></div>
         </div>
@@ -338,7 +362,9 @@ function runtimePanel(snapshot) {
         </div>
         <p class="ops-note">${escapeHtml(liveMode
           ? (runtimeAvailable
-            ? "Live 生命周期通过已注入运行时执行，并继续受 Gate、风控、审计和恢复机制约束。"
+            ? (liveRuntime?.lastError
+              ? `Live 运行异常：${liveRuntime.lastError}；Gate 仍需以后台状态为准。`
+              : "Live 生命周期通过已注入运行时执行，并继续受 Gate、风控、审计和恢复机制约束。")
             : "Live 生产路径已接入；连接正式钱包并完成生产预检后，启动、暂停和恢复会自动开放。")
           : "Paper 启动/暂停复用桌面入口；恢复只收割经过身份验证的遗留进程，不会启动 Live。")}</p>
       </div>
@@ -348,6 +374,9 @@ function runtimePanel(snapshot) {
 
 function livePanel(snapshot) {
   const gate = snapshot?.live?.gate;
+  const liveRuntimeState = snapshot?.live?.runtime?.state ?? "NOT_CONFIGURED";
+  const liveRuntimeNeedsStop = gate?.state === "LIVE_DISABLED"
+    && (liveRuntimeState === "RUNNING" || liveRuntimeState === "ERROR");
   const blocked = snapshot?.live?.capability?.externalDependencies ?? [];
   const prerequisites = snapshot?.live?.prerequisites ?? [];
   const production = snapshot?.live?.production;
@@ -378,19 +407,31 @@ function livePanel(snapshot) {
     POLY_GNOSIS_SAFE: "Polymarket Gnosis Safe",
     POLY_1271: "Polymarket Deposit Wallet",
   };
+  const financials = window.HecatonchiresUiState.overviewFinancials(snapshot);
+  const balanceLabel = walletBalance
+    ? `${walletBalance.balance.display} pUSD · ${financials.stale ? "数据已过期" : `更新 ${formatTime(financials.observedAt)}`}`
+    : "连接并检查 Gate 后显示";
   return `
     <details class="fold-panel ops-panel reveal" data-panel-id="live" style="--delay: 125ms">
       <summary>
         <span class="fold-title"><i class="fold-icon">◆</i><strong>Live 安全状态</strong></span>
-        <span class="fold-summary">${escapeHtml(gate ? `${gate.executionMode} · ${gate.state}` : "Gate 等待数据库")}</span>
+        <span class="fold-summary">${escapeHtml(gate
+          ? `${gate.executionMode} · ${gate.state}${liveRuntimeState === "RUNNING" || liveRuntimeState === "ERROR"
+            ? ` · Runtime ${liveRuntimeState}`
+            : ""}`
+          : "Gate 等待数据库")}</span>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
       </summary>
       <div class="fold-content ops-content">
-        <div class="gate-banner ${gate?.state === "LIVE_ACTIVE" ? "danger" : ""}">
-          <strong>${escapeHtml(production?.status === "READY" ? "生产路径已就绪" : "生产路径待前置条件")}</strong>
-          <span>${escapeHtml(walletNeedsReconnect
-            ? "本地服务已重启或会话已过期，请在 OKX 重新签名；这不会授权交易。"
-            : gate?.reason ?? "当前不会提交真实订单；连接正式钱包后继续完成预检。")}</span>
+        <div class="gate-banner ${gate?.state === "LIVE_ACTIVE" || liveRuntimeNeedsStop ? "danger" : ""}">
+          <strong>${escapeHtml(liveRuntimeNeedsStop
+            ? "Gate 已禁用，但 Live 后台仍需停止"
+            : production?.status === "READY" ? "生产路径已就绪" : "生产路径待前置条件")}</strong>
+          <span>${escapeHtml(liveRuntimeNeedsStop
+            ? "新交易已被 Gate 阻断；请点击“紧急停用 Live”再次确认后台停止。"
+            : walletNeedsReconnect
+              ? "本地服务已重启或会话已过期，请在 OKX 重新签名；这不会授权交易。"
+              : gate?.reason ?? "当前不会提交真实订单；连接正式钱包后继续完成预检。")}</span>
         </div>
         <div class="live-production-config">
           <div class="production-heading">
@@ -424,9 +465,7 @@ function livePanel(snapshot) {
             <span>Signer：${escapeHtml(walletSession?.signerStatus === "READY"
               ? "钱包签名通道已准备"
               : walletConnected ? "正在装配" : "未连接")}</span>
-            <span>实际余额：${escapeHtml(walletBalance
-              ? `${walletBalance.balance.display} pUSD`
-              : "连接并检查 Gate 后显示")}</span>
+            <span>实际余额：${escapeHtml(balanceLabel)}</span>
             <span>启动前仓位：${escapeHtml(walletPositionBaseline
               ? `${walletPositionBaseline.positionCount} 项 · 已隔离`
               : "尚未建立基线")}</span>
@@ -499,9 +538,15 @@ function livePanel(snapshot) {
         </div>
         <div class="ops-actions">
           <button class="confirm-button" data-action="live-activate" type="button"
-            ${disabledAttr(Boolean(state.busy) || !gateAvailable, gateAvailable ? "" : gateReason)}>一键检查并切换 LIVE</button>
+            ${disabledAttr(
+              Boolean(state.busy) || !gateAvailable || liveRuntimeNeedsStop,
+              liveRuntimeNeedsStop ? "请先停止残留的 Live 后台运行" : gateAvailable ? "" : gateReason,
+            )}>一键检查并切换 LIVE</button>
           <button class="secondary-button danger-button" data-action="live-disable" type="button"
-            ${disabledAttr(Boolean(state.busy) || gate?.state === "LIVE_DISABLED", "Live 当前已禁用")}>紧急停用 Live</button>
+            ${disabledAttr(
+              Boolean(state.busy) || gate?.state === "LIVE_DISABLED" && !liveRuntimeNeedsStop,
+              "Live Gate 与后台运行均已停用",
+            )}>紧急停用 Live</button>
         </div>
         <details class="live-advanced-actions">
           <summary>高级诊断</summary>
@@ -583,7 +628,7 @@ function eventCard(event, index) {
         </summary>
         <div class="details">
           <p>目标：${escapeHtml(event.target.reason)} · 我的决定：${escapeHtml(event.mine.reason)}</p>
-          <div class="audit-flow"><span>目标事件</span><i></i><span>Signal</span><i></i><span>Risk ${escapeHtml(event.mine.riskDecision ?? "—")}</span><i></i><span>Paper Execution</span></div>
+          <div class="audit-flow"><span>目标事件</span><i></i><span>Signal</span><i></i><span>Risk ${escapeHtml(event.mine.riskDecision ?? "—")}</span><i></i><span>${event.mine.mode === "LIVE" ? "Live" : "Paper"} Execution</span></div>
         </div>
       </details>
     </article>
@@ -640,9 +685,10 @@ function rowCell(row, key) {
 function recordTable(title, rows, columns, actionRenderer = null) {
   if (!rows?.length) return `<section class="record-section"><h3>${escapeHtml(title)}</h3><p class="empty-inline">暂无记录</p></section>`;
   const actionHeader = actionRenderer ? "<th>操作</th>" : "";
+  const visibleCount = Math.min(rows.length, 30);
   return `
     <section class="record-section">
-      <h3>${escapeHtml(title)} <small>${rows.length}</small></h3>
+      <h3>${escapeHtml(title)} <small>当前显示 ${visibleCount} / 已加载 ${rows.length}</small></h3>
       <div class="record-scroll"><table class="record-table"><thead><tr>${columns.map(([key, label]) => `<th>${escapeHtml(label)}</th>`).join("")}${actionHeader}</tr></thead>
       <tbody>${rows.slice(0, 30).map((row) => `<tr>${columns.map(([key]) => `<td>${escapeHtml(rowCell(row, key))}</td>`).join("")}${actionRenderer ? `<td>${actionRenderer(row)}</td>` : ""}</tr>`).join("")}</tbody></table></div>
     </section>
@@ -653,7 +699,13 @@ function domainDetails(snapshot) {
   const paper = snapshot?.paper;
   const live = snapshot?.live;
   const runtime = snapshot?.runtime;
-  const liveExecutionAvailable = live?.capability?.execution === "AVAILABLE";
+  const liveGateActive = live?.gate?.executionMode === "LIVE"
+    && live?.gate?.state === "LIVE_ACTIVE";
+  const liveExecutionConfigured = live?.capability?.execution === "AVAILABLE";
+  const liveExecutionAvailable = liveExecutionConfigured && liveGateActive;
+  const liveExecutionBlockedReason = !liveExecutionConfigured
+    ? "Live Executor 未配置"
+    : "Live Gate 尚未处于 LIVE_ACTIVE";
   const liveOrderManagementAvailable = live?.capability?.orderManagement === "AVAILABLE";
   const retryableExecutionStates = new Set(["WAITING_EXECUTION", "EXIT_PENDING", "STOP_EXIT_PENDING"]);
   return `
@@ -700,7 +752,7 @@ function domainDetails(snapshot) {
           const retryable = retryableExecutionStates.has(String(row.state ?? ""));
           if (!retryable) return '<span class="table-action-note">无需重试</span>';
           return `<button class="table-action-button" type="button" data-live-execution-retry="${escapeHtml(row.live_execution_id)}"
-            ${disabledAttr(!liveExecutionAvailable, "Live Executor 未配置")}>重试</button>`;
+            ${disabledAttr(!liveExecutionAvailable, liveExecutionBlockedReason)}>重试</button>`;
         })}
         ${recordTable("Live 订单", live?.orders, [["side", "方向"], ["status", "状态"], ["price_units", "价格"], ["filled_notional_micros", "成交金额"], ["external_order_id", "外部订单"]], (row) => {
           const terminal = Number(row.is_terminal) === 1;
@@ -780,7 +832,9 @@ function render() {
         ${livePanel(snapshot)}
         <div class="feed-heading reveal" style="--delay: 145ms">
           <div><h1>跟单记录</h1><p>目标交易与我的执行结果</p></div>
-          <span>${escapeHtml(snapshot.comparisons.length ? `${snapshot.comparisons.length} 条` : "暂无记录")}</span>
+          <span>${escapeHtml(snapshot.comparisons.length
+            ? `${currentMode(snapshot)} · 最近 ${snapshot.comparisons.length} 条`
+            : `${currentMode(snapshot)} · 暂无记录`)}</span>
         </div>
         <div class="trade-list">${snapshot.comparisons.length
           ? snapshot.comparisons.map(eventCard).join("")
@@ -1060,9 +1114,7 @@ function bindWalletProvider(provider) {
     }
   };
   const chainChanged = (chainId) => {
-    const parsed = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
-      ? Number.parseInt(chainId, 16)
-      : Number.NaN;
+    const parsed = walletFlow().parseChainId(chainId);
     if (state.snapshot?.live?.walletSession?.status === "CONNECTED" && parsed !== 137) {
       void invalidateConnectedWallet("OKX 已离开 Polygon 主网。");
     }
@@ -1139,9 +1191,7 @@ async function connectLiveWallet() {
           { method: "eth_chainId" },
           { timeoutMs: 10_000, label: "读取钱包网络" },
         );
-        const parsedChainId = typeof chainId === "string" && /^0x[0-9a-f]+$/i.test(chainId)
-          ? Number.parseInt(chainId, 16)
-          : Number.NaN;
+        const parsedChainId = flow.parseChainId(chainId);
         if (parsedChainId !== 137) {
           setWalletProgress("等待网络切换", "请在 OKX 中确认切换到 Polygon 主网。");
           await flow.requestWithTimeout(
@@ -1157,11 +1207,7 @@ async function connectLiveWallet() {
             { method: "eth_chainId" },
             { timeoutMs: 10_000, label: "确认钱包网络" },
           );
-          if (
-            typeof chainId !== "string"
-            || !/^0x[0-9a-f]+$/i.test(chainId)
-            || Number.parseInt(chainId, 16) !== 137
-          ) {
+          if (flow.parseChainId(chainId) !== 137) {
             throw new Error("请把钱包切换到 Polygon 主网");
           }
         }
@@ -1323,9 +1369,7 @@ async function processWalletRequest(provider, session, request) {
     { method: "eth_chainId" },
     { timeoutMs: 10_000, label: "确认钱包网络" },
   );
-  const parsedChainId = typeof activeChainId === "string" && /^0x[0-9a-f]+$/i.test(activeChainId)
-    ? Number.parseInt(activeChainId, 16)
-    : Number.NaN;
+  const parsedChainId = flow.parseChainId(activeChainId);
   if (parsedChainId !== request.chainId || parsedChainId !== session.chainId) {
     throw new Error("钱包网络已变化，请切回 Polygon 主网");
   }

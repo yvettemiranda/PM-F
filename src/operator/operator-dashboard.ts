@@ -101,6 +101,9 @@ export interface OperatorDashboardSnapshot {
       priceTimestamp: string | null;
       createdAt: string;
     };
+    positionSummary: {
+      nonzeroCount: number;
+    };
     executions: Row[];
     orders: Row[];
     fills: Row[];
@@ -112,6 +115,10 @@ export interface OperatorDashboardSnapshot {
     };
   };
   live: {
+    runtime: {
+      state: "NOT_CONFIGURED" | "READY" | "RUNNING" | "STOPPED" | "ERROR";
+      lastError: string | null;
+    };
     walletSession: LiveWalletSessionSnapshot;
     walletBalance: null | {
       walletAddress: string;
@@ -150,6 +157,11 @@ export interface OperatorDashboardSnapshot {
     }>;
     gateRuns: Row[];
     accounts: Row[];
+    selectedAccountId: string | null;
+    selectedAccount: Row | null;
+    positionSummary: {
+      nonzeroCount: number;
+    };
     executions: Row[];
     orders: Row[];
     attempts: Row[];
@@ -197,7 +209,7 @@ export interface ComparisonEvent {
     reason: string;
   };
   mine: {
-    mode: "PAPER";
+    mode: "PAPER" | "LIVE";
     decision: "FOLLOWED" | "WAITING" | "RISK_REJECTED" | "SKIPPED" | "NOT_PROCESSED";
     riskDecision: string | null;
     riskReason: string | null;
@@ -471,15 +483,58 @@ function comparisonDecision(row: Row): ComparisonEvent["mine"]["decision"] {
 function comparisons(
   database: DatabaseSync,
   targetId: string,
+  mode: "PAPER" | "LIVE",
   accountId: string | null,
   limit: number,
 ): ComparisonEvent[] {
   if (!tableExists(database, "signals")) return [];
   const hasContexts = tableExists(database, "signal_execution_contexts");
   const hasRisk = tableExists(database, "risk_decisions");
-  const hasExecutions = tableExists(database, "paper_executions");
-  const hasOrders = tableExists(database, "paper_orders");
-  const hasPositions = tableExists(database, "paper_positions");
+  const executionTable = mode === "LIVE" ? "live_executions" : "paper_executions";
+  const orderTable = mode === "LIVE" ? "live_orders" : "paper_orders";
+  const positionTable = mode === "LIVE" ? "live_positions" : "paper_positions";
+  const executionPositionTable = mode === "LIVE"
+    ? "live_execution_positions"
+    : "paper_execution_positions";
+  const pnlTable = mode === "LIVE" ? "live_pnl_ledger" : "paper_pnl_ledger";
+  const executionIdColumn = mode === "LIVE" ? "live_execution_id" : "paper_execution_id";
+  const positionIdColumn = mode === "LIVE" ? "live_position_id" : "paper_position_id";
+  const accountIdColumn = mode === "LIVE" ? "live_account_id" : "paper_account_id";
+  const hasExecutions = tableExists(database, executionTable);
+  const hasOrders = tableExists(database, orderTable);
+  const hasPositions = tableExists(database, positionTable);
+  const hasExecutionPositions = tableExists(database, executionPositionTable);
+  const hasPnl = tableExists(database, pnlTable);
+  const averagePriceSql = mode === "PAPER"
+    ? `(SELECT o.vwap_price_units FROM paper_orders o WHERE o.paper_execution_id=e.paper_execution_id AND o.vwap_price_units IS NOT NULL ORDER BY o.created_at DESC,o.paper_order_id DESC LIMIT 1) average_price_units`
+    : "NULL average_price_units";
+  const linkedPositionProjection = hasExecutions && hasPositions && hasExecutionPositions
+    ? `(SELECT p.status
+        FROM ${executionPositionTable} ep
+        JOIN ${positionTable} p ON p.${positionIdColumn}=ep.${positionIdColumn}
+        WHERE ep.${executionIdColumn}=e.${executionIdColumn}
+        ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1) position_status,
+       ${hasPnl
+          ? `(SELECT CAST(SUM(CAST(l.pnl_micros AS INTEGER)) AS TEXT)
+              FROM ${pnlTable} l
+              WHERE l.${executionIdColumn}=e.${executionIdColumn})`
+          : `(SELECT p.realized_pnl_micros
+              FROM ${executionPositionTable} ep
+              JOIN ${positionTable} p ON p.${positionIdColumn}=ep.${positionIdColumn}
+              WHERE ep.${executionIdColumn}=e.${executionIdColumn}
+              ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1)`} position_realized_pnl_micros,
+       (SELECT p.outcome
+        FROM ${executionPositionTable} ep
+        JOIN ${positionTable} p ON p.${positionIdColumn}=ep.${positionIdColumn}
+        WHERE ep.${executionIdColumn}=e.${executionIdColumn}
+        ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1) position_outcome`
+    : null;
+  const signalPositionProjection = hasPositions
+    ? `(SELECT p.status FROM ${positionTable} p WHERE p.signal_id=s.signal_id AND p.${accountIdColumn}=? ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1) position_status,
+       (SELECT p.realized_pnl_micros FROM ${positionTable} p WHERE p.signal_id=s.signal_id AND p.${accountIdColumn}=? ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1) position_realized_pnl_micros,
+       (SELECT p.outcome FROM ${positionTable} p WHERE p.signal_id=s.signal_id AND p.${accountIdColumn}=? ORDER BY p.updated_at DESC,p.${positionIdColumn} DESC LIMIT 1) position_outcome`
+    : "NULL position_status,NULL position_realized_pnl_micros,NULL position_outcome";
+  const positionProjection = linkedPositionProjection ?? signalPositionProjection;
   const rows = database.prepare(
     `SELECT
        s.signal_id,s.signal_type,s.status signal_status,s.asset_id,s.condition_id,
@@ -487,18 +542,21 @@ function comparisons(
        s.reason signal_reason,s.execution_eligible,s.event_classification,s.created_at,
        ${hasContexts ? "c.target_trade_capital_ratio_ppm,c.target_trade_timestamp,c.market_end_time,c.market_metadata_snapshot_json,c.market_end_time_status,c.execution_deadline_at" : "NULL target_trade_capital_ratio_ppm,NULL target_trade_timestamp,NULL market_end_time,NULL market_metadata_snapshot_json,NULL market_end_time_status,NULL execution_deadline_at"},
        ${hasRisk ? "r.risk_decision_id,r.decision risk_decision,coalesce(r.risk_reason,r.risk_reject_reason) risk_reason,r.requested_amount_micros risk_requested_amount_micros" : "NULL risk_decision_id,NULL risk_decision,NULL risk_reason,NULL risk_requested_amount_micros"},
-       ${hasExecutions ? "e.paper_execution_id,e.state execution_state,e.filled_size_micros,e.filled_notional_micros,e.fee_micros,e.requested_amount_micros,e.reason execution_reason" : "NULL paper_execution_id,NULL execution_state,NULL filled_size_micros,NULL filled_notional_micros,NULL fee_micros,NULL requested_amount_micros,NULL execution_reason"},
-       ${hasOrders ? "(SELECT o.vwap_price_units FROM paper_orders o WHERE o.paper_execution_id=e.paper_execution_id AND o.vwap_price_units IS NOT NULL ORDER BY o.created_at DESC,o.paper_order_id DESC LIMIT 1) average_price_units" : "NULL average_price_units"},
-       ${hasPositions ? "(SELECT p.status FROM paper_positions p WHERE p.signal_id=s.signal_id AND p.paper_account_id=? ORDER BY p.updated_at DESC,p.paper_position_id DESC LIMIT 1) position_status,(SELECT p.realized_pnl_micros FROM paper_positions p WHERE p.signal_id=s.signal_id AND p.paper_account_id=? ORDER BY p.updated_at DESC,p.paper_position_id DESC LIMIT 1) position_realized_pnl_micros,(SELECT p.outcome FROM paper_positions p WHERE p.signal_id=s.signal_id AND p.paper_account_id=? ORDER BY p.updated_at DESC,p.paper_position_id DESC LIMIT 1) position_outcome" : "NULL position_status,NULL position_realized_pnl_micros,NULL position_outcome"}
+       ${hasExecutions ? `e.${executionIdColumn} execution_id,e.state execution_state,e.filled_size_micros,e.filled_notional_micros,e.fee_micros,e.requested_amount_micros,e.reason execution_reason` : "NULL execution_id,NULL execution_state,NULL filled_size_micros,NULL filled_notional_micros,NULL fee_micros,NULL requested_amount_micros,NULL execution_reason"},
+       ${hasOrders ? averagePriceSql : "NULL average_price_units"},
+       ${positionProjection}
      FROM signals s
      ${hasContexts ? "LEFT JOIN signal_execution_contexts c ON c.signal_id=s.signal_id" : ""}
-     ${hasRisk ? "LEFT JOIN risk_decisions r ON r.risk_decision_id=(SELECT r2.risk_decision_id FROM risk_decisions r2 WHERE r2.signal_id=s.signal_id AND r2.executor_mode='PAPER' ORDER BY r2.created_at DESC,r2.risk_decision_id DESC LIMIT 1)" : ""}
-     ${hasExecutions ? "LEFT JOIN paper_executions e ON e.paper_execution_id=(SELECT e2.paper_execution_id FROM paper_executions e2 WHERE e2.signal_id=s.signal_id AND e2.paper_account_id=? ORDER BY e2.created_at DESC,e2.paper_execution_id DESC LIMIT 1)" : ""}
+     ${hasRisk ? "LEFT JOIN risk_decisions r ON r.risk_decision_id=(SELECT r2.risk_decision_id FROM risk_decisions r2 WHERE r2.signal_id=s.signal_id AND r2.executor_mode=? AND r2.account_id=? ORDER BY r2.created_at DESC,r2.risk_decision_id DESC LIMIT 1)" : ""}
+     ${hasExecutions ? `LEFT JOIN ${executionTable} e ON e.${executionIdColumn}=(SELECT e2.${executionIdColumn} FROM ${executionTable} e2 WHERE e2.signal_id=s.signal_id AND e2.${accountIdColumn}=? ORDER BY e2.created_at DESC,e2.${executionIdColumn} DESC LIMIT 1)` : ""}
      WHERE s.target_id=?
      ORDER BY s.created_at DESC,s.signal_id DESC
      LIMIT ?`,
   ).all(
-    ...(hasPositions ? [accountId ?? "", accountId ?? "", accountId ?? ""] : []),
+    ...(linkedPositionProjection === null && hasPositions
+      ? [accountId ?? "", accountId ?? "", accountId ?? ""]
+      : []),
+    ...(hasRisk ? [mode, accountId ?? ""] : []),
     ...(hasExecutions ? [accountId ?? ""] : []),
     targetId,
     limit,
@@ -516,12 +574,16 @@ function comparisons(
       ? (targetPrice * targetSize) / 10n ** BigInt(PRICE_SCALE_DIGITS)
       : null;
     const market = metadata(row.market_metadata_snapshot_json);
-    const averagePrice = row.average_price_units === null || row.average_price_units === undefined
-      ? null
-      : price(row.average_price_units);
     const filledNotional = row.filled_notional_micros === null || row.filled_notional_micros === undefined
       ? null
       : money(row.filled_notional_micros);
+    const filledSize = safeBigInt(row.filled_size_micros);
+    const averagePriceUnits = row.average_price_units !== null && row.average_price_units !== undefined
+      ? row.average_price_units
+      : mode === "LIVE" && filledSize > 0n && filledNotional !== null
+        ? (safeBigInt(row.filled_notional_micros) * 10n ** BigInt(PRICE_SCALE_DIGITS) / filledSize).toString()
+        : null;
+    const averagePrice = averagePriceUnits === null ? null : price(averagePriceUnits);
     const decision = comparisonDecision(row);
     const riskReason = nullableString(row.risk_reason);
     const executionReason = nullableString(row.execution_reason);
@@ -554,11 +616,11 @@ function comparisons(
         reason: stringValue(row.signal_reason),
       },
       mine: {
-        mode: "PAPER",
+        mode,
         decision,
         riskDecision: nullableString(row.risk_decision),
         riskReason,
-        executionId: nullableString(row.paper_execution_id),
+        executionId: nullableString(row.execution_id),
         executionState: nullableString(row.execution_state),
         averagePrice,
         amount: filledNotional,
@@ -575,7 +637,7 @@ function comparisons(
           ? null
           : money(row.position_realized_pnl_micros),
         reason: executionReason ?? riskReason ?? (
-          decision === "NOT_PROCESSED" ? "尚未进入 Paper 执行链路" : stringValue(row.signal_reason)
+          decision === "NOT_PROCESSED" ? `尚未进入 ${mode} 执行链路` : stringValue(row.signal_reason)
         ),
       },
     };
@@ -610,6 +672,7 @@ function emptySnapshot(
     paper: {
       account: null,
       portfolio: null,
+      positionSummary: { nonzeroCount: 0 },
       executions: [],
       orders: [],
       fills: [],
@@ -617,6 +680,10 @@ function emptySnapshot(
       ledger: { cash: [], fees: [], pnl: [] },
     },
     live: {
+      runtime: {
+        state: "NOT_CONFIGURED",
+        lastError: null,
+      },
       walletSession: {
         status: "DISCONNECTED",
         sessionId: null,
@@ -655,6 +722,9 @@ function emptySnapshot(
       prerequisites: [],
       gateRuns: [],
       accounts: [],
+      selectedAccountId: null,
+      selectedAccount: null,
+      positionSummary: { nonzeroCount: 0 },
       executions: [],
       orders: [],
       attempts: [],
@@ -790,6 +860,17 @@ export function operatorDashboardSnapshot(
         realizedPnl: money(paperAccountRow.realized_pnl_micros),
         updatedAt: stringValue(paperAccountRow.updated_at),
       };
+      const paperPositionSummary = first(
+        database,
+        "paper_positions",
+        `SELECT COUNT(*) nonzero_count
+         FROM paper_positions
+         WHERE paper_account_id=? AND current_size_micros<>'0'`,
+        [paperAccountId],
+      );
+      snapshot.paper.positionSummary.nonzeroCount = integerValue(
+        paperPositionSummary?.nonzero_count,
+      );
       const projection = first(
         database,
         "portfolio_projection_runs",
@@ -969,7 +1050,6 @@ export function operatorDashboardSnapshot(
         size: ["requested_size_micros"],
         json: ["checks_json"],
       });
-      snapshot.comparisons = comparisons(database, targetId, paperAccountId, limit);
     }
 
     const gate = first(
@@ -1009,14 +1089,22 @@ export function operatorDashboardSnapshot(
        FROM live_gate_runs ORDER BY created_at DESC,live_gate_run_id DESC LIMIT ?`,
       [limit],
     ), { json: ["blocked_reasons_json", "checks_json"] });
-    const latestRiskSnapshot = first(
-      database,
-      "risk_snapshots",
-      `SELECT wallet_address,balance_micros,risk_status,created_at
-       FROM risk_snapshots
-       WHERE wallet_address IS NOT NULL AND balance_micros IS NOT NULL
-       ORDER BY created_at DESC,risk_snapshot_id DESC LIMIT 1`,
-    );
+    const configuredTradingWallet = snapshot.live.production.config.tradingWalletAddress;
+    const walletRiskMode = snapshot.live.gate?.executionMode === "LIVE" ? "LIVE" : "PAPER";
+    const latestRiskSnapshot = configuredTradingWallet === null
+      ? null
+      : first(
+        database,
+        "risk_snapshots",
+        `SELECT wallet_address,balance_micros,risk_status,created_at
+         FROM risk_snapshots
+         WHERE wallet_address IS NOT NULL
+           AND balance_micros IS NOT NULL
+           AND mode=?
+           AND lower(wallet_address)=?
+         ORDER BY created_at DESC,risk_snapshot_id DESC LIMIT 1`,
+        [walletRiskMode, configuredTradingWallet],
+      );
     if (
       latestRiskSnapshot !== null
       && nullableString(latestRiskSnapshot.wallet_address) !== null
@@ -1032,13 +1120,38 @@ export function operatorDashboardSnapshot(
     snapshot.live.accounts = decorateRows(all(
       database,
       "live_accounts",
-      `SELECT live_account_id,live_wallet_id,name,status,initial_bankroll_micros,
-              risk_budget_micros,authorized_signer_address,activated_at,created_at,updated_at
-       FROM live_accounts ORDER BY updated_at DESC,live_account_id DESC LIMIT ?`,
-      [limit],
+      `SELECT a.live_account_id,a.live_wallet_id,a.name,a.status,a.initial_bankroll_micros,
+              a.risk_budget_micros,a.authorized_signer_address,a.activated_at,a.created_at,a.updated_at,
+              w.wallet_address,w.status wallet_status
+       FROM live_accounts a
+       LEFT JOIN live_wallets w ON w.live_wallet_id=a.live_wallet_id
+       ORDER BY
+         CASE WHEN lower(coalesce(w.wallet_address,''))=? THEN 0 ELSE 1 END,
+         CASE a.status WHEN 'ACTIVE' THEN 0 WHEN 'DISABLED' THEN 1 ELSE 2 END,
+         a.updated_at DESC,a.live_account_id DESC LIMIT ?`,
+      [configuredTradingWallet ?? "", limit],
     ), { money: ["initial_bankroll_micros", "risk_budget_micros"] });
-    const liveAccountId = nullableString(snapshot.live.accounts[0]?.live_account_id);
+    const selectedAccount = configuredTradingWallet === null
+      ? null
+      : snapshot.live.accounts.find((account) => (
+        typeof account.wallet_address === "string"
+        && account.wallet_address.toLowerCase() === configuredTradingWallet
+      )) ?? null;
+    const liveAccountId = nullableString(selectedAccount?.live_account_id);
+    snapshot.live.selectedAccountId = liveAccountId;
+    snapshot.live.selectedAccount = selectedAccount;
     if (liveAccountId !== null) {
+      const livePositionSummary = first(
+        database,
+        "live_positions",
+        `SELECT COUNT(*) nonzero_count
+         FROM live_positions
+         WHERE live_account_id=? AND current_size_micros<>'0'`,
+        [liveAccountId],
+      );
+      snapshot.live.positionSummary.nonzeroCount = integerValue(
+        livePositionSummary?.nonzero_count,
+      );
       const walletPositionBaseline = first(
         database,
         "live_wallet_position_baselines",
@@ -1210,6 +1323,16 @@ export function operatorDashboardSnapshot(
         ],
       });
     }
+    const liveMode = snapshot.live.gate?.executionMode === "LIVE";
+    snapshot.comparisons = targetId === null
+      ? []
+      : comparisons(
+        database,
+        targetId,
+        liveMode ? "LIVE" : "PAPER",
+        liveMode ? liveAccountId : paperAccountId,
+        limit,
+      );
     snapshot.live.audit = decorateRows(all(
       database,
       "audit_log",

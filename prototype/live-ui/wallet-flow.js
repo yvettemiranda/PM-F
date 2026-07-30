@@ -12,6 +12,18 @@
     return address ?? "";
   }
 
+  function parseChainId(value) {
+    if (Number.isSafeInteger(value) && value > 0) return value;
+    if (typeof value === "string" && /^0x[0-9a-f]+$/i.test(value)) {
+      return Number.parseInt(value, 16);
+    }
+    if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+    }
+    return Number.NaN;
+  }
+
   function walletErrorMessage(error) {
     const code = error && typeof error === "object" ? error.code : undefined;
     const rawMessage = error && typeof error === "object"
@@ -87,6 +99,7 @@
 
   global.HecatonchiresWalletFlow = {
     firstValidAddress,
+    parseChainId,
     requestWithTimeout,
     runExclusive,
     walletErrorMessage,

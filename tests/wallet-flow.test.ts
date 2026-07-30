@@ -6,6 +6,7 @@ const source = readFileSync(new URL("../prototype/live-ui/wallet-flow.js", impor
 
 interface WalletFlow {
   firstValidAddress(accounts: unknown): string;
+  parseChainId(value: unknown): number;
   requestWithTimeout(
     provider: { request(input: unknown): Promise<unknown> },
     request: unknown,
@@ -36,6 +37,15 @@ describe("browser wallet flow", () => {
       "0xfb54e3e216afd5b1892134d499024271faae5da4",
     ])).toBe("0xfb54e3e216afd5b1892134d499024271faae5da4");
     expect(wallet.firstValidAddress([])).toBe("");
+  });
+
+  it("normalizes both standard hexadecimal and numeric wallet chain identifiers", () => {
+    const wallet = load();
+
+    expect(wallet.parseChainId("0x89")).toBe(137);
+    expect(wallet.parseChainId(137)).toBe(137);
+    expect(wallet.parseChainId("137")).toBe(137);
+    expect(Number.isNaN(wallet.parseChainId("polygon"))).toBe(true);
   });
 
   it("serializes wallet work when another browser tab already owns the lock", async () => {

@@ -1,6 +1,8 @@
 // Pure status helpers for the localhost operator console. Keeping these
 // decisions outside app.js makes refresh behavior deterministic and testable.
 (function installHecatonchiresUiState(global) {
+  const LIVE_DATA_STALE_AFTER_MS = 60_000;
+
   function formatTime(value) {
     if (!value) return "—";
     const date = new Date(value);
@@ -15,11 +17,25 @@
     if (snapshot.database?.status === "ERROR") return "后台状态异常";
     if (snapshot.database?.status === "NOT_INITIALIZED") return "后台在线 · 等待初始化";
     const timestamp = formatTime(snapshot.generatedAt);
-    if (snapshot.runtime?.state === "RECOVERY_REQUIRED") {
+    const liveMode = executionMode(snapshot) === "LIVE";
+    const liveRuntimeState = snapshot.live?.runtime?.state;
+    if (!liveMode && liveRuntimeState === "RUNNING") {
+      return `后台在线 · ${timestamp} · Live 后台未停止（Gate 已禁用）`;
+    }
+    if (!liveMode && liveRuntimeState === "ERROR") {
+      return `后台在线 · ${timestamp} · Live 后台异常（Gate 已禁用）`;
+    }
+    const runtimeState = liveMode
+      ? liveRuntimeState
+      : snapshot.runtime?.state;
+    if (liveMode && runtimeState === "ERROR") {
+      return `后台在线 · ${timestamp} · Live 运行异常`;
+    }
+    if (!liveMode && runtimeState === "RECOVERY_REQUIRED") {
       return `后台在线 · ${timestamp} · 需要恢复`;
     }
-    if (snapshot.runtime?.state === "RUNNING") {
-      return `后台在线 · ${timestamp} · 运行中`;
+    if (runtimeState === "RUNNING") {
+      return `后台在线 · ${timestamp} · ${liveMode ? "Live " : ""}运行中`;
     }
     return `后台在线 · ${timestamp}`;
   }
@@ -62,6 +78,8 @@
   }
 
   function livePositionCount(snapshot) {
+    const summarized = snapshot?.live?.positionSummary?.nonzeroCount;
+    if (Number.isSafeInteger(summarized) && summarized >= 0) return summarized;
     const positions = Array.isArray(snapshot?.live?.positions) ? snapshot.live.positions : [];
     return positions.filter((position) => String(position?.current_size_micros ?? "0") !== "0").length;
   }
@@ -76,11 +94,32 @@
   function overviewFinancials(snapshot) {
     const mode = executionMode(snapshot) === "LIVE" ? "LIVE" : "PAPER";
     if (mode === "PAPER") {
+      const sourcePortfolio = snapshot?.paper?.portfolio ?? null;
+      const paperValuationIncomplete = sourcePortfolio !== null
+        && (
+          (
+            typeof sourcePortfolio.valuationStatus === "string"
+            && sourcePortfolio.valuationStatus !== "COMPLETE"
+          )
+          || Number(sourcePortfolio.unpricedPositionCount ?? 0) > 0
+        );
+      const portfolio = paperValuationIncomplete
+        ? {
+          ...sourcePortfolio,
+          positionValue: null,
+          unrealizedPnl: null,
+          totalEquity: null,
+        }
+        : sourcePortfolio;
       return {
         mode,
-        portfolio: snapshot?.paper?.portfolio ?? null,
-        positionCount: Array.isArray(snapshot?.paper?.positions) ? snapshot.paper.positions.length : 0,
-        valuationStatus: snapshot?.paper?.portfolio?.valuationStatus ?? null,
+        portfolio,
+        positionCount: Number.isSafeInteger(snapshot?.paper?.positionSummary?.nonzeroCount)
+          ? snapshot.paper.positionSummary.nonzeroCount
+          : Array.isArray(snapshot?.paper?.positions) ? snapshot.paper.positions.length : 0,
+        valuationStatus: sourcePortfolio?.valuationStatus ?? null,
+        observedAt: sourcePortfolio?.createdAt ?? null,
+        stale: false,
       };
     }
 
@@ -89,16 +128,32 @@
       ? snapshot.live.valuations[0]
       : null;
     const walletBalance = snapshot?.live?.walletBalance?.balance ?? null;
+    const observedAt = valuation?.created_at
+      ?? snapshot?.live?.walletBalance?.observedAt
+      ?? null;
+    const generatedAt = Date.parse(snapshot?.generatedAt ?? "");
+    const observedTimestamp = Date.parse(observedAt ?? "");
+    const stale = Number.isFinite(generatedAt)
+      && Number.isFinite(observedTimestamp)
+      && generatedAt - observedTimestamp > LIVE_DATA_STALE_AFTER_MS;
     const positionCount = livePositionCount(snapshot);
+    const valuationComplete = valuation?.valuation_status === "COMPLETE"
+      && Number(valuation?.unpriced_position_count ?? 0) === 0;
     const portfolio = directPortfolio ?? (valuation
       ? {
         cashBalance: rowMoneyView(valuation, "cash_balance_micros"),
         reservedBalance: rowMoneyView(valuation, "reserved_balance_micros"),
         availableBalance: rowMoneyView(valuation, "available_balance_micros"),
-        positionValue: rowMoneyView(valuation, "position_value_micros"),
+        positionValue: valuationComplete
+          ? rowMoneyView(valuation, "position_value_micros")
+          : null,
         realizedPnl: rowMoneyView(valuation, "realized_pnl_micros"),
-        unrealizedPnl: rowMoneyView(valuation, "unrealized_pnl_micros"),
-        totalEquity: rowMoneyView(valuation, "total_equity_micros"),
+        unrealizedPnl: valuationComplete
+          ? rowMoneyView(valuation, "unrealized_pnl_micros")
+          : null,
+        totalEquity: valuationComplete
+          ? rowMoneyView(valuation, "total_equity_micros")
+          : positionCount === 0 ? walletBalance : null,
       }
       : {
         cashBalance: walletBalance,
@@ -118,6 +173,8 @@
       valuationStatus: directPortfolio?.valuationStatus
         ?? valuation?.valuation_status
         ?? (positionCount === 0 && walletBalance ? "WALLET_CASH_ONLY" : "PENDING"),
+      observedAt,
+      stale,
     };
   }
 

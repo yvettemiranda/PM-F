@@ -22,7 +22,18 @@ function project(): string {
   const root = mkdtempSync(join(tmpdir(), "ni-k-operator-dashboard-"));
   directories.push(root);
   mkdirSync(join(root, "config"), { recursive: true });
+  mkdirSync(join(root, "data/operator"), { recursive: true });
   writeFileSync(join(root, "config/default-target-wallet.txt"), `${wallet}\n`);
+  writeFileSync(
+    join(root, "data/operator/live-production.json"),
+    `${JSON.stringify({
+      schemaVersion: "live-production-config-v2",
+      walletAddress: wallet,
+      tradingWalletAddress: wallet,
+      signatureType: "EOA",
+      network: "POLYGON",
+    })}\n`,
+  );
   return root;
 }
 
@@ -294,6 +305,29 @@ function installDatabase(root: string): void {
       'position-1','${accountId}','${signalId}','asset-yes','condition-1','Yes',
       '523000000000000000','47700000','24947100','OPEN','0',NULL,'${now}','${now}'
     );
+    CREATE TABLE paper_execution_positions (
+      paper_execution_id TEXT NOT NULL,
+      paper_position_id TEXT NOT NULL,
+      requested_size_micros TEXT NOT NULL,
+      filled_size_micros TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(paper_execution_id,paper_position_id)
+    );
+    INSERT INTO paper_execution_positions VALUES (
+      'execution-1','position-1','47700000','47700000','${now}'
+    );
+    CREATE TABLE paper_pnl_ledger (
+      pnl_ledger_id TEXT PRIMARY KEY,
+      paper_account_id TEXT NOT NULL,
+      paper_position_id TEXT NOT NULL,
+      paper_execution_id TEXT NOT NULL,
+      pnl_type TEXT NOT NULL,
+      proceeds_micros TEXT NOT NULL,
+      cost_basis_micros TEXT NOT NULL,
+      fee_micros TEXT NOT NULL,
+      pnl_micros TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
 
     CREATE TABLE reconciliation_issues (
       issue_id TEXT PRIMARY KEY,
@@ -310,6 +344,12 @@ function installDatabase(root: string): void {
       'issue-1','${targetId}',NULL,'TRANSIENT','MINOR_DIFF','RESOLVED','{}','${now}','${now}'
     );
 
+    CREATE TABLE live_wallets (
+      live_wallet_id TEXT PRIMARY KEY,
+      wallet_address TEXT NOT NULL,
+      status TEXT NOT NULL
+    );
+    INSERT INTO live_wallets VALUES ('wallet-1','${wallet}','ACTIVE');
     CREATE TABLE live_accounts (
       live_account_id TEXT PRIMARY KEY,
       live_wallet_id TEXT NOT NULL,
@@ -397,6 +437,44 @@ function installDatabase(root: string): void {
     INSERT INTO live_wallet_position_baselines VALUES (
       'live-account-1','CAPTURED',1,'${now}'
     );
+    CREATE TABLE live_positions (
+      live_position_id TEXT PRIMARY KEY,
+      live_account_id TEXT NOT NULL,
+      signal_id TEXT NOT NULL,
+      asset_id TEXT NOT NULL,
+      condition_id TEXT NOT NULL,
+      outcome TEXT,
+      entry_price_units TEXT NOT NULL,
+      current_size_micros TEXT NOT NULL,
+      remaining_cost_micros TEXT NOT NULL,
+      status TEXT NOT NULL,
+      realized_pnl_micros TEXT NOT NULL,
+      frozen_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE live_execution_positions (
+      live_execution_id TEXT NOT NULL,
+      live_position_id TEXT NOT NULL,
+      requested_size_micros TEXT NOT NULL,
+      filled_size_micros TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(live_execution_id,live_position_id)
+    );
+    CREATE TABLE live_pnl_ledger (
+      pnl_ledger_id TEXT PRIMARY KEY,
+      live_account_id TEXT NOT NULL,
+      live_position_id TEXT NOT NULL,
+      live_execution_id TEXT NOT NULL,
+      pnl_type TEXT NOT NULL,
+      proceeds_micros TEXT NOT NULL,
+      cost_basis_micros TEXT NOT NULL,
+      fee_micros TEXT NOT NULL,
+      pnl_micros TEXT NOT NULL,
+      price_source TEXT NOT NULL,
+      price_timestamp TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
   database.close();
 }
@@ -482,6 +560,8 @@ describe("operator dashboard", () => {
     expect(snapshot.paper.orders).toHaveLength(1);
     expect(snapshot.paper.fills).toHaveLength(1);
     expect(snapshot.paper.positions).toHaveLength(1);
+    expect(snapshot.paper.positionSummary).toEqual({ nonzeroCount: 1 });
+    expect(snapshot.live.positionSummary).toEqual({ nonzeroCount: 0 });
     expect(snapshot.live.gate).toMatchObject({
       executionMode: "PAPER",
       state: "LIVE_DISABLED",
@@ -520,5 +600,131 @@ describe("operator dashboard", () => {
       }),
     ]);
     expect(JSON.stringify(snapshot)).not.toContain("should-never-reach-ui");
+  });
+
+  it("scopes Live money and records to the configured trading wallet", () => {
+    const root = project();
+    installDatabase(root);
+    const database = new DatabaseSync(join(root, "data/phase0/phase0.sqlite"));
+    const otherWallet = "0x00000000000000000000000000000000000000cd";
+    const later = "2026-07-27T09:00:00.000Z";
+    database.exec(`
+      INSERT INTO live_wallets VALUES ('wallet-old','${otherWallet}','DISABLED');
+      INSERT INTO live_accounts VALUES (
+        'live-account-old','wallet-old','Old Live','DISABLED','9000000','9000000',
+        '${otherWallet}',NULL,'${later}','${later}'
+      );
+      INSERT INTO risk_snapshots VALUES (
+        'risk-snapshot-old','PAPER','${otherWallet}','999000000','0','0','SAFE','[]',
+        'gate-run-old','test-commit',0,'test-config','${later}'
+      );
+    `);
+    database.close();
+
+    const snapshot = operatorDashboardSnapshot(root, { now: () => new Date(later) });
+
+    expect((snapshot.live as typeof snapshot.live & { selectedAccountId?: string }).selectedAccountId)
+      .toBe("live-account-1");
+    expect(snapshot.live.walletBalance).toMatchObject({
+      walletAddress: wallet,
+      balance: { display: "34,342.00" },
+    });
+    expect(snapshot.live.attempts).toEqual([
+      expect.objectContaining({ attempt_id: "attempt-1" }),
+    ]);
+  });
+
+  it("uses Live decisions and executions in comparison cards while the Gate is Live", () => {
+    const root = project();
+    installDatabase(root);
+    const database = new DatabaseSync(join(root, "data/phase0/phase0.sqlite"));
+    database.exec(`
+      UPDATE live_gate_state
+      SET execution_mode='LIVE',live_gate_state='LIVE_ACTIVE',state_reason='LIVE_ACTIVE';
+      INSERT INTO risk_decisions VALUES (
+        'risk-live-1','${signalId}','LIVE','live-account-1','ALLOW',NULL,
+        'LIVE_ALL_CHECKS_PASSED','1000000',NULL,'[]','${now}'
+      );
+      INSERT INTO risk_snapshots VALUES (
+        'risk-snapshot-live','LIVE','${wallet}','77000000','0','0','SAFE','[]',
+        'gate-run-live','test-commit',0,'test-config','${now}'
+      );
+      UPDATE live_executions SET risk_decision_id='risk-live-1';
+    `);
+    database.close();
+
+    const snapshot = operatorDashboardSnapshot(root, { now: () => new Date(now) });
+
+    expect(snapshot.comparisons).toHaveLength(1);
+    expect(snapshot.comparisons[0]).toMatchObject({
+      signalId,
+      mine: {
+        mode: "LIVE",
+        decision: "SKIPPED",
+        executionState: "FAILED",
+        requestedAmount: { display: "1.00" },
+        reason: "ADAPTER_UNAVAILABLE",
+      },
+    });
+    expect(snapshot.live.walletBalance).toMatchObject({
+      balance: { display: "77.00" },
+    });
+  });
+
+  it("reports the realized PnL of the exact SELL execution", () => {
+    const root = project();
+    installDatabase(root);
+    const database = new DatabaseSync(join(root, "data/phase0/phase0.sqlite"));
+    const sellTime = "2026-07-27T08:05:00.000Z";
+    database.exec(`
+      INSERT INTO signals VALUES (
+        'signal-sell','${targetId}','TARGET_SELL','PUBLISHED','asset-yes','condition-1',
+        '610000000000000000','47700000','1','1','POST_BASELINE_SELL',1,NULL,
+        'STANDARD_TRADE','OBSERVE_ONLY','observe-1','${sellTime}'
+      );
+      INSERT INTO signal_execution_contexts VALUES (
+        'signal-sell',NULL,'${sellTime}','2026-09-30T00:00:00.000Z',
+        '{"question":"Will the Fed cut rates in September?","marketSlug":"fed-rates","tokens":[{"token_id":"asset-yes","outcome":"Yes"}]}',
+        'VERIFIED','2026-07-27T08:30:00.000Z'
+      );
+      INSERT INTO risk_decisions VALUES (
+        'risk-sell','signal-sell','PAPER','${accountId}','ALLOW',NULL,'ALL_CHECKS_PASSED',
+        NULL,'47700000','[]','${sellTime}'
+      );
+      INSERT INTO paper_executions VALUES (
+        'execution-sell','${accountId}','signal-sell','risk-sell','TARGET_SELL','EXECUTED',
+        NULL,'47700000','47700000','29097000','10000','610000000000000000',
+        'FILLED',1,'${sellTime}','${sellTime}'
+      );
+      INSERT INTO paper_orders VALUES (
+        'order-sell','execution-sell','SELL','FILLED','47700000',NULL,'47700000',
+        '29097000','610000000000000000','10000',NULL,'${sellTime}'
+      );
+      INSERT INTO paper_execution_positions VALUES (
+        'execution-sell','position-1','47700000','47700000','${sellTime}'
+      );
+      INSERT INTO paper_pnl_ledger VALUES (
+        'pnl-sell','${accountId}','position-1','execution-sell','REALIZED',
+        '29097000','25007000','10000','4080000','${sellTime}'
+      );
+      UPDATE paper_positions
+      SET status='CLOSED',current_size_micros='0',realized_pnl_micros='4080000',
+          updated_at='${sellTime}'
+      WHERE paper_position_id='position-1';
+    `);
+    database.close();
+
+    const snapshot = operatorDashboardSnapshot(root, { now: () => new Date(sellTime) });
+    const sell = snapshot.comparisons.find((event) => event.signalId === "signal-sell");
+
+    expect(sell).toMatchObject({
+      action: "SELL",
+      mine: {
+        mode: "PAPER",
+        executionId: "execution-sell",
+        positionStatus: "CLOSED",
+        realizedPnl: { display: "4.08" },
+      },
+    });
   });
 });

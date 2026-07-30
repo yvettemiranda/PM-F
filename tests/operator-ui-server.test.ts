@@ -97,6 +97,37 @@ function mutation(
   return fetch(`${baseUrl}${path}`, init);
 }
 
+function installLiveGate(root: string, executionMode: "PAPER" | "LIVE", state: string): void {
+  const databaseDirectory = join(root, "data/phase0");
+  mkdirSync(databaseDirectory, { recursive: true });
+  const database = new DatabaseSync(join(databaseDirectory, "phase0.sqlite"));
+  database.exec(`
+    CREATE TABLE live_gate_state(
+      state_id TEXT PRIMARY KEY,
+      execution_mode TEXT NOT NULL,
+      live_gate_state TEXT NOT NULL,
+      requested_execution_mode TEXT,
+      last_preflight_id TEXT,
+      state_reason TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  database.prepare(
+    `INSERT INTO live_gate_state(
+       state_id,execution_mode,live_gate_state,requested_execution_mode,
+       last_preflight_id,state_reason,updated_at
+     ) VALUES ('default',?,?,?,?,?,?)`,
+  ).run(
+    executionMode,
+    state,
+    executionMode,
+    null,
+    state,
+    "2026-07-30T00:00:00.000Z",
+  );
+  database.close();
+}
+
 describe("operator UI server", () => {
   it("accepts a single safe application shutdown request", async () => {
     const requestShutdown = vi.fn();
@@ -739,6 +770,88 @@ describe("operator UI server", () => {
     });
   });
 
+  it("blocks the generic Live start route until the persisted Gate is active", async () => {
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STARTED" })),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const { baseUrl, root } = await listen({ liveRuntimeActions });
+    installLiveGate(root, "PAPER", "LIVE_DISABLED");
+
+    const response = await mutation(baseUrl, "/api/operator/runtime/start", {
+      body: { mode: "LIVE", actor: "TEST", reason: "MANUAL_START" },
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_GATE_NOT_ACTIVE",
+        details: {
+          executionMode: "PAPER",
+          liveGateState: "LIVE_DISABLED",
+        },
+      },
+    });
+    expect(liveRuntimeActions.start).not.toHaveBeenCalled();
+  });
+
+  it("allows the generic Live start route only after the persisted Gate is active", async () => {
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STARTED" })),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const { baseUrl, root } = await listen({ liveRuntimeActions });
+    installLiveGate(root, "LIVE", "LIVE_ACTIVE");
+
+    const response = await mutation(baseUrl, "/api/operator/runtime/start", {
+      body: { mode: "LIVE", actor: "TEST", reason: "MANUAL_START" },
+    });
+
+    expect(response.status).toBe(202);
+    expect(liveRuntimeActions.start).toHaveBeenCalledWith({
+      actor: "TEST",
+      reason: "MANUAL_START",
+    });
+  });
+
+  it("blocks execution retry until the persisted Live Gate is active", async () => {
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(async () => ({ accepted: true, code: "LIVE_EXECUTION_RETRY_ACCEPTED" })),
+    };
+    const { baseUrl, root } = await listen({ liveRuntimeActions });
+    installLiveGate(root, "PAPER", "LIVE_DISABLED");
+
+    const response = await mutation(
+      baseUrl,
+      "/api/operator/live/executions/execution-1/retry",
+      { body: { actor: "TEST", reason: "MANUAL_RETRY" } },
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_GATE_NOT_ACTIVE" },
+    });
+    expect(liveRuntimeActions.retryExecution).not.toHaveBeenCalled();
+  });
+
   it("starts the recovered idle runtime before Gate confirmation and couples emergency stop", async () => {
     const allowed = {
       allowed: true,
@@ -802,6 +915,91 @@ describe("operator UI server", () => {
     expect(liveRuntimeActions.stop).toHaveBeenCalledWith({
       actor: "TEST",
       reason: "USER_STOP",
+    });
+  });
+
+  it("reports a partial emergency stop when the Gate is disabled but the runtime cannot stop", async () => {
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(),
+      confirmActivation: vi.fn(),
+      emergencyDisable: vi.fn(async () => undefined),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(),
+      stop: vi.fn(async () => ({
+        accepted: false,
+        code: "LIVE_RUNTIME_STOP_FAILED",
+        details: { reason: "background loop did not exit" },
+      })),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/emergency-disable", {
+      body: { actor: "TEST", reason: "USER_STOP" },
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_GATE_DISABLED_RUNTIME_STOP_FAILED",
+        details: {
+          gateDisabled: true,
+          runtimeStopped: false,
+          runtimeCode: "LIVE_RUNTIME_STOP_FAILED",
+          safety: "PAPER + LIVE_DISABLED",
+        },
+      },
+    });
+  });
+
+  it("still attempts to stop the runtime when emergency Gate disable itself fails", async () => {
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(),
+      confirmActivation: vi.fn(),
+      emergencyDisable: vi.fn(async () => {
+        throw new Error("GATE_WRITE_FAILED");
+      }),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(),
+      stop: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STOPPED" })),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/emergency-disable", {
+      body: { actor: "TEST", reason: "USER_STOP" },
+    });
+
+    expect(response.status).toBe(503);
+    expect(liveRuntimeActions.stop).toHaveBeenCalledWith({
+      actor: "TEST",
+      reason: "USER_STOP",
+    });
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_EMERGENCY_DISABLE_INCOMPLETE",
+        details: {
+          gateDisabled: false,
+          runtimeStopped: true,
+          runtimeCode: "LIVE_RUNTIME_STOPPED",
+        },
+      },
     });
   });
 
@@ -944,6 +1142,130 @@ describe("operator UI server", () => {
     expect(liveRuntimeActions.start).not.toHaveBeenCalled();
   });
 
+  it("does not claim Paper safety when one-click rollback cannot disable the Gate", async () => {
+    const allowed = {
+      allowed: true,
+      runId: "gate-ready",
+      blockedReasons: [],
+      checks: [],
+      requestedExecutionMode: "LIVE" as const,
+      executionMode: "PAPER",
+      liveGateState: "LIVE_ARMING",
+    };
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(async () => allowed),
+      confirmActivation: vi.fn(),
+      emergencyDisable: vi.fn(async () => {
+        throw new Error("GATE_WRITE_FAILED");
+      }),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: {
+        execution: "AVAILABLE",
+        orderManagement: "AVAILABLE",
+        walletSetup: "AVAILABLE",
+      },
+      start: vi.fn(),
+      stop: vi.fn(),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(async () => ({
+        accepted: false,
+        code: "LIVE_RECONCILIATION_FAILED",
+      })),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+      prepareWallet: vi.fn(),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/activate", {
+      body: {
+        actor: "LOCAL_OPERATOR",
+        reason: "UI_ONE_CLICK_LIVE",
+        confirmationText: "ENABLE LIVE TRADING",
+      },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_ACTIVATION_ROLLBACK_INCOMPLETE",
+        details: {
+          stage: "RECONCILIATION",
+          originalCode: "LIVE_RECONCILIATION_FAILED",
+          gateDisabled: false,
+          runtimeStopRequired: false,
+        },
+      },
+    });
+  });
+
+  it("reports an incomplete one-click rollback when the runtime cannot stop", async () => {
+    const arming = {
+      allowed: true,
+      runId: "gate-ready",
+      blockedReasons: [],
+      checks: [],
+      requestedExecutionMode: "LIVE" as const,
+      executionMode: "PAPER",
+      liveGateState: "LIVE_ARMING",
+    };
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(async () => arming),
+      confirmActivation: vi.fn(async () => ({
+        ...arming,
+        allowed: false,
+        blockedReasons: ["FINAL_CONFIRMATION_FAILED"],
+      })),
+      emergencyDisable: vi.fn(async () => undefined),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: {
+        execution: "AVAILABLE",
+        orderManagement: "AVAILABLE",
+        walletSetup: "AVAILABLE",
+      },
+      start: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STARTED" })),
+      stop: vi.fn(async () => ({ accepted: false, code: "LIVE_RUNTIME_STOP_FAILED" })),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(async () => ({ accepted: true, code: "LIVE_RECONCILED" })),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+      prepareWallet: vi.fn(async () => ({ accepted: true, code: "LIVE_WALLET_SETUP_READY" })),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/activate", {
+      body: {
+        actor: "LOCAL_OPERATOR",
+        reason: "UI_ONE_CLICK_LIVE",
+        confirmationText: "ENABLE LIVE TRADING",
+      },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_ACTIVATION_ROLLBACK_INCOMPLETE",
+        details: {
+          stage: "CONFIRMATION",
+          originalCode: "LIVE_GATE_BLOCKED",
+          gateDisabled: true,
+          runtimeStopRequired: true,
+          runtimeStopped: false,
+          runtimeCode: "LIVE_RUNTIME_STOP_FAILED",
+          safety: "PAPER + LIVE_DISABLED",
+        },
+      },
+    });
+  });
+
   it("stops an available Live runtime before the UI host shuts down", async () => {
     const liveRuntimeActions: OperatorLiveRuntimeActions = {
       capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
@@ -1006,6 +1328,53 @@ describe("operator UI server", () => {
     expect(liveGateActions.emergencyDisable).toHaveBeenCalledWith({
       actor: "SYSTEM",
       reason: "LIVE_RUNTIME_START_ROLLBACK:LIVE_RUNTIME_STARTUP_RECOVERY_BLOCKED",
+    });
+  });
+
+  it("reports an incomplete legacy confirmation rollback when the runtime cannot stop", async () => {
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(),
+      confirmActivation: vi.fn(async () => ({
+        allowed: false,
+        runId: "gate-confirmation-failed",
+        blockedReasons: ["FINAL_CONFIRMATION_FAILED"],
+        checks: [],
+        requestedExecutionMode: "LIVE" as const,
+        executionMode: "PAPER",
+        liveGateState: "LIVE_ARMING",
+      })),
+      emergencyDisable: vi.fn(async () => undefined),
+      recover: vi.fn(),
+    };
+    const liveRuntimeActions: OperatorLiveRuntimeActions = {
+      capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
+      start: vi.fn(async () => ({ accepted: true, code: "LIVE_RUNTIME_STARTED" })),
+      stop: vi.fn(async () => ({ accepted: false, code: "LIVE_RUNTIME_STOP_FAILED" })),
+      cancelOrder: vi.fn(),
+      reconcile: vi.fn(),
+      recover: vi.fn(),
+      retryExecution: vi.fn(),
+    };
+    const { baseUrl } = await listen({ liveGateActions, liveRuntimeActions });
+
+    const response = await mutation(baseUrl, "/api/operator/live/confirm", {
+      body: { actor: "TEST", confirmationText: "ENABLE LIVE TRADING" },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: {
+        code: "LIVE_CONFIRMATION_ROLLBACK_INCOMPLETE",
+        details: {
+          originalCode: "LIVE_GATE_BLOCKED",
+          gateDisabled: true,
+          runtimeStopped: false,
+          runtimeCode: "LIVE_RUNTIME_STOP_FAILED",
+          safety: "PAPER + LIVE_DISABLED",
+        },
+      },
     });
   });
 

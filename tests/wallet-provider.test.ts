@@ -103,6 +103,19 @@ describe("browser wallet provider discovery", () => {
     await expect(wallet.discover()).resolves.toBe(okxProvider);
   });
 
+  it("prefers a freshly reinjected OKX provider after the extension reloads", async () => {
+    const windowObject = new FakeWindow();
+    const oldProvider = { request: async () => "old" };
+    const newProvider = { request: async () => "new" };
+    windowObject.okxwallet = oldProvider;
+    const wallet = load(windowObject);
+
+    await expect(wallet.discover()).resolves.toBe(oldProvider);
+    windowObject.okxwallet = newProvider;
+
+    await expect(wallet.discover()).resolves.toBe(newProvider);
+  });
+
   it("returns null instead of hanging when no wallet announces", async () => {
     const wallet = load(new FakeWindow());
 

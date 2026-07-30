@@ -68,8 +68,14 @@ export interface OperatorLiveRuntimeCapability {
   production?: LiveProductionCapabilityOverrides;
 }
 
+export interface OperatorLiveRuntimeStatus {
+  state: "NOT_CONFIGURED" | "READY" | "RUNNING" | "STOPPED" | "ERROR";
+  lastError: string | null;
+}
+
 export interface OperatorLiveRuntimeActions {
   readonly capability: OperatorLiveRuntimeCapability;
+  readonly status?: OperatorLiveRuntimeStatus;
   start(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult>;
   stop(input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult>;
   cancelOrder(input: {
@@ -330,6 +336,10 @@ export class UnconfiguredOperatorLiveRuntimeActions implements OperatorLiveRunti
     execution: "PENDING_PREREQUISITES",
     orderManagement: "PENDING_PREREQUISITES",
   } as const;
+  readonly status = {
+    state: "NOT_CONFIGURED",
+    lastError: null,
+  } as const;
 
   async start(_input: { actor: string; reason: string }): Promise<OperatorLiveRuntimeResult> {
     return this.unavailable("LIVE_RUNTIME_NOT_CONFIGURED");
@@ -425,6 +435,19 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
             SECURE_SIGNER: false,
           },
         }),
+    };
+  }
+
+  get status(): OperatorLiveRuntimeStatus {
+    if (this.walletSessionInvalidated) {
+      return {
+        state: "ERROR",
+        lastError: this.lastRunError,
+      };
+    }
+    return {
+      state: this.running ? "RUNNING" : "STOPPED",
+      lastError: this.lastRunError,
     };
   }
 
