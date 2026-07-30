@@ -576,6 +576,35 @@ describe("Live account and risk isolation", () => {
     database.close();
   });
 
+  it("uses the operator-approved Live limits without hidden percentage, absolute, or loss-streak caps", () => {
+    const { database, targetId } = setup();
+    const accountId = "operator-limits-live";
+    registerActiveAccount(database, accountId, 1_000_000_000n, 800_000_000n);
+    for (let sequence = 1; sequence <= 5; sequence += 1) {
+      insertRealizedPnl(database, accountId, sequence, -1n);
+    }
+    const signal = insertSignal(database, targetId, "live-operator-limits");
+
+    const decision = new RiskManager(database, sourceVersion, {
+      maxTradeSizeMicros: "300000000",
+      maxExposureMicros: "800000000",
+      maxDailyLossMicros: "200000000",
+    }).evaluate({
+      mode: "LIVE",
+      accountId,
+      signal,
+      requestedAmountMicros: 250_000_000n,
+      requestedSizeMicros: null,
+      now,
+    });
+
+    expect(decision.decision).toBe("ALLOW");
+    expect(decision.checks.find((check) => check.name === "live_single_trade")?.detail)
+      .toBe("300000000");
+    expect(decision.checks.some((check) => check.name === "live_consecutive_losses")).toBe(false);
+    database.close();
+  });
+
   it("allows a Signal whose historical ruleset is immutable, registered, and internally consistent", () => {
     const { database, targetId } = setup();
     const accountId = "historical-rules-live";
@@ -607,7 +636,7 @@ describe("Live account and risk isolation", () => {
     database.close();
   });
 
-  it("applies percentage exposure limits to a non-default bankroll", () => {
+  it("does not add a hidden bankroll-percentage cap below the configured limits", () => {
     const { database, targetId } = setup();
     const accountId = "small-bankroll-live";
     registerActiveAccount(database, accountId, 10_000_000n);
@@ -622,8 +651,7 @@ describe("Live account and risk isolation", () => {
       now,
     });
 
-    expect(decision.decision).toBe("REJECT");
-    expect(decision.riskRejectReason).toBe("LIVE_SINGLE_TRADE_LIMIT_EXCEEDED");
+    expect(decision.decision).toBe("ALLOW");
     database.close();
   });
 
@@ -648,7 +676,7 @@ describe("Live account and risk isolation", () => {
     database.close();
   });
 
-  it("blocks new Live buys after five consecutive losing executions", () => {
+  it("does not add a hidden consecutive-loss cap beyond the daily-loss limit", () => {
     const { database, targetId } = setup();
     const accountId = "consecutive-loss-live";
     registerActiveAccount(database, accountId, 1_000_000_000n);
@@ -666,8 +694,8 @@ describe("Live account and risk isolation", () => {
       now,
     });
 
-    expect(decision.decision).toBe("REJECT");
-    expect(decision.riskRejectReason).toBe("LIVE_CONSECUTIVE_LOSS_LIMIT_REACHED");
+    expect(decision.decision).toBe("ALLOW");
+    expect(decision.checks.some((check) => check.name === "live_consecutive_losses")).toBe(false);
     database.close();
   });
 });

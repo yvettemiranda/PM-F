@@ -1149,7 +1149,7 @@ describe("LiveGateService", () => {
     gate.close();
   });
 
-  it("keeps TARGET_SELL available after exposure, daily-loss, and consecutive-loss limits are reached", async () => {
+  it("keeps TARGET_SELL available after exposure and daily-loss limits are reached", async () => {
     const env = setup();
     passPrerequisites(env.databasePath);
     insertWallet(env.databasePath);
@@ -1184,8 +1184,8 @@ describe("LiveGateService", () => {
     expect(result.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "live_exposure_limit", passed: true, reason: "EXIT_NOT_EXPOSURE_LIMITED" }),
       expect.objectContaining({ name: "live_daily_loss_limit", passed: true, reason: "EXIT_NOT_DAILY_LOSS_LIMITED" }),
-      expect.objectContaining({ name: "live_consecutive_loss_limit", passed: true, reason: "EXIT_NOT_CONSECUTIVE_LOSS_LIMITED" }),
     ]));
+    expect(result.checks.some((check) => check.name === "live_consecutive_loss_limit")).toBe(false);
     gate.close();
   });
 
@@ -1560,7 +1560,7 @@ describe("LiveGateService", () => {
     gate.close();
   });
 
-  it("blocks after five consecutive losing Live executions", async () => {
+  it("does not impose a hidden loss-streak blocker beyond the saved daily-loss limit", async () => {
     const env = setup();
     insertSignalAndRisk(env.databasePath, env.targetId, {
       signalId: "live-consecutive-gate",
@@ -1602,7 +1602,8 @@ describe("LiveGateService", () => {
     setLiveActive(env.databasePath);
     const gate = service(env.databasePath);
     const result = await gate.checkExecution(executionInput("live-consecutive-gate", "risk-live-consecutive-gate"));
-    expect(result.blockedReasons).toContain("LIVE_CONSECUTIVE_LOSS_LIMIT_EXCEEDED");
+    expect(result.blockedReasons).not.toContain("LIVE_CONSECUTIVE_LOSS_LIMIT_EXCEEDED");
+    expect(result.checks.some((check) => check.name === "live_consecutive_loss_limit")).toBe(false);
     gate.close();
   });
 

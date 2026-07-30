@@ -14,16 +14,101 @@ function id(prefix: string, value: string): string {
   return `${prefix}-${createHash("sha256").update(value).digest("hex").slice(0, 24).toUpperCase()}`;
 }
 
-function count(database: DatabaseSync, query: string, accountId: string): number {
-  const row = database.prepare(query).get(accountId) as { count: number };
-  return Number(row.count);
+function deactivateSupersededAccounts(
+  database: DatabaseSync,
+  registry: LiveAccountRegistry,
+  currentAccountId: string,
+): void {
+  const accounts = database.prepare(
+    `SELECT live_account_id
+     FROM live_accounts
+     WHERE status='ACTIVE' AND live_account_id<>?
+     ORDER BY created_at,live_account_id`,
+  ).all(currentAccountId) as unknown as Array<{ live_account_id: string }>;
+  if (accounts.length === 0) return;
+
+  const blockers: string[] = [];
+  for (const account of accounts) {
+    const pendingOrder = database.prepare(
+      `SELECT o.live_order_id,o.status
+       FROM live_orders o
+       JOIN live_executions e ON e.live_execution_id=o.live_execution_id
+       WHERE e.live_account_id=? AND o.is_terminal=0
+       LIMIT 1`,
+    ).get(account.live_account_id) as { live_order_id: string; status: string } | undefined;
+    if (pendingOrder) {
+      blockers.push(`LIVE_ACCOUNT_OTHER_ACTIVE_ORDER:${account.live_account_id}:${pendingOrder.live_order_id}:${pendingOrder.status}`);
+      continue;
+    }
+    const pendingReservation = database.prepare(
+      `SELECT live_execution_id
+       FROM live_reservation_ledger
+       WHERE live_execution_id IN (
+         SELECT live_execution_id FROM live_executions WHERE live_account_id=?
+       )
+       GROUP BY live_execution_id
+       HAVING SUM(delta_micros)<>0
+       LIMIT 1`,
+    ).get(account.live_account_id) as { live_execution_id: string } | undefined;
+    if (pendingReservation) {
+      blockers.push(`LIVE_ACCOUNT_OTHER_ACTIVE_RESERVATION:${account.live_account_id}:${pendingReservation.live_execution_id}`);
+      continue;
+    }
+    const pendingAssetReservation = database.prepare(
+      `SELECT live_execution_id
+       FROM live_asset_reservation_ledger
+       WHERE live_execution_id IN (
+         SELECT live_execution_id FROM live_executions WHERE live_account_id=?
+       )
+       GROUP BY live_execution_id
+       HAVING SUM(delta_size_micros)<>0
+       LIMIT 1`,
+    ).get(account.live_account_id) as { live_execution_id: string } | undefined;
+    if (pendingAssetReservation) {
+      blockers.push(`LIVE_ACCOUNT_OTHER_ACTIVE_ASSET_RESERVATION:${account.live_account_id}:${pendingAssetReservation.live_execution_id}`);
+      continue;
+    }
+    const activeExecution = database.prepare(
+      `SELECT live_execution_id,state
+       FROM live_executions
+       WHERE live_account_id=?
+         AND state NOT IN ('EXECUTED','EXPIRED','REJECTED','CANCELLED','FAILED','FROZEN')
+       ORDER BY created_at,live_execution_id
+       LIMIT 1`,
+    ).get(account.live_account_id) as { live_execution_id: string; state: string } | undefined;
+    if (activeExecution) {
+      blockers.push(`LIVE_ACCOUNT_OTHER_ACTIVE_EXECUTION:${account.live_account_id}:${activeExecution.live_execution_id}:${activeExecution.state}`);
+      continue;
+    }
+    const openPosition = database.prepare(
+      `SELECT live_position_id
+       FROM live_positions
+       WHERE live_account_id=?
+         AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')
+         AND current_size_micros<>'0'
+       LIMIT 1`,
+    ).get(account.live_account_id) as { live_position_id: string } | undefined;
+    if (openPosition) {
+      blockers.push(`LIVE_ACCOUNT_OTHER_OPEN_POSITION:${account.live_account_id}:${openPosition.live_position_id}`);
+    }
+  }
+  if (blockers.length > 0) {
+    throw new Error(blockers[0]);
+  }
+  for (const account of accounts) {
+    registry.disable({
+      liveAccountId: account.live_account_id,
+      actor: "PRODUCTION_RUNTIME",
+      reason: "SUPERSEDED_BY_CURRENT_TRADING_WALLET",
+    });
+  }
 }
 
 /**
  * Registers only public wallet/account metadata for the connected production
- * runtime. It never changes the global Live Gate. Existing accounts can absorb
- * new limits only before they have any execution, position or ledger history;
- * otherwise the immutable portfolio history wins and the change fails closed.
+ * runtime. It never changes the global Live Gate. Saved allocation changes
+ * update the account's future risk envelope while every prior execution and
+ * ledger row remains immutable and independently auditable.
  */
 export async function ensureProductionLiveAccount(input: {
   projectRoot: string;
@@ -78,12 +163,13 @@ export async function ensureProductionLiveAccount(input: {
     }
 
     const registry = new LiveAccountRegistry(database, input.sourceVersion, now);
+    deactivateSupersededAccounts(database, registry, accountId);
     const account = registry.get(accountId);
     if (account === null) {
       registry.register({
         liveAccountId: accountId,
         liveWalletId: walletId,
-        name: "Hecatonchires Small Live",
+        name: "Hecatonchires Live",
         initialBankrollMicros: BigInt(input.config.liveBankrollMicros),
         riskBudgetMicros: BigInt(input.config.maxExposureMicros),
         signalCutoffAt: timestamp,
@@ -98,17 +184,21 @@ export async function ensureProductionLiveAccount(input: {
       const limitsChanged = account.initialBankrollMicros !== input.config.liveBankrollMicros
         || account.riskBudgetMicros !== input.config.maxExposureMicros;
       if (limitsChanged) {
-        const historyCount = [
-          count(database, "SELECT COUNT(*) count FROM live_executions WHERE live_account_id=?", accountId),
-          count(database, "SELECT COUNT(*) count FROM live_positions WHERE live_account_id=?", accountId),
-          count(database, "SELECT COUNT(*) count FROM live_cash_ledger WHERE live_account_id=?", accountId),
-        ].reduce((total, value) => total + value, 0);
-        if (historyCount > 0) throw new Error("LIVE_ACCOUNT_LIMIT_CHANGE_REQUIRES_NEW_PORTFOLIO");
+        const cashRows = database.prepare(
+          "SELECT cash_delta_micros FROM live_cash_ledger WHERE live_account_id=?",
+        ).all(accountId) as unknown as Array<{ cash_delta_micros: string }>;
+        const cashDelta = cashRows.reduce(
+          (total, row) => total + BigInt(row.cash_delta_micros),
+          0n,
+        );
+        if (BigInt(input.config.liveBankrollMicros) + cashDelta < 0n) {
+          throw new Error("LIVE_ACCOUNT_BANKROLL_BELOW_LEDGER_LOSSES");
+        }
         if (account.status === "ACTIVE") {
           registry.disable({
             liveAccountId: accountId,
             actor: "PRODUCTION_RUNTIME",
-            reason: "PREPARE_SMALL_LIMIT_UPDATE",
+            reason: "PREPARE_LIVE_LIMIT_UPDATE",
           });
         }
         database.prepare(
@@ -127,8 +217,8 @@ export async function ensureProductionLiveAccount(input: {
             audit_id,timestamp,entity_type,entity_id,action,reason,ruleset_hash,
             source_code_commit,source_code_dirty,config_version,metadata_json
           )
-          SELECT ?,?,'LIVE_ACCOUNT',?,'small_live_limits_updated',
-                 'OPERATOR_CONFIRMED_SMALL_LIMITS',ruleset_hash,?,?,config_version,?
+          SELECT ?,?,'LIVE_ACCOUNT',?,'live_limits_updated',
+                 'OPERATOR_CONFIRMED_LIVE_LIMITS',ruleset_hash,?,?,config_version,?
           FROM live_accounts WHERE live_account_id=?`,
         ).run(
           randomUUID(),
@@ -137,6 +227,8 @@ export async function ensureProductionLiveAccount(input: {
           input.sourceVersion.commit,
           input.sourceVersion.dirty ? 1 : 0,
           JSON.stringify({
+            previousInitialBankrollMicros: account.initialBankrollMicros,
+            previousRiskBudgetMicros: account.riskBudgetMicros,
             initialBankrollMicros: input.config.liveBankrollMicros,
             riskBudgetMicros: input.config.maxExposureMicros,
           }),

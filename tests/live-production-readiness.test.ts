@@ -111,11 +111,19 @@ describe("Live production readiness", () => {
     });
     expect(changed.limitsConfirmedAt).toBeNull();
     expect(changed.limitsConfirmationHash).toBeNull();
-    expect(() => saveLiveProductionConfig(root, {
-      liveBankrollMicros: "20000000",
-      maxTradeSizeMicros: "11000000",
-      maxExposureMicros: "12000000",
-    })).toThrow("LIVE_SMALL_LIMIT_HARD_CAP_EXCEEDED");
+    const largerAllocation = saveLiveProductionConfig(root, {
+      liveBankrollMicros: "34342000000",
+      maxTradeSizeMicros: "100000000",
+      maxExposureMicros: "1000000000",
+      maxDailyLossMicros: "50000000",
+    });
+    expect(largerAllocation).toMatchObject({
+      liveBankrollMicros: "34342000000",
+      maxTradeSizeMicros: "100000000",
+      maxExposureMicros: "1000000000",
+      maxDailyLossMicros: "50000000",
+      limitsConfirmedAt: null,
+    });
   });
 
   it("allows the operator to revoke a prior compliance acknowledgement", () => {
@@ -138,7 +146,7 @@ describe("Live production readiness", () => {
     expect(revoked.limitsConfirmedAt).toBe("2026-07-28T00:00:00.000Z");
   });
 
-  it("fails closed to a disconnected default when the stored file exceeds the small-Live hard caps", () => {
+  it("keeps a valid larger allocation but clears a forged limits confirmation", () => {
     const root = mkdtempSync(join(tmpdir(), "ni-k-live-readiness-tampered-"));
     roots.push(root);
     const path = join(root, "data/operator/live-production.json");
@@ -177,11 +185,11 @@ describe("Live production readiness", () => {
 
     expect(readiness.status).toBe("PENDING_PREREQUISITES");
     expect(readiness.config).toMatchObject({
-      walletAddress: null,
-      network: null,
-      liveBankrollMicros: "10000000",
+      walletAddress: wallet,
+      network: "POLYGON",
+      liveBankrollMicros: "100000001",
       limitsConfirmedAt: null,
-      complianceAcceptedAt: null,
+      complianceAcceptedAt: "2026-07-28T00:00:00.000Z",
     });
   });
 });

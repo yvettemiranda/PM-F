@@ -19,6 +19,7 @@ const state = {
   hasRenderedContent: false,
   lastRenderKey: null,
   serviceInstanceId: null,
+  shuttingDown: false,
 };
 
 const SETTING_META = {
@@ -79,15 +80,21 @@ function moneyOrDash(value) {
 
 function microsToPusd(value) {
   if (!/^\d+$/.test(String(value ?? ""))) return "";
-  return (Number(value) / 1_000_000).toFixed(2).replace(/\.?0+$/, "");
+  const micros = BigInt(value);
+  const whole = micros / 1_000_000n;
+  const fraction = (micros % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
 }
 
 function pusdToMicros(value, label) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100) {
-    throw new Error(`${label} 必须是 0–100 之间的正数`);
+  const normalized = String(value ?? "").trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(normalized)) {
+    throw new Error(`${label} 必须是大于 0 的数字，最多 6 位小数`);
   }
-  return String(Math.round(parsed * 1_000_000));
+  const [whole, fraction = ""] = normalized.split(".");
+  const micros = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0") || "0");
+  if (micros <= 0n) throw new Error(`${label} 必须大于 0`);
+  return micros.toString();
 }
 
 function disabledAttr(disabled, reason = "") {
@@ -135,6 +142,7 @@ function header(snapshot) {
             <i></i><span>${escapeHtml(mode)}</span>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
           </button>
+          <button class="service-exit-button" data-action="service-shutdown" type="button" aria-label="安全退出 Hecatonchires">退出</button>
         </div>
       </div>
     </header>
@@ -423,7 +431,7 @@ function livePanel(snapshot) {
           </div>
           <form class="live-limit-form" id="live-config-form">
             <div class="live-limit-heading">
-              <div><strong>小额 Live 参数</strong><span>默认：10 pUSD 资金上限、1 pUSD 单笔、3 pUSD 总敞口、1 pUSD 单日止损。</span></div>
+              <div><strong>Live 风险参数</strong><span>默认：10 pUSD 资金上限、1 pUSD 单笔、3 pUSD 总敞口、1 pUSD 单日止损；可按你的实际资金修改。</span></div>
               <span>${escapeHtml(production?.config?.limitsConfirmedAt ? "已确认" : "待确认")}</span>
             </div>
             <div class="live-limit-grid">
@@ -449,7 +457,7 @@ function livePanel(snapshot) {
                 <label class="settings-field">
                   <span>${label}</span>
                   <div class="field-with-unit">
-                    <input name="${name}" type="number" min="0.01" max="100" step="0.01"
+                    <input name="${name}" type="number" min="0.000001" step="0.000001"
                       value="${escapeHtml(microsToPusd(production?.config?.[key]))}" required />
                     <em>pUSD</em>
                   </div>
@@ -461,8 +469,8 @@ function livePanel(snapshot) {
               <span>我确认本人所在地区与账户允许使用该交易服务，并接受实时地域检查失败时系统立即阻断。</span>
             </label>
             <div class="live-limit-confirm">
-              <input class="modal-input" name="confirmationText" value="" placeholder="输入 CONFIRM SMALL LIVE LIMITS" autocomplete="off" required />
-              <button class="confirm-button" type="submit" ${disabledAttr(Boolean(state.busy), "")}>保存并确认</button>
+              <span>保存后立即按这组参数执行；实际钱包余额只展示，不作为最低准入条件。</span>
+              <button class="confirm-button" type="submit" ${disabledAttr(Boolean(state.busy), "")}>保存参数</button>
             </div>
           </form>
         </div>
@@ -724,6 +732,18 @@ function errorView() {
   return `<main class="page"><section class="empty-state error-state"><strong>后台暂时不可用</strong><span>${escapeHtml(state.error ?? "未知错误")}</span><button class="secondary-button" id="retry-button" type="button">重新连接</button></section></main>`;
 }
 
+function shutdownView() {
+  return `
+    <main class="page shutdown-page">
+      <section class="empty-state shutdown-state">
+        ${logo()}
+        <strong>Hecatonchires 已安全关闭</strong>
+        <span>Live 已停用，后台服务正在退出。下次使用时，双击桌面的 Hecatonchires.command 即可。</span>
+      </section>
+    </main>
+  `;
+}
+
 function render() {
   const app = document.querySelector("#app");
   for (const panel of app.querySelectorAll("details[data-panel-id]")) {
@@ -731,6 +751,10 @@ function render() {
     if (!panelId) continue;
     if (panel.open) state.openPanels.add(panelId);
     else state.openPanels.delete(panelId);
+  }
+  if (state.shuttingDown) {
+    app.innerHTML = shutdownView();
+    return;
   }
   if (state.loading) {
     app.innerHTML = loadingView();
@@ -836,6 +860,7 @@ function refreshInteractionActive() {
 }
 
 async function refresh(silent = false) {
+  if (state.shuttingDown) return;
   if (state.refreshing) return;
   if (!silent) state.loading = state.snapshot === null;
   state.refreshing = true;
@@ -1215,6 +1240,29 @@ async function disconnectLiveWallet() {
   }
 }
 
+async function requestSafeShutdown() {
+  state.busy = "安全退出";
+  state.notice = { kind: "processing", title: "正在安全退出", message: "正在停用 Live 并关闭后台服务。" };
+  render();
+  try {
+    await api("/api/operator/service/shutdown", {
+      body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_SAFE_EXIT" }),
+    });
+    state.shuttingDown = true;
+    if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
+    state.walletWorkerGeneration += 1;
+    state.walletWorkerSessionId = null;
+    if (state.walletWorkerRetryTimer !== null) window.clearTimeout(state.walletWorkerRetryTimer);
+    clearWalletProviderBinding();
+    state.walletProvider = null;
+    render();
+  } catch (error) {
+    state.busy = null;
+    setNotice("error", "安全退出未完成", error.message);
+    render();
+  }
+}
+
 async function saveLiveConfiguration(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1227,10 +1275,10 @@ async function saveLiveConfiguration(event) {
       maxTradeSizeMicros: pusdToMicros(form.elements.maxTradeSize.value, "单笔上限"),
       maxExposureMicros: pusdToMicros(form.elements.maxExposure.value, "总敞口上限"),
       maxDailyLossMicros: pusdToMicros(form.elements.maxDailyLoss.value, "单日亏损上限"),
-      confirmationText: form.elements.confirmationText.value.trim(),
+      confirmLimits: true,
       acceptCompliance: form.elements.acceptCompliance.checked,
     };
-    const result = await runAction("保存小额 Live 参数", "/api/operator/live/configuration", {
+    const result = await runAction("保存 Live 风险参数", "/api/operator/live/configuration", {
       method: "PUT",
       body: JSON.stringify(body),
     }, { success: "" });
@@ -1238,13 +1286,13 @@ async function saveLiveConfiguration(event) {
       setNotice(
         "success",
         "Live 参数已保存",
-        "为了让新参数绑定到新的安全会话，钱包已自动断开；请重新连接一次。",
+        "实际限额或钱包身份已变化，旧运行时已安全断开；重新连接一次即可应用。",
       );
     } else {
       setNotice(
         "success",
         "Live 参数已保存",
-        "接下来连接正式钱包，再完成交易授权、生产预检和最终二次确认。",
+        "参数已保存；如果钱包已经连接，不需要重新连接。",
       );
     }
     render();
@@ -1451,6 +1499,15 @@ async function actionClick(action, input = {}) {
   if (action === "live-recover") await runAction("恢复 Live Gate", "/api/operator/live/recover", { body: "{}" }, { success: "Live Gate 恢复检查完成。" });
   if (action === "live-wallet-connect") await connectLiveWallet();
   if (action === "live-wallet-disconnect") await disconnectLiveWallet();
+  if (action === "service-shutdown") {
+    showModal(
+      "安全退出 Hecatonchires",
+      "<p>程序会先停用 Live、断开当前钱包会话，再关闭本机后台服务。</p>",
+      "下次使用只需再次双击桌面的 Hecatonchires.command。",
+      "确认退出",
+      requestSafeShutdown,
+    );
+  }
   if (action === "live-activate") showModeModal();
   if (action === "live-wallet-setup") {
     showModal(

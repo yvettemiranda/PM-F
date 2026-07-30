@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("../prototype/live-ui/ui-state.js", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../prototype/live-ui/app.js", import.meta.url), "utf8");
 
 type UiState = {
   statusText(snapshot: Record<string, unknown> | null, connectionError?: string | null): string;
@@ -34,6 +35,12 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 describe("operator UI state projection", () => {
+  it("does not impose a hidden 100 pUSD ceiling on operator-defined Live limits", () => {
+    expect(appSource).not.toContain("parsed > 100");
+    expect(appSource).not.toContain('max="100"');
+    expect(appSource).not.toContain("CONFIRM SMALL LIVE LIMITS");
+  });
+
   it("uses the current backend snapshot time instead of the last target update", () => {
     const ui = load();
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +10,10 @@ import {
   ProductionLivePrerequisiteManager,
   liveProductionValidationArtifactPath,
 } from "../src/operator/production-live-prerequisites.js";
+import {
+  computeLiveProductionRuntimeHash,
+  resolveLiveProductionRuntimeIdentity,
+} from "../src/operator/live-production-build.js";
 
 const roots: string[] = [];
 const sourceVersion = { commit: "b".repeat(40), dirty: false };
@@ -47,10 +52,12 @@ async function fixture() {
   const artifactPath = liveProductionValidationArtifactPath(root);
   mkdirSync(dirname(artifactPath), { recursive: true });
   writeFileSync(artifactPath, JSON.stringify({
-    schemaVersion: "live-production-validation-v1",
+    schemaVersion: "live-production-validation-v2",
     status: "PASSED",
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: false,
+    liveRuntimeHash: computeLiveProductionRuntimeHash(root),
+    runtimeSourceDirty: false,
     generatedAt: "2026-07-28T05:00:00.000Z",
     typecheckPassed: true,
     fullTestPassed: true,
@@ -64,6 +71,74 @@ async function fixture() {
 }
 
 describe("ProductionLivePrerequisiteManager", () => {
+  it("binds validation to runtime behavior while ignoring docs and presentation-only styling", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-runtime-hash-"));
+    roots.push(root);
+    mkdirSync(join(root, "src/live"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    mkdirSync(join(root, "prototype/live-ui"), { recursive: true });
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 1;\n");
+    writeFileSync(join(root, "tests/runtime.test.ts"), "export const testRuntime = 1;\n");
+    writeFileSync(join(root, "prototype/live-ui/app.js"), "window.runtime = 1;\n");
+    writeFileSync(join(root, "prototype/live-ui/styles.css"), "body { color: blue; }\n");
+    writeFileSync(join(root, "README.md"), "first\n");
+    writeFileSync(join(root, "scripts/launch-hecatonchires-ui.command"), "#!/bin/zsh\n");
+    writeFileSync(join(root, "package.json"), "{}\n");
+    writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    writeFileSync(join(root, "tsconfig.json"), "{}\n");
+
+    const baseline = computeLiveProductionRuntimeHash(root);
+    writeFileSync(join(root, "prototype/live-ui/styles.css"), "body { color: green; }\n");
+    writeFileSync(join(root, "README.md"), "second\n");
+    expect(computeLiveProductionRuntimeHash(root)).toBe(baseline);
+
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 2;\n");
+    expect(computeLiveProductionRuntimeHash(root)).not.toBe(baseline);
+
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 1;\n");
+    writeFileSync(join(root, "tests/runtime.test.ts"), "export const testRuntime = 2;\n");
+    expect(computeLiveProductionRuntimeHash(root)).not.toBe(baseline);
+  });
+
+  it("treats documentation and pure styling as non-runtime dirtiness", () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-live-runtime-dirty-"));
+    roots.push(root);
+    mkdirSync(join(root, "src/live"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    mkdirSync(join(root, "prototype/live-ui"), { recursive: true });
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 1;\n");
+    writeFileSync(join(root, "tests/runtime.test.ts"), "export const testRuntime = 1;\n");
+    writeFileSync(join(root, "prototype/live-ui/styles.css"), "body { color: blue; }\n");
+    writeFileSync(join(root, "README.md"), "first\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+    writeFileSync(join(root, "prototype/live-ui/styles.css"), "body { color: green; }\n");
+    writeFileSync(join(root, "README.md"), "second\n");
+    expect(resolveLiveProductionRuntimeIdentity(root, { commit, dirty: true })).toMatchObject({
+      runtimeSourceDirty: false,
+      runtimeDirtyPaths: [],
+    });
+
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 2;\n");
+    expect(resolveLiveProductionRuntimeIdentity(root, { commit, dirty: true })).toMatchObject({
+      runtimeSourceDirty: true,
+      runtimeDirtyPaths: ["src/live/runtime.ts"],
+    });
+
+    writeFileSync(join(root, "src/live/runtime.ts"), "export const runtime = 1;\n");
+    writeFileSync(join(root, "tests/runtime.test.ts"), "export const testRuntime = 2;\n");
+    expect(resolveLiveProductionRuntimeIdentity(root, { commit, dirty: true })).toMatchObject({
+      runtimeSourceDirty: true,
+      runtimeDirtyPaths: ["tests/runtime.test.ts"],
+    });
+  });
+
   it("imports only verified current-code Paper evidence and keeps user authorization pending", async () => {
     const env = await fixture();
     const manager = new ProductionLivePrerequisiteManager({
@@ -96,6 +171,30 @@ describe("ProductionLivePrerequisiteManager", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("accepts a documentation-only commit change but rejects changed runtime behavior", async () => {
+    const env = await fixture();
+    const manager = new ProductionLivePrerequisiteManager({
+      projectRoot: env.root,
+      databasePath: env.databasePath,
+      sourceVersion: { commit: "c".repeat(40), dirty: false },
+      geoblockProvider: {
+        providerType: "LIVE_READONLY",
+        check: async () => ({
+          status: "ALLOWED",
+          checkedAt: "2026-07-28T05:01:00.000Z",
+          source: "https://polymarket.com/api/geoblock",
+          reason: null,
+        }),
+      },
+      walletAddress: wallet,
+    });
+
+    manager.refreshStaticEvidence();
+    mkdirSync(join(env.root, "src/live"), { recursive: true });
+    writeFileSync(join(env.root, "src/live/new-runtime.ts"), "export const changed = true;\n");
+    expect(() => manager.refreshStaticEvidence()).toThrow("LIVE_PRODUCTION_RUNTIME_HASH_MISMATCH");
   });
 
   it("records fresh official geoblock and explicit user authorization only on activation request", async () => {

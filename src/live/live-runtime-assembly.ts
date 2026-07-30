@@ -52,14 +52,20 @@ export interface LiveRuntimeAssembly {
 export function assembleLiveRuntime(input: LiveRuntimeAssemblyInput): LiveRuntimeAssembly {
   const sourceVersion = input.sourceVersion ?? resolveSourceVersion();
   const now = input.now ?? (() => new Date());
+  const gateConfig = {
+    ...defaultLiveGateConfig(),
+    ...(input.gateConfig ?? {}),
+    runtimeEnvironment: input.environment,
+  };
+  const liveRiskLimits = {
+    maxTradeSizeMicros: gateConfig.maxTradeSizeMicros as string,
+    maxExposureMicros: gateConfig.maxExposureMicros as string,
+    maxDailyLossMicros: gateConfig.maxDailyLossMicros as string,
+  };
   const gate = new LiveGateService(
     input.databasePath,
     input.balanceProvider,
-    {
-      ...defaultLiveGateConfig(),
-      ...(input.gateConfig ?? {}),
-      runtimeEnvironment: input.environment,
-    },
+    gateConfig,
     {
       sourceVersion,
       now,
@@ -79,12 +85,19 @@ export function assembleLiveRuntime(input: LiveRuntimeAssemblyInput): LiveRuntim
     sourceVersion,
     now,
     environment: input.environment,
+    liveRiskLimits,
     ...(input.requireExternalPositionReconciliation === undefined
       ? {}
       : { requireExternalPositionReconciliation: input.requireExternalPositionReconciliation }),
     ...(input.externalCallTimeoutMs === undefined ? {} : { externalCallTimeoutMs: input.externalCallTimeoutMs }),
   });
-  const consumer = new LiveSignalConsumer(input.databasePath, executor, sourceVersion, now);
+  const consumer = new LiveSignalConsumer(
+    input.databasePath,
+    executor,
+    sourceVersion,
+    now,
+    liveRiskLimits,
+  );
   const identityBinding = new LiveIdentityBinding(
     input.databasePath,
     input.walletProvider,

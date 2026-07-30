@@ -182,16 +182,6 @@ function validateLimits(
   if (trade > exposure || exposure > bankroll || dailyLoss > bankroll) {
     throw new Error("LIVE_LIMIT_RELATIONSHIP_INVALID");
   }
-  if (
-    (
-      bankroll > 100_000_000n
-      || trade > 10_000_000n
-      || exposure > 25_000_000n
-      || dailyLoss > 10_000_000n
-    )
-  ) {
-    throw new Error("LIVE_SMALL_LIMIT_HARD_CAP_EXCEEDED");
-  }
   return {
     liveBankrollMicros: bankroll.toString(),
     maxTradeSizeMicros: trade.toString(),
@@ -382,8 +372,8 @@ export function liveProductionReadiness(
       key: "LIVE_LIMITS",
       status: limitsReady ? "READY" : "PENDING",
       reason: limitsReady
-        ? "小额 Live 资金、单笔、总敞口和单日亏损上限已逐项确认。"
-        : "需要保存并确认小额 Live 风险上限。",
+        ? "Live 资金、单笔、总敞口和单日亏损上限已逐项确认。"
+        : "需要保存并确认 Live 风险上限。",
     },
     {
       key: "LIVE_RUNTIME",

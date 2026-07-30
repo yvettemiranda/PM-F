@@ -10,19 +10,8 @@ const port = Number(process.env.OPERATOR_UI_PORT ?? process.env.PROTOTYPE_PORT ?
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const staticRoot = fileURLToPath(new URL("./", import.meta.url));
 const walletRequestBroker = new LiveWalletRequestBroker();
-const server = await startOperatorUiServer({
-  projectRoot,
-  staticRoot,
-  walletRequestBroker,
-  connectedLiveRuntimeFactory: (input) => assembleDefaultConnectedLiveRuntime({
-    ...input,
-    walletRequestBroker,
-  }),
-}, port);
-const address = server.address();
-const actualPort = typeof address === "object" && address !== null ? address.port : port;
-console.log(`Hecatonchires operator UI: http://127.0.0.1:${actualPort}/`);
 
+let server;
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
@@ -38,5 +27,19 @@ const shutdown = async () => {
   const forceExit = setTimeout(() => process.exit(1), 10_000);
   forceExit.unref();
 };
+
+server = await startOperatorUiServer({
+  projectRoot,
+  staticRoot,
+  walletRequestBroker,
+  connectedLiveRuntimeFactory: (input) => assembleDefaultConnectedLiveRuntime({
+    ...input,
+    walletRequestBroker,
+  }),
+  requestShutdown: shutdown,
+}, port);
+const address = server.address();
+const actualPort = typeof address === "object" && address !== null ? address.port : port;
+console.log(`Hecatonchires operator UI: http://127.0.0.1:${actualPort}/`);
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());

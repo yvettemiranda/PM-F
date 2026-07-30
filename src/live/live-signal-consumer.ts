@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { RULESET_HASH, stableJson, VERSIONS } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import type { PaperSignalEnvelope } from "../paper/types.js";
-import { RiskManager } from "../risk/risk-manager.js";
+import { RiskManager, type LiveRiskLimits } from "../risk/risk-manager.js";
 import type { LiveExecutor } from "./live-executor.js";
 import {
   calculateBuyCapitalSizing,
@@ -64,10 +64,11 @@ export class LiveSignalConsumer {
     private readonly executor: LiveExecutor,
     private readonly sourceVersion: SourceVersion,
     private readonly now: () => Date = () => new Date(),
+    liveRiskLimits?: LiveRiskLimits,
   ) {
     this.database = new DatabaseSync(databasePath);
     this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
-    this.riskManager = new RiskManager(this.database, sourceVersion);
+    this.riskManager = new RiskManager(this.database, sourceVersion, liveRiskLimits);
   }
 
   async consumeAvailableSignals(

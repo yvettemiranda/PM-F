@@ -1,4 +1,7 @@
-# Hecatonchires 外部审计包说明
+# Hecatonchires 外部审计包说明（历史版）
+
+> 这是 2026-07-29 归档包的说明，不是当前源码的验证凭证。当前全程序审计和最新
+> 验证请看 [`ni-k-program-audit-2026-07-30.md`](./ni-k-program-audit-2026-07-30.md)。
 
 ## 1. 审计包身份
 

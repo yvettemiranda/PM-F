@@ -3,8 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { stableJson } from "../domain/versioning.js";
-import type { SourceVersion } from "../infra/source-version.js";
+import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
 import type { GeoblockProvider } from "../live/live-safety-provider.js";
+import { resolveLiveProductionRuntimeIdentity } from "./live-production-build.js";
 
 const ARTIFACT_FILE = "data/operator/live-production-validation.json";
 const FINAL_REPORT_FILE = "data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md";
@@ -20,10 +21,12 @@ const STATIC_PREREQUISITES = [
 ] as const;
 
 export interface LiveProductionValidationArtifact {
-  schemaVersion: "live-production-validation-v1";
+  schemaVersion: "live-production-validation-v2";
   status: "PASSED";
   sourceCodeCommit: string;
-  sourceCodeDirty: false;
+  sourceCodeDirty: boolean;
+  liveRuntimeHash: string;
+  runtimeSourceDirty: false;
   generatedAt: string;
   typecheckPassed: true;
   fullTestPassed: true;
@@ -42,15 +45,22 @@ function readValidatedArtifact(
   projectRoot: string,
   sourceVersion: SourceVersion,
 ): LiveProductionValidationArtifact {
-  if (sourceVersion.dirty) throw new Error("LIVE_PRODUCTION_SOURCE_DIRTY");
+  const runtimeIdentity = resolveLiveProductionRuntimeIdentity(projectRoot, sourceVersion);
+  if (runtimeIdentity.runtimeSourceDirty) {
+    throw new Error("LIVE_PRODUCTION_RUNTIME_SOURCE_DIRTY");
+  }
   const path = resolve(projectRoot, ARTIFACT_FILE);
   if (!existsSync(path)) throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_MISSING");
   const value = JSON.parse(readFileSync(path, "utf8")) as Partial<LiveProductionValidationArtifact>;
   if (
-    value.schemaVersion !== "live-production-validation-v1"
+    value.schemaVersion !== "live-production-validation-v2"
     || value.status !== "PASSED"
-    || value.sourceCodeCommit !== sourceVersion.commit
-    || value.sourceCodeDirty !== false
+    || typeof value.sourceCodeCommit !== "string"
+    || value.sourceCodeCommit.trim().length === 0
+    || typeof value.sourceCodeDirty !== "boolean"
+    || typeof value.liveRuntimeHash !== "string"
+    || !/^[0-9a-f]{64}$/.test(value.liveRuntimeHash)
+    || value.runtimeSourceDirty !== false
     || value.typecheckPassed !== true
     || value.fullTestPassed !== true
     || value.diffCheckPassed !== true
@@ -61,6 +71,9 @@ function readValidatedArtifact(
     || Number(value.testCount) <= 0
   ) {
     throw new Error("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+  }
+  if (value.liveRuntimeHash !== runtimeIdentity.liveRuntimeHash) {
+    throw new Error("LIVE_PRODUCTION_RUNTIME_HASH_MISMATCH");
   }
   const finalReport = readFileSync(resolve(projectRoot, FINAL_REPORT_FILE), "utf8");
   if (
@@ -91,6 +104,19 @@ export function liveProductionValidationArtifactPath(projectRoot: string): strin
   return resolve(projectRoot, ARTIFACT_FILE);
 }
 
+/**
+ * Returns the exact source identity whose runtime behavior passed validation.
+ * A documentation-only commit or pure CSS edit may leave that validated
+ * behavior unchanged; executable/runtime changes require a new artifact.
+ */
+export function validatedLiveProductionSourceVersion(
+  projectRoot: string,
+  sourceVersion: SourceVersion = resolveSourceVersion(projectRoot),
+): SourceVersion {
+  const artifact = readValidatedArtifact(projectRoot, sourceVersion);
+  return { commit: artifact.sourceCodeCommit, dirty: false };
+}
+
 export class ProductionLivePrerequisiteManager {
   constructor(private readonly input: {
     projectRoot: string;
@@ -109,6 +135,7 @@ export class ProductionLivePrerequisiteManager {
         evidenceType: "CURRENT_CODE_AND_OWNER_ACCEPTED_PAPER_VALIDATION",
         checkedAt: artifact.generatedAt,
         sourceCodeCommit: artifact.sourceCodeCommit,
+        liveRuntimeHash: artifact.liveRuntimeHash,
         environment: "PRODUCTION",
         testOnly: false,
         validationMode: "NO_WALLET_NO_REAL_ORDERS",

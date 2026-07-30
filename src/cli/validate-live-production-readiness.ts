@@ -8,11 +8,15 @@ import {
   liveProductionValidationArtifactPath,
   type LiveProductionValidationArtifact,
 } from "../operator/production-live-prerequisites.js";
+import { resolveLiveProductionRuntimeIdentity } from "../operator/live-production-build.js";
 
 const projectRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const node = process.execPath;
 const sourceVersion = resolveSourceVersion(projectRoot);
-if (sourceVersion.dirty) throw new Error("LIVE_PRODUCTION_VALIDATION_REQUIRES_CLEAN_WORKTREE");
+const runtimeIdentityBefore = resolveLiveProductionRuntimeIdentity(projectRoot, sourceVersion);
+if (runtimeIdentityBefore.runtimeSourceDirty) {
+  throw new Error("LIVE_PRODUCTION_VALIDATION_REQUIRES_CLEAN_RUNTIME_SOURCE");
+}
 
 execFileSync(node, ["node_modules/typescript/bin/tsc", "--noEmit"], {
   cwd: projectRoot,
@@ -25,6 +29,16 @@ const testOutput = execFileSync(node, ["node_modules/vitest/vitest.mjs", "run"],
 });
 process.stdout.write(testOutput);
 execFileSync("git", ["diff", "--check"], { cwd: projectRoot, stdio: "inherit" });
+const runtimeIdentityAfter = resolveLiveProductionRuntimeIdentity(
+  projectRoot,
+  resolveSourceVersion(projectRoot),
+);
+if (runtimeIdentityAfter.runtimeSourceDirty) {
+  throw new Error("LIVE_PRODUCTION_RUNTIME_SOURCE_CHANGED_DURING_VALIDATION");
+}
+if (runtimeIdentityAfter.liveRuntimeHash !== runtimeIdentityBefore.liveRuntimeHash) {
+  throw new Error("LIVE_PRODUCTION_RUNTIME_HASH_CHANGED_DURING_VALIDATION");
+}
 
 const fileMatch = testOutput.match(/Test Files\s+(\d+) passed/);
 const testMatch = testOutput.match(/Tests\s+(\d+) passed/);
@@ -39,10 +53,12 @@ const isolatedVerification = readFileSync(
 );
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const artifact: LiveProductionValidationArtifact = {
-  schemaVersion: "live-production-validation-v1",
+  schemaVersion: "live-production-validation-v2",
   status: "PASSED",
-  sourceCodeCommit: sourceVersion.commit,
-  sourceCodeDirty: false,
+  sourceCodeCommit: runtimeIdentityAfter.sourceVersion.commit,
+  sourceCodeDirty: runtimeIdentityAfter.sourceVersion.dirty,
+  liveRuntimeHash: runtimeIdentityAfter.liveRuntimeHash,
+  runtimeSourceDirty: false,
   generatedAt: new Date().toISOString(),
   typecheckPassed: true,
   fullTestPassed: true,

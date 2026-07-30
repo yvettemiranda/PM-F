@@ -4418,6 +4418,52 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("uses the operator-approved limits in the transactional reservation guard", () => {
+    const env = setup();
+    const approved = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-buy-operator-reservation-limit",
+      riskDecisionId: "risk-live-buy-operator-reservation-limit",
+      decision: "ALLOW",
+      requestedAmountMicros: "250000000",
+      requestedSizeMicros: null,
+    });
+    const database = new DatabaseSync(env.databasePath);
+    const store = new LiveStore(database, sourceVersion, () => new Date(now), {
+      maxTradeSizeMicros: "300000000",
+      maxExposureMicros: "500000000",
+      maxDailyLossMicros: "100000000",
+    });
+
+    store.transaction(() => {
+      const execution = store.createExecution({
+        liveAccountId: accountId,
+        signalId: approved.signal.signalId,
+        contextId: approved.context.contextId,
+        riskDecisionId: "risk-live-buy-operator-reservation-limit",
+        liveGateRunId: null,
+        executionIdempotencyKey: "LIVE_EXECUTION:operator-reservation-limit",
+        executionType: "TARGET_BUY",
+        state: "WAITING_EXECUTION",
+        assetId,
+        conditionId,
+        requestedAmountMicros: "250000000",
+        requestedSizeMicros: null,
+        targetPriceUnits: approved.signal.targetPriceUnits,
+        reason: "TEST_OPERATOR_LIMIT",
+        rulesetHash: RULESET_HASH,
+      });
+      store.reserveChecked(execution, 250_000_000n, {
+        walletBalanceMicros: 1_000_000_000n,
+        walletAllowanceMicros: 1_000_000_000n,
+      });
+    });
+
+    expect(database.prepare(
+      "SELECT SUM(delta_micros) reserved FROM live_reservation_ledger",
+    ).get()).toEqual({ reserved: 250_000_000 });
+    database.close();
+  });
+
   it("blocks when allowance is insufficient and does not approve", async () => {
     const env = setup();
     const executor = liveExecutor(env.databasePath, {

@@ -27,6 +27,18 @@ export interface RiskDecision {
   checks: Array<{ name: string; result: "PASS" | "FAIL"; detail?: string }>;
 }
 
+export interface LiveRiskLimits {
+  maxTradeSizeMicros: string;
+  maxExposureMicros: string;
+  maxDailyLossMicros: string;
+}
+
+interface ParsedLiveRiskLimits {
+  maxTradeSizeMicros: bigint;
+  maxExposureMicros: bigint;
+  maxDailyLossMicros: bigint;
+}
+
 export interface RiskEvaluationInput {
   mode: ExecutorMode;
   accountId: string;
@@ -88,12 +100,36 @@ function minBigInt(left: bigint, right: bigint): bigint {
   return left < right ? left : right;
 }
 
+function parsedPositiveLimit(value: string, name: string): bigint {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`LIVE_RISK_${name}_INVALID`);
+  return BigInt(value);
+}
+
 export class RiskManager {
+  private readonly liveRiskLimits: ParsedLiveRiskLimits;
+
   constructor(
     private readonly database: DatabaseSync,
     private readonly sourceVersion: SourceVersion,
+    liveRiskLimits?: LiveRiskLimits,
   ) {
     this.database.exec("PRAGMA recursive_triggers=ON;");
+    this.liveRiskLimits = liveRiskLimits === undefined
+      ? {
+        maxTradeSizeMicros: BigInt(RULESET.liveMaxTradeSizeMicros),
+        maxExposureMicros: BigInt(RULESET.liveMaxExposureMicros),
+        maxDailyLossMicros: BigInt(RULESET.liveMaxDailyLossMicros),
+      }
+      : {
+        maxTradeSizeMicros: parsedPositiveLimit(liveRiskLimits.maxTradeSizeMicros, "MAX_TRADE"),
+        maxExposureMicros: parsedPositiveLimit(liveRiskLimits.maxExposureMicros, "MAX_EXPOSURE"),
+        maxDailyLossMicros: parsedPositiveLimit(liveRiskLimits.maxDailyLossMicros, "MAX_DAILY_LOSS"),
+      };
+    if (
+      this.liveRiskLimits.maxTradeSizeMicros > this.liveRiskLimits.maxExposureMicros
+    ) {
+      throw new Error("LIVE_RISK_MAX_TRADE_EXCEEDS_EXPOSURE");
+    }
   }
 
   evaluate(input: RiskEvaluationInput): RiskDecision {
@@ -722,89 +758,49 @@ export class RiskManager {
   ): RiskDecision | null {
     const requested = input.requestedAmountMicros as bigint;
     const riskBudget = account.riskBudgetMicros as bigint;
-    const singleLimit = minBigInt(
-      minBigInt(limitFromInitial(account.initialBalanceMicros, RULESET.liveMaxSingleTradePpm), BigInt(RULESET.liveMaxTradeSizeMicros)),
-      riskBudget,
-    );
+    const singleLimit = minBigInt(this.liveRiskLimits.maxTradeSizeMicros, riskBudget);
     if (requested > singleLimit) return fail("live_single_trade", "LIVE_SINGLE_TRADE_LIMIT_EXCEEDED");
     pass("live_single_trade", singleLimit.toString());
     const marketExposure = this.marketExposure("LIVE", input.accountId, input.signal.conditionId) + requested;
-    const marketLimit = minBigInt(
-      minBigInt(limitFromInitial(account.initialBalanceMicros, RULESET.liveMaxMarketExposurePpm), BigInt(RULESET.liveMaxTradeSizeMicros)),
-      riskBudget,
-    );
-    if (marketExposure > marketLimit) {
+    const exposureLimit = minBigInt(this.liveRiskLimits.maxExposureMicros, riskBudget);
+    if (marketExposure > exposureLimit) {
       return fail("live_market_exposure", "LIVE_MARKET_EXPOSURE_LIMIT_EXCEEDED");
     }
-    pass("live_market_exposure", marketExposure.toString());
+    pass("live_market_exposure", `${marketExposure}/${exposureLimit}`);
     const assetExposure = this.assetExposure("LIVE", input.accountId, input.signal.assetId) + requested;
-    const positionLimit = minBigInt(
-      minBigInt(limitFromInitial(account.initialBalanceMicros, RULESET.liveMaxPositionExposurePpm), BigInt(RULESET.liveMaxTradeSizeMicros)),
-      riskBudget,
-    );
-    if (assetExposure > positionLimit) {
+    if (assetExposure > exposureLimit) {
       return fail("live_position_exposure", "LIVE_POSITION_EXPOSURE_LIMIT_EXCEEDED");
     }
-    pass("live_position_exposure", assetExposure.toString());
-    const totalLimit = minBigInt(
-      minBigInt(limitFromInitial(account.initialBalanceMicros, RULESET.liveMaxTotalExposurePpm), BigInt(RULESET.liveMaxExposureMicros)),
-      riskBudget,
-    );
+    pass("live_position_exposure", `${assetExposure}/${exposureLimit}`);
     const totalExposure = this.totalExposure("LIVE", input.accountId) + requested;
-    if (totalExposure > totalLimit) {
+    if (totalExposure > exposureLimit) {
       return fail("live_total_exposure", "LIVE_TOTAL_EXPOSURE_LIMIT_EXCEEDED");
     }
-    pass("live_total_exposure", totalExposure.toString());
-    const loss = this.liveLossStats(input.accountId, input.now);
-    const dailyLossLimit = minBigInt(
-      limitFromInitial(account.initialBalanceMicros, RULESET.liveMaxDailyLossPpm),
-      BigInt(RULESET.liveMaxDailyLossMicros),
-    );
-    if (loss.dailyLossMicros >= dailyLossLimit && dailyLossLimit > 0n) {
+    pass("live_total_exposure", `${totalExposure}/${exposureLimit}`);
+    const dailyLoss = this.liveDailyLossMicros(input.accountId, input.now);
+    if (dailyLoss >= this.liveRiskLimits.maxDailyLossMicros) {
       return fail("live_daily_loss", "LIVE_DAILY_LOSS_LIMIT_REACHED");
     }
-    pass("live_daily_loss", `${loss.dailyLossMicros}/${dailyLossLimit}`);
-    if (loss.consecutiveLosses >= RULESET.liveMaxConsecutiveLosses) {
-      return fail("live_consecutive_losses", "LIVE_CONSECUTIVE_LOSS_LIMIT_REACHED");
-    }
-    pass("live_consecutive_losses", `${loss.consecutiveLosses}/${RULESET.liveMaxConsecutiveLosses}`);
+    pass("live_daily_loss", `${dailyLoss}/${this.liveRiskLimits.maxDailyLossMicros}`);
     return null;
   }
 
-  private liveLossStats(accountId: string, now: string): { dailyLossMicros: bigint; consecutiveLosses: number } {
+  private liveDailyLossMicros(accountId: string, now: string): bigint {
     const timestamp = Date.parse(now);
     if (!Number.isFinite(timestamp)) throw new Error(`INVALID_RISK_TIMESTAMP:${now}`);
     const dayStart = new Date(timestamp);
     dayStart.setUTCHours(0, 0, 0, 0);
     const rows = this.database.prepare(
-      `SELECT p.live_execution_id,p.pnl_ledger_id,p.pnl_micros,p.created_at
+      `SELECT p.pnl_micros,p.created_at
        FROM live_pnl_ledger p
        WHERE p.live_account_id=?
        ORDER BY p.created_at,p.pnl_ledger_id`,
-    ).all(accountId) as unknown as Array<{
-      live_execution_id: string;
-      pnl_ledger_id: string;
-      pnl_micros: string;
-      created_at: string;
-    }>;
+    ).all(accountId) as unknown as Array<{ pnl_micros: string; created_at: string }>;
     let dailyLossMicros = 0n;
-    const executions = new Map<string, { pnl: bigint; createdAt: string }>();
     for (const row of rows) {
       const pnl = BigInt(row.pnl_micros);
       if (Date.parse(row.created_at) >= dayStart.valueOf() && pnl < 0n) dailyLossMicros -= pnl;
-      const prior = executions.get(row.live_execution_id);
-      executions.set(row.live_execution_id, {
-        pnl: (prior?.pnl ?? 0n) + pnl,
-        createdAt: prior && prior.createdAt > row.created_at ? prior.createdAt : row.created_at,
-      });
     }
-    const ordered = [...executions.entries()]
-      .sort(([leftId, left], [rightId, right]) => right.createdAt.localeCompare(left.createdAt) || rightId.localeCompare(leftId));
-    let consecutiveLosses = 0;
-    for (const [, execution] of ordered) {
-      if (execution.pnl >= 0n) break;
-      consecutiveLosses += 1;
-    }
-    return { dailyLossMicros, consecutiveLosses };
+    return dailyLossMicros;
   }
 }

@@ -1,6 +1,17 @@
 # Progress
 
 ## Current task
+- 2026-07-30 全程序审计收尾：已通过 `77 files / 910 tests`、TypeScript、UI/launcher 语法和
+  `git diff --check`。已补齐安全退出、启动前 Gate 复位、参数显式化、版本/测试哈希绑定、
+  钱包账户切换保护，并创建当前主审计文档
+  `docs/audit/ni-k-program-audit-2026-07-30.md`。待提交后生成 v2 validation artifact，
+  再做真实本地服务启停/重启与 SQLite 安全状态核验；用户已取消关机，不执行关机。
+- 2026-07-29 全程序审计启动。实测发现宿主进程被强制终止后，数据库可残留
+  `LIVE + LIVE_ACTIVE`，而 4173 已无服务、Live execution/order/attempt/fill 仍全为 `0`。
+  已先用正式 emergency-disable 恢复 `PAPER + LIVE_DISABLED`；新增红测证明新服务过去会
+  直接暴露旧状态，现已修为监听端口前强制清除任何非安全 Gate 状态，并验证必须精确回到
+  `PAPER + LIVE_DISABLED`，否则拒绝启动。正在继续审计一键安全退出、版本/验证工件失效、
+  钱包稳定性和隐藏的绝对风控上限。
 - 2026-07-29 最终提交首次真实激活后约 `90 s`，周期外部对账的
   `GET_OPEN_ORDERS` 单次 `30 s` 超时使 Gate 安全降回 Paper；当时 execution/order/
   attempt/fill 均为 `0`，没有资产动作。根因是只读对账没有瞬时故障重试。现仅对
@@ -231,3 +242,9 @@
    一次 OKX 身份签名。
 3. 再跑真实一键流程，确认 `0 pUSD` 进入 Live、启动前 `5` 项仓位继续隔离、LiveRuntime
    启动且没有历史 Signal 被回放成交；余额不足只在未来具体 BUY 下单前阻断该笔。
+# 2026-07-30 腾讯云服务器清理
+- 已通过 Chrome OrcaTerm 进入实例 `lhins-fp6xjlwz`（Ubuntu，`ubuntu` 用户）。
+- 只读盘点确认：OpenClaw 用户服务 `openclaw-gateway.service`（约 352M 包 + 899M 配置）和 Hermes 用户服务 `hermes-gateway.service`（约 4.0G）正在运行并开机启用。
+- 节点服务识别为 `hysteria-new.service` 与 `xray.service`，未纳入删除范围；根分区约 27G 可用。
+- 已完成：通过 `systemctl --user disable --now` 停止并禁用两个服务；`npm uninstall -g openclaw` 移除 297 个 npm 包；删除 OpenClaw/Hermes 主目录、配置、服务文件、备份及用户级脚本，并清理 uv 缓存中的 Hermes 条目。
+- 最终复核：OpenClaw/Hermes 进程、服务文件、主目录和专属缓存均无残留；根分区可用空间由约 27G 增至 32G。`hysteria-new.service` 与 `xray.service` 均保持 `active/enabled`，443 端口仍监听。

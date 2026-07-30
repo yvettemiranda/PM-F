@@ -2,10 +2,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOperatorUiServer,
+  startOperatorUiServer,
   type OperatorUiServerOptions,
   type OperatorLiveGateActions,
   type OperatorLiveRuntimeActions,
@@ -45,6 +47,7 @@ async function listen(input: {
   connectedLiveRuntimeFactory?: OperatorUiServerOptions["connectedLiveRuntimeFactory"];
   walletRequestBroker?: LiveWalletRequestBroker;
   tradingWalletDiscovery?: OperatorUiServerOptions["tradingWalletDiscovery"];
+  requestShutdown?: OperatorUiServerOptions["requestShutdown"];
 } = {}) {
   const fixture = project();
   const serverOptions: OperatorUiServerOptions = {
@@ -59,6 +62,7 @@ async function listen(input: {
     ...(input.walletRequestBroker === undefined
       ? {}
       : { walletRequestBroker: input.walletRequestBroker }),
+    ...(input.requestShutdown === undefined ? {} : { requestShutdown: input.requestShutdown }),
     tradingWalletDiscovery: input.tradingWalletDiscovery ?? (async (walletAddress) => ({
       walletAddress,
       tradingWalletAddress: walletAddress,
@@ -94,6 +98,71 @@ function mutation(
 }
 
 describe("operator UI server", () => {
+  it("accepts a single safe application shutdown request", async () => {
+    const requestShutdown = vi.fn();
+    const { baseUrl } = await listen({ requestShutdown });
+
+    const response = await mutation(baseUrl, "/api/operator/service/shutdown", {
+      body: { actor: "LOCAL_OPERATOR", reason: "UI_SAFE_EXIT" },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      data: {
+        accepted: true,
+        code: "OPERATOR_UI_SAFE_SHUTDOWN_REQUESTED",
+      },
+    });
+    await vi.waitFor(() => expect(requestShutdown).toHaveBeenCalledOnce());
+  });
+
+  it("fails closed by disabling a stale persisted Live Gate before listening", async () => {
+    const fixture = project();
+    const databaseDirectory = join(fixture.root, "data/phase0");
+    mkdirSync(databaseDirectory, { recursive: true });
+    const database = new DatabaseSync(join(databaseDirectory, "phase0.sqlite"));
+    database.exec(`
+      CREATE TABLE live_gate_state(
+        state_id TEXT PRIMARY KEY,
+        execution_mode TEXT NOT NULL,
+        live_gate_state TEXT NOT NULL
+      );
+      INSERT INTO live_gate_state VALUES ('default', 'LIVE', 'LIVE_ACTIVE');
+    `);
+    database.close();
+    const liveGateActions: OperatorLiveGateActions = {
+      preflight: vi.fn(),
+      requestActivation: vi.fn(),
+      confirmActivation: vi.fn(),
+      emergencyDisable: vi.fn(async () => {
+        const writer = new DatabaseSync(join(databaseDirectory, "phase0.sqlite"));
+        writer.prepare(
+          "UPDATE live_gate_state SET execution_mode='PAPER',live_gate_state='LIVE_DISABLED' WHERE state_id='default'",
+        ).run();
+        writer.close();
+      }),
+      recover: vi.fn(),
+    };
+
+    const server = await startOperatorUiServer({
+      projectRoot: fixture.root,
+      staticRoot: fixture.staticRoot,
+      liveGateActions,
+    }, 0);
+    servers.push(server);
+
+    expect(liveGateActions.emergencyDisable).toHaveBeenCalledWith({
+      actor: "SYSTEM",
+      reason: "OPERATOR_UI_STARTUP_STALE_LIVE_RESET",
+    });
+    const verified = new DatabaseSync(join(databaseDirectory, "phase0.sqlite"), { readOnly: true });
+    expect(verified.prepare(
+      "SELECT execution_mode,live_gate_state FROM live_gate_state WHERE state_id='default'",
+    ).get()).toEqual({ execution_mode: "PAPER", live_gate_state: "LIVE_DISABLED" });
+    verified.close();
+  });
+
   it("serves the real snapshot and static UI from one localhost origin", async () => {
     const { baseUrl } = await listen();
     const snapshotResponse = await fetch(`${baseUrl}/api/operator/snapshot`);
@@ -940,7 +1009,7 @@ describe("operator UI server", () => {
     });
   });
 
-  it("disconnects a connected wallet when confirmed Live parameters are saved", async () => {
+  it("keeps a connected wallet for an unchanged save and disconnects only after runtime limits change", async () => {
     const account = privateKeyToAccount("0x0123456789012345678901234567890123456789012345678901234567890123");
     const connectedActions: OperatorLiveRuntimeActions = {
       capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE" },
@@ -980,12 +1049,36 @@ describe("operator UI server", () => {
         maxTradeSizeMicros: "1000000",
         maxExposureMicros: "3000000",
         maxDailyLossMicros: "1000000",
-        confirmationText: "CONFIRM SMALL LIVE LIMITS",
+        confirmLimits: true,
         acceptCompliance: true,
       },
     });
     expect(saved.status).toBe(200);
     expect(await saved.json()).toMatchObject({
+      ok: true,
+      data: {
+        config: { limitsConfirmedAt: expect.any(String) },
+        reconnectRequired: false,
+        snapshot: { live: { walletSession: { status: "CONNECTED" } } },
+      },
+    });
+    expect(connectedActions.stop).not.toHaveBeenCalled();
+
+    const changed = await mutation(baseUrl, "/api/operator/live/configuration", {
+      method: "PUT",
+      body: {
+        signatureType: "EOA",
+        tradingWalletAddress: account.address,
+        liveBankrollMicros: "10000000",
+        maxTradeSizeMicros: "900000",
+        maxExposureMicros: "3000000",
+        maxDailyLossMicros: "1000000",
+        confirmLimits: true,
+        acceptCompliance: true,
+      },
+    });
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toMatchObject({
       ok: true,
       data: {
         reconnectRequired: true,

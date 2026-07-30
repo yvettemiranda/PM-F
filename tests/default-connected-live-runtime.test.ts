@@ -13,6 +13,7 @@ import { LiveWalletRequestBroker } from "../src/operator/live-wallet-request-bro
 import {
   liveProductionValidationArtifactPath,
 } from "../src/operator/production-live-prerequisites.js";
+import { computeLiveProductionRuntimeHash } from "../src/operator/live-production-build.js";
 import type { LiveWalletRuntimeBinding } from "../src/operator/live-wallet-session.js";
 
 const roots: string[] = [];
@@ -88,10 +89,12 @@ describe("assembleDefaultConnectedLiveRuntime", () => {
     writeFileSync(isolatedPath, isolated);
     const artifactPath = liveProductionValidationArtifactPath(root);
     writeFileSync(artifactPath, JSON.stringify({
-      schemaVersion: "live-production-validation-v1",
+      schemaVersion: "live-production-validation-v2",
       status: "PASSED",
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
+      liveRuntimeHash: computeLiveProductionRuntimeHash(root),
+      runtimeSourceDirty: false,
       generatedAt: "2026-07-28T06:00:00.000Z",
       typecheckPassed: true,
       fullTestPassed: true,

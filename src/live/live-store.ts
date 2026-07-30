@@ -8,6 +8,7 @@ import {
   transition as assertTransition,
 } from "../domain/state-machine.js";
 import type { SourceVersion } from "../infra/source-version.js";
+import type { LiveRiskLimits } from "../risk/risk-manager.js";
 import type { ExecutionFeeSnapshot, ExecutionOrderbookSnapshot } from "../execution/market-data.js";
 import type { ExecutionMatchResult } from "../execution/orderbook-matching.js";
 import type {
@@ -151,12 +152,27 @@ export function redeemIdempotencyKey(positionId: string, conditionId: string, as
 
 export class LiveStore {
   private savepointSequence = 0;
+  private readonly liveRiskLimits: {
+    maxTradeSizeMicros: bigint;
+    maxExposureMicros: bigint;
+  };
 
   constructor(
     private readonly database: DatabaseSync,
     private readonly sourceVersion: SourceVersion,
     private readonly now: () => Date,
-  ) {}
+    liveRiskLimits?: LiveRiskLimits,
+  ) {
+    this.liveRiskLimits = liveRiskLimits === undefined
+      ? {
+        maxTradeSizeMicros: BigInt(RULESET.liveMaxTradeSizeMicros),
+        maxExposureMicros: BigInt(RULESET.liveMaxExposureMicros),
+      }
+      : {
+        maxTradeSizeMicros: BigInt(liveRiskLimits.maxTradeSizeMicros),
+        maxExposureMicros: BigInt(liveRiskLimits.maxExposureMicros),
+      };
+  }
 
   existingExecution(idempotencyKey: string): LiveExecutionRow | null {
     const row = this.database.prepare("SELECT * FROM live_executions WHERE execution_idempotency_key=?")
@@ -887,12 +903,8 @@ export class LiveStore {
     } | undefined;
     if (!account || account.status !== "ACTIVE") throw new Error("LIVE_ACCOUNT_NOT_ACTIVE");
 
-    const bankroll = BigInt(account.initial_bankroll_micros);
     const riskBudget = BigInt(account.risk_budget_micros);
-    const singleLimit = minBigInt(
-      BigInt(RULESET.liveMaxTradeSizeMicros),
-      (bankroll * BigInt(RULESET.liveMaxSingleTradePpm)) / 1_000_000n,
-    );
+    const singleLimit = minBigInt(this.liveRiskLimits.maxTradeSizeMicros, riskBudget);
     if (finalAmountMicros > singleLimit) throw new Error("LIVE_RESERVATION_SINGLE_TRADE_LIMIT");
 
     const pendingTotal = this.pendingReservationTotal(execution.live_account_id);
@@ -904,25 +916,21 @@ export class LiveStore {
     }
 
     const totalExposure = this.positionCostTotal(execution.live_account_id);
-    const totalLimit = minBigInt(
-      riskBudget,
-      BigInt(RULESET.liveMaxExposureMicros),
-      (bankroll * BigInt(RULESET.liveMaxTotalExposurePpm)) / 1_000_000n,
-    );
+    const totalLimit = minBigInt(this.liveRiskLimits.maxExposureMicros, riskBudget);
     if (totalExposure + pendingTotal + additionalAmountMicros > totalLimit) {
       throw new Error("LIVE_RESERVATION_TOTAL_EXPOSURE_LIMIT");
     }
 
     const marketExposure = this.positionCostTotal(execution.live_account_id, { conditionId: execution.condition_id });
     const marketPending = this.pendingReservationTotal(execution.live_account_id, { conditionId: execution.condition_id });
-    const marketLimit = (bankroll * BigInt(RULESET.liveMaxMarketExposurePpm)) / 1_000_000n;
+    const marketLimit = totalLimit;
     if (marketExposure + marketPending + additionalAmountMicros > marketLimit) {
       throw new Error("LIVE_RESERVATION_MARKET_EXPOSURE_LIMIT");
     }
 
     const positionExposure = this.positionCostTotal(execution.live_account_id, { assetId: execution.asset_id });
     const positionPending = this.pendingReservationTotal(execution.live_account_id, { assetId: execution.asset_id });
-    const positionLimit = (bankroll * BigInt(RULESET.liveMaxPositionExposurePpm)) / 1_000_000n;
+    const positionLimit = totalLimit;
     if (positionExposure + positionPending + additionalAmountMicros > positionLimit) {
       throw new Error("LIVE_RESERVATION_POSITION_EXPOSURE_LIMIT");
     }

@@ -1,6 +1,5 @@
 import { Chain, SignatureTypeV2, getContractConfig } from "@polymarket/clob-client-v2";
 import { resolve } from "node:path";
-import { resolveSourceVersion } from "../infra/source-version.js";
 import {
   BrowserWalletClobSigner,
   type PolymarketWalletSignatureType,
@@ -35,7 +34,10 @@ import type {
   LiveWalletSession,
 } from "./live-wallet-session.js";
 import { ensureProductionLiveAccount } from "./production-live-account.js";
-import { ProductionLivePrerequisiteManager } from "./production-live-prerequisites.js";
+import {
+  ProductionLivePrerequisiteManager,
+  validatedLiveProductionSourceVersion,
+} from "./production-live-prerequisites.js";
 
 export const PRODUCTION_LIVE_EXTERNAL_TIMEOUT_MS = 30_000;
 
@@ -79,7 +81,7 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
     throw new Error("LIVE_PRODUCTION_CONNECTED_CONFIGURATION_MISMATCH");
   }
   const now = input.now ?? (() => new Date());
-  const sourceVersion = resolveSourceVersion(input.projectRoot);
+  const sourceVersion = validatedLiveProductionSourceVersion(input.projectRoot);
   const databasePath = resolve(input.projectRoot, OPERATOR_DATABASE_FILE);
   const account = await ensureProductionLiveAccount({
     projectRoot: input.projectRoot,

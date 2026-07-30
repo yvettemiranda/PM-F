@@ -44,21 +44,33 @@ if ui_ready; then
   exit 0
 fi
 
-# Finder 启动 .command 时通常只给 /usr/bin:/bin 等系统 PATH，
-# 这时 command -v pnpm 会失败，即使本机已经有可用的 pnpm。
-# 先从常见用户安装位置和 Codex 自带运行时中补齐 pnpm，再继续下面的
-# Node PATH 推导；这样双击入口和终端入口走同一套依赖探测。
-resolve_pnpm() {
+# 日常启动只需要已经安装好的 Node 运行时与项目依赖，不应额外依赖
+# pnpm。Finder 的 PATH 很精简，因此直接寻找兼容 Node 24.14+。
+node_supported() {
+  local candidate="$1"
+  [[ -x "$candidate" ]] || return 1
+  "$candidate" -e '
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    process.exit(major === 24 && minor >= 14 ? 0 : 1);
+  ' >/dev/null 2>&1
+}
+
+resolve_node() {
   local home_dir="${HOME:-}"
   local candidate
+  candidate="$(command -v node 2>/dev/null || true)"
+  if [[ -n "$candidate" ]] && node_supported "$candidate"; then
+    print -r -- "$candidate"
+    return 0
+  fi
   setopt local_options null_glob
   for candidate in \
-    "$home_dir/.local/share/pnpm/pnpm" \
-    "$home_dir/Library/pnpm/pnpm" \
-    "$home_dir/.cache/codex-runtimes/"*/dependencies/bin/fallback/pnpm \
-    "/opt/homebrew/bin/pnpm" \
-    "/usr/local/bin/pnpm"; do
-    if [[ -x "$candidate" ]]; then
+    "$home_dir/.cache/codex-runtimes/"*/dependencies/node/bin/node \
+    "$home_dir/.nvm/versions/node/"*/bin/node \
+    "$home_dir/.volta/bin/node" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node"; do
+    if node_supported "$candidate"; then
       print -r -- "$candidate"
       return 0
     fi
@@ -66,31 +78,15 @@ resolve_pnpm() {
   return 1
 }
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  PNPM_FALLBACK="$(resolve_pnpm || true)"
-  if [[ -n "$PNPM_FALLBACK" ]]; then
-    export PATH="$(dirname "$PNPM_FALLBACK"):$PATH"
-  fi
-fi
-
-if ! command -v pnpm >/dev/null 2>&1; then
-  print -u2 "找不到 pnpm。请先在项目目录完成依赖安装，再重新双击 Hecatonchires.command。"
+NODE_BIN="$(resolve_node || true)"
+if [[ -z "$NODE_BIN" ]]; then
+  print -u2 "找不到兼容的 Node.js 24.14+。请先安装 Node.js 24，再重新双击 Hecatonchires.command。"
   exit 1
 fi
+export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-# Finder 启动 .command 时可能不会加载交互式 shell 的 PATH。若 pnpm
-# 来自一个自带 Node 的运行时，先把同目录的 Node 放入 PATH；普通系统
-# 安装的 pnpm 则保持原样。
-if ! command -v node >/dev/null 2>&1; then
-  PNPM_BIN="$(command -v pnpm)"
-  PNPM_NODE_DIR="$(cd "$(dirname "$PNPM_BIN")/../../node/bin" 2>/dev/null && pwd || true)"
-  if [[ -n "$PNPM_NODE_DIR" && -x "$PNPM_NODE_DIR/node" ]]; then
-    export PATH="$PNPM_NODE_DIR:$PATH"
-  fi
-fi
-
-if ! command -v node >/dev/null 2>&1; then
-  print -u2 "找不到 Node.js。请先安装 Node.js 24.14+，再重新双击 Hecatonchires.command。"
+if [[ ! -f "$PROJECT_ROOT/node_modules/tsx/package.json" ]]; then
+  print -u2 "Hecatonchires 的本地依赖尚未安装完整，请先完成一次程序安装。"
   exit 1
 fi
 

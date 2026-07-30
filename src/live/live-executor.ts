@@ -46,7 +46,7 @@ import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-a
 import type { RedeemAdapter } from "./redeem-adapter.js";
 import type { Signer } from "./signer.js";
 import type { WalletProvider } from "./wallet-provider.js";
-import { RiskManager } from "../risk/risk-manager.js";
+import { RiskManager, type LiveRiskLimits } from "../risk/risk-manager.js";
 import {
   applyBuyAmountPolicy,
   applyPriorBuyAmountPolicy,
@@ -138,6 +138,8 @@ export interface LiveExecutorOptions {
   /** Test-only override; production can never disable external CTF reconciliation. */
   requireExternalPositionReconciliation?: boolean;
   externalCallTimeoutMs?: number;
+  /** Exact operator-visible Live limits supplied by the production Gate. */
+  liveRiskLimits?: LiveRiskLimits;
 }
 
 type WalletCheckResult =
@@ -263,7 +265,12 @@ export class LiveExecutor implements ExecutorInterface {
     }
     this.database = new DatabaseSync(options.databasePath);
     this.database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;");
-    this.store = new LiveStore(this.database, this.sourceVersion, this.now);
+    this.store = new LiveStore(
+      this.database,
+      this.sourceVersion,
+      this.now,
+      options.liveRiskLimits,
+    );
     this.reconciliation = new LiveReconciliation(this.database, this.store);
     this.recovery = new LiveCrashRecovery(
       this.orderAdapter,
@@ -819,7 +826,11 @@ export class LiveExecutor implements ExecutorInterface {
           context: base.context,
           capitalDecision: null,
         };
-        const risk = new RiskManager(this.database, this.sourceVersion).recordSystemDecision({
+        const risk = new RiskManager(
+          this.database,
+          this.sourceVersion,
+          this.options.liveRiskLimits,
+        ).recordSystemDecision({
           mode: "LIVE",
           accountId,
           signalId: position.signal_id,
@@ -1890,7 +1901,11 @@ export class LiveExecutor implements ExecutorInterface {
       risk_decision_id: string;
       requested_amount_micros: string | null;
     }>;
-    const riskManager = new RiskManager(this.database, this.sourceVersion);
+    const riskManager = new RiskManager(
+      this.database,
+      this.sourceVersion,
+      this.options.liveRiskLimits,
+    );
     return this.store.transaction(() => {
       let adjustedCount = 0;
       for (const row of rows) {
@@ -2458,7 +2473,11 @@ export class LiveExecutor implements ExecutorInterface {
     const currentAmount = BigInt(execution.requested_amount_micros ?? "0");
     if (finalAmount <= currentAmount) return { status: "NOT_ELIGIBLE" };
     const walletCheck = await this.walletChecks(approval, "BUY", execution.asset_id, finalAmount);
-    const riskManager = new RiskManager(this.database, this.sourceVersion);
+    const riskManager = new RiskManager(
+      this.database,
+      this.sourceVersion,
+      this.options.liveRiskLimits,
+    );
     let finalRiskDecisionId: string;
     let rejectionReason: string | null = null;
     this.database.exec("BEGIN IMMEDIATE");

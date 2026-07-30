@@ -517,7 +517,6 @@ export class LiveGateService implements LiveGate {
       },
       this.exposureCheck(riskDecision, input.side),
       this.dailyLossCheck(riskDecision?.account_id ?? null, input.side),
-      this.consecutiveLossCheck(riskDecision?.account_id ?? null, input.side),
       this.marketStatusCheck(signal),
       ...fullEvaluation.checks,
     ];
@@ -983,10 +982,17 @@ export class LiveGateService implements LiveGate {
   private riskParameterChecks(): LiveGateCheck[] {
     const exposureValid = this.isPositiveInteger(this.config.maxExposureMicros);
     const tradeSizeValid = this.isPositiveInteger(this.config.maxTradeSizeMicros);
+    const dailyLossValid = this.isPositiveInteger(this.config.maxDailyLossMicros);
     const bankrollValid = this.isPositiveInteger(this.config.bankrollMicros);
     const totalLimitValid = exposureValid
       && bankrollValid
       && BigInt(this.config.maxExposureMicros as string) <= BigInt(this.config.bankrollMicros as string);
+    const tradeWithinExposure = tradeSizeValid
+      && exposureValid
+      && BigInt(this.config.maxTradeSizeMicros as string) <= BigInt(this.config.maxExposureMicros as string);
+    const dailyLossWithinBankroll = dailyLossValid
+      && bankrollValid
+      && BigInt(this.config.maxDailyLossMicros as string) <= BigInt(this.config.bankrollMicros as string);
     const checks: LiveGateCheck[] = [
       {
         name: "risk_single_market_limit",
@@ -995,13 +1001,24 @@ export class LiveGateService implements LiveGate {
       },
       {
         name: "risk_single_event_limit",
-        passed: tradeSizeValid,
-        reason: tradeSizeValid ? "OK" : "MAX_TRADE_SIZE_INVALID",
+        passed: tradeWithinExposure,
+        reason: tradeWithinExposure
+          ? "OK"
+          : !tradeSizeValid
+            ? "MAX_TRADE_SIZE_INVALID"
+            : !exposureValid
+              ? "MAX_EXPOSURE_INVALID"
+              : "MAX_TRADE_SIZE_EXCEEDS_EXPOSURE",
       },
       {
         name: "risk_total_limit",
         passed: totalLimitValid,
         reason: totalLimitValid ? "OK" : "MAX_EXPOSURE_EXCEEDS_BANKROLL",
+      },
+      {
+        name: "risk_daily_loss_limit",
+        passed: dailyLossWithinBankroll,
+        reason: dailyLossWithinBankroll ? "OK" : "MAX_DAILY_LOSS_EXCEEDS_BANKROLL",
       },
     ];
     if (this.config.kellyEnabled !== true) {
@@ -1112,11 +1129,10 @@ export class LiveGateService implements LiveGate {
     const requestedRaw = side === "BUY" ? riskDecision?.requested_amount_micros : null;
     const requestedValid = requestedRaw === null || requestedRaw === undefined || this.isPositiveInteger(requestedRaw);
     const requested = requestedRaw !== null && requestedRaw !== undefined && requestedValid ? BigInt(requestedRaw) : 0n;
-    const percentageLimit = account
-      ? (account.initialBankrollMicros * BigInt(RULESET.liveMaxTotalExposurePpm)) / 1_000_000n
-      : 0n;
-    const limit = this.isPositiveInteger(configuredLimit) && percentageLimit > 0n
-      ? percentageLimit < BigInt(configuredLimit as string) ? percentageLimit : BigInt(configuredLimit as string)
+    const limit = this.isPositiveInteger(configuredLimit) && account !== null
+      ? account.riskBudgetMicros < BigInt(configuredLimit as string)
+        ? account.riskBudgetMicros
+        : BigInt(configuredLimit as string)
       : 0n;
     const passed = limit > 0n && requestedValid && exposure + requested <= limit;
     return { name: "live_exposure_limit", passed, reason: passed ? "OK" : "LIVE_EXPOSURE_LIMIT_EXCEEDED" };
@@ -1133,20 +1149,9 @@ export class LiveGateService implements LiveGate {
     if (!this.isPositiveInteger(configuredLimit) || !account) {
       return { name: "live_daily_loss_limit", passed: false, reason: "LIVE_DAILY_LOSS_LIMIT_UNAVAILABLE" };
     }
-    const percentageLimit = (account.initialBankrollMicros * BigInt(RULESET.liveMaxDailyLossPpm)) / 1_000_000n;
-    const limit = percentageLimit < BigInt(configuredLimit as string) ? percentageLimit : BigInt(configuredLimit as string);
+    const limit = BigInt(configuredLimit as string);
     const passed = limit > 0n && dailyLoss < limit;
     return { name: "live_daily_loss_limit", passed, reason: passed ? "OK" : "LIVE_DAILY_LOSS_LIMIT_EXCEEDED" };
-  }
-
-  private consecutiveLossCheck(accountId: string | null, side?: "BUY" | "SELL"): LiveGateCheck {
-    if (side === "SELL") {
-      return { name: "live_consecutive_loss_limit", passed: true, reason: "EXIT_NOT_CONSECUTIVE_LOSS_LIMITED" };
-    }
-    if (!accountId) return { name: "live_consecutive_loss_limit", passed: false, reason: "LIVE_ACCOUNT_ID_MISSING" };
-    const losses = this.consecutiveLosses(accountId);
-    const passed = losses < RULESET.liveMaxConsecutiveLosses;
-    return { name: "live_consecutive_loss_limit", passed, reason: passed ? "OK" : "LIVE_CONSECUTIVE_LOSS_LIMIT_EXCEEDED" };
   }
 
   private marketStatusCheck(signal: SignalRow | null): LiveGateCheck {
@@ -1186,35 +1191,6 @@ export class LiveGateService implements LiveGate {
       "SELECT live_account_id FROM live_accounts WHERE live_wallet_id=? AND status='ACTIVE'",
     ).get(liveWalletId) as { live_account_id: string } | undefined;
     return row?.live_account_id ?? null;
-  }
-
-  private consecutiveLosses(accountId: string): number {
-    const rows = this.database.prepare(
-      `SELECT live_execution_id,pnl_micros,created_at,pnl_ledger_id
-       FROM live_pnl_ledger WHERE live_account_id=?
-       ORDER BY created_at,pnl_ledger_id`,
-    ).all(accountId) as unknown as Array<{
-      live_execution_id: string;
-      pnl_micros: string;
-      created_at: string;
-      pnl_ledger_id: string;
-    }>;
-    const executions = new Map<string, { pnl: bigint; createdAt: string }>();
-    for (const row of rows) {
-      const prior = executions.get(row.live_execution_id);
-      executions.set(row.live_execution_id, {
-        pnl: (prior?.pnl ?? 0n) + BigInt(row.pnl_micros),
-        createdAt: prior && prior.createdAt > row.created_at ? prior.createdAt : row.created_at,
-      });
-    }
-    const ordered = [...executions.entries()]
-      .sort(([leftId, left], [rightId, right]) => right.createdAt.localeCompare(left.createdAt) || rightId.localeCompare(leftId));
-    let count = 0;
-    for (const [, execution] of ordered) {
-      if (execution.pnl >= 0n) break;
-      count += 1;
-    }
-    return count;
   }
 
   private liveAccountRiskLimits(accountId: string): { initialBankrollMicros: bigint; riskBudgetMicros: bigint } | null {

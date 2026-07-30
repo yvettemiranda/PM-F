@@ -43,6 +43,7 @@ import {
 import { LiveWalletRequestBroker } from "./live-wallet-request-broker.js";
 import { resolveSourceVersion, type SourceVersion } from "../infra/source-version.js";
 import { effectiveLivePrerequisites } from "./operator-status.js";
+import { validatedLiveProductionSourceVersion } from "./production-live-prerequisites.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -76,6 +77,7 @@ export interface OperatorUiServerOptions {
       dispose?: () => void;
     }
   >;
+  requestShutdown?: () => void | Promise<void>;
   now?: () => Date;
 }
 
@@ -111,6 +113,7 @@ interface RequestContext {
     startedAt: string;
     sourceVersion: SourceVersion;
   };
+  prerequisiteSourceVersion: SourceVersion;
 }
 
 class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
@@ -346,6 +349,8 @@ function stringField(body: Record<string, unknown>, key: string): string {
 
 const STALE_LIVE_RUNTIME_CODES = new Set([
   "LIVE_PRODUCTION_SOURCE_DIRTY",
+  "LIVE_PRODUCTION_RUNTIME_SOURCE_DIRTY",
+  "LIVE_PRODUCTION_RUNTIME_HASH_MISMATCH",
   "LIVE_PRODUCTION_VALIDATION_ARTIFACT_MISSING",
   "LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID",
   "LIVE_PRODUCTION_FINAL_PAPER_EVIDENCE_INVALID",
@@ -452,6 +457,7 @@ function freshSnapshot(
   liveRuntimeActions: OperatorLiveRuntimeActions,
   walletSessionManager: LiveWalletSessionManager,
   service: RequestContext["service"],
+  prerequisiteSourceVersion: SourceVersion,
 ): OperatorDashboardSnapshot {
   const snapshot = options.now === undefined
     ? operatorDashboardSnapshot(options.projectRoot)
@@ -459,7 +465,7 @@ function freshSnapshot(
   snapshot.service = service;
   snapshot.live.prerequisites = effectiveLivePrerequisites(
     snapshot.live.prerequisites,
-    service.sourceVersion,
+    prerequisiteSourceVersion,
   );
   snapshot.live.capability.execution = liveRuntimeActions.capability.execution;
   snapshot.live.capability.orderManagement = liveRuntimeActions.capability.orderManagement;
@@ -497,7 +503,7 @@ function canKeepWalletSessionWhenRuntimeAssemblyIsBlocked(code: string): boolean
   // A verified wallet identity is still useful for showing readiness while a
   // clean, audited source tree is prepared. This must not apply to identity,
   // network, or chain-verification failures.
-  return code === "LIVE_PRODUCTION_SOURCE_DIRTY"
+  return STALE_LIVE_RUNTIME_CODES.has(code)
     || code.startsWith("LIVE_PRODUCTION_SAFE_OWNER_LOOKUP_FAILED:")
     || code === "LIVE_PRODUCTION_TRADING_WALLET_OWNER_MISMATCH";
 }
@@ -514,18 +520,39 @@ async function handleApi(context: RequestContext): Promise<void> {
     walletSessionManager,
     walletRequestBroker,
     service,
+    prerequisiteSourceVersion,
   } = context;
   const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(
     options,
     liveRuntimeActions,
     walletSessionManager,
     service,
+    prerequisiteSourceVersion,
   );
   if (isMutation(request.method ?? "GET")) assertRequestOrigin(request);
   const path = url.pathname;
 
   if (request.method === "GET" && path === "/api/operator/snapshot") {
     success(response, dashboardSnapshot());
+    return;
+  }
+
+  if (request.method === "POST" && path === "/api/operator/service/shutdown") {
+    await readJson(request);
+    if (options.requestShutdown === undefined) {
+      throw new HttpError(409, "OPERATOR_UI_SAFE_SHUTDOWN_NOT_CONFIGURED", "当前宿主未提供安全退出能力。");
+    }
+    success(response, {
+      accepted: true,
+      code: "OPERATOR_UI_SAFE_SHUTDOWN_REQUESTED",
+    }, 202);
+    response.once("finish", () => {
+      setImmediate(() => {
+        void Promise.resolve(options.requestShutdown?.()).catch((error) => {
+          console.error(error instanceof Error ? error.message : String(error));
+        });
+      });
+    });
     return;
   }
 
@@ -716,16 +743,21 @@ async function handleApi(context: RequestContext): Promise<void> {
     ) {
       throw new HttpError(400, "LIVE_PRODUCTION_SIGNATURE_TYPE_INVALID", "钱包类型不受支持。");
     }
-    const confirmLimits = body.confirmationText === undefined
+    if (body.confirmLimits !== undefined && typeof body.confirmLimits !== "boolean") {
+      throw new HttpError(400, "LIVE_LIMIT_CONFIRMATION_INVALID", "Live 限额确认必须是布尔值。");
+    }
+    const legacyTextConfirmed = body.confirmationText === undefined
       ? false
       : stringField(body, "confirmationText") === "CONFIRM SMALL LIVE LIMITS";
-    if (body.confirmationText !== undefined && !confirmLimits) {
-      throw new HttpError(400, "LIVE_LIMIT_CONFIRMATION_TEXT_MISMATCH", "小额 Live 限额确认词不正确。");
+    if (body.confirmationText !== undefined && !legacyTextConfirmed) {
+      throw new HttpError(400, "LIVE_LIMIT_CONFIRMATION_TEXT_MISMATCH", "Live 限额确认词不正确。");
     }
+    const confirmLimits = body.confirmLimits === true || legacyTextConfirmed;
     const acceptCompliance = body.acceptCompliance === true;
     if (body.acceptCompliance !== undefined && typeof body.acceptCompliance !== "boolean") {
       throw new HttpError(400, "LIVE_COMPLIANCE_ACCEPTANCE_INVALID", "合规确认必须是布尔值。");
     }
+    const previousConfig = readLiveProductionConfig(options.projectRoot);
     let config;
     try {
       config = saveLiveProductionConfig(options.projectRoot, {
@@ -758,8 +790,19 @@ async function handleApi(context: RequestContext): Promise<void> {
       const code = error instanceof Error ? error.message : String(error);
       throw new HttpError(400, code, "Live 生产配置未通过校验。");
     }
+    const runtimeBindingKeys = [
+      "walletAddress",
+      "tradingWalletAddress",
+      "signatureType",
+      "network",
+      "liveBankrollMicros",
+      "maxTradeSizeMicros",
+      "maxExposureMicros",
+      "maxDailyLossMicros",
+    ] as const;
+    const reconnectRequired = runtimeBindingKeys.some((key) => previousConfig[key] !== config[key]);
     const connectedSession = walletSessionManager.snapshot(options.now);
-    if (connectedSession.status === "CONNECTED" && connectedSession.sessionId !== null) {
+    if (reconnectRequired && connectedSession.status === "CONNECTED" && connectedSession.sessionId !== null) {
       await walletSessionManager.disconnect(connectedSession.sessionId);
       walletRequestBroker.cancelSession(
         connectedSession.sessionId,
@@ -768,7 +811,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     }
     success(response, {
       config,
-      reconnectRequired: connectedSession.status === "CONNECTED",
+      reconnectRequired: reconnectRequired && connectedSession.status === "CONNECTED",
       snapshot: dashboardSnapshot(),
     });
     return;
@@ -1261,6 +1304,16 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
     startedAt: (options.now ?? (() => new Date()))().toISOString(),
     sourceVersion: resolveSourceVersion(options.projectRoot),
   };
+  let prerequisiteSourceVersion = service.sourceVersion;
+  try {
+    prerequisiteSourceVersion = validatedLiveProductionSourceVersion(
+      options.projectRoot,
+      service.sourceVersion,
+    );
+  } catch {
+    // The dashboard will keep existing prerequisite evidence visibly stale;
+    // the production assembly returns the exact actionable validation error.
+  }
   const server = createServer(async (request, response) => {
     setHeaders(response);
     try {
@@ -1280,6 +1333,7 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
           walletSessionManager,
           walletRequestBroker,
           service,
+          prerequisiteSourceVersion,
         });
       } else if (request.method === "GET" || request.method === "HEAD") {
         await serveStatic(response, staticRoot, url.pathname);
@@ -1343,6 +1397,22 @@ export async function startOperatorUiServer(
   options: OperatorUiServerOptions,
   port = Number(process.env.OPERATOR_UI_PORT ?? 4173),
 ): Promise<OperatorUiServer> {
+  const startupSafety = operatorRuntimeSafety(options.projectRoot);
+  if (startupSafety.databaseAvailable
+    && (startupSafety.executionMode !== "PAPER"
+      || startupSafety.liveGateState !== "LIVE_DISABLED")) {
+    const startupGateActions = options.liveGateActions
+      ?? new DefaultOperatorLiveGateActions(options.projectRoot);
+    await startupGateActions.emergencyDisable({
+      actor: "SYSTEM",
+      reason: "OPERATOR_UI_STARTUP_STALE_LIVE_RESET",
+    });
+    const resetSafety = operatorRuntimeSafety(options.projectRoot);
+    if (resetSafety.executionMode !== "PAPER"
+      || resetSafety.liveGateState !== "LIVE_DISABLED") {
+      throw new Error("OPERATOR_UI_STARTUP_SAFETY_RESET_FAILED");
+    }
+  }
   const server = createOperatorUiServer(options);
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
