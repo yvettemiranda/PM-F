@@ -1,11 +1,17 @@
 # Progress
 
 ## Current task
-- 2026-07-30 全程序审计收尾：已通过 `77 files / 910 tests`、TypeScript、UI/launcher 语法和
-  `git diff --check`。已补齐安全退出、启动前 Gate 复位、参数显式化、版本/测试哈希绑定、
-  钱包账户切换保护，并创建当前主审计文档
-  `docs/audit/ni-k-program-audit-2026-07-30.md`。待提交后生成 v2 validation artifact，
-  再做真实本地服务启停/重启与 SQLite 安全状态核验；用户已取消关机，不执行关机。
+- 2026-07-30 全程序审计收尾已完成：`77 files / 910 tests`、TypeScript、UI/launcher 语法、
+  `git diff --check` 和 v2 validation artifact 均通过。已补齐安全退出、启动前 Gate 复位、
+  参数显式化、版本/测试哈希绑定、钱包账户切换保护，并完成主审计文档
+  `docs/audit/ni-k-program-audit-2026-07-30.md`。
+- 已用正式账户装配流程清理当前数据库中的空旧 Live 账户：旧 EOA 账户审计停用，当前
+  Polygon Gnosis Safe 账户保持 `ACTIVE`；没有未终态订单、reservation、执行或非零仓位。
+  全局 Gate 保持 `PAPER + LIVE_DISABLED`，Live executions/orders/attempts/fills 和非零
+  Live 仓位均为 `0`。
+- 已在临时端口 `4179` 实测启动、连续快照时间推进、安全退出、端口关闭和再次重启；两次
+  服务实例 ID 不同，均回到 `PAPER + LIVE_DISABLED + liveAllowed=false`。用户已取消关机，
+  不执行关机；最终只停止本地服务。
 - 2026-07-29 全程序审计启动。实测发现宿主进程被强制终止后，数据库可残留
   `LIVE + LIVE_ACTIVE`，而 4173 已无服务、Live execution/order/attempt/fill 仍全为 `0`。
   已先用正式 emergency-disable 恢复 `PAPER + LIVE_DISABLED`；新增红测证明新服务过去会
@@ -248,3 +254,9 @@
 - 节点服务识别为 `hysteria-new.service` 与 `xray.service`，未纳入删除范围；根分区约 27G 可用。
 - 已完成：通过 `systemctl --user disable --now` 停止并禁用两个服务；`npm uninstall -g openclaw` 移除 297 个 npm 包；删除 OpenClaw/Hermes 主目录、配置、服务文件、备份及用户级脚本，并清理 uv 缓存中的 Hermes 条目。
 - 最终复核：OpenClaw/Hermes 进程、服务文件、主目录和专属缓存均无残留；根分区可用空间由约 27G 增至 32G。`hysteria-new.service` 与 `xray.service` 均保持 `active/enabled`，443 端口仍监听。
+
+## 2026-07-30 服务器资产盘点
+- 除两个节点外，唯一明确的第三方常驻应用是 Docker RustDesk 服务端：容器 `hbbs`、`hbbr`（`rustdesk/rustdesk-server:latest`），监听 21115-21119，数据挂载 `/home/ubuntu/rustdesk-server/data`。
+- 未发现 Nginx/Apache/MySQL 等网站服务或用户级 systemd 服务。系统服务、Docker/containerd、腾讯云 `tat_agent`/`cloud-init` 等暂列系统/管理基础设施，不应无确认删除。
+- 可选空间项：`~/.rustup` 约 1.4G、`~/.npm` 约 1.2G、`~/.cache` 约 2.9G；通用缓存/开发工具链用途未确认，等待用户决定是否清理。
+- 用户确认“只删 RustDesk”后，已删除 Docker 容器 `hbbs`/`hbbr`、镜像 `rustdesk/rustdesk-server:latest`、挂载数据 `/home/ubuntu/rustdesk-server` 及 `.rustdesk-server`。复核无 RustDesk 容器/镜像/数据残留，21115-21119 端口已关闭；`hysteria-new.service` 与 `xray.service` 仍为 `active/enabled`，443 端口仍监听。

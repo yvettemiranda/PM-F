@@ -186,6 +186,28 @@ Test Files  77 passed
 Tests       910 passed
 ```
 
+验证工件当前为 `data/operator/live-production-validation.json`，状态为
+`live-production-validation-v2 / PASSED`，绑定源码提交
+`08cbe4b5d9e8c4230959bc42208631bf411bfdc0`，运行时哈希为
+`5cb827c5fbdb1ddbde881e5820d6c5cd4b87568edf6e85a6c2844122f8ff2d80`。工件同时记录
+`typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
+`910` 个测试；运行时文件没有 dirty 变化。
+
+### 5.1 本轮实际启停复核
+
+在不触碰真实钱包和真实订单的前提下，使用临时本地端口 `4179` 完成了以下闭环：
+
+- 启动后快照返回 `PAPER`、`LIVE_DISABLED`、`liveAllowed=false`，后台状态为 `STOPPED`；
+- 间隔约四秒再次读取，`generatedAt` 前进且 `service.instanceId` 不变，证明服务和时间心跳
+  正常；
+- 调用带 localhost `Origin` 的安全退出接口得到 `202 Accepted`，端口关闭，宿主 Node
+  进程正常退出；
+- 再次启动得到新的 `service.instanceId`，状态仍为 `PAPER + LIVE_DISABLED`，再次安全退出；
+- 退出后 SQLite 复核为 `live_executions=0`、`live_orders=0`、`live_order_attempts=0`、
+  `live_fills=0`，非零 Live 仓位为 `0`。
+
+本轮没有执行电脑关机；用户已明确取消关机请求，最终只停止本地服务。
+
 重点回归覆盖：
 
 - 启动前残留 `LIVE_ACTIVE` 的自动安全复位；
