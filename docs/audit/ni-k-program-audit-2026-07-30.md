@@ -185,15 +185,16 @@ pnpm validate:live-production
 
 ```text
 Test Files  77 passed
-Tests       910 passed
+Tests       911 passed
 ```
 
 验证工件当前为 `data/operator/live-production-validation.json`，状态为
-`live-production-validation-v2 / PASSED`，绑定源码提交
-`0285811688491c764a303d8803d8e6b0163c7437`，运行时哈希为
-`5cb827c5fbdb1ddbde881e5820d6c5cd4b87568edf6e85a6c2844122f8ff2d80`。工件同时记录
+`live-production-validation-v2 / PASSED`。绑定源码提交应以工件的 `sourceCodeCommit`
+为准，并用 `git rev-parse HEAD` 复核；当前运行时哈希为
+`43b0ed637d45bec080683ba0ff836f5e6238a9628c022bf3b43dc40668203aa7`。工件同时记录
 `typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
-`910` 个测试；运行时文件没有 dirty 变化。
+`911` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
+工件的 `runtimeSourceDirty` 仍应为 `false`，但 `sourceCodeDirty` 会如实记录整个工作树状态。
 
 ### 5.1 本轮实际启停复核
 
