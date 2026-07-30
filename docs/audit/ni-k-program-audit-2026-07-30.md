@@ -110,6 +110,12 @@ Live 风险参数现在只有一套来源：UI 中可见、保存并确认的配
 某一笔 BUY 时，若当时没有足够余额，该笔会被拒绝并保留原因，不会伪造成交，也不会把
 账户永久锁死。
 
+首页四项资金总览现在严格按真实执行模式选择数据源：Paper 只显示 Paper 组合投影；Live
+优先显示最新 Live 估值。若 Live 尚未生成估值且没有本系统管理仓位，则总权益和可用现金
+直接使用最新钱包 pUSD 现金，持仓价值为 0；若存在管理仓位但估值尚不完整，则显示“待同步”，
+绝不回退到 Paper 的 `1,000 pUSD` 演示账户。启动前隔离仓位不计入本系统管理组合，仍在
+“启动前仓位”中单独展示和对账。
+
 ### 3.4 验证工件和版本绑定
 
 生产验证工件升级为 v2。哈希包含：
@@ -185,15 +191,16 @@ pnpm validate:live-production
 
 ```text
 Test Files  77 passed
-Tests       911 passed
+Tests       913 passed
 ```
 
 验证工件当前为 `data/operator/live-production-validation.json`，状态为
-`live-production-validation-v2 / PASSED`。绑定源码提交应以工件的 `sourceCodeCommit`
-为准，并用 `git rev-parse HEAD` 复核；当前运行时哈希为
-`43b0ed637d45bec080683ba0ff836f5e6238a9628c022bf3b43dc40668203aa7`。工件同时记录
+`live-production-validation-v2 / PASSED`。受验证的运行时提交以工件的 `sourceCodeCommit`
+为准；若 `git rev-parse HEAD` 只因后续文档提交而更新，可以不同，但 `liveRuntimeHash` 必须
+完全一致且 `runtimeSourceDirty=false`。当前运行时哈希为
+`d20fe18a5107785cffd0d336df3bff79f0c104f73f4f8620aaf4cb21ef490a1b`。工件同时记录
 `typecheckPassed=true`、`fullTestPassed=true`、`diffCheckPassed=true`、`77` 个测试文件和
-`911` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
+`913` 个测试；运行时文件没有 dirty 变化。若工作树只有文档或 `agent_memory` 变化，
 工件的 `runtimeSourceDirty` 仍应为 `false`，但 `sourceCodeDirty` 会如实记录整个工作树状态。
 
 ### 5.1 本轮实际启停复核
@@ -217,6 +224,7 @@ Tests       911 passed
 - UI 安全退出 API 和宿主关闭回调；
 - 入口直接持有 Node PID、信号退出和重启；
 - 钱包重复保存、参数变化断开和旧账户安全停用；
+- Live 总览不得读取 Paper 组合，且无估值时只允许使用真实钱包现金或显示“待同步”；
 - 0 pUSD 余额的生产准备；
 - 任意已确认 Live 限额、五次历史亏损不触发隐藏阻断；
 - 测试源码变化使验证哈希失效；
