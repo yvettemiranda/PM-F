@@ -20,11 +20,12 @@ function deactivateSupersededAccounts(
   currentAccountId: string,
 ): void {
   const accounts = database.prepare(
-    `SELECT live_account_id
-     FROM live_accounts
-     WHERE status='ACTIVE' AND live_account_id<>?
-     ORDER BY created_at,live_account_id`,
-  ).all(currentAccountId) as unknown as Array<{ live_account_id: string }>;
+    `SELECT a.live_account_id,a.status
+     FROM live_accounts a
+     JOIN live_wallets w ON w.live_wallet_id=a.live_wallet_id
+     WHERE a.live_account_id<>? AND w.status='ACTIVE'
+     ORDER BY a.created_at,a.live_account_id`,
+  ).all(currentAccountId) as unknown as Array<{ live_account_id: string; status: string }>;
   if (accounts.length === 0) return;
 
   const blockers: string[] = [];

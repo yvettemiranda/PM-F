@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { RULESET_HASH, VERSIONS } from "../src/domain/versioning.js";
+import { LiveAccountRegistry } from "../src/live/live-account-registry.js";
 import { ensureProductionLiveAccount } from "../src/operator/production-live-account.js";
 import { saveLiveProductionConfig } from "../src/operator/live-production-readiness.js";
 import { RiskManager } from "../src/risk/risk-manager.js";
@@ -250,5 +251,49 @@ describe("ensureProductionLiveAccount", () => {
       config: second,
       sourceVersion,
     })).rejects.toThrow(`LIVE_ACCOUNT_OTHER_OPEN_POSITION:${oldAccount.accountId}:open-position`);
+  });
+
+  it("retires an active wallet left behind by a previously disabled empty account", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ni-k-production-account-stale-wallet-"));
+    roots.push(root);
+    const databasePath = join(root, "data/runtime/ni-k.sqlite");
+    const first = saveLiveProductionConfig(root, {
+      walletAddress: wallet,
+      tradingWalletAddress: wallet,
+      signatureType: "EOA",
+      network: "POLYGON",
+      confirmLimits: true,
+    });
+    const oldAccount = await ensureProductionLiveAccount({
+      projectRoot: root,
+      databasePath,
+      config: first,
+      sourceVersion,
+    });
+    const database = new DatabaseSync(databasePath);
+    new LiveAccountRegistry(database, sourceVersion).disable({
+      liveAccountId: oldAccount.accountId,
+      actor: "TEST",
+      reason: "TEST_DISABLE_WITHOUT_WALLET_RETIREMENT",
+    });
+    database.close();
+    const second = { ...first, walletAddress: alternateWallet, tradingWalletAddress: alternateWallet };
+    await ensureProductionLiveAccount({
+      projectRoot: root,
+      databasePath,
+      config: second,
+      sourceVersion,
+    });
+    const readOnly = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(readOnly.prepare(
+        `SELECT w.status
+         FROM live_wallets w
+         JOIN live_accounts a ON a.live_wallet_id=w.live_wallet_id
+         WHERE a.live_account_id=?`,
+      ).get(oldAccount.accountId)).toEqual({ status: "DISABLED" });
+    } finally {
+      readOnly.close();
+    }
   });
 });
