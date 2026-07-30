@@ -154,13 +154,15 @@ function overview(snapshot) {
   const targetControl = snapshot?.control?.controls?.targetWallet;
   const targetBlocked = targetControl?.available !== true;
   const targetReason = targetControl?.blockedReason ?? "目标地址当前不可修改";
-  const portfolio = snapshot?.paper?.portfolio;
+  const financials = window.HecatonchiresUiState.overviewFinancials(snapshot);
+  const portfolio = financials.portfolio;
   const summary = [
     ["总权益", portfolio?.totalEquity, "pUSD"],
     ["可用现金", portfolio?.availableBalance, "pUSD"],
-    ["持仓价值", portfolio?.positionValue, `${snapshot?.paper?.positions?.length ?? 0} 个仓位`],
+    ["持仓价值", portfolio?.positionValue, `${financials.positionCount} 个仓位`],
     ["已实现盈亏", portfolio?.realizedPnl, "pUSD", portfolio?.realizedPnl?.micros?.startsWith("-") ? "" : "positive"],
   ];
+  const missingValue = financials.mode === "LIVE" ? "待同步" : "暂无";
   return `
     <section class="overview-card reveal" style="--delay: 40ms">
       <div class="target-row">
@@ -180,7 +182,7 @@ function overview(snapshot) {
         ${summary.map(([label, value, unit, tone]) => `
           <div class="summary-cell">
             <span>${escapeHtml(label)}</span>
-            <strong class="${tone ?? ""}">${escapeHtml(displayValue(value, snapshot?.database?.status === "NOT_INITIALIZED" ? "—" : "暂无"))}</strong>
+            <strong class="${tone ?? ""}">${escapeHtml(displayValue(value, snapshot?.database?.status === "NOT_INITIALIZED" ? "—" : missingValue))}</strong>
             <small>${escapeHtml(value ? unit : "")}</small>
           </div>
         `).join("")}

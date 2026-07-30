@@ -12,12 +12,27 @@ type UiState = {
     previousInstanceId: string | null,
     snapshot: Record<string, unknown> | null,
   ): boolean;
+  overviewFinancials(snapshot: Record<string, unknown>): {
+    mode: string;
+    portfolio: Record<string, unknown> | null;
+    positionCount: number;
+    valuationStatus: string | null;
+  };
 };
+
+type Overview = (snapshot: Record<string, any>) => string;
 
 function load(): UiState {
   const windowObject = {};
   runInNewContext(source, { window: windowObject });
   return (windowObject as { HecatonchiresUiState: UiState }).HecatonchiresUiState;
+}
+
+function loadOverview(): Overview {
+  const windowObject = {};
+  const renderPrefix = appSource.slice(0, appSource.indexOf("function bindEvents()"));
+  runInNewContext(`${source}\n${renderPrefix}\nwindow.__overview = overview;`, { window: windowObject });
+  return (windowObject as { __overview: Overview }).__overview;
 }
 
 function snapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -73,5 +88,68 @@ describe("operator UI state projection", () => {
       service: { instanceId: "service-b" },
     }))).toBe(true);
     expect(ui.serviceInstanceChanged("service-a", snapshot())).toBe(false);
+  });
+
+  it("uses Live valuation in the overview after switching to Live", () => {
+    const money = (display: string, micros: string) => ({ display, micros, currency: "pUSD" });
+    const html = loadOverview()({
+      control: {
+        target: { walletAddress: "0x00000000000000000000000000000000000000ab" },
+        controls: { targetWallet: { available: true } },
+      },
+      targetRuntime: { identityStatus: "IDENTITY_CONFIRMED" },
+      database: { status: "AVAILABLE" },
+      live: {
+        gate: { executionMode: "LIVE", live_gate_state: "LIVE_ACTIVE" },
+        walletBalance: { balance: money("42.00", "42000000") },
+        valuations: [{
+          total_equity_micros_view: money("42.00", "42000000"),
+          available_balance_micros_view: money("17.00", "17000000"),
+          position_value_micros_view: money("25.00", "25000000"),
+          realized_pnl_micros_view: money("1.20", "1200000"),
+        }],
+        positions: [{ current_size_micros: "1" }],
+      },
+      paper: {
+        portfolio: {
+          totalEquity: money("1000.00", "1000000000"),
+          availableBalance: money("1000.00", "1000000000"),
+          positionValue: money("0.00", "0"),
+          realizedPnl: money("0.00", "0"),
+        },
+        positions: [],
+      },
+    });
+
+    expect(html).toContain(">42.00</strong>");
+    expect(html).toContain(">17.00</strong>");
+    expect(html).toContain(">25.00</strong>");
+    expect(html).not.toContain(">1000.00</strong>");
+  });
+
+  it("uses the fresh Live wallet cash when no managed Live position is valued yet", () => {
+    const ui = load();
+    const result = ui.overviewFinancials({
+      live: {
+        gate: { executionMode: "LIVE" },
+        walletBalance: {
+          balance: { display: "42.00", micros: "42000000", currency: "pUSD" },
+        },
+        positions: [],
+        valuations: [],
+      },
+      paper: {
+        portfolio: {
+          totalEquity: { display: "1000.00", micros: "1000000000", currency: "pUSD" },
+        },
+      },
+    });
+
+    expect(result.mode).toBe("LIVE");
+    expect(result.portfolio).toMatchObject({
+      totalEquity: { display: "42.00" },
+      availableBalance: { display: "42.00" },
+      positionValue: { display: "0.00" },
+    });
   });
 });
