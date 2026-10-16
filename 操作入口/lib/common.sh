@@ -1,7 +1,10 @@
 #!/bin/zsh
 set -euo pipefail
 
-export PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:$HOME/Library/pnpm:$HOME/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Preserve the caller's selected runtime (for example setup-node or a campaign
+# launcher). Finder's minimal PATH still gains the usual installation fallbacks.
+# Replacing Node here can change the core compatibility hash during packaging.
+export PATH="$PATH:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:$HOME/Library/pnpm:$HOME/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin"
 
 DATA_DIR="$PROJECT_ROOT/data"
 LOG_DIR="$DATA_DIR/operator/logs"

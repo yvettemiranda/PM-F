@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,15 @@ import { resolveSourceVersion } from "../src/infra/source-version.js";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const targetWallet = "0x1f9e15f39bbd5d163b0eacf0fbef647ced9e4f1a";
 const temporaryDirectories: string[] = [];
+// Shell provenance must use the runtime that computed the expected core hash,
+// even when the runner also has another Node installed by Homebrew or Codex.
+const shellEnvironment = {
+  ...process.env,
+  PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}`,
+};
+const bundleCommandTimeoutMs = 30_000;
+const bundleTestTimeoutMs = bundleCommandTimeoutMs + 5_000;
+const twoBundleCommandsTimeoutMs = 2 * bundleCommandTimeoutMs + 5_000;
 
 function copyActiveRulesetProfile(directory: string): void {
   const source = process.env.NI_K_RULESET_PROFILE_FILE;
@@ -138,7 +147,7 @@ function campaignBundleFixture(input: {
     phase0,
     replay,
     launchStamp,
-  ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+  ], { cwd: directory, encoding: "utf8", env: shellEnvironment, timeout: bundleCommandTimeoutMs });
   expect(bundled.status, bundled.stderr).toBe(0);
   const zipName = readdirSync(join(directory, "交给Codex")).find((name) => name.endsWith(".zip"));
   expect(zipName).toMatch(/^Paper累计验证_UNKNOWN_UNKNOWN_/);
@@ -169,6 +178,42 @@ async function exited(child: ReturnType<typeof sleepingProcess>): Promise<void> 
 }
 
 describe("Paper Campaign operator shell", () => {
+  it("keeps the caller's Node ahead of installed fallback runtimes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-node-selection-"));
+    temporaryDirectories.push(directory);
+    const selectedDirectory = join(directory, "selected-node");
+    const selectedMarker = join(directory, "selected-used");
+    mkdirSync(selectedDirectory, { recursive: true });
+    const selectedNode = join(selectedDirectory, "node");
+    writeFileSync(selectedNode, '#!/bin/sh\nprintf selected > "$OPERATOR_TEST_SELECTED_MARKER"\nexec "$OPERATOR_TEST_NODE" "$@"\n');
+    chmodSync(selectedNode, 0o755);
+
+    const result = spawnSync("zsh", [
+      "-c",
+      `PROJECT_ROOT="$1"
+       source "$1/操作入口/lib/common.sh"
+       [[ "$PATH" == "$OPERATOR_TEST_SELECTED_DIR:"* ]] || exit 41
+       operator_headless_node -p process.execPath`,
+      "zsh",
+      projectRoot,
+    ], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: {
+        ...shellEnvironment,
+        PATH: `${selectedDirectory}:${shellEnvironment.PATH}`,
+        OPERATOR_TEST_SELECTED_DIR: selectedDirectory,
+        OPERATOR_TEST_SELECTED_MARKER: selectedMarker,
+        OPERATOR_TEST_NODE: process.execPath,
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(process.execPath);
+    expect(readFileSync(selectedMarker, "utf8")).toBe("selected");
+  }, 15_000);
+
   it("reaps only pointer-bound supervisor, Paper, and Observe children", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-orphan-"));
     temporaryDirectories.push(directory);
@@ -202,7 +247,7 @@ describe("Paper Campaign operator shell", () => {
         "zsh",
         projectRoot,
         pointer,
-      ], { cwd: projectRoot, encoding: "utf8", timeout: 10_000 });
+      ], { cwd: projectRoot, encoding: "utf8", env: shellEnvironment, timeout: 10_000 });
       expect(stopped.status, stopped.stderr).toBe(0);
       await Promise.all([exited(supervisor), exited(paper), exited(observe)]);
       expect(unrelated.kill(0)).toBe(true);
@@ -242,7 +287,7 @@ describe("Paper Campaign operator shell", () => {
         "zsh",
         projectRoot,
         pointer,
-      ], { cwd: projectRoot, encoding: "utf8", timeout: 10_000 });
+      ], { cwd: projectRoot, encoding: "utf8", env: shellEnvironment, timeout: 10_000 });
       expect(stopped.status, stopped.stderr).toBe(0);
       await Promise.all([exited(supervisor), exited(paper)]);
     } finally {
@@ -280,7 +325,7 @@ describe("Paper Campaign operator shell", () => {
         "zsh",
         projectRoot,
         pointer,
-      ], { cwd: projectRoot, encoding: "utf8", timeout: 10_000 });
+      ], { cwd: projectRoot, encoding: "utf8", env: shellEnvironment, timeout: 10_000 });
       expect(stopped.status, stopped.stderr).toBe(0);
       await Promise.all([exited(paper), exited(observe)]);
     } finally {
@@ -443,7 +488,7 @@ describe("Paper Campaign operator shell", () => {
       pointer,
       log,
       isolated,
-    ], { cwd: directory, encoding: "utf8", timeout: 20_000 });
+    ], { cwd: directory, encoding: "utf8", env: shellEnvironment, timeout: 20_000 });
     expect(bundled.status, bundled.stderr).toBe(0);
     const zipName = readdirSync(join(directory, "交给Codex")).find((name) => name.endsWith(".zip"));
     expect(zipName).toBeTruthy();
@@ -480,10 +525,10 @@ describe("Paper Campaign operator shell", () => {
       "zsh",
       directory,
       projectRoot,
-    ], { cwd: tmpdir(), encoding: "utf8" });
+    ], { cwd: tmpdir(), encoding: "utf8", env: shellEnvironment });
     expect(selected.status, selected.stderr).toBe(0);
     expect(selected.stdout.trim()).toBe(zipPath);
-  }, 15_000);
+  }, 25_000);
 
   it.each([
     "source commit",
@@ -515,7 +560,7 @@ describe("Paper Campaign operator shell", () => {
       sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
       coreCompatibilityHash: bundled.expectedCurrentCoreHash,
     });
-  }, 15_000);
+  }, bundleTestTimeoutMs);
 
   it("packages every Phase0 and Replay attempt from the current launch only", () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -539,7 +584,7 @@ describe("Paper Campaign operator shell", () => {
     ]));
     expect(bundled.entries.filter((name) => name.startsWith("paper-phase0-validation-attempt-"))).toHaveLength(3);
     expect(bundled.entries.filter((name) => name.startsWith("paper-replay-validation-attempt-"))).toHaveLength(3);
-  }, 15_000);
+  }, bundleTestTimeoutMs);
 
   it("includes isolated proof only when source commit and core compatibility both match", () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -560,7 +605,7 @@ describe("Paper Campaign operator shell", () => {
       sourceCodeDirty: bundled.expectedCurrentSourceVersion.dirty,
       coreCompatibilityHash: bundled.expectedCurrentCoreHash,
     });
-  });
+  }, bundleTestTimeoutMs);
 
   it("requires bundled isolated proof to match the report core hash", () => {
     const directory = mkdtempSync(join(tmpdir(), "ni-k-bundle-proof-core-"));
@@ -583,13 +628,13 @@ describe("Paper Campaign operator shell", () => {
       evidenceFile,
       currentCommit,
       expectedCoreHash,
-    ], { cwd: projectRoot, encoding: "utf8", timeout: 30_000 });
+    ], { cwd: projectRoot, encoding: "utf8", env: shellEnvironment, timeout: bundleCommandTimeoutMs });
 
     expect(verify(currentCoreHash).status).toBe(0);
     expect(verify("f".repeat(64)).status).not.toBe(0);
     const common = readFileSync(resolve(projectRoot, "操作入口/lib/common.sh"), "utf8");
     expect(common).toContain('"$report_core_compatibility_hash"; then');
-  });
+  }, twoBundleCommandsTimeoutMs);
 
   it("publishes neither ZIP nor fallback directory when either manifest safety scan fails", () => {
     const directory = mkdtempSync(join(tmpdir(), "ni-k-operator-manifest-fail-"));
@@ -623,7 +668,7 @@ describe("Paper Campaign operator shell", () => {
       projectRoot,
       marker,
       log,
-    ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+    ], { cwd: directory, encoding: "utf8", env: shellEnvironment, timeout: bundleCommandTimeoutMs });
     expect(legacy.status).toBe(1);
     expect(existsSync(marker)).toBe(false);
 
@@ -639,7 +684,7 @@ describe("Paper Campaign operator shell", () => {
       join(evidenceDirectory, "missing-pointer.json"),
       log,
       join(evidenceDirectory, "missing-proof.json"),
-    ], { cwd: directory, encoding: "utf8", timeout: 30_000 });
+    ], { cwd: directory, encoding: "utf8", env: shellEnvironment, timeout: bundleCommandTimeoutMs });
     expect(campaign.status).toBe(1);
 
     const published = readdirSync(join(directory, "交给Codex"));
@@ -650,5 +695,5 @@ describe("Paper Campaign operator shell", () => {
       || name.startsWith(".bundle-")
       || name.startsWith(".paper-campaign-")
     ))).toEqual([]);
-  });
+  }, twoBundleCommandsTimeoutMs);
 });

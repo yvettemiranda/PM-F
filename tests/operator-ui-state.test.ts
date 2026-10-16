@@ -90,9 +90,16 @@ describe("operator UI state projection", () => {
 
   it("uses the current backend snapshot time instead of the last target update", () => {
     const ui = load();
+    const generatedAt = "2026-07-29T04:00:00.000Z";
+    const targetUpdatedAt = "2026-07-29T02:15:30.000Z";
+    const time = new Intl.DateTimeFormat("zh-CN", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    });
+    const status = ui.statusText(snapshot({ generatedAt, targetRuntime: { updatedAt: targetUpdatedAt } }));
 
-    expect(ui.statusText(snapshot())).toContain("12:00:00");
-    expect(ui.statusText(snapshot())).not.toContain("同步正常");
+    expect(status).toContain(time.format(new Date(generatedAt)));
+    expect(status).not.toContain(time.format(new Date(targetUpdatedAt)));
+    expect(status).not.toContain("同步正常");
   });
 
   it("reports a client connection failure instead of stale healthy text", () => {
