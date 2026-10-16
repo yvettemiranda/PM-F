@@ -254,6 +254,9 @@ export class PolymarketPublicApi {
       parsePublicPositions,
       signal,
     );
+    // Reconciliation and live custody callers require the complete wallet, not
+    // a plausible partial snapshot when a client/server pagination cap is hit.
+    if (!result.historyComplete) throw new Error("POSITIONS_PAGE_SATURATED");
     const last = result.captures.at(-1);
     if (!last) throw new Error("Positions pagination returned no capture");
     const seenAssets = new Set<string>();

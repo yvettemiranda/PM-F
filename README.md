@@ -13,9 +13,10 @@ live_gate_state:     LIVE_DISABLED
 liveAllowed:         false
 ```
 
-最新隔离验证结果：`77` 个测试文件、`939` 项测试通过，TypeScript 检查通过，runtime
-source 无脏改动。真实钱包、真实 CLOB、真实订单、真实成交、真实 PnL 和链上写入仍未完成
-最终生产验收。
+原生产候选归档的隔离验证记录为 `77` 个测试文件、`939` 项测试通过。2026-10-16 参考
+PM-NAUTILUS 完成的可靠性和性能改进、当前回归结果见
+[本轮优化记录](docs/PM_NAUTILUS_OPTIMIZATION.md)。旧验证工件不代表新源码已经通过实盘验收。
+真实钱包、真实 CLOB、真实订单、真实成交、真实 PnL 和链上写入仍未完成最终生产验收。
 
 ## 安装与启动
 

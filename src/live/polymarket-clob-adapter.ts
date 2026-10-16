@@ -10,7 +10,13 @@ import {
 } from "@polymarket/clob-client-v2";
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { conservativeClobBuyFeeMicros, roundedClobPlatformFeeMicros } from "../execution/clob-fee.js";
-import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-adapter.js";
+import {
+  clobOrderIdentity,
+  validateClobOrderIdentity,
+  validateClobTradeIdentity,
+  type ClobOrderIdentity,
+} from "./clob-order-identity.js";
+import { OrderSubmissionOutcomeUnknownError, type OrderAdapter, type OrderSnapshot } from "./order-adapter.js";
 import type {
   CancelResult,
   LiveFillEvent,
@@ -291,8 +297,8 @@ export class PolymarketClobAdapter implements OrderAdapter {
       let tradeSnapshot: TradeSnapshot = { fills: [], pendingTradeIds: [] };
       if (externalOrderId && (responseTradeIds.length > 0 || responseStatus === "FILLED")) {
         tradeSnapshot = responseTradeIds.length > 0
-          ? await this.fillsForTradeIds(externalOrderId, order.side, responseTradeIds)
-          : await this.tradeSnapshotForOrder(externalOrderId);
+          ? await this.fillsForTradeIds(externalOrderId, order, responseTradeIds)
+          : await this.tradeSnapshotForOrder(externalOrderId, order);
       }
 
       const fills = tradeSnapshot.fills;
@@ -372,9 +378,13 @@ export class PolymarketClobAdapter implements OrderAdapter {
   }
 
   async getOrder(orderId: string): Promise<OrderStatus> {
+    return (await this.getOrderSnapshot(orderId)).status;
+  }
+
+  async getOrderSnapshot(orderId: string): Promise<OrderSnapshot> {
     const order = await this.client.getOrder(orderId);
     if (order.id !== orderId) throw new Error(`CLOB_ORDER_ID_MISMATCH:${orderId}:${order.id}`);
-    return this.mapOrder(order);
+    return this.mapOrderSnapshot(order);
   }
 
   async getOpenOrders(): Promise<OrderStatus[]> {
@@ -382,7 +392,7 @@ export class PolymarketClobAdapter implements OrderAdapter {
     const mapped: OrderStatus[] = [];
     // Keep authenticated history reads sequential to avoid bursting the CLOB
     // rate limit when many orders are open at once.
-    for (const order of orders) mapped.push(await this.mapOrder(order));
+    for (const order of orders) mapped.push((await this.mapOrderSnapshot(order)).status);
     return mapped;
   }
 
@@ -394,7 +404,7 @@ export class PolymarketClobAdapter implements OrderAdapter {
     return side === "BUY" ? Side.BUY : Side.SELL;
   }
 
-  private async mapOrder(order: OpenOrder): Promise<OrderStatus> {
+  private async mapOrderSnapshot(order: OpenOrder): Promise<OrderSnapshot> {
     const base = mapOpenOrderStatus(order);
     const matched = matchedSize(order);
     const snapshot = await this.tradeSnapshot(order);
@@ -414,19 +424,23 @@ export class PolymarketClobAdapter implements OrderAdapter {
       && (["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(status)
         || (marketOrder && status === "PARTIALLY_FILLED"));
     return {
-      adapterType: this.adapterType,
-      externalOrderId: order.id,
-      status,
-      confirmationPending: snapshot.pendingTradeIds.length > 0,
-      terminal,
-      filledSizeMicros: confirmed.toString(),
-      raw: order as unknown as JsonRecord,
+      status: {
+        adapterType: this.adapterType,
+        externalOrderId: order.id,
+        status,
+        confirmationPending: snapshot.pendingTradeIds.length > 0,
+        terminal,
+        filledSizeMicros: confirmed.toString(),
+        raw: order as unknown as JsonRecord,
+      },
+      fills: snapshot.fills,
     };
   }
 
-  private async tradeSnapshotForOrder(orderId: string): Promise<TradeSnapshot> {
+  private async tradeSnapshotForOrder(orderId: string, expected?: ClobOrderIdentity): Promise<TradeSnapshot> {
     const order = await this.client.getOrder(orderId);
     if (order.id !== orderId) throw new Error(`CLOB_ORDER_ID_MISMATCH:${orderId}:${order.id}`);
+    if (expected) validateClobOrderIdentity(order, expected);
     mapOpenOrderStatus(order);
     return this.tradeSnapshot(order);
   }
@@ -436,7 +450,7 @@ export class PolymarketClobAdapter implements OrderAdapter {
     if (matched > 0n && order.associate_trades.length === 0) {
       throw new Error(`CLOB_MATCHED_ORDER_WITHOUT_ASSOCIATED_TRADES:${order.id}`);
     }
-    const snapshot = await this.fillsForTradeIds(order.id, orderSide(order.side), order.associate_trades);
+    const snapshot = await this.fillsForTradeIds(order.id, clobOrderIdentity(order), order.associate_trades);
     const confirmed = snapshot.fills.reduce((total, fill) => total + BigInt(fill.sizeMicros), 0n);
     if (confirmed > matched) throw new Error(`CLOB_CONFIRMED_FILL_EXCEEDS_MATCHED_SIZE:${order.id}`);
     if (snapshot.pendingTradeIds.length === 0 && confirmed !== matched) {
@@ -445,7 +459,7 @@ export class PolymarketClobAdapter implements OrderAdapter {
     return snapshot;
   }
 
-  private async fillsForTradeIds(orderId: string, side: LiveOrderSide, tradeIds: string[]): Promise<TradeSnapshot> {
+  private async fillsForTradeIds(orderId: string, identity: ClobOrderIdentity, tradeIds: string[]): Promise<TradeSnapshot> {
     const uniqueTradeIds = [...new Set(tradeIds)];
     const pages: Trade[][] = [];
     // Keep authenticated history reads sequential to avoid bursting the CLOB
@@ -463,6 +477,9 @@ export class PolymarketClobAdapter implements OrderAdapter {
     if (associatedTrades.length !== uniqueTradeIds.length) {
       throw new Error(`CLOB_TRADES_NOT_ASSOCIATED_WITH_ORDER:${orderId}`);
     }
+    // Validate pending facts as well: their finality controls reservation
+    // release, even though only confirmed facts become ledger fills.
+    for (const trade of associatedTrades) validateClobTradeIdentity(trade, orderId, identity);
     const pendingTradeIds = associatedTrades
       .filter((trade) => ["MATCHED", "MINED", "RETRYING"].includes(tradeLifecycleStatus(trade)))
       .map((trade) => `${trade.id}:${trade.bucket_index}`);
@@ -484,7 +501,7 @@ export class PolymarketClobAdapter implements OrderAdapter {
         }
         exponentByAsset.set(trade.asset_id, exponent);
       }
-      const fill = fillFromTrade(trade, orderId, side, exponent);
+      const fill = fillFromTrade(trade, orderId, identity.side, exponent);
       if (fill !== null) fills.push(fill);
     }
     const unique = new Map<string, LiveFillEvent>();

@@ -11,6 +11,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { OrderSubmissionOutcomeUnknownError } from "../src/live/order-adapter.js";
 import { PolymarketClobAdapter } from "../src/live/polymarket-clob-adapter.js";
+import { validateLiveOrderFills } from "../src/live/fill-validation.js";
 import type { LiveOrderRequest } from "../src/live/live-types.js";
 
 type ClobClientPort = Pick<
@@ -329,6 +330,75 @@ describe("PolymarketClobAdapter", () => {
     await expect(adapter.getOrder("order-1")).rejects.toThrow("UNSUPPORTED_CLOB_ORDER_STATUS:MYSTERY_STATUS");
   });
 
+  it.each([
+    { fields: { asset_id: "another-asset" }, reason: "CLOB_TRADE_ASSET_MISMATCH" },
+    { fields: { market: "another-condition" }, reason: "CLOB_TRADE_MARKET_MISMATCH" },
+    { fields: { side: Side.SELL }, reason: "CLOB_TRADE_SIDE_MISMATCH" },
+  ])("rejects an associated taker trade with mismatched identity: $reason", async ({ fields, reason }) => {
+    const adapter = new PolymarketClobAdapter(client({
+      postOrder: vi.fn(async () => ({ success: true, orderID: "order-1", tradeIDs: ["trade-1"], status: "matched" })),
+      getOrder: vi.fn(async () => openOrder({ status: "MATCHED", size_matched: "10", associate_trades: ["trade-1"] })),
+      getTrades: vi.fn(async () => [trade(fields)]),
+    }));
+
+    await expect(adapter.submitOrder(request())).rejects.toThrow(`ORDER_SUBMISSION_OUTCOME_UNKNOWN:${reason}`);
+    await expect(adapter.getOrder("order-1")).rejects.toThrow(reason);
+    await expect(adapter.getFills("order-1")).rejects.toThrow(reason);
+  });
+
+  it.each(["MATCHED", "MINED", "RETRYING"])("rejects wrong-asset %s facts before finality", async (status) => {
+    const adapter = new PolymarketClobAdapter(client({
+      getOrder: vi.fn(async () => openOrder({ status: "MATCHED", size_matched: "10", associate_trades: ["trade-1"] })),
+      getTrades: vi.fn(async () => [trade({ status, asset_id: "another-asset" })]),
+    }));
+    await expect(adapter.getOrder("order-1")).rejects.toThrow("CLOB_TRADE_ASSET_MISMATCH:trade-1");
+  });
+
+  it.each([
+    { fields: { asset_id: "another-asset" }, reason: "CLOB_ORDER_ASSET_MISMATCH" },
+    { fields: { market: "another-condition" }, reason: "CLOB_ORDER_MARKET_MISMATCH" },
+    { fields: { side: "SELL" }, reason: "CLOB_ORDER_SIDE_MISMATCH" },
+  ])("checks submit fallback order identity against its signed intent: $reason", async ({ fields, reason }) => {
+    const adapter = new PolymarketClobAdapter(client({
+      postOrder: vi.fn(async () => ({ success: true, orderID: "order-1", tradeIDs: [], status: "matched" })),
+      getOrder: vi.fn(async () => openOrder({ status: "MATCHED", size_matched: "10", associate_trades: ["trade-1"], ...fields })),
+      getTrades: vi.fn(async () => [trade()]),
+    }));
+    await expect(adapter.submitOrder(request())).rejects.toThrow(`ORDER_SUBMISSION_OUTCOME_UNKNOWN:${reason}`);
+  });
+
+  it.each(["asset_id", "market"] as const)("rejects a queried order with missing required %s identity", async (field) => {
+    const incomplete = openOrder();
+    delete (incomplete as unknown as Record<string, unknown>)[field];
+    const adapter = new PolymarketClobAdapter(client({ getOrder: vi.fn(async () => incomplete) }));
+    await expect(adapter.getOrder("order-1")).rejects.toThrow("CLOB_ORDER_IDENTITY_MISSING:order-1");
+    await expect(adapter.getFills("order-1")).rejects.toThrow("CLOB_ORDER_IDENTITY_MISSING:order-1");
+  });
+
+  it.each([Side.BUY, undefined])("accepts complementary maker fills using the maker asset and optional side %s", async (side) => {
+    const makerOrder = {
+      order_id: "order-1", owner: "api-owner", maker_address: signerAddress,
+      matched_amount: "10", price: "0.5", fee_rate_bps: "0", asset_id: "asset-1", outcome: "Yes",
+      ...(side === undefined ? {} : { side }),
+    };
+    const makerTrade = trade({
+      taker_order_id: "another-order", asset_id: "complementary-asset", side: Side.BUY,
+      maker_orders: [makerOrder], trader_side: "MAKER",
+    });
+    const adapter = new PolymarketClobAdapter(client({
+      postOrder: vi.fn(async () => ({ success: true, orderID: "order-1", tradeIDs: ["trade-1"], status: "matched" })),
+      getOrder: vi.fn(async () => openOrder({ status: "MATCHED", size_matched: "10", associate_trades: ["trade-1"] })),
+      getTrades: vi.fn(async () => [makerTrade]),
+    }));
+    await expect(adapter.submitOrder(request())).resolves.toMatchObject({ status: "FILLED", fills: [{ sizeMicros: "10000000" }] });
+    await expect(adapter.getOrder("order-1")).resolves.toMatchObject({ status: "FILLED", filledSizeMicros: "10000000" });
+    await expect(adapter.getFills("order-1")).resolves.toHaveLength(1);
+
+    makerTrade.maker_orders[0]!.asset_id = "wrong-maker-asset";
+    await expect(adapter.submitOrder(request())).rejects.toThrow("CLOB_TRADE_ASSET_MISMATCH:trade-1");
+    await expect(adapter.getOrder("order-1")).rejects.toThrow("CLOB_TRADE_ASSET_MISMATCH:trade-1");
+  });
+
   it("uses confirmed trade size exactly and derives partial fill state", async () => {
     const adapter = new PolymarketClobAdapter(client({
       getOrder: vi.fn(async () => openOrder({
@@ -380,6 +450,55 @@ describe("PolymarketClobAdapter", () => {
       await expect(adapter.getFills("order-1")).resolves.toEqual([]);
     },
   );
+
+  it("derives status and fills together while a trade progresses from MINED to CONFIRMED", async () => {
+    const getOrder = vi.fn(async () => openOrder({
+      status: "MATCHED", size_matched: "10", associate_trades: ["trade-1"],
+    }));
+    const getTrades = vi.fn()
+      .mockResolvedValueOnce([trade({ status: "MINED", fee_rate_bps: "0" })])
+      .mockResolvedValueOnce([trade({ status: "CONFIRMED", fee_rate_bps: "0" })]);
+    const adapter = new PolymarketClobAdapter(client({ getOrder, getTrades }));
+
+    const pending = await adapter.getOrderSnapshot("order-1");
+    expect(pending).toMatchObject({
+      status: { status: "ACKNOWLEDGED", filledSizeMicros: "0", confirmationPending: true, terminal: false },
+      fills: [],
+    });
+    expect(getOrder).toHaveBeenCalledTimes(1);
+    expect(getTrades).toHaveBeenCalledTimes(1);
+
+    const confirmed = await adapter.getOrderSnapshot("order-1");
+    expect(confirmed).toMatchObject({
+      status: { status: "FILLED", filledSizeMicros: "10000000", confirmationPending: false, terminal: true },
+      fills: [{ externalFillId: "trade-1:0", sizeMicros: "10000000" }],
+    });
+    expect(getOrder).toHaveBeenCalledTimes(2);
+    expect(getTrades).toHaveBeenCalledTimes(2);
+    for (const snapshot of [pending, confirmed]) {
+      expect(() => validateLiveOrderFills({
+        adapterType: adapter.adapterType,
+        side: "BUY",
+        status: snapshot.status.status,
+        fills: snapshot.fills,
+        requestedSizeMicros: "10000000",
+        limitPriceUnits: "500000000000000000",
+        buyBudgetMicros: "5000000",
+        availableSellSizeMicros: null,
+        reportedFilledSizeMicros: snapshot.status.filledSizeMicros,
+      })).not.toThrow();
+    }
+  });
+
+  it("still rejects upstream matched/confirmed disagreement in a combined snapshot", async () => {
+    const adapter = new PolymarketClobAdapter(client({
+      getOrder: vi.fn(async () => openOrder({
+        status: "MATCHED", size_matched: "9", associate_trades: ["trade-1"],
+      })),
+      getTrades: vi.fn(async () => [trade()]),
+    }));
+    await expect(adapter.getOrderSnapshot("order-1")).rejects.toThrow("CLOB_CONFIRMED_FILL_EXCEEDS_MATCHED_SIZE");
+  });
 
   it("loads only associated trade ids and maps maker matched_amount rather than taker size", async () => {
     const getTrades = vi.fn(async ({ id }: { id?: string }) => id === "trade-maker" ? [trade({

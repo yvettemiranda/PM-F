@@ -13,6 +13,8 @@ import { LiveIdentityBinding } from "../src/live/live-identity-binding.js";
 import { LiveRuntime } from "../src/live/live-runtime.js";
 import { assembleLiveRuntime } from "../src/live/live-runtime-assembly.js";
 import { LiveStore } from "../src/live/live-store.js";
+import { LiveCrashRecovery } from "../src/live/live-crash-recovery.js";
+import { LiveReconciliation } from "../src/live/live-reconciliation.js";
 import { FakeOrderAdapter } from "../src/live/fake-order-adapter.js";
 import { FakeSigner } from "../src/live/fake-signer.js";
 import { FakeWalletProvider } from "../src/live/fake-wallet-provider.js";
@@ -4637,6 +4639,125 @@ describe("LiveExecutor", () => {
     expect(count(env.databasePath, "live_recovery_runs")).toBe(2);
     db.close();
     executor.close();
+  });
+
+  it("prefers one adapter snapshot while finality progresses and records the confirmed fill exactly once", async () => {
+    const env = setup();
+    const deferred = new DeferredRecoveryOrderAdapter();
+    const executor = liveExecutor(env.databasePath, { orderAdapter: deferred });
+    const execution = await executor.executeBuy({
+      accountId, signal: env.signal, context: env.context, riskDecisionId: "risk-live-buy",
+    });
+    expect(execution.state).toBe("WAITING_EXECUTION");
+    const getOrder = vi.fn(async () => { throw new Error("SEPARATE_STATUS_READ_UNEXPECTED"); });
+    const getFills = vi.fn(async () => { throw new Error("SEPARATE_FILLS_READ_UNEXPECTED"); });
+    const getOrderSnapshot = vi.fn(async (id: string) => {
+      const status = await deferred.getOrder(id);
+      const fills = await deferred.getFills(id);
+      return { status: { ...status, confirmationPending: fills.length === 0, terminal: fills.length > 0 }, fills };
+    });
+    const adapter: OrderAdapter = {
+      adapterType: "FAKE",
+      submitOrder: (request) => deferred.submitOrder(request),
+      cancelOrder: (id, key) => deferred.cancelOrder(id, key),
+      getOpenOrders: async () => [],
+      getOrder,
+      getFills,
+      getOrderSnapshot,
+    };
+    const database = new DatabaseSync(env.databasePath);
+    const store = new LiveStore(database, sourceVersion, () => new Date(now));
+    const recovery = new LiveCrashRecovery(
+      adapter, new LiveReconciliation(database, store), store, new FakeWalletProvider(), false, 1_000,
+    );
+    try {
+      expect((await recovery.recover(accountId)).passed).toBe(true);
+      expect(count(env.databasePath, "live_fills")).toBe(0);
+      expect(database.prepare(
+        "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total FROM live_reservation_ledger WHERE live_execution_id=?",
+      ).get(execution.executionId)).toEqual({ total: 5_000_000 });
+      deferred.complete();
+      expect((await recovery.recover(accountId)).passed).toBe(true);
+      expect((await recovery.recover(accountId)).passed).toBe(true);
+      expect(getOrderSnapshot).toHaveBeenCalledTimes(2);
+      expect(getOrder).not.toHaveBeenCalled();
+      expect(getFills).not.toHaveBeenCalled();
+      expect(count(env.databasePath, "live_fills")).toBe(1);
+      expect(count(env.databasePath, "live_positions")).toBe(1);
+      expect(count(env.databasePath, "live_fill_ledger")).toBe(1);
+      expect(database.prepare(
+        "SELECT state,filled_size_micros FROM live_executions WHERE live_execution_id=?",
+      ).get(execution.executionId)).toEqual({ state: "EXECUTED", filled_size_micros: "10000000" });
+      expect(database.prepare(
+        "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total FROM live_reservation_ledger WHERE live_execution_id=?",
+      ).get(execution.executionId)).toEqual({ total: 0 });
+    } finally {
+      database.close();
+      executor.close();
+    }
+  });
+
+  it.each([
+    { order: { asset_id: "another-asset" }, fill: {}, reason: "CLOB_ORDER_ASSET_MISMATCH" },
+    { order: { market: "another-condition" }, fill: {}, reason: "CLOB_ORDER_MARKET_MISMATCH" },
+    { order: { side: "SELL" }, fill: {}, reason: "CLOB_ORDER_SIDE_MISMATCH" },
+    { order: { asset_id: "" }, fill: {}, reason: "CLOB_ORDER_IDENTITY_MISSING" },
+    { order: {}, fill: { asset_id: "another-asset" }, reason: "CLOB_TRADE_ASSET_MISMATCH" },
+    { order: {}, fill: { market: "another-condition" }, reason: "CLOB_TRADE_MARKET_MISMATCH" },
+    { order: {}, fill: { side: "SELL" }, reason: "CLOB_TRADE_SIDE_MISMATCH" },
+    { order: {}, fill: {}, reason: null },
+  ].flatMap((entry) => [false, true].map((snapshot) => ({ ...entry, snapshot }))))(
+    "checks recovered CLOB facts against durable local intent ($snapshot snapshot): $reason", async ({ order, fill, reason, snapshot }) => {
+    const env = setup();
+    const deferred = new DeferredRecoveryOrderAdapter();
+    const executor = liveExecutor(env.databasePath, { orderAdapter: deferred });
+    const execution = await executor.executeBuy({
+      accountId, signal: env.signal, context: env.context, riskDecisionId: "risk-live-buy",
+    });
+    expect(execution.state).toBe("WAITING_EXECUTION");
+    deferred.complete();
+    const adapter: OrderAdapter = {
+      adapterType: "POLYMARKET_CLOB",
+      submitOrder: (request) => deferred.submitOrder(request),
+      cancelOrder: (id, key) => deferred.cancelOrder(id, key),
+      getOpenOrders: async () => [],
+      getOrder: async (id) => ({
+        ...await deferred.getOrder(id),
+        raw: { id, market: conditionId, asset_id: assetId, side: "BUY", ...order },
+      }),
+      getFills: async (id) => (await deferred.getFills(id)).map((event) => ({
+        ...event,
+        raw: {
+          id: event.externalFillId, taker_order_id: id, market: conditionId, asset_id: assetId,
+          side: "BUY", status: "CONFIRMED", ...fill,
+          niKFeeEvidence: { isTaker: true, platformFeeRateBps: "0" },
+        },
+      })),
+    };
+    if (snapshot) adapter.getOrderSnapshot = async (id) => ({ status: await adapter.getOrder(id), fills: await adapter.getFills(id) });
+    const database = new DatabaseSync(env.databasePath);
+    const store = new LiveStore(database, sourceVersion, () => new Date(now));
+    const recovery = new LiveCrashRecovery(
+      adapter, new LiveReconciliation(database, store), store, new FakeWalletProvider(), false, 1_000,
+    );
+    try {
+      const result = await recovery.recover(accountId);
+      expect(result.passed).toBe(reason === null);
+      if (reason) {
+        expect(result.reason).toContain(reason);
+        expect(count(env.databasePath, "live_fills")).toBe(0);
+        expect(count(env.databasePath, "live_positions")).toBe(0);
+        expect(database.prepare(
+          "SELECT COALESCE(SUM(CAST(delta_micros AS INTEGER)),0) total FROM live_reservation_ledger WHERE live_execution_id=?",
+        ).get(execution.executionId)).toEqual({ total: 5_000_000 });
+      } else {
+        expect(count(env.databasePath, "live_fills")).toBe(1);
+        expect(count(env.databasePath, "live_positions")).toBe(1);
+      }
+    } finally {
+      database.close();
+      executor.close();
+    }
   });
 
   it("fails closed when a recoverable external order lacks immutable intent evidence", async () => {

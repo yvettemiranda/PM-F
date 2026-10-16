@@ -242,8 +242,10 @@ export class PublicObserveDataSource implements ObserveDataSource {
       polygonTrades: polygonOrderFilled?.trades ?? [],
     })).digest("hex");
     const eventHeadChanged = this.eventHeadHashes.get(walletAddress) !== eventHeadHash;
-    this.eventHeadHashes.set(walletAddress, eventHeadHash);
     const state = await this.currentReconciliationState(walletAddress, signal, eventHeadChanged);
+    // A failed refresh must leave this head dirty so the next poll cannot pair
+    // its new events with a still-cached pre-event position/balance snapshot.
+    this.eventHeadHashes.set(walletAddress, eventHeadHash);
     return {
       trades: events.trades,
       activity: events.activity,

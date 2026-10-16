@@ -5,6 +5,10 @@ const state = {
   snapshot: null,
   loading: true,
   refreshing: false,
+  mutationVersion: 0,
+  actionPending: false,
+  walletInvalidationPending: false,
+  shutdownPending: false,
   busy: null,
   error: null,
   notice: null,
@@ -864,34 +868,34 @@ async function api(path, init = {}) {
     ? null
     : window.setTimeout(() => controller.abort(), timeoutMs);
   if (!requestInit.method && requestInit.body !== undefined) requestInit.method = "POST";
-  let response;
   try {
-    response = await fetch(path, {
+    const response = await fetch(path, {
       cache: "no-store",
       ...requestInit,
       ...(controller === null ? {} : { signal: controller.signal }),
       headers: { "content-type": "application/json", ...(init.headers ?? {}) },
     });
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw new Error(`HTTP_${response.status}`);
+    }
+    if (!response.ok || payload.ok !== true) {
+      const error = payload.error ?? {};
+      const failure = new Error(error.message ?? `HTTP_${response.status}`);
+      failure.code = error.code;
+      failure.details = error.details;
+      throw failure;
+    }
+    return payload.data;
   } catch (error) {
     if (error?.name === "AbortError") throw new Error("后台响应超时");
     throw error;
   } finally {
     if (timeout !== null) window.clearTimeout(timeout);
   }
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error(`HTTP_${response.status}`);
-  }
-  if (!response.ok || payload.ok !== true) {
-    const error = payload.error ?? {};
-    const failure = new Error(error.message ?? `HTTP_${response.status}`);
-    failure.code = error.code;
-    failure.details = error.details;
-    throw failure;
-  }
-  return payload.data;
 }
 
 function updateHeaderStatus() {
@@ -921,6 +925,7 @@ async function refresh(silent = false) {
   if (state.refreshing) return;
   if (!silent) state.loading = state.snapshot === null;
   state.refreshing = true;
+  const mutationVersion = state.mutationVersion;
   if (!state.snapshot) render();
   let renderRequired = !silent || !state.hasRenderedContent;
   let serviceReplaced = false;
@@ -930,6 +935,7 @@ async function refresh(silent = false) {
       headers: {},
       timeoutMs: 8_000,
     });
+    if (mutationVersion !== state.mutationVersion || state.shuttingDown) return;
     if (
       window.HecatonchiresUiState.serviceInstanceChanged(
         state.serviceInstanceId,
@@ -947,12 +953,13 @@ async function refresh(silent = false) {
     state.error = null;
     if (state.snapshot?.live?.walletSession?.status === "CONNECTED") startWalletRequestWorker();
   } catch (error) {
+    if (mutationVersion !== state.mutationVersion || state.shuttingDown) return;
     state.error = error.message;
     renderRequired = state.snapshot === null;
   } finally {
     state.loading = false;
     state.refreshing = false;
-    if (serviceReplaced) return;
+    if (serviceReplaced || state.shuttingDown) return;
     if (renderRequired && (!silent || !refreshInteractionActive())) render();
     else updateHeaderStatus();
   }
@@ -988,23 +995,38 @@ function setNotice(kind, title, message) {
 }
 
 async function runAction(label, path, init = {}, options = {}) {
+  // Wallet connection owns a longer flow and calls runAction after signing.
+  // Track HTTP mutations separately from its display-only busy label.
+  if (state.actionPending || state.walletInvalidationPending || state.shutdownPending || state.shuttingDown) {
+    throw new Error("当前操作正在处理，请稍后再试");
+  }
+  state.actionPending = true;
+  const mutationVersion = ++state.mutationVersion;
   state.busy = label;
   state.notice = { kind: "processing", title: "处理中", message: label };
   render();
   try {
     const data = await api(path, init);
+    if (mutationVersion !== state.mutationVersion || state.shuttingDown) {
+      throw new Error("后台状态已更新，请重新确认当前状态");
+    }
     if (data.snapshot) state.snapshot = data.snapshot;
     state.error = null;
     setNotice("success", "已完成", options.success ?? label);
     return data;
   } catch (error) {
-    const reason = typeof options.formatError === "function"
-      ? options.formatError(error)
-      : error.details?.blockedReasons?.join("、") ?? error.message;
-    setNotice("error", "操作未执行", reason);
+    if (mutationVersion === state.mutationVersion && !state.shuttingDown) {
+      const reason = typeof options.formatError === "function"
+        ? options.formatError(error)
+        : error.details?.blockedReasons?.join("、") ?? error.message;
+      setNotice("error", "操作未执行", reason);
+    }
     throw error;
   } finally {
-    state.busy = null;
+    // A poll sent during the action may still contain its previous state.
+    if (mutationVersion === state.mutationVersion) state.mutationVersion += 1;
+    state.actionPending = false;
+    if (state.busy === label) state.busy = null;
     render();
   }
 }
@@ -1077,27 +1099,36 @@ function clearWalletProviderBinding() {
 }
 
 async function invalidateConnectedWallet(message) {
-  if (state.busy === "断开失效钱包") return;
+  if (state.walletInvalidationPending || state.shuttingDown) return;
   const sessionId = state.snapshot?.live?.walletSession?.sessionId;
   state.walletWorkerGeneration += 1;
   state.walletWorkerSessionId = null;
   clearWalletProviderBinding();
   state.walletProvider = null;
   if (!sessionId) {
-    setNotice("error", "钱包会话已失效", message);
+    if (!state.shutdownPending) setNotice("error", "钱包会话已失效", message);
     return;
   }
-  state.busy = "断开失效钱包";
+  state.walletInvalidationPending = true;
+  const mutationVersion = ++state.mutationVersion;
+  if (!state.shutdownPending) state.busy = "断开失效钱包";
   try {
     const data = await api("/api/operator/live/wallet-session/disconnect", {
       body: JSON.stringify({ sessionId }),
     });
-    if (data.snapshot) state.snapshot = data.snapshot;
+    if (mutationVersion === state.mutationVersion && !state.shutdownPending && !state.shuttingDown && data.snapshot) {
+      state.snapshot = data.snapshot;
+    }
   } catch {
     // The next snapshot remains authoritative if the old session already expired.
   } finally {
-    state.busy = null;
-    setNotice("error", "钱包会话已失效", `${message} 请重新连接钱包。`);
+    const ownsMutation = mutationVersion === state.mutationVersion;
+    if (ownsMutation) state.mutationVersion += 1;
+    state.walletInvalidationPending = false;
+    if (state.busy === "断开失效钱包") state.busy = null;
+    if (ownsMutation && !state.shutdownPending && !state.shuttingDown) {
+      setNotice("error", "钱包会话已失效", `${message} 请重新连接钱包。`);
+    }
     render();
   }
 }
@@ -1137,7 +1168,13 @@ function bindWalletProvider(provider) {
 }
 
 async function connectLiveWallet() {
-  if (state.walletFlowActive) return false;
+  if (state.walletFlowActive || state.actionPending || state.walletInvalidationPending || state.shutdownPending || state.shuttingDown) return false;
+  let mutationVersion = state.mutationVersion;
+  const assertCurrentFlow = () => {
+    if (mutationVersion !== state.mutationVersion || state.shutdownPending || state.shuttingDown) {
+      throw new Error("后台状态已更新，请重新确认当前状态");
+    }
+  };
   state.walletFlowActive = true;
   state.busy = "连接钱包";
   state.notice = { kind: "processing", title: "正在检查 OKX", message: "正在确认钱包扩展和既有授权状态。" };
@@ -1148,7 +1185,9 @@ async function connectLiveWallet() {
       window.navigator?.locks ?? null,
       "hecatonchires:wallet-connect",
       async () => {
+        assertCurrentFlow();
         const provider = await discoverWalletProvider();
+        assertCurrentFlow();
         if (!provider || typeof provider.request !== "function") {
           throw new Error(
             "当前页面没有收到 OKX 钱包。请确认扩展已启用，然后只保留一个 Hecatonchires 页面并刷新重试。",
@@ -1167,6 +1206,7 @@ async function connectLiveWallet() {
           // The explicit connection request below remains authoritative if a
           // read-only probe races with an extension wake-up.
         }
+        assertCurrentFlow();
         let walletAddress = flow.firstValidAddress(accounts);
         if (!walletAddress) {
           setWalletProgress(
@@ -1178,6 +1218,7 @@ async function connectLiveWallet() {
             { method: "eth_requestAccounts" },
             { timeoutMs: 90_000, label: "连接钱包" },
           );
+          assertCurrentFlow();
           walletAddress = flow.firstValidAddress(accounts);
         } else {
           setWalletProgress(
@@ -1192,6 +1233,7 @@ async function connectLiveWallet() {
           { method: "eth_chainId" },
           { timeoutMs: 10_000, label: "读取钱包网络" },
         );
+        assertCurrentFlow();
         const parsedChainId = flow.parseChainId(chainId);
         if (parsedChainId !== 137) {
           setWalletProgress("等待网络切换", "请在 OKX 中确认切换到 Polygon 主网。");
@@ -1203,11 +1245,13 @@ async function connectLiveWallet() {
             },
             { timeoutMs: 90_000, label: "切换 Polygon 主网" },
           );
+          assertCurrentFlow();
           chainId = await flow.requestWithTimeout(
             provider,
             { method: "eth_chainId" },
             { timeoutMs: 10_000, label: "确认钱包网络" },
           );
+          assertCurrentFlow();
           if (flow.parseChainId(chainId) !== 137) {
             throw new Error("请把钱包切换到 Polygon 主网");
           }
@@ -1215,6 +1259,7 @@ async function connectLiveWallet() {
         const challenge = await api("/api/operator/live/wallet-session/challenge", {
           body: JSON.stringify({ chainId }),
         });
+        assertCurrentFlow();
         setWalletProgress(
           "等待身份签名",
           "请在 OKX 确认 Hecatonchires 身份签名；签名只证明地址控制权，不授权交易或移动资金。",
@@ -1227,6 +1272,7 @@ async function connectLiveWallet() {
           },
           { timeoutMs: 120_000, label: "身份签名" },
         );
+        assertCurrentFlow();
         if (typeof signature !== "string" || !signature.startsWith("0x")) {
           throw new Error("钱包没有返回签名");
         }
@@ -1238,6 +1284,8 @@ async function connectLiveWallet() {
             signature,
           }),
         }, { success: "钱包已连接，Live 签名通道已准备。" });
+        mutationVersion = state.mutationVersion;
+        assertCurrentFlow();
         if (connection.runtime?.accepted === false) {
           setNotice(
             "success",
@@ -1250,6 +1298,7 @@ async function connectLiveWallet() {
         startWalletRequestWorker();
       },
     );
+    assertCurrentFlow();
     if (!coordinated.acquired) {
       setNotice(
         "error",
@@ -1260,16 +1309,19 @@ async function connectLiveWallet() {
     }
     return state.snapshot?.live?.walletSession?.status === "CONNECTED";
   } catch (error) {
-    setNotice("error", "钱包未连接", walletFlow().walletErrorMessage(error));
+    if (mutationVersion === state.mutationVersion && !state.shutdownPending && !state.shuttingDown) {
+      setNotice("error", "钱包未连接", walletFlow().walletErrorMessage(error));
+    }
     return false;
   } finally {
     state.walletFlowActive = false;
-    state.busy = null;
+    if (state.busy === "连接钱包") state.busy = null;
     render();
   }
 }
 
 async function disconnectLiveWallet() {
+  if (state.actionPending || state.walletInvalidationPending || state.shutdownPending || state.shuttingDown) return;
   const sessionId = state.snapshot?.live?.walletSession?.sessionId;
   if (!sessionId) return;
   try {
@@ -1290,6 +1342,9 @@ async function disconnectLiveWallet() {
 }
 
 async function requestSafeShutdown() {
+  if (state.shutdownPending || state.shuttingDown) return;
+  state.shutdownPending = true;
+  state.mutationVersion += 1;
   state.busy = "安全退出";
   state.notice = { kind: "processing", title: "正在安全退出", message: "正在停用 Live 并关闭后台服务。" };
   render();
@@ -1297,6 +1352,7 @@ async function requestSafeShutdown() {
     await api("/api/operator/service/shutdown", {
       body: JSON.stringify({ actor: "LOCAL_OPERATOR", reason: "UI_SAFE_EXIT" }),
     });
+    state.mutationVersion += 1;
     state.shuttingDown = true;
     if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
     state.walletWorkerGeneration += 1;
@@ -1306,8 +1362,13 @@ async function requestSafeShutdown() {
     state.walletProvider = null;
     render();
   } catch (error) {
-    state.busy = null;
+    state.mutationVersion += 1;
     setNotice("error", "安全退出未完成", error.message);
+  } finally {
+    state.shutdownPending = false;
+    if (state.busy === "安全退出") {
+      state.busy = !state.shuttingDown && state.walletInvalidationPending ? "断开失效钱包" : null;
+    }
     render();
   }
 }

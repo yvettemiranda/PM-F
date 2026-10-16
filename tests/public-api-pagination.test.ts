@@ -67,6 +67,68 @@ describe("Polymarket public API pagination", () => {
     )).rejects.toThrow("PAGINATION_SNAPSHOT_DRIFT");
   });
 
+  it.each([10_000, 10_499, 10_500])(
+    "requires a proven final position page at the client limit (%i positions)",
+    async (positionCount) => {
+      const offsets: number[] = [];
+      const wallet = "0x0000000000000000000000000000000000000001";
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+        const offset = Number(new URL(String(input)).searchParams.get("offset"));
+        offsets.push(offset);
+        const rows = Array.from(
+          { length: Math.max(0, Math.min(500, positionCount - offset)) },
+          (_, index) => ({
+            proxyWallet: wallet,
+            asset: String(100_000 + offset + index),
+            conditionId,
+            size: "1",
+            avgPrice: "0.5",
+            currentValue: "0.5",
+          }),
+        );
+        return new Response(JSON.stringify(rows), { status: 200 });
+      }));
+
+      const result = new PolymarketPublicApi({ maxRetries: 0 }).allPositions(wallet);
+      if (positionCount === 10_500) {
+        await expect(result).rejects.toThrow("POSITIONS_PAGE_SATURATED");
+      } else {
+        const positions = await result;
+        expect(positions.historyComplete).toBe(true);
+        expect(positions.rows).toHaveLength(positionCount);
+        expect(positions.merged.data).toHaveLength(positionCount);
+      }
+      expect(offsets).toEqual([
+        ...Array.from({ length: 21 }, (_, index) => index * 500),
+        0,
+      ]);
+    },
+  );
+
+  it("rejects a partial position snapshot when the server stops pagination", async () => {
+    const offsets: number[] = [];
+    const wallet = "0x0000000000000000000000000000000000000001";
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const offset = Number(new URL(String(input)).searchParams.get("offset"));
+      offsets.push(offset);
+      if (offset > 0) {
+        return new Response("max historical activity offset exceeded", { status: 400 });
+      }
+      return new Response(JSON.stringify(Array.from({ length: 500 }, (_, index) => ({
+        proxyWallet: wallet,
+        asset: String(100_000 + index),
+        conditionId,
+        size: "1",
+        avgPrice: "0.5",
+        currentValue: "0.5",
+      }))), { status: 200 });
+    }));
+
+    await expect(new PolymarketPublicApi({ maxRetries: 0 }).allPositions(wallet))
+      .rejects.toThrow("POSITIONS_PAGE_SATURATED");
+    expect(offsets).toEqual([0, 500]);
+  });
+
   it("records an exact adjacent-page overlap without deleting the raw trade rows", async () => {
     const wallet = "0x0000000000000000000000000000000000000001";
     const trade = (index: number) => ({
@@ -461,4 +523,94 @@ describe("Polymarket public API pagination", () => {
       balanceCalls: 3,
     });
   });
+
+  it.each(["positions", "balance"])(
+    "retries a changed event head after the %s refresh fails within the cache TTL",
+    async (failedEndpoint) => {
+      const wallet = "0x0000000000000000000000000000000000000001";
+      let nowMs = Date.parse("2026-07-13T00:00:00.000Z");
+      let newTrade = false;
+      let failRefresh = false;
+      const capture = <T>(url: string, data: T) => ({
+        url,
+        fetchedAt: new Date(nowMs).toISOString(),
+        latencyMs: 0,
+        status: 200,
+        data,
+      });
+      const positions = vi.fn(async () => {
+        if (failRefresh && failedEndpoint === "positions") {
+          throw new Error("TRANSIENT_POSITION_FAILURE");
+        }
+        const merged = capture("fake://positions", []);
+        return {
+          rows: merged.data,
+          captures: [merged],
+          historyComplete: true,
+          stopReason: "END_OF_DATA",
+          merged,
+        };
+      });
+      const balance = vi.fn(async () => {
+        if (failRefresh && failedEndpoint === "balance") {
+          throw new Error("TRANSIENT_BALANCE_FAILURE");
+        }
+        return capture("fake://balance", {
+          jsonrpc: "2.0",
+          id: 2,
+          result: newTrade ? "0x1" : "0x0",
+        });
+      });
+      const api = {
+        recentTrades: async () => capture("fake://trades", newTrade ? [{
+          proxyWallet: wallet,
+          transactionHash: "0xnew-trade",
+          conditionId,
+          asset: "100000",
+          side: "BUY" as const,
+          price: "0.12",
+          size: "5",
+          timestamp: Math.floor(nowMs / 1_000),
+        }] : []),
+        activitySince: async () => ({
+          rows: [],
+          captures: [capture("fake://activity", [])],
+          historyComplete: true,
+          stopReason: "END_OF_DATA",
+        }),
+        allPositions: positions,
+        pUsdBalance: balance,
+      };
+      const source = new PublicObserveDataSource(api as unknown as PolymarketPublicApi, {
+        reconciliationIntervalMs: 15_000,
+        polygonTradeFeed: null,
+        now: () => new Date(nowMs),
+      });
+      const initial = await source.poll(wallet, undefined, 1_699_999_000);
+
+      nowMs += 3_000;
+      newTrade = true;
+      failRefresh = true;
+      await expect(source.poll(wallet, undefined, 1_699_999_000))
+        .rejects.toThrow(failedEndpoint === "positions"
+          ? "TRANSIENT_POSITION_FAILURE"
+          : "TRANSIENT_BALANCE_FAILURE");
+
+      // The same event head remains cached; its failed reconciliation must retry
+      // before the prior valid account snapshot's fifteen-second TTL expires.
+      nowMs += 1;
+      failRefresh = false;
+      const recovered = await source.poll(wallet, undefined, 1_699_999_000);
+      expect(recovered.trades.data).toHaveLength(1);
+      expect(recovered.positions.fetchedAt).toBe(new Date(nowMs).toISOString());
+      expect(recovered.positions.fetchedAt).not.toBe(initial.positions.fetchedAt);
+      expect(recovered.pUsdBalance.data.result).toBe("0x1");
+      expect(positions).toHaveBeenCalledTimes(3);
+      expect(balance).toHaveBeenCalledTimes(3);
+
+      await source.poll(wallet, undefined, 1_699_999_000);
+      expect(positions).toHaveBeenCalledTimes(3);
+      expect(balance).toHaveBeenCalledTimes(3);
+    },
+  );
 });

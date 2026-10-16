@@ -15,11 +15,18 @@ export class OrderSubmissionOutcomeUnknownError extends Error {
   }
 }
 
+export interface OrderSnapshot {
+  status: OrderStatus;
+  fills: LiveFillEvent[];
+}
+
 export interface OrderAdapter {
   readonly adapterType: "DISABLED" | "FAKE" | "POLYMARKET_CLOB";
   submitOrder(order: LiveOrderRequest): Promise<OrderSubmitResult>;
   cancelOrder(orderId: string, idempotencyKey: string): Promise<CancelResult>;
   getOrder(orderId: string): Promise<OrderStatus>;
+  /** Derive order state and fills from the same external observations. */
+  getOrderSnapshot?(orderId: string): Promise<OrderSnapshot>;
   getOpenOrders(): Promise<OrderStatus[]>;
   getFills(orderId: string): Promise<LiveFillEvent[]>;
 }

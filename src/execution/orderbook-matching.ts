@@ -53,6 +53,10 @@ function rawFeeMicros(sizeMicros: bigint, priceUnits: bigint, feeRatePpm: bigint
 
 function roundedFee(levels: Array<{ size: bigint; price: bigint }>, feeRatePpm: bigint, exponent: number): bigint {
   const raw = levels.reduce((sum, level) => sum + rawFeeMicros(level.size, level.price, feeRatePpm, exponent), 0n);
+  return roundRawFeeMicros(raw);
+}
+
+function roundRawFeeMicros(raw: bigint): bigint {
   if (raw === 0n) return 0n;
   const unit = BigInt(RULESET.paperFeeRoundingMicros);
   return ((raw + unit / 2n) / unit) * unit;
@@ -112,21 +116,30 @@ export function matchExecutionBuy(input: {
     return result([], input.feeRatePpm, input.feeExponent, false, "BUY");
   }
   const fills: Array<{ price: bigint; size: bigint }> = [];
+  let committedNotional = 0n;
+  let committedRawFee = 0n;
   for (const level of asks) {
     if (level.price > input.upperPriceUnits) break;
+    // Previous levels are immutable during this search. Keep their exact
+    // per-level truncation and round the aggregate fee only once, without
+    // copying and summing the entire filled prefix for every candidate.
+    const costWithSize = (size: bigint): bigint => committedNotional
+      + buyNotionalMicros(size, level.price)
+      + roundRawFeeMicros(committedRawFee + rawFeeMicros(size, level.price, input.feeRatePpm, input.feeExponent));
     let low = 0n;
     let high = level.size;
+    if (costWithSize(high) <= input.reservationMicros) low = high;
     while (low < high) {
       const middle = (low + high + 1n) / 2n;
-      const candidate = [...fills, { price: level.price, size: middle }];
-      const total = candidate.reduce((sum, fill) => sum + buyNotionalMicros(fill.size, fill.price), 0n)
-        + roundedFee(candidate, input.feeRatePpm, input.feeExponent);
-      if (total <= input.reservationMicros) low = middle;
+      if (costWithSize(middle) <= input.reservationMicros) low = middle;
       else high = middle - 1n;
     }
-    if (low > 0n) fills.push({ price: level.price, size: low });
-    const spent = fills.reduce((sum, fill) => sum + buyNotionalMicros(fill.size, fill.price), 0n)
-      + roundedFee(fills, input.feeRatePpm, input.feeExponent);
+    if (low > 0n) {
+      fills.push({ price: level.price, size: low });
+      committedNotional += buyNotionalMicros(low, level.price);
+      committedRawFee += rawFeeMicros(low, level.price, input.feeRatePpm, input.feeExponent);
+    }
+    const spent = committedNotional + roundRawFeeMicros(committedRawFee);
     if (spent >= input.reservationMicros || low < level.size) break;
   }
   const matched = result(fills, input.feeRatePpm, input.feeExponent, false, "BUY");

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { OrderAdapter } from "./order-adapter.js";
+import type { OrderAdapter, OrderSnapshot } from "./order-adapter.js";
 import type { WalletProvider } from "./wallet-provider.js";
 import { LiveReconciliation } from "./live-reconciliation.js";
 import type { LiveRecoveryOrderRow, LiveStore } from "./live-store.js";
@@ -7,6 +7,7 @@ import type { LiveExecutionState, LiveFillEvent, LiveOrderState, LiveReconciliat
 import { withExternalTimeout } from "./external-timeout.js";
 import { validateLiveOrderFills } from "./fill-validation.js";
 import { stableJson } from "../domain/versioning.js";
+import { validateClobOrderIdentity, validateClobTradeIdentity } from "./clob-order-identity.js";
 
 interface ExternalOrderSnapshot {
   local: LiveRecoveryOrderRow;
@@ -225,17 +226,10 @@ export class LiveCrashRecovery {
       const snapshots: ExternalOrderSnapshot[] = [];
       for (const local of localOrders) {
         if (!local.external_order_id) throw new Error(`LOCAL_ORDER_EXTERNAL_ID_MISSING:${local.live_order_id}`);
-        const status = await this.readExternal(
-          "GET_ORDER",
-          () => this.orderAdapter.getOrder(local.external_order_id!),
-        );
+        const { status, fills } = await this.readOrderSnapshot(local);
         if (status.externalOrderId !== local.external_order_id) {
           throw new Error(`EXTERNAL_ORDER_ID_MISMATCH:${local.live_order_id}`);
         }
-        const fills = await this.readExternal(
-          "GET_FILLS",
-          () => this.orderAdapter.getFills(local.external_order_id!),
-        );
         this.validateExternalSnapshot(local, status, fills);
         snapshots.push({ local, status, fills });
       }
@@ -442,6 +436,17 @@ export class LiveCrashRecovery {
     };
   }
 
+  private async readOrderSnapshot(local: LiveRecoveryOrderRow): Promise<OrderSnapshot> {
+    const orderId = local.external_order_id!;
+    if (this.orderAdapter.getOrderSnapshot !== undefined) {
+      return this.readExternal("GET_ORDER_SNAPSHOT", () => this.orderAdapter.getOrderSnapshot!(orderId));
+    }
+    const status = await this.readExternal("GET_ORDER", () => this.orderAdapter.getOrder(orderId));
+    if (status.externalOrderId !== orderId) throw new Error(`EXTERNAL_ORDER_ID_MISMATCH:${local.live_order_id}`);
+    const fills = await this.readExternal("GET_FILLS", () => this.orderAdapter.getFills(orderId));
+    return { status, fills };
+  }
+
   private async readExternal<T>(operation: string, task: () => Promise<T>): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= EXTERNAL_READ_MAX_ATTEMPTS; attempt += 1) {
@@ -461,6 +466,11 @@ export class LiveCrashRecovery {
     status: OrderStatus,
     fills: LiveFillEvent[],
   ): void {
+    if (this.orderAdapter.adapterType === "POLYMARKET_CLOB") {
+      const identity = { assetId: local.asset_id, conditionId: local.condition_id, side: local.side };
+      validateClobOrderIdentity(status.raw, identity);
+      for (const fill of fills) validateClobTradeIdentity(fill.raw, local.external_order_id!, identity);
+    }
     const availableSellSize = local.side === "SELL"
       ? this.store.openPositions(local.execution.live_account_id, local.asset_id)
         .reduce((total, position) => total + BigInt(position.current_size_micros), 0n)

@@ -1,0 +1,30 @@
+name: Verify
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # The desktop lifecycle tests use macOS zsh and BSD script semantics.
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: pnpm/setup@v1
+        with:
+          install: false
+          cache: true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Check browser scripts and desktop launcher
+        run: |
+          for script in prototype/live-ui/*.js prototype/live-ui/*.mjs; do
+            node --check "$script"
+          done
+          zsh -n scripts/launch-hecatonchires-ui.command
