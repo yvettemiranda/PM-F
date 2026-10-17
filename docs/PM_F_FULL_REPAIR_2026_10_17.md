@@ -101,8 +101,8 @@ schema 更新为 2.34.0，新增 038 事件顺序证据/歧义阻断、039 赎�
 
 ```sh
 pnpm validate:live-production \
-  --paper-report=data/paper-validation/campaigns/<campaignId>/paper-campaign-report.json \
-  --observe-report=data/paper-validation/campaigns/<campaignId>/sessions/<sessionId>/observe-internal.json \
+  --paper-report="data/paper-validation/campaigns/<campaignId>/paper-campaign-report.json" \
+  --observe-report="data/paper-validation/campaigns/<campaignId>/sessions/<sessionId>/observe-internal.json" \
   --isolated-verification=data/operator/paper-campaign-isolated-verification.json
 ```
 

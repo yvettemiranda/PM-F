@@ -119,8 +119,11 @@ pnpm test
 node --check prototype/live-ui/app.js
 node --check prototype/live-ui/server.mjs
 zsh -n scripts/launch-hecatonchires-ui.command
-pnpm validate:live-production
 ```
+
+恢复当前版本的真实报告后，按[生产验收参数](PM_F_FULL_REPAIR_2026_10_17.md)
+运行 `pnpm validate:live-production --paper-report="<真实Campaign报告路径>" --observe-report="<真实Observe报告路径>"`。
+历史 v2 验证摘要不自动转为当前版本通过。
 
 然后启动控制台，确认：
 

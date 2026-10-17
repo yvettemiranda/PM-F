@@ -55,8 +55,11 @@ node --check prototype/live-ui/app.js
 node --check prototype/live-ui/server.mjs
 zsh -n scripts/launch-hecatonchires-ui.command
 git diff --check
-pnpm validate:live-production
+pnpm validate:live-production --paper-report="<真实Campaign报告路径>" --observe-report="<真实Observe报告路径>"
 ```
+
+报告要求和可选隔离证明路径见[当前生产验收说明](PM_F_FULL_REPAIR_2026_10_17.md)。
+仅在已有合格运行证据后执行；旧 v2 工件不能直接放行当前版本。
 
 记录以下结果：
 

@@ -45,7 +45,8 @@ live_gate_state=LIVE_DISABLED
 liveAllowed=false
 ```
 
-可以运行 `pnpm validate:live-production` 查看验证工件，但验证通过不会授予 Live 权限。
+已有合格长期运行报告后，可按[生产验收参数](PM_F_FULL_REPAIR_2026_10_17.md)
+运行 `pnpm validate:live-production` 重新生成 v3 验证工件；验证通过不会授予 Live 权限。
 
 ## 4. 启动控制台
 

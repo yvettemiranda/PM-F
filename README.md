@@ -63,8 +63,12 @@ pnpm test
 node --check prototype/live-ui/app.js
 node --check prototype/live-ui/server.mjs
 zsh -n scripts/launch-hecatonchires-ui.command
-pnpm validate:live-production
 ```
+
+生产验收需提供当前版本的真实 Campaign、Observe 和隔离证明；
+`pnpm validate:live-production` 现在必须显式传入报告路径。
+具体参数、schema 2.34 迁移及钱包支持范围见
+[`完整修复说明`](docs/PM_F_FULL_REPAIR_2026_10_17.md)。
 
 完整的分阶段入口、通过条件和停止条件见
 [`docs/TESTING_ROADMAP.md`](docs/TESTING_ROADMAP.md)；发布前逐项核对
