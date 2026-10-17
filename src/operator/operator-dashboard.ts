@@ -118,6 +118,7 @@ export interface OperatorDashboardSnapshot {
     runtime: {
       state: "NOT_CONFIGURED" | "READY" | "RUNNING" | "STOPPED" | "ERROR";
       lastError: string | null;
+      health?: import("../live/live-runner.js").LiveRunnerHealth;
     };
     walletSession: LiveWalletSessionSnapshot;
     walletBalance: null | {

@@ -46,6 +46,15 @@ function directory(): string {
   return path;
 }
 
+function removeNewOrderingAndRedemptionSchema(database: DatabaseSync): void {
+  database.exec(`
+    DROP TABLE IF EXISTS observe_event_order_evidence;
+    DROP TABLE IF EXISTS observe_ordering_blocks;
+    DROP TABLE IF EXISTS live_redemption_journal;
+    DELETE FROM schema_migrations WHERE version IN ('2.33.0','2.34.0');
+  `);
+}
+
 function createPreviousSchema(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const database = new DatabaseSync(path);
@@ -168,7 +177,7 @@ describe("runtime database preparation", () => {
     const sqliteDirectory = join(process.cwd(), "src", "infra", "sqlite");
     const migrationTriggers = [...new Set(readdirSync(sqliteDirectory)
       .filter((name) => /^\d{3}_.+\.sql$/.test(name))
-      .flatMap((name) => [...readFileSync(join(sqliteDirectory, name), "utf8").matchAll(/^CREATE TRIGGER\s+(\S+)/gm)]
+      .flatMap((name) => [...readFileSync(join(sqliteDirectory, name), "utf8").matchAll(/^CREATE TRIGGER\s+(?:IF NOT EXISTS\s+)?(\S+)/gm)]
         .map((match) => match[1]!)))]
       .sort();
 
@@ -230,6 +239,7 @@ describe("runtime database preparation", () => {
        VALUES ('OBSERVE_ONLY_24H_SOAK','PASSED',?,?)`,
     ).run(evidence, "2026-07-20T00:00:00.000Z");
     legacy.prepare("DELETE FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'").run();
+    removeNewOrderingAndRedemptionSchema(legacy);
     legacy.prepare("DELETE FROM schema_migrations WHERE version IN ('2.28.0','2.29.0','2.30.0','2.31.0','2.32.0')").run();
     legacy.close();
 
@@ -259,6 +269,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, "partial-migration-034", "phase0.sqlite");
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const partial = new DatabaseSync(databasePath);
+    removeNewOrderingAndRedemptionSchema(partial);
     partial.exec("DROP INDEX observe_signal_emissions_source_event_idx");
     partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.29.0','2.30.0','2.31.0','2.32.0')").run();
     partial.close();
@@ -288,6 +299,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, `partial-migration-035-${label.replaceAll(" ", "-")}`, "phase0.sqlite");
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const partial = new DatabaseSync(databasePath);
+    removeNewOrderingAndRedemptionSchema(partial);
     partial.exec(damageSql);
     partial.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0','2.32.0')").run();
     partial.close();
@@ -308,6 +320,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, "complete-migration-035", "phase0.sqlite");
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const existing = new DatabaseSync(databasePath);
+    removeNewOrderingAndRedemptionSchema(existing);
     existing.prepare("DELETE FROM schema_migrations WHERE version IN ('2.30.0','2.31.0','2.32.0')").run();
     existing.close();
 
@@ -330,6 +343,7 @@ describe("runtime database preparation", () => {
     const databasePath = join(root, "partial-migration-037", "phase0.sqlite");
     await prepareRuntimeDatabase({ databasePath, sourceVersion });
     const partial = new DatabaseSync(databasePath);
+    removeNewOrderingAndRedemptionSchema(partial);
     partial.exec("DROP TRIGGER live_wallet_position_baseline_items_no_update");
     partial.prepare("DELETE FROM schema_migrations WHERE version='2.32.0'").run();
     partial.close();
@@ -354,6 +368,7 @@ describe("runtime database preparation", () => {
     const identity = createLegacyDurationCampaign(databasePath);
 
     const legacy = new DatabaseSync(databasePath);
+    removeNewOrderingAndRedemptionSchema(legacy);
     const campaignBefore = legacy.prepare(
       "SELECT * FROM paper_validation_campaigns WHERE campaign_id=?",
     ).get(identity.campaignId);

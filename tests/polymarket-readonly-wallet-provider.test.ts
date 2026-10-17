@@ -5,6 +5,7 @@ import {
   PolymarketReadonlyWalletProvider,
 } from "../src/live/polymarket-readonly-wallet-provider.js";
 import type { LiveWalletRuntimeBinding } from "../src/operator/live-wallet-session.js";
+import { marketRoute } from "../src/live/market-protocol.js";
 
 const wallet = "0x0000000000000000000000000000000000000001";
 
@@ -41,6 +42,29 @@ function clob(overrides: Record<string, unknown> = {}) {
 }
 
 describe("PolymarketReadonlyWalletProvider", () => {
+  it.each(["BUY", "SELL"] as const)("reads %s balance and its exact protocol allowance together without caching", async (side) => {
+    const route = marketRoute({ assetId: "123", conditionId: `0x${"a".repeat(64)}`, neg_risk: true });
+    let sequence = 0;
+    const getBalanceAllowance = vi.fn(async () => ({
+      balance: String(++sequence), allowances: { [route.exchange]: "10000000", unrelatedExchange: "0" },
+    }));
+    const resolve = vi.fn(async () => route);
+    const provider = new PolymarketReadonlyWalletProvider({
+      walletBinding: binding(), funderAddress: wallet,
+      clobClient: clob({ getBalanceAllowance }) as never, routeProvider: { resolve },
+    });
+    await expect(provider.getCapacity({ assetId: "123", side })).resolves.toEqual({
+      balance: { status: "AVAILABLE", balanceMicros: "1", reason: null },
+      allowance: { status: "AVAILABLE", allowanceMicros: "10000000", reason: null },
+    });
+    expect(getBalanceAllowance).toHaveBeenCalledTimes(1);
+    expect(getBalanceAllowance).toHaveBeenLastCalledWith(side === "BUY"
+      ? { asset_type: AssetType.COLLATERAL } : { asset_type: AssetType.CONDITIONAL, token_id: "123" });
+    await expect(provider.getCapacity({ assetId: "123", side })).resolves.toMatchObject({ balance: { balanceMicros: "2" } });
+    expect(getBalanceAllowance).toHaveBeenCalledTimes(2);
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
   it("reads exact collateral/outcome base units and uses the most conservative allowance", async () => {
     const client = clob();
     const provider = new PolymarketReadonlyWalletProvider({

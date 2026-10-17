@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS, stableJson } from "../src/domain/versioning.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
+import { LiveStore } from "../src/live/live-store.js";
 import { LiveAccountRegistry } from "../src/live/live-account-registry.js";
 import type { PaperSignalEnvelope } from "../src/paper/types.js";
 import { RiskManager } from "../src/risk/risk-manager.js";
@@ -696,6 +697,38 @@ describe("Live account and risk isolation", () => {
 
     expect(decision.decision).toBe("ALLOW");
     expect(decision.checks.some((check) => check.name === "live_consecutive_losses")).toBe(false);
+    database.close();
+  });
+});
+
+
+describe("pending Live BUY risk", () => {
+  it("includes pending reservations and credits only the same execution during an increase", () => {
+    const { database, targetId } = setup();
+    const accountId = "pending-risk-account";
+    registerActiveAccount(database, accountId, 1_000_000_000n, 500_000_000n);
+    const limits = { maxTradeSizeMicros: "200000000", maxExposureMicros: "200000000", maxDailyLossMicros: "50000000" };
+    const manager = new RiskManager(database, sourceVersion, limits);
+    const signal = insertSignal(database, targetId, "pending-risk-signal");
+    const input = { mode: "LIVE" as const, accountId, signal, requestedAmountMicros: 150_000_000n, requestedSizeMicros: null, now };
+    const approval = manager.evaluate(input);
+    expect(approval.decision).toBe("ALLOW");
+    const store = new LiveStore(database, sourceVersion, () => new Date(now), limits);
+    const execution = store.createExecution({
+      liveAccountId: accountId, signalId: signal.signalId, contextId: signal.context!.contextId,
+      riskDecisionId: approval.riskDecisionId, liveGateRunId: null, executionIdempotencyKey: "pending-risk-execution",
+      executionType: "TARGET_BUY", state: "WAITING_EXECUTION", assetId: signal.assetId,
+      conditionId: signal.conditionId, requestedAmountMicros: "150000000", requestedSizeMicros: null,
+      targetPriceUnits: signal.targetPriceUnits, reason: "RISK_ALLOW", rulesetHash: RULESET_HASH,
+    });
+    store.reserve(execution, 150_000_000n);
+    expect(manager.evaluate({ ...input, requestedAmountMicros: 100_000_000n }).riskRejectReason).toBe("LIVE_MARKET_EXPOSURE_LIMIT_EXCEEDED");
+    expect(manager.evaluate({ ...input, requestedAmountMicros: 180_000_000n,
+      replacingExecutionId: execution.live_execution_id, replacingReservedAmountMicros: 150_000_000n }).decision).toBe("ALLOW");
+    expect(manager.evaluate({ ...input, replacingReservedAmountMicros: 150_000_000n }).riskRejectReason).toBe("RISK_RESERVATION_CREDIT_INVALID");
+    expect(manager.evaluate({ ...input, replacingExecutionId: "foreign-or-missing", replacingReservedAmountMicros: 150_000_000n }).riskRejectReason).toBe("RISK_RESERVATION_CREDIT_INVALID");
+    store.releaseReservation(execution, null, "CANCELLED");
+    expect(manager.evaluate({ ...input, requestedAmountMicros: 100_000_000n }).decision).toBe("ALLOW");
     database.close();
   });
 });

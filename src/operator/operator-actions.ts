@@ -11,7 +11,7 @@ import {
   defaultLiveGateConfig,
 } from "../live/live-gate-service.js";
 import type { LiveGateResult } from "../live/live-gate-types.js";
-import type { LiveRunnerOptions } from "../live/live-runner.js";
+import type { LiveRunnerOptions, LiveRunnerHealth } from "../live/live-runner.js";
 import { buildSafeChildEnvironment } from "./safe-child-environment.js";
 import {
   OPERATOR_DATABASE_FILE,
@@ -71,6 +71,7 @@ export interface OperatorLiveRuntimeCapability {
 export interface OperatorLiveRuntimeStatus {
   state: "NOT_CONFIGURED" | "READY" | "RUNNING" | "STOPPED" | "ERROR";
   lastError: string | null;
+  health?: Readonly<LiveRunnerHealth>;
 }
 
 export interface OperatorLiveRuntimeActions {
@@ -102,6 +103,7 @@ export interface OperatorLiveRuntimeActions {
  * tests and alternate hosts can inject the same contract explicitly.
  */
 export interface OperatorLiveRuntimeBackend {
+  health?(): Readonly<LiveRunnerHealth> | null;
   recoverOnStartup(accountId: string): Promise<{ ready: boolean }>;
   run(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
   runAfterRecovery?(options: LiveRunnerOptions, signal?: AbortSignal): Promise<unknown>;
@@ -445,9 +447,13 @@ export class ConfiguredOperatorLiveRuntimeActions implements OperatorLiveRuntime
         lastError: this.lastRunError,
       };
     }
+    const health = this.options.runtime.health?.();
+    const maintenanceError = health === null || health === undefined ? null
+      : Object.values(health.failedPhases).sort((a, b) => b.time.localeCompare(a.time))[0]?.reason ?? null;
     return {
       state: this.running ? "RUNNING" : "STOPPED",
-      lastError: this.lastRunError,
+      lastError: this.lastRunError ?? maintenanceError,
+      ...(health === null || health === undefined ? {} : { health }),
     };
   }
 

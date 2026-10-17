@@ -98,6 +98,33 @@ class HttpError extends Error {
   }
 }
 
+/** A stop invalidates pending starts immediately, without waiting for wallet I/O. */
+class OperatorLiveLifecycle {
+  private generation = 0;
+  private pending = false;
+  private closing = false;
+
+  begin(): number {
+    if (this.closing) throw new HttpError(409, "OPERATOR_UI_SHUTTING_DOWN", "后台正在安全退出。");
+    if (this.pending) throw new HttpError(409, "LIVE_OPERATION_IN_PROGRESS", "前一个启动流程尚未完成或取消。");
+    this.pending = true;
+    return ++this.generation;
+  }
+
+  assertCurrent(generation: number): void {
+    if (generation !== this.generation || this.closing) {
+      throw new HttpError(409, "LIVE_OPERATION_SUPERSEDED", "启动流程已被停用、断开或退出操作取消，请重新发起。");
+    }
+  }
+
+  invalidate(closing = false): void {
+    this.generation += 1;
+    this.closing ||= closing;
+  }
+
+  finish(): void { this.pending = false; }
+}
+
 interface RequestContext {
   request: IncomingMessage;
   response: ServerResponse;
@@ -114,10 +141,15 @@ interface RequestContext {
     sourceVersion: SourceVersion;
   };
   prerequisiteSourceVersion: SourceVersion;
+  lifecycle: OperatorLiveLifecycle;
+  assertLiveOperationCurrent(): void;
 }
 
 class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
-  constructor(private current: OperatorLiveRuntimeActions) {}
+  constructor(
+    private current: OperatorLiveRuntimeActions,
+    private readonly onWalletInvalidated: () => void,
+  ) {}
 
   private walletSessionBinding: LiveWalletRuntimeBinding | null = null;
   private walletSessionInvalidationReason: string | null = null;
@@ -170,6 +202,7 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
     this.walletSessionInvalidationReason = null;
     if (walletSessionBinding !== undefined) {
       this.unsubscribeWalletSession = walletSessionBinding.onInvalidated((reason) => {
+        this.onWalletInvalidated();
         this.walletSessionInvalidationReason = reason;
         return this.current.stop({
           actor: "WALLET_SESSION_GUARD",
@@ -241,6 +274,7 @@ class MutableOperatorLiveRuntimeActions implements OperatorLiveRuntimeActions {
     try {
       this.walletSessionBinding.assertCurrent();
     } catch {
+      this.onWalletInvalidated();
       this.walletSessionInvalidationReason = "INVALIDATED";
     }
   }
@@ -552,6 +586,8 @@ async function handleApi(context: RequestContext): Promise<void> {
     walletRequestBroker,
     service,
     prerequisiteSourceVersion,
+    lifecycle,
+    assertLiveOperationCurrent,
   } = context;
   const dashboardSnapshot = (): OperatorDashboardSnapshot => freshSnapshot(
     options,
@@ -573,6 +609,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     if (options.requestShutdown === undefined) {
       throw new HttpError(409, "OPERATOR_UI_SAFE_SHUTDOWN_NOT_CONFIGURED", "当前宿主未提供安全退出能力。");
     }
+    lifecycle.invalidate(true);
     success(response, {
       accepted: true,
       code: "OPERATOR_UI_SAFE_SHUTDOWN_REQUESTED",
@@ -745,6 +782,7 @@ async function handleApi(context: RequestContext): Promise<void> {
   if (request.method === "POST" && path === "/api/operator/live/wallet-session/disconnect") {
     const body = await readJson(request);
     const sessionId = body.sessionId === undefined ? undefined : stringField(body, "sessionId");
+    lifecycle.invalidate();
     try {
       await walletSessionManager.disconnect(sessionId);
     } catch (error) {
@@ -834,6 +872,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     const reconnectRequired = runtimeBindingKeys.some((key) => previousConfig[key] !== config[key]);
     const connectedSession = walletSessionManager.snapshot(options.now);
     if (reconnectRequired && connectedSession.status === "CONNECTED" && connectedSession.sessionId !== null) {
+      lifecycle.invalidate();
       await walletSessionManager.disconnect(connectedSession.sessionId);
       walletRequestBroker.cancelSession(
         connectedSession.sessionId,
@@ -878,6 +917,7 @@ async function handleApi(context: RequestContext): Promise<void> {
   const runtimeMatch = path.match(/^\/api\/operator\/runtime\/(start|stop|recover)$/);
   if (request.method === "POST" && runtimeMatch !== null) {
     const body = await readJson(request);
+    assertLiveOperationCurrent();
     const mode = optionalString(body, "mode", "PAPER").toUpperCase();
     let result;
     if (mode === "PAPER") {
@@ -889,6 +929,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     } else if (mode === "LIVE") {
       const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
       const reason = optionalString(body, "reason", `UI_RUNTIME_${runtimeMatch[1]?.toUpperCase()}`);
+      if (runtimeMatch[1] === "stop") lifecycle.invalidate();
       if (runtimeMatch[1] === "start") {
         if (
           liveRuntimeActions.status?.state === "ERROR"
@@ -908,6 +949,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         : runtimeMatch[1] === "stop"
           ? await liveRuntimeActions.stop({ actor, reason })
           : await liveRuntimeActions.recover({ actor, reason });
+      if (runtimeMatch[1] === "start") assertLiveOperationCurrent();
       if (!result.accepted) {
         throw new HttpError(409, result.code, "Live 运行时未配置或被安全边界阻断。", result);
       }
@@ -937,6 +979,7 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "POST" && path === "/api/operator/live/request") {
     const body = await readJson(request);
+    assertLiveOperationCurrent();
     const result = await withLiveRuntimeFreshnessGuard({
       options,
       walletSessionManager,
@@ -946,6 +989,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         reason: optionalString(body, "reason", "UI_MODE_SWITCH"),
       }),
     });
+    assertLiveOperationCurrent();
     if (!result.allowed) {
       failure(response, new HttpError(409, "LIVE_GATE_BLOCKED", "Live Gate 未允许进入 Live。", result));
       return;
@@ -956,6 +1000,7 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "POST" && path === "/api/operator/live/activate") {
     const body = await readJson(request);
+    assertLiveOperationCurrent();
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
     const reason = optionalString(body, "reason", "UI_ONE_CLICK_LIVE");
     const confirmationText = stringField(body, "confirmationText");
@@ -1023,6 +1068,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         walletRequestBroker,
         action: () => liveGateActions.requestActivation({ actor, reason }),
       });
+      assertLiveOperationCurrent();
       if (!initialGate.allowed) {
         failure(response, new HttpError(
           409,
@@ -1038,6 +1084,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         actor,
         reason: "ONE_CLICK_LIVE_RECONCILIATION",
       });
+      assertLiveOperationCurrent();
       if (!reconciliation.accepted) {
         const rollbackResult = await rollback(reconciliation.code);
         assertRollbackComplete(reconciliation.code, rollbackResult);
@@ -1058,6 +1105,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         actor,
         reason: "ONE_CLICK_LIVE_WALLET_READINESS",
       });
+      assertLiveOperationCurrent();
       if (!wallet.accepted) {
         const rollbackResult = await rollback(wallet.code);
         assertRollbackComplete(wallet.code, rollbackResult);
@@ -1083,6 +1131,7 @@ async function handleApi(context: RequestContext): Promise<void> {
           reason: `${reason}:AFTER_RECONCILIATION`,
         }),
       });
+      assertLiveOperationCurrent();
       if (!refreshedGate.allowed) {
         const rollbackResult = await rollback("LIVE_GATE_BLOCKED");
         assertRollbackComplete("LIVE_GATE_BLOCKED", rollbackResult);
@@ -1108,6 +1157,7 @@ async function handleApi(context: RequestContext): Promise<void> {
           reason: "LIVE_GATE_ARMED_RUNTIME_START",
         }),
       });
+      assertLiveOperationCurrent();
       if (!runtime.accepted) {
         const rollbackResult = await rollback(runtime.code);
         assertRollbackComplete(runtime.code, rollbackResult);
@@ -1134,6 +1184,7 @@ async function handleApi(context: RequestContext): Promise<void> {
           confirmationText,
         }),
       });
+      assertLiveOperationCurrent();
       if (!result.allowed) {
         const rollbackResult = await rollback("LIVE_GATE_BLOCKED");
         assertRollbackComplete("LIVE_GATE_BLOCKED", rollbackResult);
@@ -1161,6 +1212,7 @@ async function handleApi(context: RequestContext): Promise<void> {
       }, 202);
       return;
     } catch (error) {
+      if (error instanceof HttpError && error.code === "LIVE_OPERATION_SUPERSEDED") throw error;
       const code = errorCode(error);
       const runtimeWasStarted = runtimeStarted;
       if (runtimeWasStarted) {
@@ -1187,6 +1239,7 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   if (request.method === "POST" && path === "/api/operator/live/confirm") {
     const body = await readJson(request);
+    assertLiveOperationCurrent();
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
     const confirmationText = stringField(body, "confirmationText");
     const runtime = await withLiveRuntimeFreshnessGuard({
@@ -1198,6 +1251,7 @@ async function handleApi(context: RequestContext): Promise<void> {
         reason: "LIVE_GATE_ARMED_RUNTIME_START",
       }),
     });
+    assertLiveOperationCurrent();
     if (!runtime.accepted) {
       await liveGateActions.emergencyDisable({
         actor: "SYSTEM",
@@ -1260,7 +1314,9 @@ async function handleApi(context: RequestContext): Promise<void> {
           confirmationText,
         }),
       });
+      assertLiveOperationCurrent();
     } catch (error) {
+      if (error instanceof HttpError && error.code === "LIVE_OPERATION_SUPERSEDED") throw error;
       await rollbackConfirmation(errorCode(error));
       throw error;
     }
@@ -1277,6 +1333,7 @@ async function handleApi(context: RequestContext): Promise<void> {
     const body = await readJson(request);
     const actor = optionalString(body, "actor", "LOCAL_OPERATOR");
     const reason = optionalString(body, "reason", "UI_EMERGENCY_DISABLE");
+    lifecycle.invalidate();
     let gateError: unknown = null;
     try {
       await liveGateActions.emergencyDisable({
@@ -1433,12 +1490,14 @@ function staticRootFromOptions(options: OperatorUiServerOptions): string {
 }
 
 export function createOperatorUiServer(options: OperatorUiServerOptions): OperatorUiServer {
+  const lifecycle = new OperatorLiveLifecycle();
   const runtimeActions = options.runtimeActions ?? new DefaultOperatorRuntimeActions(options.projectRoot);
   const liveGateActions = new MutableOperatorLiveGateActions(
     options.liveGateActions ?? new DefaultOperatorLiveGateActions(options.projectRoot),
   );
   const liveRuntimeActions = new MutableOperatorLiveRuntimeActions(
     options.liveRuntimeActions ?? new UnconfiguredOperatorLiveRuntimeActions(),
+    () => lifecycle.invalidate(),
   );
   const walletSessionManager = options.walletSessionManager ?? new LiveWalletSessionManager();
   const walletRequestBroker = options.walletRequestBroker ?? new LiveWalletRequestBroker({
@@ -1462,12 +1521,20 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
   }
   const server = createServer(async (request, response) => {
     setHeaders(response);
+    let operationGeneration: number | null = null;
     try {
       if (!isAllowedHost(request.headers.host)) {
         throw new HttpError(403, "HOST_NOT_ALLOWED", "仅允许本机 localhost 访问。");
       }
       const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
       if (url.pathname.startsWith("/api/")) {
+        if (request.method === "POST" && (
+          /^\/api\/operator\/live\/(?:activate|request|confirm)$/.test(url.pathname)
+          || url.pathname === "/api/operator/runtime/start"
+        )) {
+          assertRequestOrigin(request);
+          operationGeneration = lifecycle.begin();
+        }
         await handleApi({
           request,
           response,
@@ -1480,6 +1547,10 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
           walletRequestBroker,
           service,
           prerequisiteSourceVersion,
+          lifecycle,
+          assertLiveOperationCurrent: () => {
+            if (operationGeneration !== null) lifecycle.assertCurrent(operationGeneration);
+          },
         });
       } else if (request.method === "GET" || request.method === "HEAD") {
         await serveStatic(response, staticRoot, url.pathname);
@@ -1487,11 +1558,31 @@ export function createOperatorUiServer(options: OperatorUiServerOptions): Operat
         throw new HttpError(405, "METHOD_NOT_ALLOWED", "该页面只支持 GET。");
       }
     } catch (error) {
-      if (!response.headersSent) failure(response, error);
+      let failureToReport = error;
+      if (error instanceof HttpError && error.code === "LIVE_OPERATION_SUPERSEDED") {
+        // A start/confirm can finish after the stop it raced with. The next
+        // activation stays blocked until this cleanup finishes, so it cannot
+        // accidentally stop a newer operator intent.
+        const failures: string[] = [];
+        try {
+          await liveGateActions.emergencyDisable({ actor: "SYSTEM", reason: "LIVE_OPERATION_SUPERSEDED" });
+        } catch (cleanupError) { failures.push(`GATE:${errorCode(cleanupError)}`); }
+        try {
+          const stopped = await liveRuntimeActions.stop({ actor: "SYSTEM", reason: "LIVE_OPERATION_SUPERSEDED" });
+          if (!stopped.accepted) failures.push(`RUNTIME:${stopped.code}`);
+        } catch (cleanupError) { failures.push(`RUNTIME:${errorCode(cleanupError)}`); }
+        if (failures.length > 0) {
+          failureToReport = new HttpError(503, "LIVE_OPERATION_CANCELLATION_INCOMPLETE", "启动已取消，但安全清理未完整完成，请重试紧急停用。", { failures });
+        }
+      }
+      if (!response.headersSent) failure(response, failureToReport);
       else response.destroy(error instanceof Error ? error : undefined);
+    } finally {
+      if (operationGeneration !== null) lifecycle.finish();
     }
   }) as OperatorUiServer;
   server.shutdownSafety = async (): Promise<void> => {
+    lifecycle.invalidate(true);
     const failures: string[] = [];
     let shouldDisableGate = false;
     try {

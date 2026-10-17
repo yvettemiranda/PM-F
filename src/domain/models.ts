@@ -20,12 +20,23 @@ export interface PublicProfile {
   pseudonym?: string | null;
 }
 
+/** Verified Polygon coordinates; quantities stay exact above Number's range. */
+export interface SourceChainOrder {
+  blockNumber: string;
+  blockHash: string;
+  transactionIndex: string;
+  logIndex: string;
+  /** A grouped OrderFilled execution can cover several component logs. */
+  lastLogIndex: string;
+}
+
 export interface PublicTrade {
   proxyWallet: string;
   transactionHash: string;
   /** Present only when an official Polygon OrderFilled log proves the maker
    * order identity. Data API rows do not expose this field. */
   orderHash?: string;
+  chainOrder?: SourceChainOrder;
   conditionId: string;
   asset: string;
   side: "BUY" | "SELL";

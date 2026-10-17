@@ -3,17 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { encodeAbiParameters, encodeEventTopics, parseAbiItem, type Hex } from "viem";
+import { encodeAbiParameters, encodeEventTopics, pad, parseAbiItem, toHex, type Hex } from "viem";
 import { PolymarketPublicApi, type ApiCapture } from "../src/adapters/polymarket-public.js";
 import type { PublicActivity, PublicPosition, PublicTrade } from "../src/domain/models.js";
 import { Phase0Database } from "../src/infra/sqlite/database.js";
+import { sourceEventKey } from "../src/domain/idempotency.js";
 import type { SourceVersion } from "../src/infra/source-version.js";
 import { ObserveOnlyRunner } from "../src/observe/observe-runner.js";
 import { PublicObserveDataSource } from "../src/observe/public-data-source.js";
 import { ObserveStore } from "../src/observe/observe-store.js";
 import {
   PolygonOrderFilledFeedUnsafeError,
-  type PolygonOrderFilledTradeFeed,
+  PolygonOrderFilledTradeFeed,
+  ORDER_FILLED_TOPIC,
+  POLYMARKET_CTF_EXCHANGES,
 } from "../src/observe/polygon-order-filled-trade-feed.js";
 import type { ObserveDataSource, ObservePollSnapshot } from "../src/observe/types.js";
 import {
@@ -961,7 +964,192 @@ describe("ObserveOnlyRunner", () => {
     });
   });
 
-  it("preserves confirmed identical fills as separate occurrences across polls and restart", async () => {
+  it.each([
+    { delayedProof: false, migrateLegacy: false, omitActivity: false }, { delayedProof: true, migrateLegacy: false, omitActivity: false },
+    { delayedProof: false, migrateLegacy: true, omitActivity: false }, { delayedProof: true, migrateLegacy: false, omitActivity: true },
+  ])("preserves chain order and legacy evidence through alias, persistence and restart %j", async ({ delayedProof, migrateLegacy, omitActivity }) => {
+    const conditionId = `0x${"a".repeat(64)}`;
+    const positionFor = (size: string) => ({ ...position(size), asset: "1", conditionId });
+    const { databasePath, baselineRunId } = setup([positionFor("100")]);
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const hash = (n: number) => toHex(n, { size: 32 });
+    const prior = trade({ asset: "1", conditionId, size: "10", timestamp: baselineSecond + 70, transactionHash: hash(1) });
+    const sell = trade({ asset: "1", conditionId, side: "SELL", size: "20", timestamp: baselineSecond + 71, transactionHash: hash(2) });
+    let buy = trade({ asset: "1", conditionId, size: "20", timestamp: baselineSecond + 71, transactionHash: hash(3) });
+    for (let nonce = 3; sourceEventKey(buy) > sourceEventKey(sell); nonce += 1) buy = { ...buy, transactionHash: hash(nonce) };
+    const chronological = [prior, sell, buy];
+    const logs = chronological.map((row, index) => {
+      const shares = BigInt(row.size) * 1_000_000n;
+      const blockNumber = index === 0 ? 99 : 100;
+      return {
+        address: POLYMARKET_CTF_EXCHANGES[0], blockNumber: toHex(blockNumber), blockHash: hash(blockNumber),
+        transactionHash: row.transactionHash, transactionIndex: toHex(index === 0 ? 0 : index - 1), logIndex: toHex(index), removed: false,
+        topics: [ORDER_FILLED_TOPIC, row.transactionHash, pad(wallet, { size: 32 }), pad(POLYMARKET_CTF_EXCHANGES[0], { size: 32 })],
+        data: encodeAbiParameters(
+          [{ type: "uint8" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "bytes32" }, { type: "bytes32" }],
+          [row.side === "BUY" ? 0 : 1, 1n, row.side === "BUY" ? shares / 2n : shares, row.side === "BUY" ? shares : shares / 2n, 0n, hash(0), hash(0)],
+        ),
+      };
+    });
+    const heads = [100, 102];
+    const feed = new PolygonOrderFilledTradeFeed({
+      polygonBlockNumber: async () => capture("head", { jsonrpc: "2.0", id: 10, result: toHex(heads.shift()!) }, now.toISOString()),
+      polygonBlock: async (number) => {
+        const n = Number(BigInt(number));
+        return capture("block", { jsonrpc: "2.0", id: 12, result: { number, hash: hash(n), parentHash: hash(n - 1), timestamp: toHex(baselineSecond + (n === 99 ? 70 : n === 100 ? 71 : 65)) } }, now.toISOString());
+      },
+      polygonOrderFilledLogs: async (exchange) => capture("logs", { jsonrpc: "2.0", id: 11, result: exchange === POLYMARKET_CTF_EXCHANGES[0] ? [...logs].reverse() : [] }, now.toISOString()),
+      clobMarketByToken: async () => capture("market", { condition_id: conditionId, primary_token_id: "1", secondary_token_id: "2" }, now.toISOString()),
+    });
+    await feed.poll(wallet);
+    const batch = await feed.poll(wallet);
+    expect(batch.trades.map((row) => `${row.side} ${row.size}`)).toEqual(["BUY 10", "SELL 20", "BUY 20"]);
+    const liveSnapshot = snapshot(chronological, [positionFor("110")], "2026-07-08T00:01:11.000Z");
+    if (omitActivity) liveSnapshot.activity = capture("activity", [], liveSnapshot.activity.fetchedAt);
+    const queue = [snapshot([], [positionFor("100")], now.toISOString()),
+      ...(delayedProof ? [liveSnapshot] : []), { ...liveSnapshot, polygonOrderFilled: batch }];
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource(queue), {
+      walletAddress: wallet, pollIntervalMs: 1_000, now: () => now, sourceVersion,
+      signalMarketMetadataProvider: { market: async () => ({ sourceUrl: "https://example.test/market", fetchedAt: now.toISOString(), market: {
+        condition_id: conditionId, closed: false, end_date_iso: "2027-01-01T00:00:00Z",
+        tokens: [{ token_id: "1", outcome: "Yes" }, { token_id: "2", outcome: "No" }],
+      } }) },
+    });
+    await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:11.000Z");
+    await runner.pollOnce();
+    if (delayedProof) {
+      const before = new DatabaseSync(databasePath, { readOnly: true });
+      expect(before.prepare("SELECT count(*) n FROM signals WHERE signal_type='TARGET_SELL'").get()).toEqual({ n: 0 });
+      expect(before.prepare("SELECT sync_status FROM monitor_targets").get()).toEqual({ sync_status: "MAJOR_DESYNC" });
+      before.close();
+      now = new Date("2026-07-08T00:01:12.000Z");
+      await runner.pollOnce();
+    }
+    const runId = runner.start().observeRunId;
+    store.stopRun(runId, now.toISOString(), "TEST_COMPLETE");
+    const checkpoint = store.loadObservedEvents(baselineRunId);
+    expect(checkpoint).toHaveLength(3);
+    expect(checkpoint.every((event) => event.chainOrder !== undefined)).toBe(true);
+    if (omitActivity) {
+      expect(checkpoint.every((event) => event.sourceType === "DATA_API_TRADE" && !event.activityConfirmed)).toBe(true);
+    }
+    store.close();
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    expect(database.prepare("SELECT sell_ratio_numerator,sell_ratio_denominator,execution_eligible FROM signals WHERE signal_type='TARGET_SELL'").get())
+      .toEqual({ sell_ratio_numerator: "10000000", sell_ratio_denominator: "10000000", execution_eligible: 1 });
+    expect(database.prepare("SELECT historical_micros,tracked_micros,expected_total_micros FROM observe_position_projection").get())
+      .toEqual({ historical_micros: "90000000", tracked_micros: "20000000", expected_total_micros: "110000000" });
+    expect(database.prepare("SELECT count(*) n FROM signals").get()).toEqual({ n: 3 });
+    expect(database.prepare("SELECT count(*) n FROM signal_execution_contexts").get()).toEqual({ n: 3 });
+    expect(database.prepare("SELECT sync_status FROM monitor_targets").get()).toEqual({ sync_status: "SYNCED" });
+    expect(database.prepare("SELECT count(*) n FROM observe_event_order_evidence").get()).toEqual({ n: 3 });
+    database.close();
+    if (migrateLegacy) {
+      // Reproduce the actual 2.32 layout: economic evidence/checkpoints and
+      // published Signals remain, but no chain-order proof table existed.
+      const legacy = new DatabaseSync(databasePath);
+      const signalEvidence = legacy.prepare("SELECT * FROM signals ORDER BY signal_id").all();
+      const rawEvidence = legacy.prepare("SELECT * FROM raw_events ORDER BY source_event_key").all();
+      legacy.exec(`DROP TABLE observe_event_order_evidence; DROP TABLE observe_ordering_blocks;
+        DROP TABLE live_redemption_journal; DELETE FROM schema_migrations WHERE version IN ('2.33.0','2.34.0');`);
+      legacy.close();
+      const upgraded = new Phase0Database(databasePath, sourceVersion);
+      upgraded.initialize();
+      upgraded.close();
+      const evidence = new DatabaseSync(databasePath, { readOnly: true });
+      expect(evidence.prepare("SELECT * FROM signals ORDER BY signal_id").all()).toEqual(signalEvidence);
+      expect(evidence.prepare("SELECT * FROM raw_events ORDER BY source_event_key").all()).toEqual(rawEvidence);
+      expect(evidence.prepare("SELECT reason FROM observe_ordering_blocks").get())
+        .toEqual({ reason: "LEGACY_SAME_SECOND_ORDER_UNVERIFIED" });
+      expect(evidence.prepare("SELECT sync_status FROM monitor_targets").get()).toEqual({ sync_status: "MAJOR_DESYNC" });
+      expect(evidence.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      evidence.close();
+      const blockedStore = new ObserveStore(databasePath, sourceVersion);
+      try {
+        expect(() => new ObserveOnlyRunner(blockedStore, new QueueSource([]), {
+          walletAddress: wallet, pollIntervalMs: 1_000, now: () => new Date("2026-07-08T00:01:15.000Z"),
+        }).start()).toThrow("OBSERVE_ORDERING_REBASE_REQUIRED");
+      } finally { blockedStore.close(); }
+      return;
+    }
+    const resumed = new ObserveStore(databasePath, sourceVersion);
+    const resumedRunner = new ObserveOnlyRunner(resumed, new QueueSource([{ ...liveSnapshot, polygonOrderFilled: batch }]), {
+      walletAddress: wallet, pollIntervalMs: 1_000, now: () => new Date("2026-07-08T00:01:15.000Z"),
+    });
+    expect(await resumedRunner.pollOnce()).toBe(true);
+    expect(resumed.runMetrics(resumedRunner.start().observeRunId)).toMatchObject({ emittedSignals: 0, finalSyncStatus: "SYNCED" });
+    resumed.close();
+  });
+
+  it("ignores chain coordinates supplied only by public Trade rows", async () => {
+    const { databasePath } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const forgedOrder = { blockNumber: "0x64", blockHash: `0x${"a".repeat(64)}`, transactionIndex: "0x0", logIndex: "0x0", lastLogIndex: "0x0" };
+    const rows = [trade({ transactionHash: "prior", timestamp: baselineSecond + 70 }),
+      trade({ transactionHash: "sell", side: "SELL", size: "20", timestamp: baselineSecond + 71, chainOrder: forgedOrder }),
+      trade({ transactionHash: "buy", size: "20", timestamp: baselineSecond + 71, chainOrder: { ...forgedOrder, transactionIndex: "0x1" } })];
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([snapshot([], [position("100")], now.toISOString()),
+      snapshot(rows, [position("110")], "2026-07-08T00:01:11.000Z")]), { walletAddress: wallet, pollIntervalMs: 1_000, now: () => now });
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:11.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    expect(store.loadObservedEvents(runner.start().baseline.baselineRunId).every((row) => row.chainOrder === undefined)).toBe(true);
+    expect(store.runMetrics(runner.start().observeRunId).finalSyncStatus).toBe("MAJOR_DESYNC");
+    store.close();
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT count(*) n FROM signals WHERE signal_type='TARGET_SELL'").get()).toEqual({ n: 0 });
+    expect(check.prepare("SELECT count(*) n FROM observe_event_order_evidence").get()).toEqual({ n: 0 });
+    check.close();
+  });
+
+  it.each(["BUY", "SELL"] as const)("requires a new baseline when late %s chronology changes or removes a published SELL", async (lateSide) => {
+    const { databasePath, baselineRunId } = setup();
+    let now = new Date("2026-07-08T00:01:00.000Z");
+    const chainOrder = { blockNumber: "0x64", blockHash: `0x${"a".repeat(64)}`, transactionIndex: "0x0", logIndex: "0x0", lastLogIndex: "0x0" };
+    const prior = trade({ transactionHash: "prior", timestamp: baselineSecond + 70 });
+    const sell = trade({ transactionHash: "sell", side: "SELL", size: "20", timestamp: baselineSecond + 71 });
+    const buy = trade({ transactionHash: "buy", side: lateSide, size: lateSide === "SELL" ? "10" : "20", timestamp: baselineSecond + 71 });
+    const later = snapshot([prior, sell, buy], [position(lateSide === "SELL" ? "80" : "110")], "2026-07-08T00:01:12.000Z");
+    later.polygonOrderFilled = { status: "AVAILABLE", confirmedHead: "0x64", fromBlock: null, toBlock: null, capture: null,
+      trades: [{ ...buy, chainOrder }, { ...sell, chainOrder: { ...chainOrder, transactionIndex: "0x1" } }] };
+    const store = new ObserveStore(databasePath, sourceVersion);
+    const runner = new ObserveOnlyRunner(store, new QueueSource([snapshot([], [position("100")], now.toISOString()),
+      snapshot([prior, sell], [position("90")], "2026-07-08T00:01:11.000Z"), later]), {
+      walletAddress: wallet, pollIntervalMs: 1_000, now: () => now,
+      signalMarketMetadataProvider: { market: async () => ({ sourceUrl: "https://example.test/market", fetchedAt: now.toISOString(), market: {
+        condition_id: "0xcondition", closed: false, end_date_iso: "2027-01-01T00:00:00Z", tokens: [{ token_id: "asset-1", outcome: "Yes" }],
+      } }) },
+    });
+    expect(await runner.pollOnce()).toBe(true);
+    now = new Date("2026-07-08T00:01:11.000Z");
+    expect(await runner.pollOnce()).toBe(true);
+    const before = new DatabaseSync(databasePath, { readOnly: true });
+    const immutableSignals = before.prepare("SELECT * FROM signals ORDER BY signal_id").all();
+    expect(before.prepare("SELECT sell_ratio_numerator,sell_ratio_denominator FROM signals WHERE signal_type='TARGET_SELL'").get())
+      .toEqual({ sell_ratio_numerator: "10000000", sell_ratio_denominator: "10000000" });
+    before.close();
+    now = new Date("2026-07-08T00:01:12.000Z");
+    await expect(runner.pollOnce()).rejects.toThrow("OBSERVE_ORDERING_REBASE_REQUIRED");
+    store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
+    store.close();
+    const check = new DatabaseSync(databasePath, { readOnly: true });
+    expect(check.prepare("SELECT * FROM signals ORDER BY signal_id").all()).toEqual(immutableSignals);
+    expect(check.prepare("SELECT reason FROM observe_ordering_blocks WHERE baseline_run_id=?").get(baselineRunId))
+      .toEqual({ reason: "PUBLISHED_SIGNAL_ORDER_CONFLICT" });
+    expect(check.prepare("SELECT sync_status FROM monitor_targets").get()).toEqual({ sync_status: "MAJOR_DESYNC" });
+    check.close();
+    const resumed = new ObserveStore(databasePath, sourceVersion);
+    try {
+      expect(() => new ObserveOnlyRunner(resumed, new QueueSource([]), {
+        walletAddress: wallet, pollIntervalMs: 1_000, now: () => new Date("2026-07-08T00:01:15.000Z"),
+      }).start()).toThrow("OBSERVE_ORDERING_REBASE_REQUIRED");
+    } finally { resumed.close(); }
+  });
+
+  it("preserves confirmed fills across restart without certifying their unproven same-second order", async () => {
     const { databasePath } = setup([position("62851.16")]);
     let now = new Date("2026-07-08T00:01:00.000Z");
     const transactionHash = "0x31add6643877a7ed3aea1d8507e377ebc1efbd663cfdb6dc3c57837c3301affc";
@@ -997,7 +1185,7 @@ describe("ObserveOnlyRunner", () => {
     expect(firstStore.runMetrics(firstRunner.start().observeRunId)).toMatchObject({
       processedEvents: 3,
       emittedSignals: 0,
-      finalSyncStatus: "SYNCED",
+      finalSyncStatus: "MAJOR_DESYNC",
     });
     firstStore.close();
 
@@ -1015,7 +1203,7 @@ describe("ObserveOnlyRunner", () => {
     expect(secondStore.runMetrics(secondRunner.start().observeRunId)).toMatchObject({
       processedEvents: 0,
       emittedSignals: 0,
-      finalSyncStatus: "SYNCED",
+      finalSyncStatus: "MAJOR_DESYNC",
     });
     secondStore.close();
 
@@ -1989,10 +2177,17 @@ describe("ObserveOnlyRunner", () => {
     });
     const second = snapshot([matchingTrade], [position("100")], "2026-07-08T00:01:10.000Z");
     second.activity = capture("activity", [comboActivity], second.activity.fetchedAt);
+    const polygonOnly = snapshot([], [position("100")], "2026-07-08T00:01:11.000Z");
+    polygonOnly.polygonOrderFilled = {
+      status: "AVAILABLE", confirmedHead: "0x64", fromBlock: null, toBlock: null, capture: null,
+      trades: [{ ...matchingTrade, chainOrder: { blockNumber: "0x64", blockHash: `0x${"a".repeat(64)}`,
+        transactionIndex: "0x0", logIndex: "0x0", lastLogIndex: "0x0" } }],
+    };
     const store = new ObserveStore(databasePath, sourceVersion);
     const runner = new ObserveOnlyRunner(store, new QueueSource([
       snapshot([], [position("100")], now.toISOString()),
       second,
+      polygonOnly,
     ]), {
       walletAddress: wallet,
       pollIntervalMs: 1_000,
@@ -2002,6 +2197,8 @@ describe("ObserveOnlyRunner", () => {
     await runner.pollOnce();
     now = new Date("2026-07-08T00:01:10.000Z");
     await runner.pollOnce();
+    now = new Date("2026-07-08T00:01:11.000Z");
+    expect(await runner.pollOnce()).toBe(true);
     store.stopRun(runner.start().observeRunId, now.toISOString(), "TEST_COMPLETE");
     expect(store.runMetrics(runner.start().observeRunId)).toMatchObject({
       processedEvents: 1,

@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RULESET, RULESET_HASH, RULESET_SNAPSHOT_JSON, stableJson, VERSIONS } from "../src/domain/versioning.js";
 import { registeredExecutionRules } from "../src/domain/ruleset-registry.js";
 import { EXECUTOR_REQUIRED_CONTEXT_FIELDS } from "../src/execution/types.js";
@@ -2558,7 +2558,7 @@ describe("PaperExecutor", () => {
     env.executor.close();
   });
 
-  it("does not let concurrent pending sells reserve more than the current Position size", async () => {
+  it("applies consecutive target sell ratios to the remainder after pending exits", async () => {
     const env = setup(new Date("2026-07-08T00:00:00.000Z"));
     insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "pending-sell-buy", createdAt: "2026-07-08T00:00:01.000Z" });
     await env.executor.consumeSignal(env.accountId, "pending-sell-buy");
@@ -2576,12 +2576,12 @@ describe("PaperExecutor", () => {
        JOIN paper_executions e ON e.paper_execution_id=ep.paper_execution_id
        WHERE e.state IN ('EXIT_PENDING','STOP_EXIT_PENDING')`,
     ).get() as { pending: number };
-    expect(pending.pending).toBe(200_000_000);
+    expect(pending.pending).toBe(175_000_000);
     db.close();
     env.market.book = env.market.makeBook([], [{ price: "0.5", size: "1000" }]);
     await env.executor.retryPending(env.accountId);
     const finalDb = new DatabaseSync(env.databasePath, { readOnly: true });
-    expect((finalDb.prepare("SELECT current_size_micros FROM paper_positions").get() as { current_size_micros: string }).current_size_micros).toBe("0");
+    expect((finalDb.prepare("SELECT current_size_micros FROM paper_positions").get() as { current_size_micros: string }).current_size_micros).toBe("25000000");
     finalDb.close();
     env.executor.close();
   });
@@ -4398,4 +4398,136 @@ describe("PaperExecutor", () => {
     expect(count(env.databasePath, "paper_signal_consumptions")).toBe(1);
     restarted.close();
   });
+});
+
+
+describe("execution obligation regressions", () => {
+  it.each([0, 50, 150])("keeps the same target remainder with %i shares filled before the next sell, including restart", async (initialFill) => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "ratio-opening", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "ratio-opening");
+    env.market.book = env.market.makeBook([], initialFill ? [{ price: "0.5", size: String(initialFill) }] : []);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "ratio-first", createdAt: "2026-07-08T00:00:02.000Z", signalType: "TARGET_SELL", sellNumerator: "3", sellDenominator: "4" });
+    await env.executor.consumeSignal(env.accountId, "ratio-first");
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    env.market.book = env.market.makeBook([], []);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "ratio-second", createdAt: "2026-07-08T00:00:03.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "2" });
+    const second = await restarted.consumeSignal(env.accountId, "ratio-second");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect((db.prepare("SELECT requested_size_micros FROM paper_executions WHERE paper_execution_id=?").get(second) as { requested_size_micros: string }).requested_size_micros).toBe("25000000");
+    env.market.book = env.market.makeBook([], [{ price: "0.5", size: "1000" }]);
+    await restarted.retryPending(env.accountId);
+    expect((db.prepare("SELECT current_size_micros FROM paper_positions").get() as { current_size_micros: string }).current_size_micros).toBe("25000000");
+    expect(restarted.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    db.close(); restarted.close();
+  });
+
+  it.each([{ preapproved: false, legacy: false }, { preapproved: true, legacy: false }, { preapproved: false, legacy: true }])("enforces pending BUY risk (preapproved=$preapproved, legacy snapshot=$legacy)", async ({ preapproved, legacy }) => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    // Realized profit creates cash above initial bankroll, independently of the
+    // configured 100% market/asset exposure cap. Two 529.2 pUSD orders would breach it.
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "profit-buy", createdAt: "2026-07-08T00:00:01.000Z" });
+    await env.executor.consumeSignal(env.accountId, "profit-buy");
+    env.market.book = env.market.makeBook([], [{ price: "0.9", size: "1000" }]);
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: "profit-sell", createdAt: "2026-07-08T00:00:02.000Z", signalType: "TARGET_SELL", sellNumerator: "1", sellDenominator: "1" });
+    await env.executor.consumeSignal(env.accountId, "profit-sell");
+    expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1080000000");
+    env.market.book = env.market.makeBook([{ price: "0.6", size: "10000" }], []);
+    const riskDb = new DatabaseSync(env.databasePath);
+    const riskManager = new RiskManager(riskDb, sourceVersion);
+    const approvals = [];
+    for (const [index, id] of ["obligation-one", "obligation-two"].entries()) {
+      insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: id, createdAt: `2026-07-08T00:00:0${index + 3}.000Z`, ratioPpm: "490000" });
+      const signal = loadPaperSignal(env.databasePath, id);
+      const approval = riskManager.evaluate({ mode: "PAPER", accountId: env.accountId, signal, requestedAmountMicros: 529_200_000n, requestedSizeMicros: null, now: env.getClock().toISOString() });
+      expect(approval.decision).toBe("ALLOW");
+      approvals.push({ signal, approval });
+    }
+    const ids = [];
+    for (const [index, { signal, approval }] of approvals.entries()) {
+      // A prior-version approval omitted pending exposure. Persist the same
+      // otherwise valid legacy snapshot, then exercise recovery with real risk.
+      const oldRisk = legacy && index === 1 ? vi.spyOn(RiskManager.prototype, "evaluate").mockReturnValue(approval) : null;
+      try {
+        ids.push(preapproved
+          ? (await env.executor.executeBuy({ accountId: env.accountId, signal, context: signal.context!, riskDecisionId: approval.riskDecisionId })).executionId
+          : await env.executor.consumeSignal(env.accountId, signal.signalId));
+      } finally { oldRisk?.mockRestore(); }
+    }
+    if (legacy) {
+      expect(ids.map((id) => env.executor.executionState(id))).toEqual(["WAITING_EXECUTION", "WAITING_EXECUTION"]);
+      expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("1058400000");
+    } else {
+      expect(ids.map((id) => env.executor.executionState(id))).toEqual(["WAITING_EXECUTION", "REJECTED"]);
+      expect((riskDb.prepare("SELECT reason FROM paper_executions WHERE paper_execution_id=?").get(ids[1]!) as { reason: string }).reason).toBe("MARKET_EXPOSURE_LIMIT_EXCEEDED");
+      expect((await env.executor.accountSnapshot(env.accountId)).reservedBalanceMicros).toBe("529200000");
+    }
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    env.market.book = env.market.makeBook([{ price: "0.5", size: "10000" }], [{ price: "0.5", size: "10000" }]);
+    await restarted.retryPending(env.accountId);
+    expect(ids.map((id) => restarted.executionState(id)).sort()).toEqual(["EXECUTED", "REJECTED"]);
+    expect((riskDb.prepare("SELECT remaining_cost_micros FROM paper_positions WHERE status='OPEN'").get() as { remaining_cost_micros: string }).remaining_cost_micros).toBe("529200000");
+    expect(restarted.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    riskDb.close(); restarted.close();
+  });
+
+  it("preserves fractional asset settlement payout across position lots and a restart", async () => {
+    const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+    env.market.book = env.market.makeBook([{ price: "0.3", size: "10000" }], [{ price: "0.3", size: "10000" }]);
+    const historical = installHistoricalPaperRuleset(env.databasePath);
+    for (const [index, name] of ["fraction-one", "fraction-two"].entries()) {
+      insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: name, createdAt: `2026-07-08T00:00:0${index + 1}.000Z`, confidence: "MEDIUM", capitalStatus: "INCOMPLETE", ratioPpm: null, fallbackMicros: "1000000", targetPriceUnits: "300000000000000000", marketEndTime: "2026-07-08T01:00:00.000Z", ...(index === 1 ? { ruleset: historical } : {}) });
+      expect(env.executor.executionState(await env.executor.consumeSignal(env.accountId, name))).toBe("EXECUTED");
+    }
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const before = db.prepare("SELECT paper_position_id,current_size_micros FROM paper_positions ORDER BY paper_position_id").all() as Array<{ paper_position_id: string; current_size_micros: string }>;
+    expect(before.map((row) => row.current_size_micros)).toEqual(["3333333", "3333333"]);
+    env.setClock(new Date("2026-07-08T01:00:00.001Z"));
+    env.market.resolutionSnapshot = { ...env.market.resolutionSnapshot, resolved: true, payoutNumerator: "1", payoutDenominator: "2", raw: { closed: true } };
+    env.executor.markSettlementPending(before[0]!.paper_position_id, "MARKET_END_REACHED");
+    const firstClaim = env.executor.redeemSettledPosition(before[0]!.paper_position_id, { ...env.market.resolutionSnapshot, snapshotTime: env.getClock().toISOString() });
+    expect(env.executor.redeemSettledPosition(before[0]!.paper_position_id, { ...env.market.resolutionSnapshot, snapshotTime: env.getClock().toISOString() })).toBe(firstClaim);
+    env.executor.markSettlementPending(before[1]!.paper_position_id, "MARKET_END_REACHED");
+    expect(() => env.executor.redeemSettledPosition(before[1]!.paper_position_id, {
+      ...env.market.resolutionSnapshot, payoutDenominator: "1", snapshotTime: env.getClock().toISOString(),
+    })).toThrow("SETTLEMENT_PRIOR_CLAIM_INCONSISTENT");
+    expect(count(env.databasePath, "paper_settlements")).toBe(1);
+    env.executor.close();
+    const restarted = new PaperExecutor(env.databasePath, env.market, { sourceVersion, now: () => env.getClock() });
+    expect(await restarted.processSettlements(env.accountId)).toHaveLength(1);
+    expect(await restarted.processSettlements(env.accountId)).toEqual([]);
+    const payouts = db.prepare("SELECT redeem_amount_micros FROM paper_settlements ORDER BY redeem_amount_micros").all() as Array<{ redeem_amount_micros: string }>;
+    expect(payouts.map((row) => row.redeem_amount_micros)).toEqual(["1666666", "1666667"]);
+    expect((await restarted.accountSnapshot(env.accountId))).toMatchObject({ cashBalanceMicros: "1001333333", realizedPnlMicros: "1333333" });
+    expect(restarted.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+    db.close(); restarted.close();
+  });
+});
+
+
+it("isolates fractional settlement carry between accounts and assets", async () => {
+  const env = setup(new Date("2026-07-08T00:00:00.000Z"));
+  const otherAccount = env.executor.createAccount("Independent account", 1_000_000_000n);
+  env.market.book = env.market.makeBook([{ price: "0.3", size: "10000" }], [{ price: "0.3", size: "10000" }]);
+  for (const [index, [account, asset]] of [[env.accountId, assetId], [otherAccount, assetId], [env.accountId, "other-asset"]].entries()) {
+    const id = `isolation-${index}`;
+    insertSignal({ databasePath: env.databasePath, targetId: env.targetId, signalId: id, createdAt: `2026-07-08T00:00:0${index + 1}.000Z`, assetId: asset!, confidence: "MEDIUM", capitalStatus: "INCOMPLETE", ratioPpm: null, fallbackMicros: "1000000", targetPriceUnits: "300000000000000000", marketEndTime: "2026-07-08T01:00:00.000Z" });
+    expect(env.executor.executionState(await env.executor.consumeSignal(account!, id))).toBe("EXECUTED");
+  }
+  env.setClock(new Date("2026-07-08T01:00:00.001Z"));
+  const db = new DatabaseSync(env.databasePath, { readOnly: true });
+  const positions = db.prepare("SELECT paper_position_id,asset_id FROM paper_positions ORDER BY created_at,paper_position_id").all() as Array<{ paper_position_id: string; asset_id: string }>;
+  for (const position of positions) {
+    env.executor.markSettlementPending(position.paper_position_id, "MARKET_END_REACHED");
+    env.executor.redeemSettledPosition(position.paper_position_id, { ...env.market.resolutionSnapshot,
+      assetId: position.asset_id, resolved: true, payoutNumerator: "1", payoutDenominator: "2", snapshotTime: env.getClock().toISOString() });
+  }
+  expect((db.prepare("SELECT redeem_amount_micros FROM paper_settlements").all() as Array<{ redeem_amount_micros: string }>).map((row) => row.redeem_amount_micros)).toEqual(["1666666", "1666666", "1666666"]);
+  expect((await env.executor.accountSnapshot(env.accountId)).cashBalanceMicros).toBe("1001333332");
+  expect((await env.executor.accountSnapshot(otherAccount)).cashBalanceMicros).toBe("1000666666");
+  expect(env.executor.acceptanceSummary(env.accountId).consistency.passed).toBe(true);
+  expect(env.executor.acceptanceSummary(otherAccount).consistency.passed).toBe(true);
+  db.close(); env.executor.close();
 });

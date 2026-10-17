@@ -1,6 +1,7 @@
 import { PolymarketPublicApi, PolymarketPublicHttpError } from "../adapters/polymarket-public.js";
 import { decimalToScaled } from "../domain/fixed.js";
 import { RULESET } from "../domain/versioning.js";
+import { marketRoute, type PolymarketMarketRoute } from "../live/market-protocol.js";
 
 export interface ExecutionOrderbookLevel {
   price: string;
@@ -32,6 +33,7 @@ export interface ExecutionOrderbookSnapshot {
   bids: ExecutionOrderbookLevel[];
   asks: ExecutionOrderbookLevel[];
   publicCapture?: PublicMarketDataCapture;
+  marketRoute?: PolymarketMarketRoute;
 }
 
 export interface ExecutionFeeSnapshot {
@@ -230,6 +232,9 @@ export class PublicExecutionMarketDataProvider implements ExecutionMarketDataPro
       sourceUrl: capture.url,
       ...(capture.data.min_order_size === undefined ? {} : { minOrderSize: capture.data.min_order_size }),
       ...(capture.data.tick_size === undefined ? {} : { tickSize: capture.data.tick_size }),
+      ...((capture.data.version !== undefined || typeof capture.data.neg_risk === "boolean")
+        && /^[0-9]+$/.test(assetId) && /^0x[0-9a-f]{62}(?:[0-9a-f]{2})?$/i.test(conditionId)
+        ? { marketRoute: marketRoute({ assetId, conditionId, version: capture.data.version, neg_risk: capture.data.neg_risk }) } : {}),
       bids: capture.data.bids,
       asks: capture.data.asks,
       publicCapture: {

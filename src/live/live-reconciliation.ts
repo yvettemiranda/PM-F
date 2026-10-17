@@ -322,7 +322,27 @@ export class LiveReconciliation {
        LEFT JOIN live_settlement_ledger s ON s.live_position_id=r.live_position_id
        WHERE p.live_account_id=?
          AND (s.live_position_id IS NULL
-           OR r.status IN ('CREATED','SUBMITTED','FAILED')
+           OR (r.status IN ('CREATED','SUBMITTED','FAILED') AND NOT (
+             r.adapter_type='LIVE' AND r.status IN ('CREATED','SUBMITTED')
+             AND EXISTS (
+               SELECT 1 FROM live_redemption_journal j
+               WHERE j.idempotency_key=json_extract(r.raw_response_json,'$.groupInput.idempotencyKey')
+                 AND j.state='PREPARED' AND j.transaction_hash IS NULL
+                 AND j.asset_id=json_extract(r.raw_response_json,'$.groupInput.assetId')
+                 AND json_extract(j.intent_json,'$.input')=json_extract(r.raw_response_json,'$.groupInput')
+                 AND EXISTS (
+                   SELECT 1 FROM json_each(j.intent_json,'$.input.custody.lots') lot
+                   WHERE json_extract(lot.value,'$.positionId')=p.live_position_id
+                     AND COALESCE(json_extract(lot.value,'$.assetId'),j.asset_id)=p.asset_id
+                     AND json_extract(lot.value,'$.sizeMicros')=p.current_size_micros
+                 )
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM live_redemption_journal approval
+               WHERE approval.idempotency_key=json_extract(r.raw_response_json,'$.groupInput.idempotencyKey')||':APPROVAL'
+                 AND approval.state IN ('SUBMITTING','SUBMITTED')
+             )
+           ))
            OR (r.status='CONFIRMED' AND (s.settlement_status!='REDEEMED' OR p.status!='REDEEMED')))
        LIMIT 1`,
     ).get(accountId) as { live_redeem_id: string } | undefined;

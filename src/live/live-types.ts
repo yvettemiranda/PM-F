@@ -1,4 +1,5 @@
 import type { SignedOrder } from "@polymarket/clob-client-v2";
+import type { PolymarketMarketRoute } from "./market-protocol.js";
 import type {
   LiveAccountActionGateInput,
   LiveExecutionGateInput,
@@ -40,6 +41,8 @@ export interface SignedPayload {
    * omit it; the authenticated CLOB adapter refuses to submit without it.
    */
   readonly signedOrder?: SignedOrder;
+  /** Protocol/asset identity captured by the signer and retained for recovery. */
+  readonly marketRoute?: PolymarketMarketRoute;
   /**
    * Optional exact order amounts produced by a fee-aware signer. They let the
    * executor reserve the approved capital budget while submitting a smaller

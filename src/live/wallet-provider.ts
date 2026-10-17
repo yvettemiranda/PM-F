@@ -1,4 +1,5 @@
 import type {
+  LiveOrderSide,
   WalletAllowance,
   WalletBalance,
   WalletOutcomePositions,
@@ -17,6 +18,11 @@ export interface WalletProvider {
   /** Total externally visible collateral before this process's local reservations. */
   getBalance(): Promise<WalletBalance>;
   getAllowance(): Promise<WalletAllowance>;
+  /** Fresh balance and matching spender allowance from one response. */
+  getCapacity?(input: { assetId: string; side: LiveOrderSide }): Promise<{
+    balance: WalletBalance;
+    allowance: WalletAllowance;
+  }>;
   getOutcomeBalance(assetId: string): Promise<WalletBalance>;
   getOutcomeAllowance(assetId: string): Promise<WalletAllowance>;
   /** Complete externally visible CTF balance projection for reconciliation. */

@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import type {
   ExecutorBalanceQuery,
   ExecutorExecutionResult,
@@ -11,7 +12,7 @@ import type {
 import { executionEnvelopeIntegrityError } from "../execution/signal-integrity.js";
 import { conservativeClobBuyFeeMicros } from "../execution/clob-fee.js";
 import type { PaperAccountSnapshot, PaperSignalEnvelope, SignalExecutionContext } from "../paper/types.js";
-import { PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS, scaledToDecimal } from "../domain/fixed.js";
+import { PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS, decimalToScaled, scaledToDecimal } from "../domain/fixed.js";
 import { RULESET, RULESET_HASH } from "../domain/versioning.js";
 import { registeredExecutionRules, registeredStopLossRules } from "../domain/ruleset-registry.js";
 import {
@@ -43,7 +44,8 @@ import { DisabledSigner } from "./disabled-signer.js";
 import { DisabledWalletProvider } from "./disabled-wallet-provider.js";
 import { DisabledLiveMarketDataProvider, type LiveMarketDataProvider } from "./live-market-data.js";
 import { OrderSubmissionOutcomeUnknownError, type OrderAdapter } from "./order-adapter.js";
-import type { RedeemAdapter } from "./redeem-adapter.js";
+import type { RedeemAdapter, RedeemInput, RedeemResult } from "./redeem-adapter.js";
+import { validateMarketRoute, type PolymarketMarketRoute } from "./market-protocol.js";
 import type { Signer } from "./signer.js";
 import type { WalletProvider } from "./wallet-provider.js";
 import { RiskManager, type LiveRiskLimits } from "../risk/risk-manager.js";
@@ -627,6 +629,7 @@ export class LiveExecutor implements ExecutorInterface {
 
   async reconcile(input: ExecutorReconcileInput): Promise<ExecutorReconcileResult> {
     return this.serializeAccount(input.accountId, async () => {
+      await this.processRedemptionsUnlocked(input.accountId, { recoverOnly: true });
       const result = await this.recovery.reconcile(input.accountId);
       if (result.passed) this.store.transaction(() => this.store.unfreezeReconciledPositions(input.accountId));
       const frozenPositionCount = result.passed ? 0 : this.store.transaction(() => {
@@ -644,6 +647,7 @@ export class LiveExecutor implements ExecutorInterface {
       if (this.store.isGateActive()) {
         this.store.forceGateDisabled("RECOVERY_REQUIRES_REARMING", "SYSTEM");
       }
+      await this.processRedemptionsUnlocked(accountId, { recoverOnly: true });
       const result = await this.recovery.recover(accountId);
       if (result.passed) this.startupRecoveredAccounts.add(accountId);
       else this.startupRecoveredAccounts.delete(accountId);
@@ -653,6 +657,14 @@ export class LiveExecutor implements ExecutorInterface {
 
   isGateActive(): boolean {
     return this.store.isGateActive();
+  }
+
+  hasUnresolvedRedemption(accountId: string): boolean {
+    if (this.redeemAdapter.adapterType !== "LIVE") return false;
+    return this.database.prepare(`SELECT 1 FROM live_redeems r
+      JOIN live_positions p ON p.live_position_id=r.live_position_id
+      WHERE p.live_account_id=? AND r.adapter_type='LIVE' AND r.status IN ('CREATED','SUBMITTED','FAILED') LIMIT 1`)
+      .get(accountId) !== undefined;
   }
 
   async checkStopLosses(accountId: string): Promise<LiveStopLossCheckResult> {
@@ -1047,9 +1059,9 @@ export class LiveExecutor implements ExecutorInterface {
     const submitting = this.store.submittingOrders(accountId);
     const submittingExecutionIds = new Set(submitting.map((order) => order.executionId));
     const openOrders = this.database.prepare(
-      `SELECT live_execution_id FROM live_executions
+      `SELECT live_execution_id,execution_type FROM live_executions
        WHERE live_account_id=? AND state IN ('WAITING_EXECUTION','PARTIALLY_EXECUTED','EXIT_PENDING','STOP_EXIT_PENDING')`,
-    ).all(accountId) as unknown as Array<{ live_execution_id: string }>;
+    ).all(accountId) as unknown as Array<{ live_execution_id: string; execution_type: string }>;
     const failures: Array<{ executionId: string; reason: string }> = submitting.map((order) => ({
       executionId: order.executionId,
       reason: `SUBMITTING_OUTCOME_PENDING:${order.liveOrderId}`,
@@ -1062,6 +1074,10 @@ export class LiveExecutor implements ExecutorInterface {
     }
     for (const order of openOrders) {
       if (submittingExecutionIds.has(order.live_execution_id)) continue;
+      if (order.execution_type === "REDEEM") {
+        this.store.freezeExecution(order.live_execution_id, `${emergencyReason}:REDEEM_CONFIRMATION_PENDING`);
+        continue;
+      }
       try {
         await this.cancelExecutionUnlocked(order.live_execution_id, emergencyReason);
       } catch (error) {
@@ -1100,8 +1116,213 @@ export class LiveExecutor implements ExecutorInterface {
     if (!settlement) throw new Error("LIVE_SETTLEMENT_NOT_CONFIRMED");
     return this.serializeAccount(
       settlement.live_account_id,
-      () => this.redeemPositionUnlocked(positionId, riskDecisionId),
+      () => this.redeemAdapter.adapterType === "LIVE"
+        ? this.redeemManagedAssetUnlocked(settlement.live_account_id, positionId, riskDecisionId)
+        : this.redeemPositionUnlocked(positionId, riskDecisionId),
     );
+  }
+
+  async processRedemptions(accountId: string, options: { recoverOnly?: boolean } = {}): Promise<{
+    confirmedPositionIds: string[]; pendingPositionIds: string[];
+    failures: Array<{ positionId: string; reason: string }>;
+  }> {
+    return this.serializeAccount(accountId, () => this.processRedemptionsUnlocked(accountId, options));
+  }
+
+  private async processRedemptionsUnlocked(accountId: string, options: { recoverOnly?: boolean }): Promise<{
+    confirmedPositionIds: string[]; pendingPositionIds: string[];
+    failures: Array<{ positionId: string; reason: string }>;
+  }> {
+    const result = { confirmedPositionIds: [] as string[], pendingPositionIds: [] as string[],
+      failures: [] as Array<{ positionId: string; reason: string }> };
+    // Legacy FAKE/manual redemption remains an explicitly driven test surface.
+    if (this.redeemAdapter.adapterType !== "LIVE") return result;
+    const groups = new Map<string, Array<NonNullable<ReturnType<LiveStore["settlementForRedeem"]>>>>();
+    for (const settlement of this.store.redeemableSettlements(accountId)) {
+      // Both deployed CTF adapters redeem both outcomes of a condition, even
+      // when calldata names one indexSet. Protocol V2 accepts one exact amount.
+      const key = settlement.condition_id.length === 66 ? settlement.condition_id
+        : `${settlement.condition_id}:${settlement.asset_id}`;
+      const members = groups.get(key) ?? [];
+      members.push(settlement);
+      groups.set(key, members);
+    }
+    for (const members of groups.values()) {
+      const positionId = members[0]!.live_position_id;
+      try {
+        const value = await this.redeemManagedAssetUnlocked(accountId, positionId, undefined, options, members);
+        (value.status === "CONFIRMED" ? result.confirmedPositionIds : result.pendingPositionIds)
+          .push(...(value.positionIds ?? members.map(row => row.live_position_id)));
+      } catch (error) {
+        result.failures.push({ positionId, reason: error instanceof Error ? error.message : "LIVE_REDEEM_FAILED" });
+      }
+    }
+    return result;
+  }
+
+  private async redeemManagedAssetUnlocked(accountId: string, positionId: string, suppliedRiskId?: string,
+    options: { recoverOnly?: boolean } = {},
+    candidates?: Array<NonNullable<ReturnType<LiveStore["settlementForRedeem"]>>>,
+  ): Promise<{ status: string; positionIds?: string[] }> {
+    const seed = this.store.settlementForRedeem(positionId);
+    if (!seed) throw new Error("LIVE_SETTLEMENT_NOT_CONFIRMED");
+    if (seed.position_status === "REDEEMED") return { status: "CONFIRMED" };
+    const wholeCondition = seed.condition_id.length === 66;
+    let members = (candidates ?? this.store.redeemableSettlements(accountId))
+      .filter(row => row.condition_id === seed.condition_id && (wholeCondition || row.asset_id === seed.asset_id));
+    if (members.length === 0) throw new Error("LIVE_REDEEM_NO_MANAGED_LOTS");
+    const walletRow = this.database.prepare(`SELECT w.wallet_address FROM live_accounts a
+      JOIN live_wallets w ON w.live_wallet_id=a.live_wallet_id WHERE a.live_account_id=?`).get(accountId) as { wallet_address: string } | undefined;
+    if (!walletRow) throw new Error("LIVE_ACCOUNT_WALLET_BINDING_MISSING");
+    const wallet = normalizedEvmAddress(walletRow.wallet_address, "LIVE_ACCOUNT_WALLET_ADDRESS_INVALID");
+    const pending = this.database.prepare(`SELECT r.raw_response_json FROM live_redeems r
+      JOIN live_positions p ON p.live_position_id=r.live_position_id
+      WHERE p.live_account_id=? AND p.condition_id=? AND (?=1 OR p.asset_id=?) AND r.status IN ('CREATED','SUBMITTED')
+      ORDER BY r.created_at,r.live_redeem_id LIMIT 1`).get(accountId, seed.condition_id, Number(wholeCondition), seed.asset_id) as { raw_response_json: string } | undefined;
+    const persistedInput = pending ? (JSON.parse(pending.raw_response_json) as { groupInput?: RedeemInput }).groupInput : undefined;
+    let groupInput: RedeemInput;
+    if (persistedInput) {
+      groupInput = persistedInput;
+      const ids = new Set(groupInput.custody?.lots.map(lot => lot.positionId));
+      members = members.filter(row => ids.has(row.live_position_id));
+      if (members.length !== ids.size || members.some(row => {
+        const lot = groupInput.custody!.lots.find(lot => lot.positionId === row.live_position_id);
+        return lot?.sizeMicros !== row.current_size_micros || (lot.assetId ?? groupInput.assetId) !== row.asset_id;
+      })) {
+        throw new Error("LIVE_REDEEM_PENDING_CUSTODY_CHANGED");
+      }
+    } else {
+      if (options.recoverOnly) return { status: "SUBMITTED" };
+      const managed = members.reduce((sum, row) => sum + BigInt(row.current_size_micros), 0n);
+      const expected = members.reduce((sum, row) => sum + BigInt(row.redeem_amount_micros), 0n);
+      const identity = members.map(row => `${row.live_position_id}:${row.current_size_micros}`).sort().join("|");
+      const key = `LIVE_REDEEM_GROUP:${createHash("sha256").update(`${accountId}|${wallet}|${seed.condition_id}|${seed.asset_id}|${identity}`).digest("hex")}`;
+      const routeRows = this.database.prepare(`SELECT DISTINCT p.asset_id,json_extract(o.signed_payload_json,'$.marketRoute') route_json FROM live_positions p
+        JOIN live_orders o ON o.live_execution_id=p.opening_execution_id
+        WHERE p.live_account_id=? AND p.condition_id=? AND (?=1 OR p.asset_id=?) AND o.side='BUY' AND json_type(o.signed_payload_json,'$.marketRoute')='object'`)
+        .all(accountId, seed.condition_id, Number(wholeCondition), seed.asset_id) as unknown as Array<{ asset_id: string; route_json: string }>;
+      let route: PolymarketMarketRoute | undefined;
+      let routeContracts: string | undefined;
+      for (const row of routeRows) {
+        const candidate = JSON.parse(row.route_json) as PolymarketMarketRoute;
+        const validated = validateMarketRoute(candidate, row.asset_id, seed.condition_id);
+        const contracts = [validated.protocol, validated.domainVersion, validated.exchange, validated.collateral,
+          validated.outcomeToken, validated.redemptionTarget].map(value => value.toLowerCase()).join(":");
+        if (routeContracts && routeContracts !== contracts) throw new Error("LIVE_REDEEM_PROTOCOL_EVIDENCE_CONFLICT");
+        routeContracts = contracts;
+        if (row.asset_id === seed.asset_id) route = validated;
+      }
+      groupInput = { positionId: members[0]!.live_position_id, conditionId: seed.condition_id, assetId: seed.asset_id,
+        idempotencyKey: key, custody: { walletAddress: wallet, managedSizeMicros: managed.toString(), expectedPayoutMicros: expected.toString(),
+          lots: members.map(row => ({ positionId: row.live_position_id, assetId: row.asset_id, sizeMicros: row.current_size_micros })) },
+        ...(route === undefined ? {} : { marketRoute: route }) };
+    }
+    if (groupInput.custody?.walletAddress !== wallet) throw new Error("LIVE_REDEEM_ACCOUNT_CUSTODY_MISMATCH");
+    let result: RedeemResult | undefined;
+    if (persistedInput) {
+      result = await this.redeemAdapter.redeem(groupInput, { recoverOnly: true });
+      if (result.raw.reason === "LIVE_REDEEM_RECOVERY_NO_SUBMISSION" && !options.recoverOnly) result = undefined;
+    }
+    if (result === undefined) {
+      if (options.recoverOnly || !this.store.isGateActive()) return { status: "SUBMITTED" };
+      const reconciliation = await this.recovery.reconcile(accountId);
+      if (!reconciliation.passed) throw new Error(`REDEEM_RECONCILIATION_FAILED:${reconciliation.reason}`);
+      const redemptionGateEpoch = this.store.gateTransitionCount();
+      const approvals: Array<{ member: typeof members[number]; riskId: string; gateRunId: string }> = [];
+      for (const member of members) {
+        const riskId = member.live_position_id === positionId && suppliedRiskId ? suppliedRiskId
+          : new RiskManager(this.database, this.sourceVersion, this.options.liveRiskLimits).recordSystemDecision({
+            mode: "LIVE", accountId, signalId: null, contextId: null, entityId: member.live_position_id,
+            executionType: "REDEEM", decision: "ALLOW", reason: "REDEEM_CONFIRMED",
+            requestedAmountMicros: BigInt(member.redeem_amount_micros), requestedSizeMicros: BigInt(member.current_size_micros),
+            rulesetHash: member.ruleset_hash, now: this.now().toISOString(),
+          }).riskDecisionId;
+        const approved = this.approvedRedeemRisk(riskId, member);
+        if (typeof approved === "string") throw new Error(approved);
+        const gate = await this.options.liveGate.checkAccountAction({ action: "REDEEM", accountId, riskDecisionId: riskId,
+          rulesetHash: member.ruleset_hash, assetId: member.asset_id, conditionId: member.condition_id,
+          requestedAmountMicros: member.redeem_amount_micros, requestedSizeMicros: member.current_size_micros });
+        if (!gate.allowed) throw new Error(`LIVE_ACCOUNT_ACTION_GATE_BLOCKED:${gate.blockedReasons.join(",")}`);
+        const invalid = this.productionAccountActionGateRunFailure(gate.runId, riskId, member.ruleset_hash);
+        if (invalid) throw new Error(invalid);
+        approvals.push({ member, riskId, gateRunId: gate.runId });
+      }
+      const beforeSubmit = (): void => {
+        if (!this.store.isGateActive() || this.emergencyHaltedAccounts.has(accountId)
+          || this.store.gateTransitionCount() !== redemptionGateEpoch) {
+          throw new Error("LIVE_REDEEM_GATE_DISABLED_BEFORE_SUBMIT");
+        }
+      };
+      beforeSubmit();
+      const preparation = await this.redeemAdapter.redeem(groupInput, { prepareOnly: true });
+      if (preparation.status !== "SUBMITTED" || preparation.raw.reason !== "LIVE_REDEEM_PREPARED") {
+        throw new Error(`LIVE_REDEEM_PREPARATION_FAILED:${preparation.raw.reason ?? preparation.status}`);
+      }
+      beforeSubmit();
+      // All asynchronous checks complete before any lot intent is created.
+      // A crash cannot leave half of a group approved and irrecoverable.
+      this.store.transaction(() => {
+        for (const { member, riskId, gateRunId } of approvals) {
+        const execution = this.store.createExecution({ liveAccountId: accountId, signalId: null, contextId: null,
+          riskDecisionId: riskId, liveGateRunId: this.liveGateRunExists(gateRunId) ? gateRunId : null,
+          executionIdempotencyKey: liveExecutionIdempotencyKey(accountId, `REDEEM:${member.live_position_id}`),
+          executionType: "REDEEM", state: "WAITING_EXECUTION", assetId: member.asset_id, conditionId: member.condition_id,
+          requestedAmountMicros: member.redeem_amount_micros, requestedSizeMicros: member.current_size_micros,
+          targetPriceUnits: null, reason: "REDEEM_APPROVED", rulesetHash: member.ruleset_hash });
+        if (this.store.existingRedeemStatus(member.redeem_idempotency_key) === null) this.store.createRedeemIntent({
+          positionId: member.live_position_id, executionId: execution.live_execution_id,
+          idempotencyKey: member.redeem_idempotency_key, adapterType: "LIVE", raw: { groupInput } });
+        }
+      });
+      result = await this.redeemAdapter.redeem(groupInput, { beforeSubmit });
+    }
+    if (result.adapterType !== "LIVE") throw new Error("LIVE_REDEEM_ADAPTER_RESULT_MISMATCH");
+    const evidence = result.evidence;
+    const expectedAssets = new Map<string, bigint>();
+    for (const lot of groupInput.custody!.lots) {
+      const asset = lot.assetId ?? groupInput.assetId;
+      expectedAssets.set(asset, (expectedAssets.get(asset) ?? 0n) + BigInt(lot.sizeMicros));
+    }
+    const burnsMatch = evidence?.burnedAssets === undefined ? expectedAssets.size === 1
+      : evidence.burnedAssets.length === expectedAssets.size
+        && new Set(evidence.burnedAssets.map(asset => asset.assetId)).size === expectedAssets.size
+        && evidence.burnedAssets.every(asset => /^(0|[1-9][0-9]*)$/.test(asset.sizeMicros)
+          && expectedAssets.get(asset.assetId) === BigInt(asset.sizeMicros));
+    if (result.status === "CONFIRMED" && (!evidence
+      || !burnsMatch
+      || evidence.walletAddress.toLowerCase() !== wallet || evidence.assetId !== groupInput.assetId
+      || evidence.burnedSizeMicros !== groupInput.custody!.managedSizeMicros
+      || !/^0x[0-9a-f]{64}$/i.test(evidence.transactionHash) || evidence.confirmations < 2
+      || !/^(0|[1-9][0-9]*)$/.test(evidence.actualPayoutMicros)
+      || BigInt(evidence.actualPayoutMicros) > BigInt(groupInput.custody!.managedSizeMicros)
+      || (BigInt(groupInput.custody!.expectedPayoutMicros) > 0n && BigInt(evidence.actualPayoutMicros) === 0n))) {
+      throw new Error("LIVE_REDEEM_ACTUAL_EVIDENCE_REQUIRED");
+    }
+    const total = result.status === "CONFIRMED" ? BigInt(evidence!.actualPayoutMicros) : 0n;
+    const managed = BigInt(groupInput.custody!.managedSizeMicros);
+    const expectedPayout = members.reduce((sum, member) => sum + BigInt(member.redeem_amount_micros), 0n);
+    this.store.transaction(() => {
+      let allocated = 0n;
+      let cumulativeWeight = 0n;
+      for (const member of members) {
+        const refreshed = this.store.settlementForRedeem(member.live_position_id)!;
+        const execution = refreshed.live_execution_id ? this.store.executionById(refreshed.live_execution_id) : null;
+        if (!execution) throw new Error("LIVE_REDEEM_EXECUTION_MISSING");
+        this.store.saveRedeemResult({ positionId: member.live_position_id, executionId: execution.live_execution_id,
+          idempotencyKey: member.redeem_idempotency_key, status: result!.status, adapterType: "LIVE",
+          raw: { ...result!.raw, groupInput, ...(evidence ? { evidence } : {}) } });
+        if (result!.status === "CONFIRMED") {
+          // Across opposing CTF outcomes, shares do not have equal payout.
+          // Allocate by confirmed settlement entitlement, carrying roundoff.
+          cumulativeWeight += BigInt(expectedPayout > 0n ? member.redeem_amount_micros : member.current_size_micros);
+          const amount = total * cumulativeWeight / (expectedPayout > 0n ? expectedPayout : managed) - allocated;
+          allocated += amount;
+          this.store.finalizeConfirmedRedeem(execution, member, amount.toString());
+        }
+        this.store.updateCheckpoint(accountId, { executionId: execution.live_execution_id });
+      }
+    });
+    return { status: result.status, positionIds: members.map(row => row.live_position_id) };
   }
 
   private async redeemPositionUnlocked(positionId: string, riskDecisionId: string): Promise<{ status: string }> {
@@ -1626,6 +1847,13 @@ export class LiveExecutor implements ExecutorInterface {
     if (this.liveGateRunExists(finalGate.runId)) {
       this.store.transaction(() => this.store.bindFinalGateRun(execution!.live_execution_id, finalGate.runId));
     }
+    const finalSnapshotAge = executableOrderbookAgeMs(plan.book, this.now().valueOf());
+    if (!Number.isFinite(finalSnapshotAge) || finalSnapshotAge < 0 || finalSnapshotAge > RULESET.orderbookMaxAgeMs) {
+      this.store.audit("LIVE_EXECUTION", execution.live_execution_id, "submit_snapshot_stale", "ORDERBOOK_STALE_AFTER_FINAL_GATE", {
+        marketSnapshotTime: plan.book.marketSnapshotTime, dataAgeMs: finalSnapshotAge,
+      });
+      return { mode: "LIVE", executionId: execution.live_execution_id, state: execution.state };
+    }
     if (this.emergencyHaltedAccounts.has(input.accountId)) {
       this.store.transaction(() => this.store.rejectPendingExecution(execution!, "LIVE_ACCOUNT_EMERGENCY_HALTED"));
       return { mode: "LIVE", executionId: execution.live_execution_id, state: "REJECTED" };
@@ -1717,10 +1945,24 @@ export class LiveExecutor implements ExecutorInterface {
 
     let submitResult: OrderSubmitResult | null = null;
     try {
+      const beforeSubmit = (): void => {
+        if (this.emergencyHaltedAccounts.has(input.accountId)
+          || this.store.gateTransitionCount() !== submitClaimGateTransitionCount
+          || (this.environment === "PRODUCTION" && !this.store.isGateActive())) {
+          throw new Error("LIVE_GATE_CHANGED_BEFORE_POST");
+        }
+        const age = executableOrderbookAgeMs(plan.book, this.now().valueOf());
+        if (!Number.isFinite(age) || age < 0 || age > RULESET.orderbookMaxAgeMs) {
+          throw new Error("ORDERBOOK_STALE_BEFORE_POST");
+        }
+      };
       const submit = await withExternalTimeout(
         "SUBMIT_ORDER",
         this.externalCallTimeoutMs,
-        () => this.orderAdapter.submitOrder(request),
+        () => {
+          beforeSubmit();
+          return this.orderAdapter.submitOrder(request, { beforeSubmit });
+        },
       );
       submitResult = submit;
       this.validateSubmitResult(input.accountId, request, submit);
@@ -1757,7 +1999,10 @@ export class LiveExecutor implements ExecutorInterface {
             stateReason = "FAK_ZERO_FILL_RETRY";
           } else {
             this.store.releaseReservation(execution, request.liveOrderId, "FAK_REMAINDER_RELEASE");
-            nextState = plan.match.complete && BigInt(totalFilled) >= BigInt(request.sizeMicros)
+            const signedBudgetFilled = this.orderAdapter.adapterType === "POLYMARKET_CLOB"
+              ? submit.fills.reduce((total, fill) => total + BigInt(fill.notionalMicros), 0n) >= BigInt(request.amountMicros)
+              : BigInt(totalFilled) >= BigInt(request.sizeMicros);
+            nextState = plan.match.complete && signedBudgetFilled
               ? "EXECUTED"
               : "PARTIALLY_EXECUTED";
             stateReason = nextState === "EXECUTED" ? "FAK_FILLED" : "FAK_PARTIAL_CANCEL_REMAINDER";
@@ -1834,7 +2079,9 @@ export class LiveExecutor implements ExecutorInterface {
           request: { side, assetId: request.assetId, sizeMicros: request.sizeMicros },
           response: { error: reason },
         });
-        this.store.failUnsubmittedOrder(execution, request.liveOrderId, `ORDER_SUBMIT_FAILED:${reason}`);
+        this.store.failUnsubmittedOrder(execution, request.liveOrderId, `ORDER_SUBMIT_FAILED:${reason}`, {
+          retryable: reason === "ORDERBOOK_STALE_BEFORE_POST",
+        });
         if (side === "SELL" && reason.startsWith("SELL_FILL_")) {
           this.store.freezeOpenPositions(input.accountId, reason);
         }
@@ -1843,7 +2090,10 @@ export class LiveExecutor implements ExecutorInterface {
         this.database.exec("ROLLBACK");
         throw persistenceError;
       }
-      return { mode: "LIVE", executionId: execution.live_execution_id, state: "FAILED" };
+      return {
+        mode: "LIVE", executionId: execution.live_execution_id,
+        state: reason === "ORDERBOOK_STALE_BEFORE_POST" ? execution.state : "FAILED",
+      };
     }
   }
 
@@ -2508,6 +2758,7 @@ export class LiveExecutor implements ExecutorInterface {
         capitalSizingDecision: capitalSizing,
         buyAmountPolicyDecision: amountPolicy,
         replacingReservedAmountMicros: currentAmount,
+        replacingExecutionId: execution.live_execution_id,
         now: this.now().toISOString(),
       });
       finalRiskDecisionId = risk.riskDecisionId;
@@ -2595,7 +2846,10 @@ export class LiveExecutor implements ExecutorInterface {
       () => this.walletProvider.getStatus(),
     );
     if (status.status !== "ACTIVE") return { ok: false, reason: status.reason ?? "WALLET_DISABLED" };
-    const balance = await withExternalTimeout(
+    const capacity = this.walletProvider.getCapacity === undefined ? null
+      : await withExternalTimeout("WALLET_CAPACITY", this.externalCallTimeoutMs,
+        () => this.walletProvider.getCapacity!({ assetId, side }));
+    const balance = capacity?.balance ?? await withExternalTimeout(
       side === "BUY" ? "WALLET_BALANCE" : "OUTCOME_BALANCE",
       this.externalCallTimeoutMs,
       () => side === "BUY" ? this.walletProvider.getBalance() : this.walletProvider.getOutcomeBalance(assetId),
@@ -2603,7 +2857,7 @@ export class LiveExecutor implements ExecutorInterface {
     if (balance.status !== "AVAILABLE" || balance.balanceMicros === null) {
       return { ok: false, reason: balance.reason ?? (side === "BUY" ? "WALLET_BALANCE_UNAVAILABLE" : "OUTCOME_BALANCE_UNAVAILABLE") };
     }
-    const allowance = await withExternalTimeout(
+    const allowance = capacity?.allowance ?? await withExternalTimeout(
       side === "BUY" ? "WALLET_ALLOWANCE" : "OUTCOME_ALLOWANCE",
       this.externalCallTimeoutMs,
       () => side === "BUY" ? this.walletProvider.getAllowance() : this.walletProvider.getOutcomeAllowance(assetId),
@@ -2685,6 +2939,7 @@ export class LiveExecutor implements ExecutorInterface {
         feeRateBps: feeRateBps.toString(),
         feeExponent,
         feeModelVersion: executionRules.feeModelVersion,
+        ...(plan.book.marketRoute === undefined ? {} : { marketRoute: plan.book.marketRoute }),
         idempotencyKey,
       }),
     );
@@ -2707,6 +2962,15 @@ export class LiveExecutor implements ExecutorInterface {
     }
     const signedAmount = BigInt(amountMicros);
     const signedSize = BigInt(sizeMicros);
+    if (plan.book.minOrderSize !== undefined
+      && signedSize < decimalToScaled(plan.book.minOrderSize, SHARE_SCALE_DIGITS)) {
+      throw new Error("SIGNED_ORDER_BELOW_MARKET_MIN_ORDER_SIZE");
+    }
+    if (signedPayload.marketRoute !== undefined
+      && (signedPayload.marketRoute.assetId !== input.signal.assetId
+        || signedPayload.marketRoute.conditionId.toLowerCase() !== input.signal.conditionId.toLowerCase())) {
+      throw new Error("SIGNED_ORDER_MARKET_ROUTE_IDENTITY_MISMATCH");
+    }
     if (signedSize > BigInt(plannedSizeMicros)) throw new Error("SIGNED_ORDER_SIZE_EXCEEDS_EXECUTION_PLAN");
     if (signedAmount > signedSize) throw new Error("SIGNED_ORDER_PRICE_ABOVE_ONE");
     const plannedLimitNumerator = BigInt(plan.limitPriceUnits) * signedSize;
@@ -2744,16 +3008,17 @@ export class LiveExecutor implements ExecutorInterface {
       const independentlyDerivedTotal = side === "BUY"
         ? signedAmount + conservativeClobBuyFeeMicros({
           sizeMicros: signedSize,
+          amountMicros: signedAmount,
           upperPriceUnits: BigInt(plan.limitPriceUnits),
           feeRateBps: BigInt(feeRateBps),
           feeExponent,
         })
         : signedAmount;
-      if (independentlyDerivedTotal > BigInt(approvedBudgetMicros)) {
-        throw new Error("SIGNED_ORDER_TOTAL_COST_EXCEEDS_RISK_BUDGET");
-      }
       if (maxCost < independentlyDerivedTotal) {
         throw new Error("SIGNED_ORDER_MAX_COST_UNDERSTATES_DERIVED_FEE");
+      }
+      if (independentlyDerivedTotal > BigInt(approvedBudgetMicros)) {
+        throw new Error("SIGNED_ORDER_TOTAL_COST_EXCEEDS_RISK_BUDGET");
       }
       if (maxCost > BigInt(approvedBudgetMicros)) {
         throw new Error("SIGNED_ORDER_MAX_COST_OUT_OF_BUDGET");
@@ -2761,6 +3026,7 @@ export class LiveExecutor implements ExecutorInterface {
     } else if (side === "BUY") {
       const independentlyDerivedTotal = signedAmount + conservativeClobBuyFeeMicros({
         sizeMicros: signedSize,
+        amountMicros: signedAmount,
         upperPriceUnits: BigInt(plan.limitPriceUnits),
         feeRateBps: BigInt(feeRateBps),
         feeExponent,
@@ -2879,6 +3145,8 @@ export class LiveExecutor implements ExecutorInterface {
       status: submit.status,
       fills: submit.fills,
       requestedSizeMicros: request.sizeMicros,
+      requestedNotionalMicros: request.amountMicros,
+      orderType: request.orderType,
       limitPriceUnits: request.priceUnits,
       buyBudgetMicros: request.side === "BUY" ? request.budgetMicros : null,
       availableSellSizeMicros: availableSellSize,

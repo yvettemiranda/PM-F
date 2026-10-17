@@ -58,7 +58,7 @@ describe("paper buy fixed-point rounding", () => {
 });
 
 describe("CLOB fee ceiling", () => {
-  it("uses the 0.5 fee-curve peak for exponent two when a BUY limit is 0.8", () => {
+  it("bounds cash BUY fees at the fee/notional peak and includes fragmented-fill rounding", () => {
     const sizeMicros = 100_000_000n;
     const feeRateBps = 700n;
     const feeExponent = 2;
@@ -81,6 +81,34 @@ describe("CLOB fee ceiling", () => {
       upperPriceUnits: 800_000_000_000_000_000n,
       feeRateBps,
       feeExponent,
-    })).toBe(peak);
+    })).toBe(1_659_260n);
+  });
+
+  it("covers price improvement across every supported exponent", () => {
+    const notional = 5_000_000n;
+    for (const exponent of [1, 2, 3, 4]) {
+      const ceiling = conservativeClobBuyFeeMicros({
+        amountMicros: notional, sizeMicros: 6_250_000n,
+        upperPriceUnits: 800_000_000_000_000_000n, feeRateBps: 700n, feeExponent: exponent,
+      });
+      for (let tick = 1n; tick <= 800n; tick += 7n) {
+        const price = tick * 1_000_000_000_000_000n;
+        const size = (notional * 1_000_000_000_000_000_000n) / price;
+        expect(roundedClobPlatformFeeMicros({
+          sizeMicros: size, priceUnits: price, feeRateBps: 700n, feeExponent: exponent,
+        })).toBeLessThanOrEqual(ceiling);
+      }
+    }
+  });
+
+  it("covers tiny fills which round up separately", () => {
+    const fee = roundedClobPlatformFeeMicros({
+      sizeMicros: 7_300n, priceUnits: 10_000_000_000_000_000n, feeRateBps: 700n, feeExponent: 1,
+    });
+    expect(fee).toBe(10n);
+    expect(conservativeClobBuyFeeMicros({
+      amountMicros: 7_300n, sizeMicros: 14_600n,
+      upperPriceUnits: 500_000_000_000_000_000n, feeRateBps: 700n, feeExponent: 1,
+    })).toBeGreaterThanOrEqual(100n * fee);
   });
 });

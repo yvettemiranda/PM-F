@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -9,11 +8,15 @@ import { prepareRuntimeDatabase } from "../src/infra/sqlite/runtime-database-pre
 import {
   ProductionLivePrerequisiteManager,
   liveProductionValidationArtifactPath,
+  liveProductionEvidencePathsFromArguments,
+  readLiveProductionValidationEvidence,
 } from "../src/operator/production-live-prerequisites.js";
 import {
   computeLiveProductionRuntimeHash,
   resolveLiveProductionRuntimeIdentity,
 } from "../src/operator/live-production-build.js";
+
+import { copyProductionEvidenceTestSources, writeProductionEvidenceTestArtifacts } from "./fixtures/production-live-evidence.js";
 
 const roots: string[] = [];
 const sourceVersion = { commit: "b".repeat(40), dirty: false };
@@ -23,36 +26,17 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "ni-k-live-prerequisites-"));
   roots.push(root);
+  copyProductionEvidenceTestSources(root);
   const databasePath = join(root, "data/runtime/ni-k.sqlite");
   await prepareRuntimeDatabase({ databasePath, sourceVersion });
-  const finalReport = [
-    "OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION",
-    "86,400,012 ms",
-    "live_gate_state=LIVE_DISABLED",
-  ].join("\n");
-  const isolated = JSON.stringify({
-    status: "PASSED",
-    safety: { realOrdersCreated: 0, chainWrites: 0 },
-  });
-  const finalPath = join(
-    root,
-    "data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md",
-  );
-  const isolatedPath = join(root, "data/operator/paper-campaign-isolated-verification.json");
-  mkdirSync(dirname(finalPath), { recursive: true });
-  writeFileSync(finalPath, finalReport);
-  writeFileSync(isolatedPath, isolated);
+  const artifacts = writeProductionEvidenceTestArtifacts(root, sourceVersion.commit);
   const artifactPath = liveProductionValidationArtifactPath(root);
   mkdirSync(dirname(artifactPath), { recursive: true });
   writeFileSync(artifactPath, JSON.stringify({
-    schemaVersion: "live-production-validation-v2",
+    schemaVersion: "live-production-validation-v3",
     status: "PASSED",
     sourceCodeCommit: sourceVersion.commit,
     sourceCodeDirty: false,
@@ -64,10 +48,9 @@ async function fixture() {
     testFileCount: 70,
     testCount: 900,
     diffCheckPassed: true,
-    finalPaperReportSha256: sha256(finalReport),
-    isolatedVerificationSha256: sha256(isolated),
+    ...artifacts.evidence,
   }));
-  return { root, databasePath };
+  return { root, databasePath, ...artifacts };
 }
 
 describe("ProductionLivePrerequisiteManager", () => {
@@ -237,5 +220,109 @@ describe("ProductionLivePrerequisiteManager", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+function managerFor(env: Awaited<ReturnType<typeof fixture>>) {
+  return new ProductionLivePrerequisiteManager({ projectRoot: env.root, databasePath: env.databasePath,
+    sourceVersion, walletAddress: wallet, geoblockProvider: { providerType: "LIVE_READONLY",
+      check: async () => ({ status: "UNAVAILABLE", checkedAt: null, source: null, reason: "ISOLATED_TEST" }) } });
+}
+
+function writeJson(root: string, path: string, value: unknown): void {
+  writeFileSync(join(root, path), JSON.stringify(value));
+}
+
+describe("portable production evidence", () => {
+  it("uses native report paths without a fixed date or exact duration and persists their bindings", async () => {
+    const env = await fixture();
+    const evidence = readLiveProductionValidationEvidence({ projectRoot: env.root, sourceCodeCommit: sourceVersion.commit, ...env.paths });
+    expect(evidence).toMatchObject(env.evidence);
+    expect(evidence.finalPaperReportPath).toBe("data/operator/campaigns/current/campaign-report.json");
+    expect(evidence.observeReportPath).toBe("data/observe/current-eight-hour-report.json");
+    managerFor(env).refreshStaticEvidence();
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    const row = db.prepare("SELECT evidence_json FROM live_gate_prerequisites WHERE prerequisite_key='OBSERVE_ONLY_8H_SOAK'").get() as { evidence_json: string };
+    expect(JSON.parse(row.evidence_json)).toMatchObject({ coreCompatibilityHash: evidence.coreCompatibilityHash,
+      observeReportSha256: evidence.observeReportSha256, evidencePaths: { observe: evidence.observeReportPath } });
+    db.close();
+  });
+
+  it("accepts exactly 24 hours of Paper and 8 uninterrupted hours of Observe", async () => {
+    const env = await fixture();
+    env.paper.campaign.accumulatedActiveRuntimeMs = 86_400_000;
+    env.observe.metrics.activeRuntimeMs = 28_800_000;
+    env.observe.metrics.durationMs = 28_800_000;
+    env.observe.metrics.startedAt = "2026-07-27T20:00:00.000Z";
+    writeJson(env.root, env.paths.finalPaperReportPath, env.paper);
+    writeJson(env.root, env.paths.observeReportPath, env.observe);
+    expect(() => readLiveProductionValidationEvidence({ projectRoot: env.root, sourceCodeCommit: sourceVersion.commit, ...env.paths })).not.toThrow();
+  });
+
+  it.each([
+    { name: "Paper duration one millisecond short", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.campaign.accumulatedActiveRuntimeMs = 86_399_999; } },
+    { name: "Observe duration one millisecond short", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.metrics.activeRuntimeMs = 28_799_999; } },
+    { name: "Observe wall duration shorter than credited runtime", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.metrics.startedAt = "2026-07-28T03:59:59.000Z"; } },
+    { name: "Observe scheduling gap", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.metrics.schedulingGapCount = 1; } },
+    { name: "unrecovered connection gap", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.metrics.unrecoveredConnectionGap = true; } },
+    { name: "Paper incomplete coverage", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.campaign.missingScenarios = ["BUY"]; } },
+    { name: "Paper false coverage detail", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.campaign.coverage.BUY!.covered = false; } },
+    { name: "Paper failed integrity", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.latestIntegrity.foreignKeyIssueCount = 1; } },
+    { name: "Paper stale core", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.coreCompatibilityHash = "0".repeat(64); } },
+    { name: "Paper stale source", target: "paper", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.paper.campaign.sourceVersion.commit = "c".repeat(40); } },
+    { name: "Observe dirty source", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.sourceCodeDirty = true; } },
+    { name: "Observe order created", target: "observe", mutate: (env: Awaited<ReturnType<typeof fixture>>) => { env.observe.safety.ordersCreated = 1; } },
+  ])("rejects $name before writing any prerequisite pass", async ({ target, mutate }) => {
+    const env = await fixture();
+    mutate(env);
+    writeJson(env.root, target === "paper" ? env.paths.finalPaperReportPath : env.paths.observeReportPath, target === "paper" ? env.paper : env.observe);
+    expect(() => managerFor(env).refreshStaticEvidence()).toThrow(target === "paper" ? "LIVE_PRODUCTION_FINAL_PAPER_EVIDENCE_INVALID" : "LIVE_PRODUCTION_OBSERVE_EVIDENCE_INVALID");
+    const db = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(db.prepare("SELECT count(*) count FROM live_gate_prerequisites WHERE status='PASSED'").get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it.each(["bare status", "missing replay proofs", "stale suite", "chain write", "other target"])("rejects isolated evidence with %s", async (name) => {
+    const env = await fixture();
+    const value = env.read(env.paths.isolatedVerificationPath);
+    if (name === "bare status") {
+      writeJson(env.root, env.paths.isolatedVerificationPath, { status: "PASSED", safety: { realOrdersCreated: 0, chainWrites: 0 } });
+    } else {
+      if (name === "missing replay proofs") delete value.proofs;
+      if (name === "stale suite") value.verificationSuiteHash = "0".repeat(64);
+      if (name === "chain write") (value.safety as Record<string, unknown>).chainWrites = 1;
+      if (name === "other target") value.targetWallet = `0x${"2".repeat(40)}`;
+      writeJson(env.root, env.paths.isolatedVerificationPath, value);
+    }
+    expect(() => readLiveProductionValidationEvidence({ projectRoot: env.root, sourceCodeCommit: sourceVersion.commit, ...env.paths })).toThrow("LIVE_PRODUCTION_ISOLATED_EVIDENCE_INVALID");
+  });
+
+  it("rejects legacy prose-only v2 artifacts and verifies current file hashes", async () => {
+    const env = await fixture();
+    const artifactPath = liveProductionValidationArtifactPath(env.root);
+    const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    writeJson(env.root, env.paths.observeReportPath, env.observe); // identical JSON bytes still bind correctly
+    managerFor(env).refreshStaticEvidence();
+    writeFileSync(join(env.root, env.paths.observeReportPath), `${JSON.stringify(env.observe, null, 2)}\n`);
+    expect(() => managerFor(env).refreshStaticEvidence()).toThrow("LIVE_PRODUCTION_EVIDENCE_BINDING_MISMATCH");
+    artifact.schemaVersion = "live-production-validation-v2";
+    writeFileSync(artifactPath, JSON.stringify(artifact));
+    expect(() => managerFor(env).refreshStaticEvidence()).toThrow("LIVE_PRODUCTION_VALIDATION_ARTIFACT_INVALID");
+  });
+
+  it("rejects report references that escape the project", async () => {
+    const env = await fixture();
+    expect(() => readLiveProductionValidationEvidence({ projectRoot: env.root, sourceCodeCommit: sourceVersion.commit,
+      ...env.paths, finalPaperReportPath: "../outside-report.json" })).toThrow("LIVE_PRODUCTION_EVIDENCE_PATH_OUTSIDE_PROJECT");
+  });
+
+  it("requires explicit current Paper/Observe paths in the validation CLI", () => {
+    expect(liveProductionEvidencePathsFromArguments(["--paper-report=data/current.json", "--observe-report=data/observe.json"])).toEqual({
+      finalPaperReportPath: "data/current.json", observeReportPath: "data/observe.json",
+      isolatedVerificationPath: "data/operator/paper-campaign-isolated-verification.json",
+    });
+    expect(() => liveProductionEvidencePathsFromArguments([])).toThrow("LIVE_PRODUCTION_VALIDATION_EVIDENCE_PATHS_REQUIRED");
+    expect(() => liveProductionEvidencePathsFromArguments(["--paper-report=a", "--paper-report=b"])).toThrow("LIVE_PRODUCTION_VALIDATION_ARGUMENT_INVALID");
+    expect(() => liveProductionEvidencePathsFromArguments(["--paper-report=", "--observe-report=b"])).toThrow("LIVE_PRODUCTION_VALIDATION_ARGUMENT_INVALID");
   });
 });

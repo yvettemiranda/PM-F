@@ -1,4 +1,4 @@
-import { Chain, SignatureTypeV2, getContractConfig } from "@polymarket/clob-client-v2";
+import { SignatureTypeV2 } from "@polymarket/clob-client-v2";
 import { resolve } from "node:path";
 import {
   BrowserWalletClobSigner,
@@ -19,6 +19,9 @@ import {
 } from "../live/polymarket-readonly-wallet-provider.js";
 import { PublicClobLiveMarketDataProvider } from "../live/live-market-data.js";
 import { SessionAuthenticatedClobClient } from "../live/session-authenticated-clob-client.js";
+import { RedemptionJournal } from "../live/redemption-journal.js";
+import { PublicMarketRouteProvider } from "../live/market-protocol.js";
+import { RpcPolygonChainReader } from "../live/polygon-chain-reader.js";
 import {
   ConfiguredOperatorLiveGateActions,
   ConfiguredOperatorLiveRuntimeActions,
@@ -80,6 +83,9 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
   ) {
     throw new Error("LIVE_PRODUCTION_CONNECTED_CONFIGURATION_MISMATCH");
   }
+  if (config.signatureType === "POLY_PROXY" || config.signatureType === "POLY_1271") {
+    throw new Error("LIVE_WALLET_COMPLETE_RUNTIME_UNSUPPORTED:EOA_OR_SINGLE_OWNER_SAFE_REQUIRED");
+  }
   const now = input.now ?? (() => new Date());
   const sourceVersion = validatedLiveProductionSourceVersion(input.projectRoot);
   const databasePath = resolve(input.projectRoot, OPERATOR_DATABASE_FILE);
@@ -91,11 +97,21 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
     now,
   });
   const walletSignatureType = signatureType(config.signatureType);
+  const routeProvider = new PublicMarketRouteProvider();
+  const chainReader = new RpcPolygonChainReader();
+  if (config.signatureType === "POLY_GNOSIS_SAFE") {
+    const safe = await chainReader.safeOwners(config.tradingWalletAddress);
+    if (safe.threshold !== 1n || safe.owners.length !== 1 || safe.owners[0]?.toLowerCase() !== input.walletSession.walletAddress.toLowerCase()) {
+      throw new Error("LIVE_SAFE_SINGLE_OWNER_REQUIRED");
+    }
+    input.walletSessionBinding.assertCurrent();
+  }
   const signer = new BrowserWalletClobSigner({
     walletBinding: input.walletSessionBinding,
     requestBroker: input.walletRequestBroker,
     signatureType: walletSignatureType,
     funderAddress: config.tradingWalletAddress,
+    routeProvider,
   });
   const clobClient = new SessionAuthenticatedClobClient({
     walletBinding: input.walletSessionBinding,
@@ -103,12 +119,11 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
     signatureType: walletSignatureType,
     funderAddress: config.tradingWalletAddress,
   });
-  const exchangeV3 = getContractConfig(Chain.POLYGON).exchangeV3;
   const walletProvider = new PolymarketReadonlyWalletProvider({
     walletBinding: input.walletSessionBinding,
     funderAddress: config.tradingWalletAddress,
     clobClient,
-    allowanceSpenders: [exchangeV3],
+    routeProvider,
   });
   const balanceProvider = new PolymarketReadonlyBalanceProvider(walletProvider);
   const geoblockProvider = new OfficialGeoblockProvider({ now });
@@ -130,13 +145,18 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
     bankrollMicros: config.liveBankrollMicros,
     signatureType: config.signatureType,
     tradingWalletAddress: config.tradingWalletAddress,
+    chainReader,
   });
+  const redemptionJournal = new RedemptionJournal(databasePath, now);
   const redeemAdapter = new BrowserWalletRedeemAdapter({
     walletBinding: input.walletSessionBinding,
     requestBroker: input.walletRequestBroker,
     receiptProvider,
     signatureType: config.signatureType,
     tradingWalletAddress: config.tradingWalletAddress,
+    chainReader,
+    routeProvider,
+    journal: redemptionJournal,
   });
   const assembly = await assembleConnectedLiveRuntime({
     databasePath,
@@ -168,6 +188,10 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
         };
       },
     },
+  }).catch((error: unknown) => {
+    redemptionJournal.close();
+    clobClient.invalidate();
+    throw error;
   });
   const production = {
     FORMAL_WALLET: true,
@@ -195,6 +219,7 @@ export async function assembleDefaultConnectedLiveRuntime(input: {
     ),
     dispose: () => {
       clobClient.invalidate();
+      redemptionJournal.close();
       assembly.close();
     },
   };

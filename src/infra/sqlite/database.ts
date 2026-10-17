@@ -815,6 +815,22 @@ export class Phase0Database {
         throw error;
       }
     }
+    for (const [version, file] of [
+      ["2.33.0", "038_observe_event_ordering.sql"],
+      ["2.34.0", "039_live_redemption_journal.sql"],
+    ] as const) {
+      if (this.database.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(version)) continue;
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(readFileSync(new URL(`./${file}`, import.meta.url), "utf8"));
+        this.database.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (?,?)")
+          .run(version, new Date().toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.database
       .prepare(
         `INSERT OR IGNORE INTO rulesets(

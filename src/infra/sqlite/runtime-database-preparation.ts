@@ -60,9 +60,19 @@ export const RUNTIME_SCHEMA_MIGRATION_VERSIONS = [
   "2.30.0",
   "2.31.0",
   "2.32.0",
+  "2.33.0",
+  "2.34.0",
 ] as const;
 
 export const RUNTIME_CURRENT_REQUIRED_TRIGGERS = [
+  "observe_event_order_no_update",
+  "observe_event_order_no_delete",
+  "observe_ordering_blocks_no_update",
+  "observe_ordering_blocks_no_delete",
+  "live_redemption_intent_immutable",
+  "live_redemption_hash_immutable",
+  "live_redemption_confirmed_immutable",
+  "live_redemption_no_delete",
   "api_capture_payloads_no_delete",
   "api_capture_payloads_no_update",
   "api_captures_no_delete",
@@ -248,6 +258,9 @@ function assertMigrationHistory(database: DatabaseSync, expectation: SchemaExpec
 function assertCurrentSchemaObjects(database: DatabaseSync): void {
   assertPaperRuntimeSchemaContract(database, new Set(migrationVersions(database)));
   const requiredTables = [
+    "observe_event_order_evidence",
+    "observe_ordering_blocks",
+    "live_redemption_journal",
     "negative_risk_conversion_evidence",
     "split_projection_evidence",
     "observe_projection_snapshots",
@@ -269,6 +282,9 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     if (!row) throw new Error(`RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:table:${table}`);
   }
   const requiredColumns: Record<string, string[]> = {
+    observe_event_order_evidence: ["chain_order_json", "evidence_hash"],
+    observe_ordering_blocks: ["target_id", "reason", "detail_json"],
+    live_redemption_journal: ["idempotency_key", "wallet_address", "asset_id", "intent_json", "intent_sha256", "state", "transaction_hash", "evidence_json", "created_at", "updated_at"],
     capital_estimates: ["capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
     observe_checkpoints: ["projection_snapshot_hash"],
     observe_runs: ["campaign_id", "campaign_session_id"],
@@ -312,6 +328,7 @@ function assertCurrentSchemaObjects(database: DatabaseSync): void {
     if (!row) throw new Error(`RUNTIME_DATABASE_SCHEMA_OBJECT_MISSING:trigger:${trigger}`);
   }
   for (const index of [
+    "live_redemption_wallet_inflight",
     "observe_signal_emissions_source_event_idx",
     "paper_validation_campaign_transition_sequence_idx",
     "paper_validation_session_transition_sequence_idx",

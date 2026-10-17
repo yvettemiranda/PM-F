@@ -13,6 +13,8 @@ import type { LiveWalletRequestBroker } from "../operator/live-wallet-request-br
 import type { LiveWalletRuntimeBinding } from "../operator/live-wallet-session.js";
 import type { Signer } from "./signer.js";
 import type { SignedPayload } from "./live-types.js";
+import { buildExactCtfOrder } from "./clob-exact-order-builder.js";
+import { PublicMarketRouteProvider, validateMarketRoute, type PolymarketMarketRoute, type MarketRouteProvider } from "./market-protocol.js";
 
 type ClobSigner = NonNullable<ClobClientOptions["signer"]>;
 
@@ -29,6 +31,7 @@ export interface BrowserWalletClobSignerOptions {
   funderAddress?: string;
   clobHost?: string;
   orderClient?: Pick<ClobClient, "createExchangeV3OrderFromAmounts">;
+  routeProvider?: MarketRouteProvider;
 }
 
 interface TypedDataInput {
@@ -86,6 +89,7 @@ export class BrowserWalletClobSigner implements Signer {
   readonly clobSigner: ClobSigner;
 
   private readonly orderClient: Pick<ClobClient, "createExchangeV3OrderFromAmounts">;
+  private readonly routeProvider: MarketRouteProvider;
 
   constructor(private readonly options: BrowserWalletClobSignerOptions) {
     options.walletBinding.assertCurrent();
@@ -126,6 +130,7 @@ export class BrowserWalletClobSigner implements Signer {
       useServerTime: true,
       throwOnError: true,
     });
+    this.routeProvider = options.routeProvider ?? new PublicMarketRouteProvider();
   }
 
   async address(): Promise<string> {
@@ -138,15 +143,15 @@ export class BrowserWalletClobSigner implements Signer {
     const orderSide = side(payload.side);
     const assetId = String(payload.assetId ?? "").trim();
     if (!/^[0-9]+$/.test(assetId)) throw new Error("LIVE_SIGNER_ASSET_ID_INVALID");
-    const amountMicros = positiveInteger(payload.amountMicros, "LIVE_SIGNER_AMOUNT_INVALID");
-    const sizeMicros = positiveInteger(payload.sizeMicros, "LIVE_SIGNER_SIZE_INVALID");
+    let amountMicros = positiveInteger(payload.amountMicros, "LIVE_SIGNER_AMOUNT_INVALID");
+    let sizeMicros = positiveInteger(payload.sizeMicros, "LIVE_SIGNER_SIZE_INVALID");
     const budgetMicros = positiveInteger(payload.budgetMicros, "LIVE_SIGNER_BUDGET_INVALID");
     const priceUnits = positiveInteger(payload.priceUnits, "LIVE_SIGNER_PRICE_INVALID");
     const feeRateBps = nonNegativeInteger(payload.feeRateBps, "LIVE_SIGNER_FEE_RATE_INVALID");
     const feeExponent = Number(payload.feeExponent);
     const feeModelVersion = String(payload.feeModelVersion ?? "").trim();
     if (priceUnits >= PRICE_SCALE) throw new Error("LIVE_SIGNER_PRICE_INVALID");
-    if (!Number.isSafeInteger(feeExponent) || feeExponent < 1 || feeExponent > 4) {
+    if (!Number.isSafeInteger(feeExponent) || feeExponent < (feeRateBps === 0n ? 0 : 1) || feeExponent > 4) {
       throw new Error("LIVE_SIGNER_FEE_EXPONENT_INVALID");
     }
     if (!feeModelVersion) throw new Error("LIVE_SIGNER_FEE_MODEL_VERSION_REQUIRED");
@@ -164,23 +169,47 @@ export class BrowserWalletClobSigner implements Signer {
     if (orderSide === "SELL" && amountMicros > sizeMicros) {
       throw new Error("LIVE_SIGNER_SELL_AMOUNT_INVALID");
     }
-    const maxTotalCostMicros = orderSide === "BUY"
-      ? amountMicros + conservativeClobBuyFeeMicros({
-        sizeMicros,
-        upperPriceUnits: priceUnits,
-        feeRateBps,
-        feeExponent,
-      })
-      : amountMicros;
+    const totalCost = (size: bigint): bigint => {
+      const notional = (priceUnits * size + PRICE_SCALE - 1n) / PRICE_SCALE;
+      return notional + conservativeClobBuyFeeMicros({
+        amountMicros: notional, sizeMicros: size, upperPriceUnits: priceUnits, feeRateBps, feeExponent,
+      });
+    };
+    if (orderSide === "BUY" && totalCost(sizeMicros) > budgetMicros) {
+      // Preserve the approved cash budget and original price, never enlarge it
+      // to cover fees. Monotone integer search also preserves exact raw amounts.
+      let low = 0n;
+      let high = sizeMicros;
+      while (low < high) {
+        const middle = (low + high + 1n) / 2n;
+        if (totalCost(middle) <= budgetMicros) low = middle;
+        else high = middle - 1n;
+      }
+      // Two-decimal shares are accepted at every supported SDK tick. Keeping
+      // that quantum makes maker/taker encode the original price exactly.
+      sizeMicros = (low / 10_000n) * 10_000n;
+      if (sizeMicros === 0n) throw new Error("LIVE_SIGNER_TOTAL_COST_EXCEEDS_BUDGET");
+      amountMicros = (priceUnits * sizeMicros + PRICE_SCALE - 1n) / PRICE_SCALE;
+    }
+    const maxTotalCostMicros = orderSide === "BUY" ? totalCost(sizeMicros) : amountMicros;
     if (maxTotalCostMicros > budgetMicros && orderSide === "BUY") {
       throw new Error("LIVE_SIGNER_TOTAL_COST_EXCEEDS_BUDGET");
     }
-    const signedOrder = await this.orderClient.createExchangeV3OrderFromAmounts({
-      tokenID: assetId,
-      makerAmount: (orderSide === "BUY" ? amountMicros : sizeMicros).toString(),
-      takerAmount: (orderSide === "BUY" ? sizeMicros : amountMicros).toString(),
-      side: orderSide === "BUY" ? Side.BUY : Side.SELL,
-    });
+    const conditionId = typeof payload.conditionId === "string" ? payload.conditionId : undefined;
+    const marketRoute = validateMarketRoute(payload.marketRoute === undefined
+      ? await this.routeProvider.resolve(assetId, conditionId)
+      : payload.marketRoute as PolymarketMarketRoute, assetId, conditionId);
+    this.options.walletBinding.assertCurrent();
+    const makerAmount = (orderSide === "BUY" ? amountMicros : sizeMicros).toString();
+    const takerAmount = (orderSide === "BUY" ? sizeMicros : amountMicros).toString();
+    const signedOrder = marketRoute.domainVersion === "3"
+      ? await this.orderClient.createExchangeV3OrderFromAmounts({
+        tokenID: assetId, makerAmount, takerAmount, side: orderSide === "BUY" ? Side.BUY : Side.SELL,
+      })
+      : await buildExactCtfOrder({
+        route: marketRoute, signer: this.clobSigner, makerAddress, signerAddress: authorizedSigner,
+        signatureType: this.signatureType, makerAmount, takerAmount, side: orderSide,
+      });
     this.options.walletBinding.assertCurrent();
     this.validateSignedOrder(signedOrder, {
       side: orderSide,
@@ -193,7 +222,8 @@ export class BrowserWalletClobSigner implements Signer {
     return {
       signerAddress: authorizedSigner,
       signature: signedOrder.signature,
-      payloadHash: createHash("sha256").update(stableJson(signedOrder)).digest("hex"),
+      payloadHash: createHash("sha256").update(stableJson({ signedOrder, marketRoute })).digest("hex"),
+      marketRoute,
       signedOrder,
       orderAmountMicros: amountMicros.toString(),
       orderSizeMicros: sizeMicros.toString(),

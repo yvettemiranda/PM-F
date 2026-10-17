@@ -60,6 +60,7 @@ export interface ClobOrderbook {
   min_order_size?: string;
   tick_size?: string;
   neg_risk?: boolean;
+  version?: string;
 }
 
 export interface ClobMarket {

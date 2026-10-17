@@ -37,6 +37,7 @@ import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
 import {
   fullExitThresholdForTargetSell,
   parseEffectiveTargetSellRatio,
+  allocateRemainingTargetSellSizes,
   type EffectiveTargetSellRatio,
 } from "../execution/target-sell-policy.js";
 import {
@@ -66,6 +67,7 @@ import { PortfolioProjectionService } from "../portfolio/portfolio-projection.js
 import { PaperAcceptanceSummaryService, type PaperAcceptanceSummary } from "./paper-acceptance-summary.js";
 import { RiskManager, type RiskDecision } from "../risk/risk-manager.js";
 import { SettlementService, type SettlementCandidate, type SettlementStore } from "../settlement/settlement-service.js";
+import { settlementClaimAmount } from "../settlement/settlement-allocation.js";
 import {
   bestExecutionAskPriceUnits,
   buyNoFillReason,
@@ -1375,7 +1377,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         if (preapprovedRisk) {
           this.assertPreapprovedBuyRiskAmount(preapprovedRisk.riskDecisionId, capital.amount);
         }
-        const risk = preapprovedRisk ?? this.riskManager.evaluate({
+        let risk = preapprovedRisk ?? this.riskManager.evaluate({
           mode: this.mode,
           accountId,
           signal,
@@ -1385,6 +1387,21 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
           buyAmountPolicyDecision: capital.amountPolicy,
           now,
         });
+        // A caller's approval can predate another reservation. Recheck under
+        // the writer lock before committing any new cash obligation.
+        if (preapprovedRisk && risk.decision === "ALLOW" && capital.amount !== null) {
+          const reason = this.riskManager.buyExposureRejectReason({
+            mode: this.mode, accountId, assetId: signal.assetId, conditionId: signal.conditionId,
+            requestedAmountMicros: capital.amount,
+          });
+          if (reason) risk = this.riskManager.recordSystemDecision({
+            mode: this.mode, accountId, signalId: signal.signalId,
+            contextId: signal.context?.contextId ?? null, entityId: executionId,
+            executionType: "TARGET_BUY", decision: "REJECT", reason,
+            requestedAmountMicros: capital.amount, requestedSizeMicros: null,
+            rulesetHash: signal.context?.rulesetHash ?? this.signalRulesetHash(signal.signalId), now,
+          });
+        }
         if (risk.decision === "REJECT") {
           const reason = risk.riskRejectReason ?? "RISK_REJECTED";
           this.insertRejectedExecution(accountId, signal, executionId, idempotency, reason, now, risk);
@@ -1895,8 +1912,16 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const spent = BigInt(matched.filledNotionalMicros) + BigInt(matched.feeMicros);
     const original = BigInt(reservation.original_amount_micros);
     const positionId = hash([activeExecution.paper_execution_id, "POSITION"]);
+    let exposureRejection: string | null = null;
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      exposureRejection = this.riskManager.buyExposureRejectReason({
+        mode: this.mode, accountId: activeExecution.paper_account_id,
+        assetId: activeExecution.asset_id, conditionId: activeExecution.condition_id,
+        requestedAmountMicros: BigInt(reservation.remaining_amount_micros),
+        replacingExecutionId: activeExecution.paper_execution_id,
+      });
+      if (exposureRejection) throw new Error(exposureRejection);
       this.saveMarketSnapshots(book, fee, age);
       this.insertMarketConstraintEvidence(activeExecution, book, constraint, now);
       this.insertOrder(orderId, activeExecution, "BUY", matched.complete ? "FILLED" : "PARTIALLY_FILLED", matched, bookId, feeId, null, now);
@@ -1991,6 +2016,10 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
       return finalState;
     } catch (error) {
       this.database.exec("ROLLBACK");
+      if (exposureRejection) {
+        this.rejectAndRelease(activeExecution, exposureRejection);
+        return "REJECTED";
+      }
       throw error;
     }
   }
@@ -2094,6 +2123,7 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         capitalSizingDecision: capitalSizing,
         buyAmountPolicyDecision: amountPolicy,
         replacingReservedAmountMicros: currentAmount,
+        replacingExecutionId: execution.paper_execution_id,
         now,
       });
       if (risk.decision === "REJECT") {
@@ -2396,12 +2426,40 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     const numerator = BigInt(resolution.payoutNumerator!);
     const denominator = BigInt(resolution.payoutDenominator!);
     if (denominator <= 0n || numerator < 0n || numerator > denominator) throw new Error("INVALID_SETTLEMENT_PAYOUT");
-    const redeem = (BigInt(position.current_size_micros) * numerator) / denominator;
     const cost = BigInt(position.remaining_cost_micros);
-    const pnl = calculateRealizedPnl({ proceedsMicros: redeem, costBasisMicros: cost, feeMicros: 0n });
     const signal = this.loadSignal(position.signal_id);
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      // Redemption is rounded for the asset balance, rather than once for
+      // every opening lot. Persisted claims retain the remainder over restarts
+      // and ruleset changes without rewriting any historical ledger entries.
+      const priorClaims = this.database.prepare(
+        `SELECT s.payout_numerator,s.payout_denominator,s.redeem_amount_micros,e.requested_size_micros
+         FROM paper_settlements s JOIN paper_executions e ON e.paper_execution_id=s.paper_execution_id
+         WHERE e.paper_account_id=? AND e.asset_id=? AND lower(e.condition_id)=?`,
+      ).all(position.paper_account_id, position.asset_id, position.condition_id.toLowerCase()) as Array<{
+        payout_numerator: string; payout_denominator: string;
+        redeem_amount_micros: string; requested_size_micros: string;
+      }>;
+      let previouslySettledSizeMicros = 0n;
+      let previouslyPaidMicros = 0n;
+      for (const claim of priorClaims) {
+        const priorNumerator = BigInt(claim.payout_numerator);
+        const priorDenominator = BigInt(claim.payout_denominator);
+        const priorSize = BigInt(claim.requested_size_micros);
+        const priorPaid = BigInt(claim.redeem_amount_micros);
+        if (priorDenominator <= 0n || priorNumerator < 0n || priorNumerator > priorDenominator
+          || priorNumerator * denominator !== numerator * priorDenominator
+          || priorSize < 0n || priorPaid < 0n) throw new Error("SETTLEMENT_PRIOR_CLAIM_INCONSISTENT");
+        previouslySettledSizeMicros += priorSize;
+        previouslyPaidMicros += priorPaid;
+      }
+      const allocation = settlementClaimAmount({
+        sizeMicros: BigInt(position.current_size_micros), numerator, denominator,
+        previouslySettledSizeMicros, previouslyPaidMicros,
+      });
+      const redeem = allocation.redeemMicros;
+      const pnl = calculateRealizedPnl({ proceedsMicros: redeem, costBasisMicros: cost, feeMicros: 0n });
       const risk = this.riskManager.recordSystemDecision({
         mode: this.mode,
         accountId: position.paper_account_id,
@@ -2459,6 +2517,12 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
         sourceUrl: resolution.sourceUrl,
         snapshotTime: resolution.snapshotTime,
         raw: resolution.raw,
+        assetClaimAllocation: {
+          previouslySettledSizeMicros: previouslySettledSizeMicros.toString(),
+          previouslyPaidMicros: previouslyPaidMicros.toString(),
+          aggregateRedeemMicros: allocation.aggregateRedeemMicros.toString(),
+          allocatedRedeemMicros: redeem.toString(),
+        },
       });
       const resolutionHash = createHash("sha256").update(resolutionJson).digest("hex");
       this.database.prepare(
@@ -3342,7 +3406,6 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
     ratio: EffectiveTargetSellRatio | null,
   ): Array<{ positionId: string; size: bigint }> {
     if (!ratio) return [];
-    const { numerator, denominator } = ratio;
     const positions = this.database.prepare(
       `SELECT * FROM paper_positions
        WHERE paper_account_id=? AND asset_id=? AND condition_id=?
@@ -3352,31 +3415,28 @@ export class PaperExecutor implements ExecutorInterface, SettlementStore {
          )
        ORDER BY created_at,paper_position_id`,
     ).all(accountId, signal.assetId, signal.conditionId) as unknown as PositionRow[];
-    return positions
-      .map((position) => {
-        const current = BigInt(position.current_size_micros);
-        const desired = (current * numerator) / denominator;
-        const pendingRows = this.database.prepare(
-          `SELECT ep.requested_size_micros,ep.filled_size_micros
-           FROM paper_execution_positions ep
-           JOIN paper_executions e ON e.paper_execution_id=ep.paper_execution_id
-           WHERE ep.paper_position_id=?
-             AND e.state IN ('EXIT_PENDING','STOP_EXIT_PENDING')`,
-        ).all(position.paper_position_id) as unknown as Array<{
-          requested_size_micros: string;
-          filled_size_micros: string;
-        }>;
-        const pending = pendingRows.reduce(
-          (total, row) => total + BigInt(row.requested_size_micros) - BigInt(row.filled_size_micros),
-          0n,
-        );
-        const available = current > pending ? current - pending : 0n;
-        return {
-          positionId: position.paper_position_id,
-          size: desired < available ? desired : available,
-        };
-      })
-      .filter((item) => item.size > 0n);
+    const pendingRows = this.database.prepare(
+      `SELECT ep.paper_position_id,ep.requested_size_micros,ep.filled_size_micros
+       FROM paper_execution_positions ep
+       JOIN paper_executions e ON e.paper_execution_id=ep.paper_execution_id
+       WHERE e.paper_account_id=? AND e.asset_id=? AND e.condition_id=?
+         AND e.state IN ('EXIT_PENDING','STOP_EXIT_PENDING')`,
+    ).all(accountId, signal.assetId, signal.conditionId) as Array<{
+      paper_position_id: string; requested_size_micros: string; filled_size_micros: string;
+    }>;
+    const pending = new Map<string, bigint>();
+    for (const row of pendingRows) {
+      const size = BigInt(row.requested_size_micros) - BigInt(row.filled_size_micros);
+      if (size < 0n) throw new Error("TARGET_SELL_PENDING_SIZE_INVALID");
+      pending.set(row.paper_position_id, (pending.get(row.paper_position_id) ?? 0n) + size);
+    }
+    const sizes = allocateRemainingTargetSellSizes(positions.map((position) => ({
+      currentSizeMicros: BigInt(position.current_size_micros),
+      pendingExitSizeMicros: pending.get(position.paper_position_id) ?? 0n,
+    })), ratio);
+    return positions.map((position, index) => ({
+      positionId: position.paper_position_id, size: sizes[index]!,
+    })).filter((item) => item.size > 0n);
   }
 
   private waitingBuyTargetExitAdjustments(

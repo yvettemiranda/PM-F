@@ -11,6 +11,7 @@ import type {
 } from "./live-types.js";
 import type { SessionAuthenticatedClobClient } from "./session-authenticated-clob-client.js";
 import type { WalletProvider } from "./wallet-provider.js";
+import { PublicMarketRouteProvider, type MarketRouteProvider } from "./market-protocol.js";
 
 type BalanceClient = Pick<
   SessionAuthenticatedClobClient,
@@ -104,6 +105,7 @@ export interface PolymarketReadonlyWalletProviderOptions {
   chainIdProvider?: () => Promise<number>;
   /** Exact exchange contracts used by the configured order signer. */
   allowanceSpenders?: readonly string[];
+  routeProvider?: MarketRouteProvider;
 }
 
 /**
@@ -142,6 +144,23 @@ export class PolymarketReadonlyWalletProvider implements WalletProvider {
 
   async getAllowance(): Promise<WalletAllowance> {
     return this.readAllowance({ asset_type: AssetType.COLLATERAL });
+  }
+
+  async getCapacity(input: { assetId: string; side: "BUY" | "SELL" }): Promise<{ balance: WalletBalance; allowance: WalletAllowance }> {
+    try {
+      this.options.walletBinding.assertCurrent();
+      const assetId = this.tokenId(input.assetId);
+      const route = await (this.options.routeProvider ?? new PublicMarketRouteProvider()).resolve(assetId);
+      const response = await this.options.clobClient.getBalanceAllowance(input.side === "BUY"
+        ? { asset_type: AssetType.COLLATERAL }
+        : { asset_type: AssetType.CONDITIONAL, token_id: assetId });
+      this.options.walletBinding.assertCurrent();
+      return { balance: availableBalance(response), allowance: availableAllowance(response, [route.exchange]) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "LIVE_WALLET_CAPACITY_UNAVAILABLE";
+      return { balance: { status: "UNAVAILABLE", balanceMicros: null, reason },
+        allowance: { status: "UNAVAILABLE", allowanceMicros: null, reason } };
+    }
   }
 
   async getOutcomeBalance(assetId: string): Promise<WalletBalance> {

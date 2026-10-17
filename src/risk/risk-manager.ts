@@ -4,6 +4,7 @@ import { RULESET, RULESET_HASH, stableJson, VERSIONS } from "../domain/versionin
 import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import type { ExecutorMode } from "../execution/types.js";
+import { loadAccountExposure, type AccountExposure } from "../execution/exposure-obligations.js";
 import { executionEnvelopeIntegrityError } from "../execution/signal-integrity.js";
 import type { PaperSignalEnvelope } from "../paper/types.js";
 import {
@@ -48,6 +49,7 @@ export interface RiskEvaluationInput {
   capitalSizingDecision?: BuyCapitalSizingDecision | null;
   buyAmountPolicyDecision?: BuyAmountPolicyDecision | null;
   replacingReservedAmountMicros?: bigint;
+  replacingExecutionId?: string;
   targetExitSupersession?: boolean;
   now: string;
 }
@@ -267,7 +269,18 @@ export class RiskManager {
         );
       }
       const reservationCredit = input.replacingReservedAmountMicros ?? 0n;
-      if (reservationCredit < 0n || reservationCredit > account.reservedBalanceMicros) {
+      const exposure = loadAccountExposure(this.database, input.mode, input.accountId, input.replacingExecutionId, {
+        assetId: input.signal.assetId, conditionId: input.signal.conditionId,
+      });
+      const ownReservation = input.replacingExecutionId
+        ? exposure.pendingBuys.get(input.replacingExecutionId)
+        : undefined;
+      if (reservationCredit < 0n || reservationCredit > account.reservedBalanceMicros
+        || (input.replacingExecutionId !== undefined || reservationCredit > 0n) && (
+          !ownReservation || ownReservation.amountMicros !== reservationCredit
+          || ownReservation.assetId !== input.signal.assetId
+          || ownReservation.conditionId.toLowerCase() !== input.signal.conditionId.toLowerCase()
+        )) {
         return fail("reservation_credit", "RISK_RESERVATION_CREDIT_INVALID");
       }
       if (reservationCredit > 0n) pass("reservation_credit", reservationCredit.toString());
@@ -275,8 +288,8 @@ export class RiskManager {
       if (input.requestedAmountMicros > available) return fail("account_balance", "INSUFFICIENT_AVAILABLE_CASH");
       pass("account_balance");
       const limitRejection = input.mode === "LIVE"
-        ? this.evaluateLiveBuyLimits(input, account, fail, pass)
-        : this.evaluatePaperBuyLimits(input, account, fail, pass);
+        ? this.evaluateLiveBuyLimits(input, account, exposure, fail, pass)
+        : this.evaluateBuyExposureLimits(input, account, exposure, fail, pass);
       if (limitRejection) return limitRejection;
     } else {
       if (input.requestedSizeMicros === null || input.requestedSizeMicros <= 0n) {
@@ -690,38 +703,61 @@ export class RiskManager {
     return row?.state ?? null;
   }
 
-  private marketExposure(mode: ExecutorMode, accountId: string, conditionId: string): bigint {
-    const table = mode === "LIVE" ? "live_positions" : "paper_positions";
-    const accountColumn = mode === "LIVE" ? "live_account_id" : "paper_account_id";
-    return this.sumTextRows(
-      `SELECT remaining_cost_micros value FROM ${table}
-       WHERE ${accountColumn}=? AND condition_id=?
-         AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')`,
-      accountId,
-      conditionId,
-    );
+  /** Recheck the current obligations while the caller holds its write transaction. */
+  buyExposureRejectReason(input: {
+    mode: ExecutorMode;
+    accountId: string;
+    assetId: string;
+    conditionId: string;
+    requestedAmountMicros: bigint;
+    replacingExecutionId?: string;
+  }): string | null {
+    const exposure = loadAccountExposure(this.database, input.mode, input.accountId, input.replacingExecutionId, {
+      assetId: input.assetId, conditionId: input.conditionId,
+    });
+    if (input.replacingExecutionId) {
+      const own = exposure.pendingBuys.get(input.replacingExecutionId);
+      if (!own || own.assetId !== input.assetId
+        || own.conditionId.toLowerCase() !== input.conditionId.toLowerCase()
+        || own.amountMicros !== input.requestedAmountMicros) return "RISK_RESERVATION_CREDIT_INVALID";
+    }
+    return this.buyExposureChecks(input, this.account(input.mode, input.accountId), exposure)
+      .find((check) => !check.passed)?.reason ?? null;
   }
 
-  private assetExposure(mode: ExecutorMode, accountId: string, assetId: string): bigint {
-    const table = mode === "LIVE" ? "live_positions" : "paper_positions";
-    const accountColumn = mode === "LIVE" ? "live_account_id" : "paper_account_id";
-    return this.sumTextRows(
-      `SELECT remaining_cost_micros value FROM ${table}
-       WHERE ${accountColumn}=? AND asset_id=?
-         AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')`,
-      accountId,
-      assetId,
-    );
-  }
-
-  private totalExposure(mode: ExecutorMode, accountId: string): bigint {
-    const table = mode === "LIVE" ? "live_positions" : "paper_positions";
-    const accountColumn = mode === "LIVE" ? "live_account_id" : "paper_account_id";
-    return this.sumTextRows(
-      `SELECT remaining_cost_micros value FROM ${table}
-       WHERE ${accountColumn}=? AND status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING')`,
-      accountId,
-    );
+  private buyExposureChecks(input: {
+    mode: ExecutorMode;
+    assetId: string;
+    conditionId: string;
+    requestedAmountMicros: bigint;
+  }, account: RiskAccount, exposure: AccountExposure): Array<{
+    name: string; reason: string; passed: boolean; detail?: string;
+  }> {
+    const requested = input.requestedAmountMicros;
+    const market = (exposure.marketMicros.get(input.conditionId.toLowerCase()) ?? 0n) + requested;
+    const asset = (exposure.assetMicros.get(input.assetId) ?? 0n) + requested;
+    if (input.mode === "PAPER") return [
+      { name: "single_trade_limit", reason: "SINGLE_TRADE_LIMIT_EXCEEDED",
+        passed: requested <= limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxSingleTradePpm) },
+      { name: "market_exposure_limit", reason: "MARKET_EXPOSURE_LIMIT_EXCEEDED",
+        passed: market <= limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxMarketExposurePpm) },
+      { name: "position_exposure_limit", reason: "POSITION_EXPOSURE_LIMIT_EXCEEDED",
+        passed: asset <= limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxPositionExposurePpm) },
+    ];
+    const riskBudget = account.riskBudgetMicros as bigint;
+    const single = minBigInt(this.liveRiskLimits.maxTradeSizeMicros, riskBudget);
+    const limit = minBigInt(this.liveRiskLimits.maxExposureMicros, riskBudget);
+    const total = exposure.totalMicros + requested;
+    return [
+      { name: "live_single_trade", reason: "LIVE_SINGLE_TRADE_LIMIT_EXCEEDED",
+        passed: requested <= single, detail: single.toString() },
+      { name: "live_market_exposure", reason: "LIVE_MARKET_EXPOSURE_LIMIT_EXCEEDED",
+        passed: market <= limit, detail: `${market}/${limit}` },
+      { name: "live_position_exposure", reason: "LIVE_POSITION_EXPOSURE_LIMIT_EXCEEDED",
+        passed: asset <= limit, detail: `${asset}/${limit}` },
+      { name: "live_total_exposure", reason: "LIVE_TOTAL_EXPOSURE_LIMIT_EXCEEDED",
+        passed: total <= limit, detail: `${total}/${limit}` },
+    ];
   }
 
   private sumTextRows(query: string, ...parameters: string[]): bigint {
@@ -729,54 +765,34 @@ export class RiskManager {
     return rows.reduce((total, row) => total + BigInt(row.value), 0n);
   }
 
-  private evaluatePaperBuyLimits(
+  private evaluateBuyExposureLimits(
     input: RiskEvaluationInput,
     account: RiskAccount,
+    exposure: AccountExposure,
     fail: (name: string, reason: string) => RiskDecision,
     pass: (name: string, detail?: string) => void,
   ): RiskDecision | null {
-    const requested = input.requestedAmountMicros as bigint;
-    const singleLimit = limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxSingleTradePpm);
-    if (requested > singleLimit) return fail("single_trade_limit", "SINGLE_TRADE_LIMIT_EXCEEDED");
-    pass("single_trade_limit");
-    const marketExposure = this.marketExposure("PAPER", input.accountId, input.signal.conditionId) + requested;
-    const marketLimit = limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxMarketExposurePpm);
-    if (marketExposure > marketLimit) return fail("market_exposure_limit", "MARKET_EXPOSURE_LIMIT_EXCEEDED");
-    pass("market_exposure_limit");
-    const assetExposure = this.assetExposure("PAPER", input.accountId, input.signal.assetId) + requested;
-    const positionLimit = limitFromInitial(account.initialBalanceMicros, RULESET.paperMaxPositionExposurePpm);
-    if (assetExposure > positionLimit) return fail("position_exposure_limit", "POSITION_EXPOSURE_LIMIT_EXCEEDED");
-    pass("position_exposure_limit");
+    for (const check of this.buyExposureChecks({
+      mode: input.mode,
+      assetId: input.signal.assetId,
+      conditionId: input.signal.conditionId,
+      requestedAmountMicros: input.requestedAmountMicros as bigint,
+    }, account, exposure)) {
+      if (!check.passed) return fail(check.name, check.reason);
+      pass(check.name, check.detail);
+    }
     return null;
   }
 
   private evaluateLiveBuyLimits(
     input: RiskEvaluationInput,
     account: RiskAccount,
+    exposure: AccountExposure,
     fail: (name: string, reason: string) => RiskDecision,
     pass: (name: string, detail?: string) => void,
   ): RiskDecision | null {
-    const requested = input.requestedAmountMicros as bigint;
-    const riskBudget = account.riskBudgetMicros as bigint;
-    const singleLimit = minBigInt(this.liveRiskLimits.maxTradeSizeMicros, riskBudget);
-    if (requested > singleLimit) return fail("live_single_trade", "LIVE_SINGLE_TRADE_LIMIT_EXCEEDED");
-    pass("live_single_trade", singleLimit.toString());
-    const marketExposure = this.marketExposure("LIVE", input.accountId, input.signal.conditionId) + requested;
-    const exposureLimit = minBigInt(this.liveRiskLimits.maxExposureMicros, riskBudget);
-    if (marketExposure > exposureLimit) {
-      return fail("live_market_exposure", "LIVE_MARKET_EXPOSURE_LIMIT_EXCEEDED");
-    }
-    pass("live_market_exposure", `${marketExposure}/${exposureLimit}`);
-    const assetExposure = this.assetExposure("LIVE", input.accountId, input.signal.assetId) + requested;
-    if (assetExposure > exposureLimit) {
-      return fail("live_position_exposure", "LIVE_POSITION_EXPOSURE_LIMIT_EXCEEDED");
-    }
-    pass("live_position_exposure", `${assetExposure}/${exposureLimit}`);
-    const totalExposure = this.totalExposure("LIVE", input.accountId) + requested;
-    if (totalExposure > exposureLimit) {
-      return fail("live_total_exposure", "LIVE_TOTAL_EXPOSURE_LIMIT_EXCEEDED");
-    }
-    pass("live_total_exposure", `${totalExposure}/${exposureLimit}`);
+    const exposureRejection = this.evaluateBuyExposureLimits(input, account, exposure, fail, pass);
+    if (exposureRejection) return exposureRejection;
     const dailyLoss = this.liveDailyLossMicros(input.accountId, input.now);
     if (dailyLoss >= this.liveRiskLimits.maxDailyLossMicros) {
       return fail("live_daily_loss", "LIVE_DAILY_LOSS_LIMIT_REACHED");

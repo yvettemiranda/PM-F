@@ -104,11 +104,17 @@ export class LiveIdentityBinding {
     let runtimeSigner: string | null = null;
     try {
       runtimeWallet = address(await this.walletProvider.getAddress());
+      if (runtimeWallet === null) {
+        checks.push({ name: "runtime_wallet_address", passed: false, reason: "RUNTIME_WALLET_ADDRESS_INVALID" });
+      }
     } catch {
       checks.push({ name: "runtime_wallet_address", passed: false, reason: "WALLET_ADDRESS_READ_FAILED" });
     }
     try {
       runtimeSigner = address(await this.signer.address());
+      if (runtimeSigner === null) {
+        checks.push({ name: "runtime_signer_address", passed: false, reason: "RUNTIME_SIGNER_ADDRESS_INVALID" });
+      }
     } catch {
       checks.push({ name: "runtime_signer_address", passed: false, reason: "SIGNER_ADDRESS_READ_FAILED" });
     }

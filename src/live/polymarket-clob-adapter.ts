@@ -16,7 +16,7 @@ import {
   validateClobTradeIdentity,
   type ClobOrderIdentity,
 } from "./clob-order-identity.js";
-import { OrderSubmissionOutcomeUnknownError, type OrderAdapter, type OrderSnapshot } from "./order-adapter.js";
+import { OrderSubmissionNotSentError, OrderSubmissionOutcomeUnknownError, type OrderAdapter, type OrderSnapshot, type OrderSubmissionGuard } from "./order-adapter.js";
 import type {
   CancelResult,
   LiveFillEvent,
@@ -30,7 +30,9 @@ import type {
 type ClobClientPort = Pick<
   ClobClient,
   "postOrder" | "cancelOrder" | "getOrder" | "getOpenOrders" | "getTrades" | "getFeeExponent"
->;
+> & {
+  postOrderGuarded?(order: Parameters<ClobClient["postOrder"]>[0], orderType: OrderType, guard: OrderSubmissionGuard): ReturnType<ClobClient["postOrder"]>;
+};
 type JsonRecord = Record<string, unknown>;
 type TradeLifecycleStatus = "MATCHED" | "MINED" | "CONFIRMED" | "RETRYING" | "FAILED";
 
@@ -60,7 +62,8 @@ function baseStatus(status: string | undefined): LiveOrderState {
 function matchedSize(order: OpenOrder): bigint {
   const original = decimalToScaled(order.original_size, SHARE_SCALE_DIGITS);
   const matched = decimalToScaled(order.size_matched, SHARE_SCALE_DIGITS);
-  if (original < 0n || matched < 0n || matched > original) {
+  const cashBuy = order.side.toUpperCase() === "BUY" && ["FAK", "FOK"].includes(order.order_type.toUpperCase());
+  if (original < 0n || matched < 0n || (!cashBuy && matched > original)) {
     throw new Error(`CLOB_ORDER_SIZE_INVALID:${order.id}`);
   }
   return matched;
@@ -132,6 +135,7 @@ function validateSignedOrder(request: LiveOrderRequest, signedOrder: SignedOrder
     const maxCost = integerString(maxCostText, "SIGNED_ORDER_MAX_COST_INVALID");
     const derivedFee = conservativeClobBuyFeeMicros({
       sizeMicros: requestedSize,
+      amountMicros: requestedAmount,
       upperPriceUnits: integerString(request.priceUnits, "ORDER_LIMIT_PRICE_INVALID"),
       feeRateBps: integerString(request.feeRateBps, "ORDER_FEE_RATE_INVALID"),
       feeExponent: request.feeExponent,
@@ -261,13 +265,15 @@ export class PolymarketClobAdapter implements OrderAdapter {
 
   constructor(private readonly client: ClobClientPort) {}
 
-  async submitOrder(order: LiveOrderRequest): Promise<OrderSubmitResult> {
+  async submitOrder(order: LiveOrderRequest, guard?: OrderSubmissionGuard): Promise<OrderSubmitResult> {
     if (!order.signedPayload) throw new Error("SIGNED_PAYLOAD_REQUIRED");
     const signedOrder = order.signedPayload.signedOrder;
     if (!signedOrder) throw new Error("SDK_SIGNED_ORDER_REQUIRED");
     validateSignedOrder(order, signedOrder);
     const liveFeeExponent = await this.client.getFeeExponent(order.assetId);
-    if (!Number.isSafeInteger(liveFeeExponent) || liveFeeExponent < 1 || liveFeeExponent !== order.feeExponent) {
+    const zeroFee = integerString(order.feeRateBps, "ORDER_FEE_RATE_INVALID") === 0n;
+    if (!Number.isSafeInteger(liveFeeExponent) || liveFeeExponent < (zeroFee ? 0 : 1)
+      || liveFeeExponent > 4 || (!zeroFee && liveFeeExponent !== order.feeExponent)) {
       throw new Error("CLOB_FEE_EXPONENT_MISMATCH");
     }
     const orderType = order.orderType === "FAK" ? OrderType.FAK
@@ -275,9 +281,14 @@ export class PolymarketClobAdapter implements OrderAdapter {
         : order.orderType === "GTD" ? OrderType.GTD
           : OrderType.GTC;
     let response: unknown;
+    // Outside the POST catch: a guard failure proves there was no submission.
+    guard?.beforeSubmit();
     try {
-      response = await this.client.postOrder(signedOrder, orderType);
+      response = this.client.postOrderGuarded === undefined
+        ? await this.client.postOrder(signedOrder, orderType)
+        : await this.client.postOrderGuarded(signedOrder, orderType, guard ?? { beforeSubmit() {} });
     } catch (error) {
+      if (error instanceof OrderSubmissionNotSentError) throw error;
       const reason = error instanceof Error ? error.message : "CLOB_POST_ORDER_FAILED";
       throw new OrderSubmissionOutcomeUnknownError(reason);
     }
@@ -304,9 +315,13 @@ export class PolymarketClobAdapter implements OrderAdapter {
       const fills = tradeSnapshot.fills;
       const filledSize = fills.reduce((total, fill) => total + BigInt(fill.sizeMicros), 0n);
       const requestedSize = BigInt(order.sizeMicros);
-      if (filledSize > requestedSize) throw new Error("CLOB_FILL_EXCEEDS_REQUESTED_SIZE");
+      const cashBuy = order.side === "BUY" && ["FAK", "FOK"].includes(order.orderType);
+      if (!cashBuy && filledSize > requestedSize) throw new Error("CLOB_FILL_EXCEEDS_REQUESTED_SIZE");
+      const filledNotional = fills.reduce((total, fill) => total + BigInt(fill.notionalMicros), 0n);
+      if (cashBuy && filledNotional > BigInt(order.amountMicros)) throw new Error("CLOB_FILL_EXCEEDS_SIGNED_NOTIONAL");
       let status = responseStatus;
-      if (filledSize > 0n) status = filledSize < requestedSize ? "PARTIALLY_FILLED" : "FILLED";
+      if (filledSize > 0n) status = (cashBuy ? filledNotional < BigInt(order.amountMicros) : filledSize < requestedSize)
+        ? "PARTIALLY_FILLED" : "FILLED";
       if (responseStatus === "FILLED" && fills.length === 0 && tradeSnapshot.pendingTradeIds.length > 0) {
         status = "ACKNOWLEDGED";
       } else if (responseStatus === "FILLED" && fills.length === 0) {

@@ -5,6 +5,7 @@ import { registeredExecutionRules } from "../domain/ruleset-registry.js";
 import { projectObserveEvents } from "../observe/position-projector.js";
 import {
   decodePersistedObserveEvent,
+  assertObserveOrderingCompatible,
   type PersistedObserveEventRow,
 } from "../observe/observe-store.js";
 import type { ObserveBaseline, ObserveEvent } from "../observe/types.js";
@@ -145,9 +146,11 @@ function observeProjection(database: DatabaseSync, baselineRunId: string): {
       sizeMicros: item.size_micros,
     })),
   };
+  assertObserveOrderingCompatible(database, baselineRunId);
   const rows = database.prepare(
     `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,
             o.activity_confirmed,r.is_combo,r.raw_json,
+            ordering.chain_order_json,ordering.evidence_hash chain_order_hash,
             c.transaction_hash conversion_transaction_hash,
             c.group_condition_id conversion_group_condition_id,
             c.event_slug conversion_event_slug,
@@ -170,6 +173,7 @@ function observeProjection(database: DatabaseSync, baselineRunId: string): {
             sp.positions_snapshot_hash split_positions_snapshot_hash,
             sp.evidence_hash split_evidence_hash
      FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
+     LEFT JOIN observe_event_order_evidence ordering ON ordering.source_event_key=o.source_event_key
      LEFT JOIN negative_risk_conversion_evidence c ON c.source_event_key=o.source_event_key
      LEFT JOIN split_projection_evidence sp ON sp.source_event_key=o.source_event_key
      WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,

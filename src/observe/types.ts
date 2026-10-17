@@ -1,5 +1,5 @@
 import type { ApiCapture } from "../adapters/polymarket-public.js";
-import type { EventClassification, PublicActivity, PublicPosition, PublicTrade, SyncStatus } from "../domain/models.js";
+import type { EventClassification, PublicActivity, PublicPosition, PublicTrade, SourceChainOrder, SyncStatus } from "../domain/models.js";
 import type { VerifiedNegativeRiskConversion } from "./negative-risk-conversion.js";
 import type { VerifiedSplitProjection } from "./split-projection.js";
 import type {
@@ -28,6 +28,7 @@ export interface ObserveEvent {
   isGap: boolean;
   isCombo: boolean;
   activityConfirmed: boolean;
+  chainOrder?: SourceChainOrder;
   trade?: PublicTrade;
   activity?: PublicActivity;
   conversion?: VerifiedNegativeRiskConversion;
@@ -69,6 +70,7 @@ export interface ObserveProjectionResult {
   lastProcessedTimestamp: number | null;
   lastProcessedEventId: string | null;
   gapEventCount: number;
+  orderingAmbiguities: SourceEventOrderAmbiguity[];
 }
 
 export interface ObservePollSnapshot {
@@ -119,6 +121,11 @@ export type ReconciliationDetail = ({
   issueType: "UNSUPPORTED_TARGET_ACTIVITY";
   sourceEventKey: string;
   activityType: "MERGE" | "SPLIT";
+} | {
+  issueType: "SOURCE_EVENT_ORDER_AMBIGUOUS";
+  sourceEventKey: string;
+  sourceTimestamp: number;
+  conditionId: string;
 }) & {
   firstObservedAt?: string;
   consecutiveCount?: number;
@@ -133,6 +140,12 @@ export interface SourceEventMultiplicityAmbiguity {
   sourceEventKey: string;
   tradesCount: number;
   activityCount: number;
+}
+
+export interface SourceEventOrderAmbiguity {
+  sourceTimestamp: number;
+  conditionId: string;
+  sourceEventKeys: string[];
 }
 
 export interface UnsupportedTargetActivity {

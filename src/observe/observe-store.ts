@@ -6,6 +6,8 @@ import { ACTIVITY_IDENTITY_VERSION, SOURCE_IDENTITY_VERSION } from "../domain/id
 import { decimalToScaled, PRICE_SCALE_DIGITS, SHARE_SCALE_DIGITS } from "../domain/fixed.js";
 import { RULESET_HASH, RULESET_SNAPSHOT_JSON, VERSIONS, stableJson } from "../domain/versioning.js";
 import type { SourceVersion } from "../infra/source-version.js";
+import type { SourceChainOrder } from "../domain/models.js";
+import { sameChainOrder, validatedChainOrder } from "./event-ordering.js";
 import { captureIdentityFromResponseJson } from "../services/capture-manifest.js";
 import type { CapitalEstimate } from "../services/capital-estimator.js";
 import type { SignalContextBundle } from "../signal-context/execution-context.js";
@@ -59,6 +61,7 @@ export interface CommitPollInput {
   snapshot: ObservePollSnapshot;
   newEvents: ObserveEvent[];
   eventConfirmations: Array<{ sourceEventKey: string; isCombo: boolean; isGap: boolean }>;
+  orderEvidence?: Array<{ sourceEventKey: string; chainOrder: SourceChainOrder }>;
   conversionEvidence: Array<{
     sourceEventKey: string;
     conversion: VerifiedNegativeRiskConversion;
@@ -93,6 +96,8 @@ export interface PersistedObserveEventRow {
   activity_confirmed: number;
   is_combo: number;
   raw_json: string;
+  chain_order_json?: string | null;
+  chain_order_hash?: string | null;
   conversion_transaction_hash: string | null;
   conversion_group_condition_id: string | null;
   conversion_event_slug: string | null;
@@ -118,6 +123,13 @@ export interface PersistedObserveEventRow {
 
 /** Shared decoder for normal Observe resume and Campaign crash recovery. */
 export function decodePersistedObserveEvent(row: PersistedObserveEventRow): ObserveEvent {
+  let chainOrder: SourceChainOrder | undefined;
+  if (row.chain_order_json) {
+    if (createHash("sha256").update(row.chain_order_json).digest("hex") !== row.chain_order_hash) {
+      throw new Error(`OBSERVE_CHAIN_ORDER_HASH_MISMATCH:${row.source_event_key}`);
+    }
+    chainOrder = validatedChainOrder(JSON.parse(row.chain_order_json));
+  }
   let conversion: VerifiedNegativeRiskConversion | undefined;
   if (row.conversion_evidence_hash !== null) {
     if (
@@ -192,12 +204,19 @@ export function decodePersistedObserveEvent(row: PersistedObserveEventRow): Obse
     isGap: row.is_gap !== 0,
     isCombo: row.is_combo !== 0,
     activityConfirmed: row.activity_confirmed !== 0,
+    ...(chainOrder ? { chainOrder } : {}),
     ...(row.source_type === "DATA_API_TRADE" || row.source_type === "POLYGON_ORDER_FILLED"
       ? { trade: JSON.parse(row.raw_json) }
       : { activity: JSON.parse(row.raw_json) }),
     ...(conversion ? { conversion } : {}),
     ...(split ? { split } : {}),
   };
+}
+
+export function assertObserveOrderingCompatible(database: DatabaseSync, baselineRunId: string): void {
+  const blocked = database.prepare("SELECT reason FROM observe_ordering_blocks WHERE baseline_run_id=?")
+    .get(baselineRunId) as { reason: string } | undefined;
+  if (blocked) throw new Error(`OBSERVE_ORDERING_REBASE_REQUIRED:${baselineRunId}:${blocked.reason}`);
 }
 
 export class ObserveStore {
@@ -230,6 +249,7 @@ export class ObserveStore {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       baseline = this.loadBaseline(walletAddress, baselineRunId);
+      assertObserveOrderingCompatible(this.database, baseline.baselineRunId);
       const target = this.database
         .prepare("SELECT target_id FROM monitor_targets WHERE wallet_address=?")
         .get(walletAddress.toLowerCase()) as { target_id: string } | undefined;
@@ -363,6 +383,7 @@ export class ObserveStore {
       .prepare(
         `SELECT o.source_event_key,o.source_type,o.source_timestamp,o.is_gap,
                 o.activity_confirmed,r.is_combo,r.raw_json,
+                ordering.chain_order_json,ordering.evidence_hash chain_order_hash,
                 c.transaction_hash conversion_transaction_hash,
                 c.group_condition_id conversion_group_condition_id,
                 c.event_slug conversion_event_slug,
@@ -385,6 +406,7 @@ export class ObserveStore {
                 sp.positions_snapshot_hash split_positions_snapshot_hash,
                 sp.evidence_hash split_evidence_hash
          FROM observe_events o JOIN raw_events r ON r.source_event_key=o.source_event_key
+         LEFT JOIN observe_event_order_evidence ordering ON ordering.source_event_key=o.source_event_key
          LEFT JOIN negative_risk_conversion_evidence c ON c.source_event_key=o.source_event_key
          LEFT JOIN split_projection_evidence sp ON sp.source_event_key=o.source_event_key
          WHERE o.baseline_run_id=? ORDER BY o.source_timestamp,o.source_event_key`,
@@ -404,12 +426,52 @@ export class ObserveStore {
   existingSignalIds(baselineRunId: string, signalIds: string[]): Set<string> {
     if (signalIds.length === 0) return new Set();
     const existing = new Set<string>();
-    const query = this.database.prepare(
-      `SELECT 1 FROM signals
-       WHERE baseline_run_id=? AND signal_id=? AND producer_mode='OBSERVE_ONLY'`,
-    );
-    for (const signalId of signalIds) if (query.get(baselineRunId, signalId)) existing.add(signalId);
+    const requested = new Set(signalIds);
+    const rows = this.database.prepare(
+      `SELECT signal_id FROM signals WHERE baseline_run_id=? AND producer_mode='OBSERVE_ONLY'`,
+    ).all(baselineRunId) as Array<{ signal_id: string }>;
+    for (const row of rows) if (requested.has(row.signal_id)) existing.add(row.signal_id);
     return existing;
+  }
+
+  assertSignalOrderingContinuity(
+    baseline: ObserveBaseline,
+    projection: ObserveProjectionResult,
+    detectedAt: string,
+  ): Set<string> {
+    assertObserveOrderingCompatible(this.database, baseline.baselineRunId);
+    const projected = new Map(projection.signals.map((signal) => [signal.signalId, signal]));
+    const ambiguousAfter = new Map<string, number>();
+    for (const ambiguity of projection.orderingAmbiguities) ambiguousAfter.set(
+      ambiguity.conditionId,
+      Math.min(ambiguousAfter.get(ambiguity.conditionId) ?? Infinity, ambiguity.sourceTimestamp),
+    );
+    const rows = this.database.prepare(
+      `SELECT s.signal_id,s.condition_id,s.sell_ratio_numerator,s.sell_ratio_denominator,s.execution_eligible,r.source_timestamp
+       FROM signals s JOIN raw_events r ON r.source_event_key=s.source_event_key
+       WHERE s.baseline_run_id=? AND s.producer_mode='OBSERVE_ONLY'`,
+    ).all(baseline.baselineRunId) as Array<{
+      signal_id: string; condition_id: string; sell_ratio_numerator: string | null;
+      sell_ratio_denominator: string | null; execution_eligible: number; source_timestamp: number;
+    }>;
+    const conflict = rows.find((row) => {
+      const candidate = projected.get(row.signal_id);
+      return (!candidate && row.execution_eligible === 1)
+        || (candidate && (candidate.sellRatioNumerator !== row.sell_ratio_numerator
+        || candidate.sellRatioDenominator !== row.sell_ratio_denominator))
+        || row.source_timestamp >= (ambiguousAfter.get(row.condition_id.toLowerCase()) ?? Infinity);
+    });
+    if (!conflict) return new Set(rows.map((row) => row.signal_id));
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        "INSERT OR IGNORE INTO observe_ordering_blocks(baseline_run_id,target_id,reason,detail_json,created_at) VALUES (?,?,?,?,?)",
+      ).run(baseline.baselineRunId, baseline.targetId, "PUBLISHED_SIGNAL_ORDER_CONFLICT", stableJson({ signalId: conflict.signal_id }), detectedAt);
+      this.database.prepare("UPDATE monitor_targets SET sync_status='MAJOR_DESYNC',updated_at=? WHERE target_id=?")
+        .run(detectedAt, baseline.targetId);
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    throw new Error(`OBSERVE_ORDERING_REBASE_REQUIRED:${baseline.baselineRunId}:PUBLISHED_SIGNAL_ORDER_CONFLICT`);
   }
 
   latestReconciliationReport(observeRunId: string): ReconciliationHistoryReport | null {
@@ -672,6 +734,18 @@ export class ObserveStore {
       if (persistFullEvidence) {
         this.savePollCaptures(pollId, input.snapshot);
         for (const event of input.newEvents) this.insertObserveEvent(input, pollId, event);
+        for (const evidence of input.orderEvidence ?? []) {
+          const chainOrder = validatedChainOrder(evidence.chainOrder);
+          const json = stableJson(chainOrder);
+          const previous = this.database.prepare("SELECT chain_order_json FROM observe_event_order_evidence WHERE source_event_key=?")
+            .get(evidence.sourceEventKey) as { chain_order_json: string } | undefined;
+          if (previous && !sameChainOrder(JSON.parse(previous.chain_order_json), chainOrder)) {
+            throw new Error(`OBSERVE_CHAIN_ORDER_CONFLICT:${evidence.sourceEventKey}`);
+          }
+          this.database.prepare(
+            "INSERT OR IGNORE INTO observe_event_order_evidence(source_event_key,chain_order_json,evidence_hash,created_at) VALUES (?,?,?,?)",
+          ).run(evidence.sourceEventKey, json, createHash("sha256").update(json).digest("hex"), input.completedAt);
+        }
         for (const confirmation of input.eventConfirmations) {
           if (confirmation.isCombo) {
             const existingSignal = this.database.prepare(
@@ -977,6 +1051,7 @@ export class ObserveStore {
   private shouldPersistFullEvidence(input: CommitPollInput): boolean {
     if (
       input.newEvents.length > 0
+      || (input.orderEvidence?.length ?? 0) > 0
       || input.eventConfirmations.length > 0
       || input.conversionEvidence.length > 0
       || input.splitEvidence.length > 0

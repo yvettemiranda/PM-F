@@ -9,15 +9,18 @@ import {
   type Trade,
 } from "@polymarket/clob-client-v2";
 import { describe, expect, it, vi } from "vitest";
-import { OrderSubmissionOutcomeUnknownError } from "../src/live/order-adapter.js";
+import { OrderSubmissionNotSentError, OrderSubmissionOutcomeUnknownError, type OrderSubmissionGuard } from "../src/live/order-adapter.js";
 import { PolymarketClobAdapter } from "../src/live/polymarket-clob-adapter.js";
 import { validateLiveOrderFills } from "../src/live/fill-validation.js";
+import { conservativeClobBuyFeeMicros } from "../src/execution/clob-fee.js";
 import type { LiveOrderRequest } from "../src/live/live-types.js";
 
 type ClobClientPort = Pick<
   ClobClient,
   "postOrder" | "cancelOrder" | "getOrder" | "getOpenOrders" | "getTrades" | "getFeeExponent"
->;
+> & {
+  postOrderGuarded?(order: SignedOrder, orderType: OrderType, guard: OrderSubmissionGuard): ReturnType<ClobClient["postOrder"]>;
+};
 
 const signerAddress = "0x0000000000000000000000000000000000000001";
 const zeroBytes32 = `0x${"0".repeat(64)}`;
@@ -138,13 +141,72 @@ function client(overrides: Partial<Record<keyof ClobClientPort, unknown>> = {}):
 }
 
 describe("PolymarketClobAdapter", () => {
+  it("accepts cash BUY price-improvement shares at submit and recovery, retaining the signed cash cap", async () => {
+    const adapter = new PolymarketClobAdapter(client({
+      postOrder: vi.fn(async () => ({ success: true, orderID: "order-1", status: "matched", tradeIDs: ["trade-1"] })),
+      getOrder: vi.fn(async () => openOrder({ status: "MATCHED", size_matched: "12.5", associate_trades: ["trade-1"] })),
+      getTrades: vi.fn(async () => [trade({ size: "12.5", price: "0.4", fee_rate_bps: "0" })]),
+    }));
+    const submitted = await adapter.submitOrder(request());
+    expect(submitted).toMatchObject({ status: "FILLED", terminal: true, fills: [{ sizeMicros: "12500000", notionalMicros: "5000000" }] });
+    const recovered = await adapter.getOrderSnapshot("order-1");
+    expect(recovered.status).toMatchObject({ status: "FILLED", filledSizeMicros: "12500000" });
+    for (const result of [submitted, { ...recovered.status, fills: recovered.fills }]) {
+      const input = {
+        adapterType: adapter.adapterType, side: "BUY" as const, status: result.status, fills: result.fills,
+        requestedSizeMicros: "10000000", requestedNotionalMicros: "5000000", orderType: "FAK",
+        limitPriceUnits: "500000000000000000", buyBudgetMicros: "5000000", availableSellSizeMicros: null,
+      };
+      expect(validateLiveOrderFills(input)).toEqual({ filledSizeMicros: 12_500_000n, filledNotionalMicros: 5_000_000n, feeMicros: 0n });
+      expect(() => validateLiveOrderFills({ ...input, requestedNotionalMicros: "4999999" }))
+        .toThrow("BUY_FILL_EXCEEDS_SIGNED_NOTIONAL");
+    }
+  });
+
+  it("accepts explicit zero fees with SDK exponent zero", async () => {
+    const postOrder = vi.fn(async () => ({ success: true, orderID: "order-1", status: "live", tradeIDs: [] }));
+    const adapter = new PolymarketClobAdapter(client({ getFeeExponent: vi.fn(async () => 0), postOrder }));
+    await expect(adapter.submitOrder(request())).resolves.toMatchObject({ externalOrderId: "order-1" });
+    expect(postOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the submit guard after metadata and never POSTs on failure", async () => {
+    const steps: string[] = [];
+    const postOrder = vi.fn();
+    const adapter = new PolymarketClobAdapter(client({
+      getFeeExponent: vi.fn(async () => { steps.push("metadata"); return 1; }), postOrder,
+    }));
+    await expect(adapter.submitOrder(request(), { beforeSubmit() {
+      steps.push("guard"); throw new Error("ORDERBOOK_STALE_BEFORE_POST");
+    } })).rejects.toThrow("ORDERBOOK_STALE_BEFORE_POST");
+    expect(steps).toEqual(["metadata", "guard"]);
+    expect(postOrder).not.toHaveBeenCalled();
+  });
+
+  it("uses the session transport guard and preserves a proven not-sent failure", async () => {
+    const notSent = new OrderSubmissionNotSentError("ORDERBOOK_STALE_BEFORE_POST");
+    const postOrder = vi.fn();
+    const guard = { beforeSubmit: vi.fn() };
+    const postOrderGuarded = vi.fn(async (_order: SignedOrder, _type: OrderType, actualGuard: OrderSubmissionGuard) => {
+      await Promise.resolve();
+      actualGuard.beforeSubmit();
+      throw notSent;
+    });
+    const adapter = new PolymarketClobAdapter(client({ postOrder, postOrderGuarded }));
+    const error = await adapter.submitOrder(request(), guard).catch((caught: unknown) => caught);
+    expect(error).toBe(notSent);
+    expect(error).not.toBeInstanceOf(OrderSubmissionOutcomeUnknownError);
+    expect(postOrderGuarded).toHaveBeenCalledWith(request().signedPayload!.signedOrder, OrderType.FAK, guard);
+    expect(postOrder).not.toHaveBeenCalled();
+  });
+
   it("passes an actual SDK SignedOrder and maps a matched taker fill without Number precision loss", async () => {
     const largeSize = "9007199254.740991";
     const largeSizeMicros = "9007199254740991";
     const price = "0.123456789012345678";
     const priceUnits = "123456789012345678";
     const sdkOrder = signedOrder({
-      makerAmount: "1111111109999999",
+      makerAmount: "1111999897984716",
       takerAmount: largeSizeMicros,
     });
     const postOrder = vi.fn(async () => ({
@@ -154,22 +216,27 @@ describe("PolymarketClobAdapter", () => {
       tradeIDs: ["trade-1"],
       status: "matched",
       takingAmount: largeSize,
-      makingAmount: "1111111109.999999",
+      makingAmount: "1111999897.984716",
     }));
     const getTrades = vi.fn(async () => [trade({ size: largeSize, price })]);
     const adapter = new PolymarketClobAdapter(client({ postOrder, getTrades }));
+    const totalBudget = (BigInt(sdkOrder.makerAmount) + conservativeClobBuyFeeMicros({
+      amountMicros: BigInt(sdkOrder.makerAmount), sizeMicros: BigInt(largeSizeMicros),
+      upperPriceUnits: BigInt(priceUnits), feeRateBps: 700n, feeExponent: 1,
+    })).toString();
 
     const result = await adapter.submitOrder(request({
       priceUnits,
       sizeMicros: largeSizeMicros,
       amountMicros: sdkOrder.makerAmount,
-      budgetMicros: sdkOrder.makerAmount,
+      budgetMicros: totalBudget,
+      feeRateBps: "700",
       signedPayload: {
         signerAddress,
         signature: sdkOrder.signature,
         payloadHash: "payload-hash-large",
         signedOrder: sdkOrder,
-        maxTotalCostMicros: sdkOrder.makerAmount,
+        maxTotalCostMicros: totalBudget,
         feeModelVersion: "test-fee-v1",
       },
     }));
@@ -248,7 +315,10 @@ describe("PolymarketClobAdapter", () => {
       postOrder,
       getFeeExponent: vi.fn(async () => 2),
     }));
-    await expect(exponentAdapter.submitOrder(request())).rejects.toThrow("CLOB_FEE_EXPONENT_MISMATCH");
+    await expect(exponentAdapter.submitOrder(request({
+      feeRateBps: "1", budgetMicros: "6000000",
+      signedPayload: { ...request().signedPayload!, maxTotalCostMicros: "6000000" },
+    }))).rejects.toThrow("CLOB_FEE_EXPONENT_MISMATCH");
     expect(postOrder).not.toHaveBeenCalled();
   });
 
@@ -482,6 +552,7 @@ describe("PolymarketClobAdapter", () => {
         status: snapshot.status.status,
         fills: snapshot.fills,
         requestedSizeMicros: "10000000",
+        requestedNotionalMicros: "5000000",
         limitPriceUnits: "500000000000000000",
         buyBudgetMicros: "5000000",
         availableSellSizeMicros: null,

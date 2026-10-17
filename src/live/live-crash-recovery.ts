@@ -260,6 +260,9 @@ export class LiveCrashRecovery {
             insertedFills += 1;
             lastFillId = recorded.fillId;
           }
+          if (this.store.recordedOrderFillSize(snapshot.local.live_order_id) !== BigInt(snapshot.status.filledSizeMicros)) {
+            throw new Error("RECOVERY_CUMULATIVE_FILL_HISTORY_MISMATCH");
+          }
           this.store.syncRecoveredOrder(snapshot.local, {
             status: snapshot.status.status,
             terminal: isTerminal(snapshot.status),
@@ -273,6 +276,12 @@ export class LiveCrashRecovery {
             BigInt(snapshot.status.filledSizeMicros),
             BigInt(snapshot.local.size_micros),
           );
+          if (!isTerminal(snapshot.status)) {
+            // Confirmed partial fills do not finish an order whose remaining
+            // quantity/finality is still outstanding; preserve its reservations.
+            recoveredState = snapshot.local.side === "BUY" ? "WAITING_EXECUTION"
+              : refreshed.execution_type === "STOP_LOSS" ? "STOP_EXIT_PENDING" : "EXIT_PENDING";
+          }
           if (isTerminal(snapshot.status) && snapshot.local.side === "BUY") {
             if (BigInt(refreshed.filled_size_micros) === 0n) {
               recoveredState = "WAITING_EXECUTION";
@@ -282,7 +291,10 @@ export class LiveCrashRecovery {
               }
               this.store.releaseReservation(snapshot.local.execution, snapshot.local.live_order_id, "RECOVERY_TERMINAL_ORDER");
               recoveredState = snapshot.local.buy_budget_complete === 1
-                && BigInt(snapshot.status.filledSizeMicros) >= BigInt(snapshot.local.size_micros)
+                && (this.orderAdapter.adapterType === "POLYMARKET_CLOB"
+                  ? snapshot.fills.reduce((total, fill) => total + BigInt(fill.notionalMicros), 0n)
+                    >= BigInt(snapshot.local.amount_micros!)
+                  : BigInt(snapshot.status.filledSizeMicros) >= BigInt(snapshot.local.size_micros))
                 ? "EXECUTED"
                 : "PARTIALLY_EXECUTED";
             }
@@ -472,9 +484,11 @@ export class LiveCrashRecovery {
       for (const fill of fills) validateClobTradeIdentity(fill.raw, local.external_order_id!, identity);
     }
     const availableSellSize = local.side === "SELL"
-      ? this.store.openPositions(local.execution.live_account_id, local.asset_id)
+      // Snapshots are cumulative. Already-booked fills of this same order have
+      // reduced current holdings and must be restored for this validation only.
+      ? (this.store.openPositions(local.execution.live_account_id, local.asset_id)
         .reduce((total, position) => total + BigInt(position.current_size_micros), 0n)
-        .toString()
+        + this.store.recordedOrderFillSize(local.live_order_id)).toString()
       : null;
     validateLiveOrderFills({
       adapterType: this.orderAdapter.adapterType,
@@ -482,8 +496,10 @@ export class LiveCrashRecovery {
       status: status.status,
       fills,
       requestedSizeMicros: local.size_micros,
+      ...(local.amount_micros === null ? {} : { requestedNotionalMicros: local.amount_micros }),
+      orderType: local.order_type,
       limitPriceUnits: local.price_units,
-      buyBudgetMicros: local.side === "BUY" ? local.execution.requested_amount_micros : null,
+      buyBudgetMicros: local.side === "BUY" ? local.budget_micros : null,
       availableSellSizeMicros: availableSellSize,
       reportedFilledSizeMicros: status.filledSizeMicros,
     });

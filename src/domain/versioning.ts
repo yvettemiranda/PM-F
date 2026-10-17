@@ -7,7 +7,7 @@ import {
 export { stableJson } from "./canonical-json.js";
 
 export const DEFAULT_VERSIONS = Object.freeze({
-  schemaVersion: "2.32.0",
+  schemaVersion: "2.34.0",
   signalVersion: "1.11.0",
   strategyVersion: "2.9.0",
   riskVersion: "1.10.0",

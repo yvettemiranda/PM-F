@@ -32,6 +32,15 @@ function hash(value: unknown, path: string): string {
   return result;
 }
 
+function condition(value: unknown, path: string): string {
+  const result = text(value, path);
+  // Protocol V2 condition IDs are bytes31; CTF IDs remain bytes32.
+  if (!/^0x[0-9a-fA-F]{62}(?:[0-9a-fA-F]{2})?$/.test(result)) {
+    throw new Error(`API_SCHEMA_INVALID:${path}:condition_id`);
+  }
+  return result;
+}
+
 function tokenId(value: unknown, path: string): string {
   const result = text(value, path);
   if (!TOKEN_ID_RE.test(result)) throw new Error(`API_SCHEMA_INVALID:${path}:token_id`);
@@ -71,7 +80,7 @@ export function parsePublicTrades(value: unknown): PublicTrade[] {
     const row = record(item, `trades[${index}]`);
     address(row.proxyWallet, `trades[${index}].proxyWallet`);
     hash(row.transactionHash, `trades[${index}].transactionHash`);
-    hash(row.conditionId, `trades[${index}].conditionId`);
+    condition(row.conditionId, `trades[${index}].conditionId`);
     tokenId(row.asset, `trades[${index}].asset`);
     if (row.side !== "BUY" && row.side !== "SELL") throw new Error(`API_SCHEMA_INVALID:trades[${index}].side`);
     decimal(row.price, `trades[${index}].price`, 0, 1);
@@ -97,7 +106,7 @@ export function parsePublicActivity(value: unknown): PublicActivity[] {
     for (const field of ["price", "size", "usdcSize", "isCombo"] as const) {
       if (row[field] === null) delete row[field];
     }
-    if (row.conditionId !== undefined) hash(row.conditionId, `activity[${index}].conditionId`);
+    if (row.conditionId !== undefined) condition(row.conditionId, `activity[${index}].conditionId`);
     if (row.asset !== undefined) tokenId(row.asset, `activity[${index}].asset`);
     if (row.side !== undefined && row.side !== "BUY" && row.side !== "SELL") {
       throw new Error(`API_SCHEMA_INVALID:activity[${index}].side`);
@@ -122,7 +131,7 @@ export function parsePublicPositions(value: unknown): PublicPosition[] {
     const row = record(item, `positions[${index}]`);
     address(row.proxyWallet, `positions[${index}].proxyWallet`);
     tokenId(row.asset, `positions[${index}].asset`);
-    hash(row.conditionId, `positions[${index}].conditionId`);
+    condition(row.conditionId, `positions[${index}].conditionId`);
     decimal(row.size, `positions[${index}].size`, 0);
     decimal(row.avgPrice, `positions[${index}].avgPrice`, 0, 1);
     decimal(row.currentValue, `positions[${index}].currentValue`, 0);
@@ -140,7 +149,7 @@ export function parseClobTime(value: unknown): number {
 
 export function parseClobOrderbook(value: unknown): ClobOrderbook {
   const row = record(value, "orderbook");
-  hash(row.market, "orderbook.market");
+  condition(row.market, "orderbook.market");
   tokenId(row.asset_id, "orderbook.asset_id");
   text(row.timestamp, "orderbook.timestamp");
   const levels = (key: "bids" | "asks") => array(row[key], `orderbook.${key}`).forEach((item, index) => {
@@ -155,7 +164,7 @@ export function parseClobOrderbook(value: unknown): ClobOrderbook {
 
 export function parseClobMarket(value: unknown): ClobMarket {
   const row = record(value, "market");
-  hash(row.condition_id, "market.condition_id");
+  condition(row.condition_id, "market.condition_id");
   if (typeof row.closed !== "boolean") throw new Error("API_SCHEMA_INVALID:market.closed:boolean");
   if (row.end_date_iso !== undefined && row.end_date_iso !== null) {
     text(row.end_date_iso, "market.end_date_iso");
@@ -205,7 +214,7 @@ export function parseClobMarketInfo(value: unknown): ClobMarketInfo {
 export function parseClobMarketByToken(value: unknown): ClobMarketByToken {
   const row = record(value, "marketByToken");
   return {
-    condition_id: hash(row.condition_id, "marketByToken.condition_id").toLowerCase(),
+    condition_id: condition(row.condition_id, "marketByToken.condition_id").toLowerCase(),
     primary_token_id: tokenId(row.primary_token_id, "marketByToken.primary_token_id"),
     secondary_token_id: tokenId(row.secondary_token_id, "marketByToken.secondary_token_id"),
   };

@@ -1,10 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PolymarketPublicApi } from "../src/adapters/polymarket-public.js";
-import { parseClobMarket, parsePublicActivity } from "../src/adapters/public-api-schema.js";
+import { parseClobMarket, parsePublicActivity, parsePublicTrades, parseClobOrderbook } from "../src/adapters/public-api-schema.js";
 import { ORDER_FILLED_TOPIC, POLYMARKET_CTF_EXCHANGES } from "../src/adapters/polygon-order-filled.js";
 
 describe("Polymarket public API safety", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("accepts bytes31 V2 condition IDs while retaining bytes32 transaction hashes", () => {
+    const conditionId = `0x${"a".repeat(62)}`;
+    const row = { proxyWallet: "0x0000000000000000000000000000000000000001", transactionHash: `0x${"b".repeat(64)}`,
+      conditionId, asset: "123", side: "BUY", price: "0.5", size: "10", timestamp: 1_700_000_000 };
+    expect(parsePublicTrades([row])[0]?.conditionId).toBe(conditionId);
+    expect(parseClobOrderbook({ market: conditionId, asset_id: "123", timestamp: "1700000000", bids: [], asks: [], version: "v2" }).market).toBe(conditionId);
+    expect(parseClobMarket({ condition_id: conditionId, closed: true, tokens: [{ token_id: "123", outcome: "Yes" }] }).condition_id).toBe(conditionId);
+    expect(() => parsePublicTrades([{ ...row, transactionHash: conditionId }])).toThrow("API_SCHEMA_INVALID:trades[0].transactionHash:hash");
+  });
 
   it("rejects unsafe request configuration", () => {
     expect(() => new PolymarketPublicApi({ timeoutMs: 0 })).toThrow("INVALID_REQUEST_TIMEOUT");

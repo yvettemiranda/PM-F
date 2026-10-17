@@ -37,6 +37,11 @@ export interface LiveRuntimeRunResult {
  */
 export class LiveRuntime {
   private readonly preparedRecoveries = new Map<string, LiveRuntimeRecovery>();
+  private runner: LiveRunner | null = null;
+
+  health(): ReturnType<LiveRunner["health"]> | null {
+    return this.runner?.health() ?? null;
+  }
 
   constructor(
     private readonly gate: Pick<
@@ -81,7 +86,8 @@ export class LiveRuntime {
   async run(options: LiveRunnerOptions, signal?: AbortSignal): Promise<LiveRuntimeRunResult> {
     const gateRecovery = await this.gate.recoverOnStartup();
     const identity = await this.checkIdentity(options.accountId);
-    const report = await new LiveRunner(this.executor, this.consumer, options).run(signal);
+    this.runner = new LiveRunner(this.executor, this.consumer, options);
+    const report = await this.runner.run(signal);
     return { gateRecovery, identity, report };
   }
 
@@ -91,7 +97,8 @@ export class LiveRuntime {
     this.preparedRecoveries.delete(options.accountId);
     const identity = await this.checkIdentity(options.accountId);
     if (!identity.ready) throw new Error("LIVE_RUNTIME_IDENTITY_NOT_READY");
-    const report = await new LiveRunner(this.executor, this.consumer, options).run(
+    this.runner = new LiveRunner(this.executor, this.consumer, options);
+    const report = await this.runner.run(
       signal,
       recovery.execution,
     );

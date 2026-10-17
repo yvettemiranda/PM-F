@@ -30,6 +30,7 @@ import {
 import { verifiedBinaryMarketOutcomeAssets } from "../signal-context/market-outcome-set.js";
 import { verifySplitProjection } from "./split-projection.js";
 import { PolygonOrderFilledFeedUnsafeError } from "./polygon-order-filled-trade-feed.js";
+import { isObserveTradeExecutionConfirmed, sameChainOrder, validatedChainOrder } from "./event-ordering.js";
 import type { ObserveWakeResult, ObserveWakeSource } from "./polygon-order-filled-wake-feed.js";
 
 const ACTIVITY_CURSOR_OVERLAP_SECONDS = 5 * 60;
@@ -347,7 +348,7 @@ export class ObserveOnlyRunner {
     const polygonIdentities = new Map<string, CrossSourceIdentity[]>();
     const polygonGroups = new Map<string, CrossSourceIdentity[]>();
     for (const event of [
-      ...storedEvents.filter((item) => item.sourceType === "POLYGON_ORDER_FILLED" && item.trade),
+      ...storedEvents.filter((item) => (item.sourceType === "POLYGON_ORDER_FILLED" || item.chainOrder) && item.trade),
       ...polygonTradeOccurrences.map((occurrence): ObserveEvent => ({
         sourceEventKey: occurrence.sourceEventKey,
         sourceType: "POLYGON_ORDER_FILLED",
@@ -440,6 +441,11 @@ export class ObserveOnlyRunner {
         .filter((key): key is string => key !== undefined),
     );
     const confirmedRepeatedKeys = new Set(multiplicity.confirmedRepeatedKeys);
+    for (const event of storedEvents) {
+      if (event.trade && event.chainOrder && event.sourceEventKey !== sourceEventKey(event.trade)) {
+        confirmedRepeatedKeys.add(event.sourceEventKey);
+      }
+    }
     for (const occurrence of polygonTradeOccurrences) {
       if (occurrence.occurrenceIndex > 0) confirmedRepeatedKeys.add(occurrence.sourceEventKey);
     }
@@ -466,6 +472,7 @@ export class ObserveOnlyRunner {
         isGap: eventIsGap(trade.timestamp),
         isCombo: false,
         activityConfirmed: confirmedPolygonKeys.has(sourceEventKey),
+        ...(trade.chainOrder ? { chainOrder: validatedChainOrder(trade.chainOrder) } : {}),
         trade,
       })),
       ...multiplicity.trades
@@ -525,10 +532,26 @@ export class ObserveOnlyRunner {
         }
       } else unique.set(event.sourceEventKey, event);
     }
-    const existingKeys = this.store.existingEventKeys(started.baseline.baselineRunId, [...unique.keys()]);
+    const storedByKey = new Map(storedEvents.map((event) => [event.sourceEventKey, event]));
+    const orderEvidence: NonNullable<Parameters<ObserveStore["commitSuccessfulPoll"]>[0]["orderEvidence"]> = [];
+    for (const event of unique.values()) {
+      if (!event.chainOrder) continue;
+      const previous = storedByKey.get(event.sourceEventKey);
+      if (previous?.chainOrder && !sameChainOrder(previous.chainOrder, event.chainOrder)) {
+        this.store.failPolygonTradeFeedUnsafe({
+          observeRunId: started.observeRunId, baseline: started.baseline,
+          errorDetail: `OBSERVE_CHAIN_ORDER_CONFLICT:${event.sourceEventKey}`, detectedAt: completedAt,
+        });
+        throw new PolygonOrderFilledFeedUnsafeError(`OBSERVE_CHAIN_ORDER_CONFLICT:${event.sourceEventKey}`);
+      }
+      if (!previous?.chainOrder) orderEvidence.push({ sourceEventKey: event.sourceEventKey, chainOrder: event.chainOrder });
+      if (previous) previous.chainOrder = event.chainOrder;
+    }
+    // All persisted events are already loaded for projection. Avoid a SQLite
+    // lookup per incoming event on every short polling interval.
+    const existingKeys = new Set([...unique.keys()].filter((key) => storedByKey.has(key)));
     duplicateEvents += existingKeys.size;
     const newEvents = [...unique.values()].filter((event) => !existingKeys.has(event.sourceEventKey));
-    const storedByKey = new Map(storedEvents.map((event) => [event.sourceEventKey, event]));
     const eventConfirmations = [...unique.values()]
       .filter((event) => {
         if (!existingKeys.has(event.sourceEventKey) || !event.activityConfirmed) return false;
@@ -648,10 +671,7 @@ export class ObserveOnlyRunner {
       this.lastPollCompletedAt = completedAt;
       return false;
     }
-    const existingSignalIds = this.store.existingSignalIds(
-      started.baseline.baselineRunId,
-      projection.signals.map((candidate) => candidate.signalId),
-    );
+    const existingSignalIds = this.store.assertSignalOrderingContinuity(started.baseline, projection, completedAt);
     const signalCandidates = projection.signals.filter((candidate) => !existingSignalIds.has(candidate.signalId));
     const currentTradeKeys = new Set([
       ...multiplicity.trades.map((item) => canonicalCrossSourceKey(item.sourceEventKey)),
@@ -669,8 +689,7 @@ export class ObserveOnlyRunner {
       if (
         event.trade
         && event.sourceEventKey !== sourceEventKey(event.trade)
-        && !event.activityConfirmed
-        && event.sourceType !== "POLYGON_ORDER_FILLED"
+        && !isObserveTradeExecutionConfirmed(event)
       ) {
         ambiguousKeys.add(event.sourceEventKey);
       }
@@ -691,6 +710,7 @@ export class ObserveOnlyRunner {
       previousReport,
       sourceEventAmbiguities,
       unsupportedActivities,
+      projection.orderingAmbiguities,
     );
     const expectedPositions = new Map(
       projection.projection.map((entry) => [entry.asset, BigInt(entry.expectedTotalMicros)]),
@@ -825,6 +845,7 @@ export class ObserveOnlyRunner {
       snapshot,
       newEvents,
       eventConfirmations,
+      orderEvidence,
       conversionEvidence,
       splitEvidence,
       duplicateEvents,

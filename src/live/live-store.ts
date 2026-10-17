@@ -9,6 +9,7 @@ import {
 } from "../domain/state-machine.js";
 import type { SourceVersion } from "../infra/source-version.js";
 import type { LiveRiskLimits } from "../risk/risk-manager.js";
+import { loadAccountExposure } from "../execution/exposure-obligations.js";
 import type { ExecutionFeeSnapshot, ExecutionOrderbookSnapshot } from "../execution/market-data.js";
 import type { ExecutionMatchResult } from "../execution/orderbook-matching.js";
 import type {
@@ -272,6 +273,10 @@ export class LiveStore {
     this.database.prepare(
       "UPDATE live_executions SET filled_size_micros=?,filled_notional_micros=?,fee_micros=?,updated_at=? WHERE live_execution_id=?",
     ).run(row.size.toString(), row.notional.toString(), row.fee.toString(), now, executionId);
+  }
+
+  recordedOrderFillSize(orderId: string): bigint {
+    return this.fillTotals("live_order_id", orderId).size;
   }
 
   createOrder(
@@ -647,6 +652,7 @@ export class LiveStore {
     execution: LiveExecutionRow,
     liveOrderId: string,
     reason: string,
+    options: { retryable?: boolean } = {},
   ): void {
     const row = this.database.prepare(
       "SELECT status,external_order_id FROM live_orders WHERE live_order_id=?",
@@ -661,6 +667,9 @@ export class LiveStore {
       this.transition("LIVE_ORDER", liveOrderId, row.status, "FAILED", reason, execution.ruleset_hash, now);
       this.audit("LIVE_ORDER", liveOrderId, "failed_before_external_ack", reason, {});
     }
+    // A stale quote is proven not to have crossed POST. Close this signed
+    // attempt, retain its reservation, and let the normal retry replan it.
+    if (options.retryable) return;
     this.updateExecutionState(execution.live_execution_id, "FAILED", reason, execution.ruleset_hash);
     if (execution.execution_type === "TARGET_BUY") {
       this.releaseReservation(execution, liveOrderId, reason);
@@ -907,7 +916,10 @@ export class LiveStore {
     const singleLimit = minBigInt(this.liveRiskLimits.maxTradeSizeMicros, riskBudget);
     if (finalAmountMicros > singleLimit) throw new Error("LIVE_RESERVATION_SINGLE_TRADE_LIMIT");
 
-    const pendingTotal = this.pendingReservationTotal(execution.live_account_id);
+    const exposure = loadAccountExposure(this.database, "LIVE", execution.live_account_id, undefined, {
+      assetId: execution.asset_id, conditionId: execution.condition_id,
+    });
+    const pendingTotal = [...exposure.pendingBuys.values()].reduce((sum, item) => sum + item.amountMicros, 0n);
     if (pendingTotal + additionalAmountMicros > external.walletBalanceMicros) {
       throw new Error("LIVE_RESERVATION_WALLET_BALANCE_INSUFFICIENT");
     }
@@ -915,23 +927,18 @@ export class LiveStore {
       throw new Error("LIVE_RESERVATION_ALLOWANCE_INSUFFICIENT");
     }
 
-    const totalExposure = this.positionCostTotal(execution.live_account_id);
     const totalLimit = minBigInt(this.liveRiskLimits.maxExposureMicros, riskBudget);
-    if (totalExposure + pendingTotal + additionalAmountMicros > totalLimit) {
+    if (exposure.totalMicros + additionalAmountMicros > totalLimit) {
       throw new Error("LIVE_RESERVATION_TOTAL_EXPOSURE_LIMIT");
     }
 
-    const marketExposure = this.positionCostTotal(execution.live_account_id, { conditionId: execution.condition_id });
-    const marketPending = this.pendingReservationTotal(execution.live_account_id, { conditionId: execution.condition_id });
     const marketLimit = totalLimit;
-    if (marketExposure + marketPending + additionalAmountMicros > marketLimit) {
+    if ((exposure.marketMicros.get(execution.condition_id.toLowerCase()) ?? 0n) + additionalAmountMicros > marketLimit) {
       throw new Error("LIVE_RESERVATION_MARKET_EXPOSURE_LIMIT");
     }
 
-    const positionExposure = this.positionCostTotal(execution.live_account_id, { assetId: execution.asset_id });
-    const positionPending = this.pendingReservationTotal(execution.live_account_id, { assetId: execution.asset_id });
     const positionLimit = totalLimit;
-    if (positionExposure + positionPending + additionalAmountMicros > positionLimit) {
+    if ((exposure.assetMicros.get(execution.asset_id) ?? 0n) + additionalAmountMicros > positionLimit) {
       throw new Error("LIVE_RESERVATION_POSITION_EXPOSURE_LIMIT");
     }
   }
@@ -1124,10 +1131,6 @@ export class LiveStore {
     );
   }
 
-  fillAlreadyRecorded(idempotencyKey: string): boolean {
-    return this.database.prepare("SELECT 1 ok FROM live_fills WHERE fill_idempotency_key=?").get(idempotencyKey) !== undefined;
-  }
-
   recordFill(input: {
     execution: LiveExecutionRow;
     liveOrderId: string;
@@ -1136,7 +1139,20 @@ export class LiveStore {
   }): { inserted: boolean; fillId: string } {
     const idempotencyKey = fillIdempotencyKey(input.liveOrderId, input.fill.externalFillId);
     const fillId = hash(["LIVE_FILL", input.liveOrderId, input.fill.externalFillId]);
-    if (this.fillAlreadyRecorded(idempotencyKey)) return { inserted: false, fillId };
+    const existing = this.database.prepare(
+      `SELECT side,fill_price_units,fill_size_micros,fill_notional_micros,fee_micros
+       FROM live_fills WHERE fill_idempotency_key=?`,
+    ).get(idempotencyKey) as { side: string; fill_price_units: string; fill_size_micros: string;
+      fill_notional_micros: string; fee_micros: string } | undefined;
+    if (existing) {
+      if (existing.side !== input.side || BigInt(existing.fill_price_units) !== BigInt(input.fill.priceUnits)
+        || BigInt(existing.fill_size_micros) !== BigInt(input.fill.sizeMicros)
+        || BigInt(existing.fill_notional_micros) !== BigInt(input.fill.notionalMicros)
+        || BigInt(existing.fee_micros) !== BigInt(input.fill.feeMicros)) {
+        throw new Error(`LIVE_FILL_IMMUTABLE_ECONOMICS_MISMATCH:${input.fill.externalFillId}`);
+      }
+      return { inserted: false, fillId };
+    }
     const now = this.now().toISOString();
     this.database.prepare(
       `INSERT INTO live_fills(
@@ -1894,6 +1910,19 @@ export class LiveStore {
     return row ?? null;
   }
 
+  redeemableSettlements(accountId: string): Array<NonNullable<ReturnType<LiveStore["settlementForRedeem"]>>> {
+    return this.database.prepare(`SELECT s.*,p.live_account_id,p.signal_id,p.current_size_micros,
+      p.remaining_cost_micros,p.status position_status,p.ruleset_hash FROM live_positions p
+      JOIN live_settlement_ledger s ON s.live_position_id=p.live_position_id
+      WHERE p.live_account_id=? AND (p.status='SETTLEMENT_PENDING'
+        OR (p.status='FROZEN' AND EXISTS (SELECT 1 FROM live_redeems r
+          WHERE r.live_position_id=p.live_position_id AND r.adapter_type='LIVE'
+            AND r.status IN ('CREATED','SUBMITTED') AND json_type(r.raw_response_json,'$.groupInput')='object')))
+      AND p.current_size_micros!='0'
+      AND s.settlement_status IN ('RESOLVED','REDEEM_DISABLED','REDEEM_PENDING')
+      ORDER BY p.asset_id,p.live_position_id`).all(accountId) as unknown as Array<NonNullable<ReturnType<LiveStore["settlementForRedeem"]>>>;
+  }
+
   saveRedeemResult(input: {
     positionId: string;
     executionId: string;
@@ -2000,6 +2029,7 @@ export class LiveStore {
     executionId: string;
     idempotencyKey: string;
     adapterType: string;
+    raw?: Record<string, unknown>;
   }): void {
     this.transaction(() => {
       const now = this.now().toISOString();
@@ -2027,12 +2057,13 @@ export class LiveStore {
       `INSERT INTO live_redeems(
         live_redeem_id,live_position_id,redeem_idempotency_key,status,adapter_type,
         raw_response_json,created_at,updated_at
-      ) VALUES (?, ?, ?, 'CREATED', ?, '{}', ?, ?)`,
+      ) VALUES (?, ?, ?, 'CREATED', ?, ?, ?, ?)`,
     ).run(
       hash(["LIVE_REDEEM", input.idempotencyKey]),
       input.positionId,
       input.idempotencyKey,
       input.adapterType,
+      stableJson(input.raw ?? {}),
       now,
       now,
     );
@@ -2083,7 +2114,7 @@ export class LiveStore {
     remaining_cost_micros: string;
     position_status: LivePositionState;
     ruleset_hash: string;
-  }): void {
+  }, actualAmountMicros?: string): void {
     this.transaction(() => {
       const position = this.database.prepare(
       `SELECT status,current_size_micros,remaining_cost_micros,realized_pnl_micros,ruleset_hash
@@ -2097,9 +2128,22 @@ export class LiveStore {
     } | undefined;
       if (!position) throw new Error("LIVE_POSITION_NOT_FOUND");
       if (position.status === "REDEEMED") return;
+      if (position.status === "FROZEN" && actualAmountMicros !== undefined) {
+        const proof = this.database.prepare(`SELECT 1 FROM live_redeems WHERE live_position_id=?
+          AND adapter_type='LIVE' AND status='CONFIRMED' AND json_type(raw_response_json,'$.evidence')='object'`)
+          .get(settlement.live_position_id);
+        if (!proof) throw new Error("LIVE_REDEEM_FROZEN_POSITION_EVIDENCE_REQUIRED");
+        assertTransition(LIVE_POSITION_TRANSITIONS, "FROZEN", "SETTLEMENT_PENDING");
+        this.database.prepare(`UPDATE live_positions SET status='SETTLEMENT_PENDING',
+          frozen_from_status=NULL,frozen_reason=NULL,frozen_at=NULL WHERE live_position_id=?`).run(settlement.live_position_id);
+        this.transition("LIVE_POSITION", settlement.live_position_id, "FROZEN", "SETTLEMENT_PENDING",
+          "CONFIRMED_EXTERNAL_REDEEM", settlement.ruleset_hash, this.now().toISOString());
+        position.status = "SETTLEMENT_PENDING";
+      }
       if (position.status !== "SETTLEMENT_PENDING") throw new Error(`LIVE_POSITION_NOT_REDEEMABLE:${position.status}`);
       const now = this.now().toISOString();
-      const redeemAmount = BigInt(settlement.redeem_amount_micros);
+      const redeemAmount = BigInt(actualAmountMicros ?? settlement.redeem_amount_micros);
+      if (redeemAmount < 0n) throw new Error("LIVE_REDEEM_ACTUAL_PAYOUT_INVALID");
       const costBasis = BigInt(position.remaining_cost_micros);
       const pnl = redeemAmount - costBasis;
       this.database.prepare(
@@ -2658,31 +2702,6 @@ export class LiveStore {
     }), { size: 0n, notional: 0n, fee: 0n });
   }
 
-  private pendingReservationTotal(
-    accountId: string,
-    scope: { conditionId?: string; assetId?: string } = {},
-  ): bigint {
-    const predicates = ["e.live_account_id=?"];
-    const parameters: string[] = [accountId];
-    if (scope.conditionId !== undefined) {
-      predicates.push("e.condition_id=?");
-      parameters.push(scope.conditionId);
-    }
-    if (scope.assetId !== undefined) {
-      predicates.push("e.asset_id=?");
-      parameters.push(scope.assetId);
-    }
-    const rows = this.database.prepare(
-      `SELECT r.delta_micros
-       FROM live_reservation_ledger r
-       JOIN live_executions e ON e.live_execution_id=r.live_execution_id
-       WHERE ${predicates.join(" AND ")}`,
-    ).all(...parameters) as unknown as Array<{ delta_micros: string }>;
-    const total = rows.reduce((sum, row) => sum + BigInt(row.delta_micros), 0n);
-    if (total < 0n) throw new Error("LIVE_RESERVATION_LEDGER_NEGATIVE");
-    return total;
-  }
-
   private pendingAssetReservationTotal(accountId: string, assetId: string): bigint {
     const rows = this.database.prepare(
       `SELECT r.delta_size_micros
@@ -2700,29 +2719,6 @@ export class LiveStore {
       "SELECT delta_size_micros FROM live_asset_reservation_ledger WHERE live_execution_id=?",
     ).all(executionId) as unknown as Array<{ delta_size_micros: string }>;
     return rows.reduce((sum, row) => sum + BigInt(row.delta_size_micros), 0n);
-  }
-
-  private positionCostTotal(
-    accountId: string,
-    scope: { conditionId?: string; assetId?: string } = {},
-  ): bigint {
-    const predicates = [
-      "live_account_id=?",
-      "status IN ('OPEN','PARTIALLY_CLOSED','SETTLEMENT_PENDING','FROZEN')",
-    ];
-    const parameters: string[] = [accountId];
-    if (scope.conditionId !== undefined) {
-      predicates.push("condition_id=?");
-      parameters.push(scope.conditionId);
-    }
-    if (scope.assetId !== undefined) {
-      predicates.push("asset_id=?");
-      parameters.push(scope.assetId);
-    }
-    const rows = this.database.prepare(
-      `SELECT remaining_cost_micros FROM live_positions WHERE ${predicates.join(" AND ")}`,
-    ).all(...parameters) as unknown as Array<{ remaining_cost_micros: string }>;
-    return rows.reduce((sum, row) => sum + BigInt(row.remaining_cost_micros), 0n);
   }
 
   private addExecutionPositionFill(

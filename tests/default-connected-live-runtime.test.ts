@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assembleDefaultConnectedLiveRuntime,
@@ -16,6 +15,8 @@ import {
 import { computeLiveProductionRuntimeHash } from "../src/operator/live-production-build.js";
 import type { LiveWalletRuntimeBinding } from "../src/operator/live-wallet-session.js";
 
+import { copyProductionEvidenceTestSources, writeProductionEvidenceTestArtifacts } from "./fixtures/production-live-evidence.js";
+
 const roots: string[] = [];
 const wallet = "0x0000000000000000000000000000000000000001";
 
@@ -23,10 +24,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 function binding(): LiveWalletRuntimeBinding {
   return {
@@ -54,11 +51,12 @@ describe("assembleDefaultConnectedLiveRuntime", () => {
   it("builds the complete production runtime without deriving credentials or sending a transaction", async () => {
     const root = mkdtempSync(join(tmpdir(), "ni-k-default-live-runtime-"));
     roots.push(root);
+    copyProductionEvidenceTestSources(root);
     writeFileSync(join(root, ".gitignore"), "data/\n");
     execFileSync("git", ["init", "-q"], { cwd: root });
     execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
     execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
-    execFileSync("git", ["add", ".gitignore"], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
     execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
     const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 
@@ -70,26 +68,10 @@ describe("assembleDefaultConnectedLiveRuntime", () => {
       confirmLimits: true,
       acceptCompliance: true,
     });
-    const finalReport = [
-      "OWNER_AUTHORIZED_MIXED_CORE_AGGREGATION",
-      "86,400,012 ms",
-      "live_gate_state=LIVE_DISABLED",
-    ].join("\n");
-    const isolated = JSON.stringify({
-      status: "PASSED",
-      safety: { realOrdersCreated: 0, chainWrites: 0 },
-    });
-    const finalPath = join(
-      root,
-      "data/operator/final-reports/ni-k-paper-mixed-core-24h-final-20260727-0300.md",
-    );
-    const isolatedPath = join(root, "data/operator/paper-campaign-isolated-verification.json");
-    mkdirSync(dirname(finalPath), { recursive: true });
-    writeFileSync(finalPath, finalReport);
-    writeFileSync(isolatedPath, isolated);
+    const artifacts = writeProductionEvidenceTestArtifacts(root, commit);
     const artifactPath = liveProductionValidationArtifactPath(root);
     writeFileSync(artifactPath, JSON.stringify({
-      schemaVersion: "live-production-validation-v2",
+      schemaVersion: "live-production-validation-v3",
       status: "PASSED",
       sourceCodeCommit: commit,
       sourceCodeDirty: false,
@@ -101,8 +83,7 @@ describe("assembleDefaultConnectedLiveRuntime", () => {
       testFileCount: 70,
       testCount: 900,
       diffCheckPassed: true,
-      finalPaperReportSha256: sha256(finalReport),
-      isolatedVerificationSha256: sha256(isolated),
+      ...artifacts.evidence,
     }));
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as { method: string };

@@ -1313,6 +1313,65 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("keeps a BUY reserved when the final Gate outlives its quote, then replans on retry", async () => {
+    const env = setup();
+    let clock = Date.parse(now);
+    let gateCalls = 0;
+    const gate = new FakeGate(true);
+    const check = gate.checkExecution.bind(gate);
+    gate.checkExecution = async (...args: Parameters<FakeGate["checkExecution"]>) => {
+      const result = await check(...args);
+      if (++gateCalls === 2) clock += 10_000;
+      return result;
+    };
+    const adapter = new CountingOrderAdapter();
+    const executor = liveExecutor(env.databasePath, {
+      liveGate: gate, orderAdapter: adapter, now: () => new Date(clock),
+      marketDataProvider: new FakeLiveMarketDataProvider({ now: () => new Date(clock) }),
+    });
+    const input = { accountId, signal: env.signal, context: env.context, riskDecisionId: "risk-live-buy" };
+    const first = await executor.executeBuy(input);
+    expect(first.state).toBe("WAITING_EXECUTION");
+    expect(adapter.submitCount).toBe(0);
+    expect(count(env.databasePath, "live_orders")).toBe(0);
+    const second = await executor.executeBuy(input);
+    expect(second).toMatchObject({ executionId: first.executionId, state: "EXECUTED" });
+    expect(adapter.submitCount).toBe(1);
+    executor.close();
+  });
+
+  it("closes an unsubmitted stale adapter attempt while preserving the execution for retry", async () => {
+    const env = setup();
+    let clock = Date.parse(now);
+    class SlowPreparationAdapter extends FakeOrderAdapter {
+      submitted = 0;
+      override async submitOrder(
+        order: LiveOrderRequest,
+        guard?: import("../src/live/order-adapter.js").OrderSubmissionGuard,
+      ) {
+        clock += 10_000;
+        guard?.beforeSubmit();
+        this.submitted += 1;
+        return super.submitOrder(order);
+      }
+    }
+    const adapter = new SlowPreparationAdapter();
+    const executor = liveExecutor(env.databasePath, {
+      orderAdapter: adapter, now: () => new Date(clock),
+      marketDataProvider: new FakeLiveMarketDataProvider({ now: () => new Date(clock) }),
+    });
+    const result = await executor.executeBuy({ accountId, signal: env.signal, context: env.context, riskDecisionId: "risk-live-buy" });
+    expect(result.state).toBe("WAITING_EXECUTION");
+    expect(adapter.submitted).toBe(0);
+    const database = new DatabaseSync(env.databasePath, { readOnly: true });
+    expect(database.prepare("SELECT status,is_terminal,external_order_id FROM live_orders").get())
+      .toEqual({ status: "FAILED", is_terminal: 1, external_order_id: null });
+    expect(database.prepare("SELECT delta_micros FROM live_reservation_ledger").all())
+      .toEqual([{ delta_micros: "5000000" }]);
+    database.close();
+    executor.close();
+  });
+
   it("keeps a BUY reserved and retryable while the orderbook is stale, then executes once on fresh evidence", async () => {
     const env = setup();
     const stale = liveExecutor(env.databasePath, {
@@ -1411,7 +1470,7 @@ describe("LiveExecutor", () => {
     });
     const executor = liveExecutor(env.databasePath, {
       signer: new MutatingFakeSigner((payload) => {
-        const size = (BigInt(String(payload.sizeMicros)) * 99n) / 100n;
+        const size = (BigInt(String(payload.sizeMicros)) * 97n) / 100n;
         const amount = (size * BigInt(String(payload.priceUnits))) / 1_000_000_000_000_000_000n;
         return { orderAmountMicros: amount.toString(), orderSizeMicros: size.toString() };
       }),
@@ -3720,6 +3779,42 @@ describe("LiveExecutor", () => {
     executor.close();
   });
 
+  it("publishes current phase failures, clears them after recovery and returns isolated health snapshots", async () => {
+    const env = setup();
+    let clockMs = Date.parse(now);
+    let fail = true;
+    const clock = () => new Date(clockMs);
+    const executor = liveExecutor(env.databasePath, { now: clock });
+    const consumer = new LiveSignalConsumer(env.databasePath, executor, sourceVersion, clock);
+    vi.spyOn(consumer, "consumeAvailableSignals").mockImplementation(async () => {
+      if (fail) throw new Error("TRANSIENT_SIGNAL_READ_FAILURE");
+      return [];
+    });
+    activateLiveGate(env.databasePath);
+    const runner = new LiveRunner(executor, consumer, {
+      accountId, intervalMs: 1_000, durationMs: 1_200, reconciliationEveryCycles: 100, now: clock,
+      wait: async milliseconds => {
+        if (fail) {
+          const failed = runner.health();
+          expect(failed.phase).toBeNull();
+          expect(failed.failedPhases.CONSUME_TARGET_EXITS).toMatchObject({
+            reason: "TRANSIENT_SIGNAL_READ_FAILURE", consecutiveFailures: 1,
+          });
+          expect(failed.blockedBuyReasons).toContain("TARGET_EXIT_PROCESSING_FAILED");
+          delete failed.failedPhases.CONSUME_TARGET_EXITS;
+          expect(runner.health().failedPhases.CONSUME_TARGET_EXITS).toBeDefined();
+          fail = false;
+        }
+        clockMs += milliseconds;
+      },
+    });
+    try {
+      await runner.run(undefined, { passed: true, reason: "PREPARED_TEST_RECOVERY", recoveryRunId: "test" });
+      expect(runner.health()).toMatchObject({ phase: null, failedPhases: {}, blockedBuyReasons: [] });
+      expect(runner.health().lastFailure?.reason).toBe("TRANSIENT_SIGNAL_READ_FAILURE");
+    } finally { consumer.close(); executor.close(); }
+  });
+
   it("keeps long-running error and settlement report details bounded while retaining total counts", async () => {
     const env = setup({ marketEndTime: "2026-07-09T00:00:01.000Z" });
     const buyer = liveExecutor(env.databasePath);
@@ -4639,6 +4734,66 @@ describe("LiveExecutor", () => {
     expect(count(env.databasePath, "live_recovery_runs")).toBe(2);
     db.close();
     executor.close();
+  });
+
+  it.each(["consistent", "changed_economics", "missing_history"])(
+    "recovers cumulative SELL fills without double booking and rejects changed history: %s", async history => {
+    const env = setup();
+    const buyer = liveExecutor(env.databasePath);
+    await buyer.executeBuy({ accountId, signal: env.signal, context: env.context, riskDecisionId: "risk-live-buy" });
+    buyer.close();
+    const sell = insertSignalAndRisk(env.databasePath, env.targetId, {
+      signalId: "live-cumulative-sell-recovery", riskDecisionId: "risk-cumulative-sell-recovery",
+      decision: "ALLOW", signalType: "TARGET_SELL", requestedAmountMicros: null, requestedSizeMicros: "10000000",
+    });
+    const base = new FakeOrderAdapter({ fillRatioPpm: 700_000 });
+    let complete = false;
+    let corrupted = false;
+    const adapter: OrderAdapter = {
+      adapterType: "FAKE",
+      submitOrder: async request => ({ ...await base.submitOrder(request), terminal: false }),
+      cancelOrder: (id, key) => base.cancelOrder(id, key),
+      getOpenOrders: async () => [],
+      getOrder: async id => ({ ...await base.getOrder(id),
+        status: corrupted && history === "missing_history" ? "ACKNOWLEDGED" : complete ? "FILLED" : "PARTIALLY_FILLED",
+        filledSizeMicros: corrupted && history === "missing_history" ? "0" : complete ? "10000000" : "7000000", terminal: complete }),
+      getFills: async id => {
+        const fills = await base.getFills(id);
+        if (corrupted && history === "missing_history") return [];
+        if (corrupted && history === "changed_economics") return fills.map(fill => ({ ...fill,
+          priceUnits: "600000000000000000", notionalMicros: "4200000" }));
+        return complete ? [...fills, { ...fills[0]!, externalFillId: `${id}-fill-2`, sizeMicros: "3000000",
+          notionalMicros: (3_000_000n * BigInt(fills[0]!.priceUnits) / 10n ** 18n).toString() }] : fills;
+      },
+    };
+    const seller = liveExecutor(env.databasePath, { orderAdapter: adapter });
+    await seller.executeSell({ accountId, signal: sell.signal, context: sell.context,
+      riskDecisionId: "risk-cumulative-sell-recovery" });
+    const db = new DatabaseSync(env.databasePath);
+    const size = () => db.prepare("SELECT current_size_micros FROM live_positions WHERE live_account_id=?")
+      .get(accountId) as { current_size_micros: string };
+    try {
+      expect(size().current_size_micros).toBe("3000000");
+      expect(await seller.recoverOnStartup(accountId)).toMatchObject({ passed: true, reason: "RECOVERY_RECONCILED" });
+      expect((await seller.recoverOnStartup(accountId)).passed).toBe(true);
+      expect(size().current_size_micros).toBe("3000000");
+      expect(count(env.databasePath, "live_fills")).toBe(2);
+      if (history !== "consistent") {
+        corrupted = true;
+        const result = await seller.recoverOnStartup(accountId);
+        expect(result.passed).toBe(false);
+        expect(result.reason).toContain(history === "changed_economics"
+          ? "LIVE_FILL_IMMUTABLE_ECONOMICS_MISMATCH" : "RECOVERY_CUMULATIVE_FILL_HISTORY_MISMATCH");
+        expect(size().current_size_micros).toBe("3000000");
+        expect(count(env.databasePath, "live_fills")).toBe(2);
+        return;
+      }
+      complete = true;
+      expect((await seller.recoverOnStartup(accountId)).passed).toBe(true);
+      expect((await seller.recoverOnStartup(accountId)).passed).toBe(true);
+      expect(size().current_size_micros).toBe("0");
+      expect(count(env.databasePath, "live_fills")).toBe(3);
+    } finally { db.close(); seller.close(); }
   });
 
   it("prefers one adapter snapshot while finality progresses and records the confirmed fill exactly once", async () => {
@@ -6054,6 +6209,22 @@ describe("LiveExecutor", () => {
 });
 
 describe("LiveIdentityBinding", () => {
+  it.each(["wallet", "signer"] as const)("rejects a successful but malformed runtime %s address", async (part) => {
+    const env = setup();
+    const provider = new FakeWalletProvider({ address: wallet });
+    const signer = new FakeSigner(wallet);
+    if (part === "wallet") provider.getAddress = async () => "not-an-address";
+    else signer.address = async () => "";
+    const binding = new LiveIdentityBinding(env.databasePath, provider, signer, "TEST", sourceVersion);
+    const result = await binding.check(accountId);
+    expect(result.ready).toBe(false);
+    expect(result.checks.filter((item) => item.name === `runtime_${part}_address`)).toEqual([{
+      name: `runtime_${part}_address`, passed: false,
+      reason: part === "wallet" ? "RUNTIME_WALLET_ADDRESS_INVALID" : "RUNTIME_SIGNER_ADDRESS_INVALID",
+    }]);
+    binding.close();
+  });
+
   it("accepts only the registered fake wallet and signer identities in isolated tests", async () => {
     const env = setup();
     const binding = new LiveIdentityBinding(

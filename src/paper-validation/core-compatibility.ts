@@ -42,6 +42,7 @@ export const CORE_COMPATIBILITY_EXECUTION_FILES = [
   "src/execution/buy-follow-policy.ts",
   "src/execution/buy-minimum-eligibility.ts",
   "src/execution/capital-sizing.ts",
+  "src/execution/exposure-obligations.ts",
   "src/execution/market-change-feed.ts",
   "src/execution/market-data.ts",
   "src/execution/market-order-constraints.ts",
@@ -49,6 +50,7 @@ export const CORE_COMPATIBILITY_EXECUTION_FILES = [
   "src/execution/signal-integrity.ts",
   "src/execution/target-sell-policy.ts",
   "src/execution/types.ts",
+  "src/live/market-protocol.ts",
 ] as const;
 
 /** Campaign persistence and crash recovery, excluding acceptance/report policy. */
@@ -116,6 +118,7 @@ export const CORE_COMPATIBILITY_SCHEMA_FILES = [
   "src/infra/sqlite/032_negative_risk_conversion.sql",
   "src/infra/sqlite/034_signal_enrichment_resilience.sql",
   "src/infra/sqlite/035_special_activity_projection.sql",
+  "src/infra/sqlite/038_observe_event_ordering.sql",
 ] as const;
 
 export const VALIDATION_POLICY_FILES = [
@@ -220,6 +223,7 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/default-connected-live-runtime.test.ts",
   "tests/diagnostic-redaction.test.ts",
   "tests/execution-market-data.test.ts",
+  "tests/execution-obligations.test.ts",
   "tests/fixed.test.ts",
   "tests/golden-expectations.test.ts",
   "tests/hecatonchires-launcher.test.ts",
@@ -233,10 +237,13 @@ export const PAPER_CAMPAIGN_ISOLATED_TEST_FILES = [
   "tests/live-wallet-request-broker.test.ts",
   "tests/live-wallet-session.test.ts",
   "tests/live-risk-manager.test.ts",
+  "tests/live-redemption-integration.test.ts",
   "tests/market-change-feed.test.ts",
   "tests/market-order-constraints.test.ts",
   "tests/negative-risk-conversion.test.ts",
   "tests/observe-runner.test.ts",
+  "tests/observe-event-ordering.test.ts",
+  "tests/observe-ordering-migration.test.ts",
   "tests/operational-validation.test.ts",
   "tests/operator-control.test.ts",
   "tests/operator-actions.test.ts",

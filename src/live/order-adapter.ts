@@ -15,14 +15,27 @@ export class OrderSubmissionOutcomeUnknownError extends Error {
   }
 }
 
+/** The guarded order transport was never entered; retry/replan is safe. */
+export class OrderSubmissionNotSentError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "OrderSubmissionNotSentError";
+  }
+}
+
 export interface OrderSnapshot {
   status: OrderStatus;
   fills: LiveFillEvent[];
 }
 
+/** Recheck volatile local evidence after adapter reads, immediately before POST. */
+export interface OrderSubmissionGuard {
+  beforeSubmit(): void;
+}
+
 export interface OrderAdapter {
   readonly adapterType: "DISABLED" | "FAKE" | "POLYMARKET_CLOB";
-  submitOrder(order: LiveOrderRequest): Promise<OrderSubmitResult>;
+  submitOrder(order: LiveOrderRequest, guard?: OrderSubmissionGuard): Promise<OrderSubmitResult>;
   cancelOrder(orderId: string, idempotencyKey: string): Promise<CancelResult>;
   getOrder(orderId: string): Promise<OrderStatus>;
   /** Derive order state and fills from the same external observations. */

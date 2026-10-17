@@ -61,7 +61,18 @@ export interface LiveRunnerReport {
  * adapter and cannot bypass LiveExecutor. Startup recovery always runs first;
  * a human must re-arm Live Gate afterwards before Signal consumption begins.
  */
+export interface LiveRunnerHealth {
+  phase: string | null;
+  lastSuccess: { phase: string; time: string } | null;
+  lastFailure: { phase: string; time: string; reason: string } | null;
+  failedPhases: Record<string, { time: string; reason: string; consecutiveFailures: number }>;
+  blockedBuyReasons: string[];
+}
+
 export class LiveRunner {
+  private readonly runtimeHealth: LiveRunnerHealth = {
+    phase: null, lastSuccess: null, lastFailure: null, failedPhases: {}, blockedBuyReasons: [],
+  };
   private readonly now: () => Date;
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly intervalMs: number;
@@ -90,6 +101,10 @@ export class LiveRunner {
     this.wait = options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
+  health(): Readonly<typeof this.runtimeHealth> {
+    return structuredClone(this.runtimeHealth);
+  }
+
   async run(
     signal?: AbortSignal,
     preparedRecovery?: { passed: boolean; reason: string; recoveryRunId: string },
@@ -102,6 +117,11 @@ export class LiveRunner {
     const errors: LiveRunnerReport["errors"] = [];
     let errorCount = 0;
     const recordError = (operation: string, message: string): void => {
+      this.runtimeHealth.lastFailure = { phase: operation, time: this.now().toISOString(), reason: message };
+      this.runtimeHealth.failedPhases[operation] = {
+        time: this.now().toISOString(), reason: message,
+        consecutiveFailures: (this.runtimeHealth.failedPhases[operation]?.consecutiveFailures ?? 0) + 1,
+      };
       errorCount += 1;
       if (errors.length >= this.reportDetailLimit) errors.shift();
       errors.push({ time: this.now().toISOString(), operation, message });
@@ -114,10 +134,16 @@ export class LiveRunner {
       ok: false;
     }> => {
       try {
-        return { ok: true, value: await task() };
+        this.runtimeHealth.phase = operation;
+        const value = await task();
+        delete this.runtimeHealth.failedPhases[operation];
+        this.runtimeHealth.lastSuccess = { phase: operation, time: this.now().toISOString() };
+        return { ok: true, value };
       } catch (error) {
         recordError(operation, error instanceof Error ? error.message : String(error));
         return { ok: false };
+      } finally {
+        this.runtimeHealth.phase = null;
       }
     };
     if (!recovery.passed) recordError("STARTUP_RECOVERY", recovery.reason);
@@ -147,6 +173,7 @@ export class LiveRunner {
     };
     while (!signal?.aborted && this.now().valueOf() < deadline) {
       const active = this.executor.isGateActive();
+      this.runtimeHealth.blockedBuyReasons = active ? [] : ["LIVE_GATE_NOT_ACTIVE"];
       if (active && !wasActive) {
         this.consumer.syncActiveGateBoundary(this.options.accountId);
         activationCount += 1;
@@ -171,6 +198,7 @@ export class LiveRunner {
           () => this.executor.checkStopLosses(this.options.accountId),
         );
         const stopLossHealthy = stopLoss.ok && stopLoss.value.healthy;
+        const redemptionPending = this.executor.hasUnresolvedRedemption(this.options.accountId);
         if (stopLoss.ok) stopLossExecutions += stopLoss.value.executionIds.length;
         if (!stopLossHealthy) stopLossUnsafeCycles += 1;
 
@@ -186,7 +214,7 @@ export class LiveRunner {
           : targetExits;
         if (lateTargetExits.ok) consumedSignals += lateTargetExits.value.length;
 
-        if (stopLossHealthy && conversionSafety.ok && targetExits.ok && lateTargetExits.ok) {
+        if (stopLossHealthy && !redemptionPending && conversionSafety.ok && targetExits.ok && lateTargetExits.ok) {
           const orderedSignals = await capture("CONSUME_SIGNALS_IN_ORDER", async () => {
             const results = await this.consumer.consumeAvailableSignals(
               this.options.accountId,
@@ -208,6 +236,12 @@ export class LiveRunner {
             skippedBuyCycles += 1;
           }
         } else {
+          this.runtimeHealth.blockedBuyReasons = [
+            ...(!stopLossHealthy ? ["STOP_LOSS_HEALTH_UNSAFE"] : []),
+            ...(redemptionPending ? ["REDEMPTION_UNRESOLVED"] : []),
+            ...(!conversionSafety.ok ? ["TARGET_CONVERSION_BLOCKED"] : []),
+            ...(!targetExits.ok || !lateTargetExits.ok ? ["TARGET_EXIT_PROCESSING_FAILED"] : []),
+          ];
           skippedBuyCycles += 1;
         }
         if (activeCycles % this.reconciliationEveryCycles === 0) {
@@ -239,6 +273,11 @@ export class LiveRunner {
             (left, right) => left.positionId === right.positionId && left.reason === right.reason,
           );
         }
+        if (current.failures.length > 0) throw new Error(current.failures.map(failure => failure.reason).join(","));
+      });
+      await capture("PROCESS_REDEMPTIONS", async () => {
+        const current = await this.executor.processRedemptions(this.options.accountId);
+        if (current.failures.length > 0) throw new Error(current.failures.map(failure => failure.reason).join(","));
       });
       cycles += 1;
       const remaining = deadline - this.now().valueOf();

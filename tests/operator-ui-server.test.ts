@@ -1003,6 +1003,85 @@ describe("operator UI server", () => {
     });
   });
 
+  it.each(["gate", "reconcile", "wallet", "gate-refresh", "start", "confirm"].flatMap((pausedStage) =>
+    ["emergency-disable", "runtime-stop", "wallet-disconnect", "host-shutdown"].map((cancelAction) => ({ pausedStage, cancelAction }))))(
+    "invalidates an older activation paused at $pausedStage on $cancelAction", async ({ pausedStage, cancelAction }) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const paused = new Promise<void>((resolve) => { entered = resolve; });
+      const resume = new Promise<void>((resolve) => { release = resolve; });
+      let gate = "LIVE_DISABLED";
+      let runtime: "RUNNING" | "STOPPED" = "STOPPED";
+      let gateCalls = 0;
+      let blocked = false;
+      const waitAt = async (stage: string) => {
+        if (stage !== pausedStage || blocked) return;
+        blocked = true;
+        entered();
+        await resume;
+      };
+      const allowed = () => ({
+        runId: "test-gate", allowed: true, blockedReasons: [], checks: [],
+        requestedExecutionMode: "LIVE" as const, executionMode: "PAPER", liveGateState: gate,
+      });
+      const accepted = () => ({ accepted: true, code: "TEST_OK" });
+      const liveGateActions: OperatorLiveGateActions = {
+        preflight: async () => allowed(), recover: async () => allowed(),
+        requestActivation: async () => {
+          await waitAt(++gateCalls === 1 ? "gate" : "gate-refresh");
+          gate = "LIVE_ARMING";
+          return allowed();
+        },
+        confirmActivation: async () => { await waitAt("confirm"); gate = "LIVE_ACTIVE"; return allowed(); },
+        emergencyDisable: async () => { gate = "LIVE_DISABLED"; },
+      };
+      const liveRuntimeActions: OperatorLiveRuntimeActions = {
+        capability: { execution: "AVAILABLE", orderManagement: "AVAILABLE", walletSetup: "AVAILABLE" },
+        get status() { return { state: runtime, lastError: null }; },
+        reconcile: async () => { await waitAt("reconcile"); return accepted(); },
+        prepareWallet: async () => { await waitAt("wallet"); return accepted(); },
+        start: async () => { await waitAt("start"); runtime = "RUNNING"; return accepted(); },
+        stop: async () => { runtime = "STOPPED"; return accepted(); },
+        recover: async () => accepted(), cancelOrder: async () => accepted(), retryExecution: async () => accepted(),
+      };
+      const { baseUrl, server } = await listen({ liveGateActions, liveRuntimeActions });
+      const activate = () => mutation(baseUrl, "/api/operator/live/activate", {
+        body: { confirmationText: "ENABLE LIVE TRADING" },
+      });
+      const pending = activate();
+      try {
+        await paused;
+        expect((await activate()).status).toBe(409);
+        if (cancelAction === "host-shutdown") await server.shutdownSafety();
+        else if (cancelAction === "runtime-stop") {
+          expect((await mutation(baseUrl, "/api/operator/runtime/stop", { body: { mode: "LIVE" } })).status).toBe(202);
+        } else if (cancelAction === "wallet-disconnect") {
+          expect((await mutation(baseUrl, "/api/operator/live/wallet-session/disconnect", { body: {} })).status).toBe(200);
+        } else {
+          expect((await mutation(baseUrl, "/api/operator/live/emergency-disable", { body: {} })).status).toBe(202);
+          expect(gate).toBe("LIVE_DISABLED");
+          expect(runtime).toBe("STOPPED");
+        }
+        // A new activation must wait until the superseded callback is cleaned
+        // up, otherwise that cleanup could stop the newer intent.
+        expect((await activate()).status).toBe(409);
+        release();
+        const response = await pending;
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ ok: false, error: { code: "LIVE_OPERATION_SUPERSEDED" } });
+        expect(gate).toBe("LIVE_DISABLED");
+        expect(runtime).toBe("STOPPED");
+        if (cancelAction === "host-shutdown") {
+          expect((await activate()).status).toBe(409);
+        } else {
+          expect((await activate()).status).toBe(202);
+          expect(gate).toBe("LIVE_ACTIVE");
+          expect(runtime).toBe("RUNNING");
+        }
+      } finally { release(); }
+    },
+  );
+
   it("starts the recovered idle runtime before final Gate confirmation", async () => {
     const calls: string[] = [];
     const allowed = {

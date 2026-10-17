@@ -9,6 +9,7 @@ import type {
   ReconciliationDetail,
   SourceEventMultiplicityAmbiguity,
   UnsupportedTargetActivity,
+  SourceEventOrderAmbiguity,
 } from "./types.js";
 
 function absolute(value: bigint): bigint {
@@ -16,6 +17,9 @@ function absolute(value: bigint): bigint {
 }
 
 function issueIdentity(detail: ReconciliationDetail): string {
+  if (detail.issueType === "SOURCE_EVENT_ORDER_AMBIGUOUS") return stableJson({
+    issueType: detail.issueType, sourceEventKey: detail.sourceEventKey, sourceTimestamp: detail.sourceTimestamp, conditionId: detail.conditionId,
+  });
   if (detail.issueType === "POSITION_QUANTITY_DIFF") {
     return stableJson({
       issueType: detail.issueType,
@@ -45,6 +49,7 @@ export function reconcileProjection(
   previousReport: ReconciliationHistoryReport | null,
   sourceEventAmbiguities: readonly SourceEventMultiplicityAmbiguity[] = [],
   unsupportedActivities: readonly UnsupportedTargetActivity[] = [],
+  orderingAmbiguities: readonly SourceEventOrderAmbiguity[] = [],
 ): ReconciliationResult {
   const observedAtMs = Date.parse(observedAt);
   if (!Number.isFinite(observedAtMs)) throw new Error("RECONCILIATION_OBSERVED_AT_INVALID");
@@ -85,6 +90,10 @@ export function reconcileProjection(
       activityType: activity.activityType,
     });
   }
+  for (const ambiguity of orderingAmbiguities) currentDetails.push({
+    issueType: "SOURCE_EVENT_ORDER_AMBIGUOUS", sourceEventKey: ambiguity.sourceEventKeys[0]!,
+    sourceTimestamp: ambiguity.sourceTimestamp, conditionId: ambiguity.conditionId,
+  });
   const previousDetails = new Map(
     (previousReport?.details ?? []).map((detail) => [issueIdentity(detail), detail]),
   );
@@ -122,6 +131,7 @@ export function reconcileProjection(
   if (details.length > 0) {
     const major = details.some((detail) => (
       detail.issueType === "UNSUPPORTED_TARGET_ACTIVITY"
+      || detail.issueType === "SOURCE_EVENT_ORDER_AMBIGUOUS"
       || (
         detail.consecutiveCount! >= RULESET.majorDesyncConsecutiveCount
         && observedAtMs - Date.parse(detail.firstObservedAt!) >= RULESET.reconciliationGraceMs

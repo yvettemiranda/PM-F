@@ -299,6 +299,15 @@ function runtimePanel(snapshot) {
   const campaign = runtime?.campaign;
   const liveMode = mode === "LIVE";
   const liveRuntime = snapshot?.live?.runtime;
+  const maintenanceReasons = {
+    LIVE_GATE_NOT_ACTIVE: "实盘尚未启用",
+    STOP_LOSS_HEALTH_UNSAFE: "止损检查未通过",
+    TARGET_CONVERSION_BLOCKED: "目标转换尚未核对",
+    TARGET_EXIT_PROCESSING_FAILED: "目标退出处理失败",
+    REDEMPTION_UNRESOLVED: "赎回仍在确认或需要核对",
+  };
+  const maintenanceNote = (liveRuntime?.health?.blockedBuyReasons ?? [])
+    .map((reason) => maintenanceReasons[reason] ?? "维护检查未通过").join("、");
   const displayedRuntimeState = liveMode
     ? liveRuntime?.state ?? "NOT_CONFIGURED"
     : runtime?.state ?? "STOPPED";
@@ -368,7 +377,8 @@ function runtimePanel(snapshot) {
           ? (runtimeAvailable
             ? (liveRuntime?.lastError
               ? `Live 运行异常：${liveRuntime.lastError}；Gate 仍需以后台状态为准。`
-              : "Live 生命周期通过已注入运行时执行，并继续受 Gate、风控、审计和恢复机制约束。")
+              : maintenanceNote ? `新买暂停：${maintenanceNote}。已有退出仍按后台检查结果处理。`
+                : "Live 生命周期通过已注入运行时执行，并继续受 Gate、风控、审计和恢复机制约束。")
             : "Live 生产路径已接入；连接正式钱包并完成生产预检后，启动、暂停和恢复会自动开放。")
           : "Paper 启动/暂停复用桌面入口；恢复只收割经过身份验证的遗留进程，不会启动 Live。")}</p>
       </div>

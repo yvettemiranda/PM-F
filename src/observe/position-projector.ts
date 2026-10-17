@@ -4,6 +4,7 @@ import { sourceEventKey } from "../domain/idempotency.js";
 import { stableJson } from "../domain/versioning.js";
 import { effectiveTargetSellRatio } from "../execution/target-sell-policy.js";
 import type { ObserveBaseline, ObserveEvent, ObserveProjectionEntry, ObserveProjectionResult, ObserveSignal } from "./types.js";
+import { isObserveTradeExecutionConfirmed, orderObserveEvents } from "./event-ordering.js";
 
 export const OBSERVE_SIGNAL_VERSION = "observe-v1.5.0";
 
@@ -70,8 +71,7 @@ export function projectObserveEvents(
   const unsupportedActivities: ObserveProjectionResult["unsupportedActivities"] = [];
   let gapEventCount = 0;
 
-  const allOrdered = [...events]
-    .sort((a, b) => a.sourceTimestamp - b.sourceTimestamp || a.sourceEventKey.localeCompare(b.sourceEventKey));
+  const { ordered: allOrdered, ambiguities: orderingAmbiguities } = orderObserveEvents(events, conditionByAsset);
 
   for (const event of allOrdered) {
     if (event.activity) {
@@ -248,8 +248,7 @@ export function projectObserveEvents(
     }
     if (event.isCombo) continue;
     const trade = event.trade!;
-    const tradeExecutionConfirmed = event.activityConfirmed
-      || event.sourceType === "POLYGON_ORDER_FILLED";
+    const tradeExecutionConfirmed = isObserveTradeExecutionConfirmed(event);
     // Occurrence zero keeps the legacy event key. A later byte-identical Trade
     // occurrence has no upstream row id, so it may affect projection/signals
     // only after Activity or an exact official OrderFilled log confirms it.
@@ -340,13 +339,24 @@ export function projectObserveEvents(
     if (event.isGap) gapEventCount += 1;
   }
   const last = allOrdered.at(-1);
+  const timestampByKey = new Map(allOrdered.map((event) => [event.sourceEventKey, event.sourceTimestamp]));
+  const ambiguousAfter = new Map<string, number>();
+  for (const ambiguity of orderingAmbiguities) ambiguousAfter.set(
+    ambiguity.conditionId, Math.min(ambiguousAfter.get(ambiguity.conditionId) ?? Infinity, ambiguity.sourceTimestamp),
+  );
   return {
-    signals,
+    // A provisional deterministic projection supports reconciliation/evidence,
+    // but cannot authorize a ratio after an unresolved ordering boundary.
+    signals: signals.filter((signal) => {
+      return (timestampByKey.get(signal.sourceEventKey) ?? Infinity)
+        < (ambiguousAfter.get(signal.conditionId.toLowerCase()) ?? Infinity);
+    }),
     projection,
     unsupportedActivities,
     projectionHash: createHash("sha256").update(stableJson(projection)).digest("hex"),
     lastProcessedTimestamp: last?.sourceTimestamp ?? null,
     lastProcessedEventId: last?.sourceEventKey ?? null,
     gapEventCount,
+    orderingAmbiguities,
   };
 }

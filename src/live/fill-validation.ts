@@ -42,6 +42,9 @@ export interface LiveFillValidationInput {
   status: LiveOrderState;
   fills: LiveFillEvent[];
   requestedSizeMicros: string;
+  /** Signed BUY cash cap; required for CLOB cash-market orders. */
+  requestedNotionalMicros?: string;
+  orderType?: string;
   limitPriceUnits: string;
   buyBudgetMicros: string | null;
   availableSellSizeMicros: string | null;
@@ -64,6 +67,10 @@ export function validateLiveOrderFills(input: LiveFillValidationInput): LiveFill
     throw new Error("ORDER_STATUS_FILL_MISMATCH");
   }
   const requestedSize = unsigned(input.requestedSizeMicros, "ORDER_REQUESTED_SIZE_INVALID");
+  const cashBuy = input.adapterType === "POLYMARKET_CLOB" && input.side === "BUY"
+    && ["FAK", "FOK"].includes(input.orderType ?? "FAK");
+  const requestedNotional = cashBuy
+    ? unsigned(input.requestedNotionalMicros ?? "", "BUY_SIGNED_NOTIONAL_MISSING") : null;
   const limitPrice = unsigned(input.limitPriceUnits, "ORDER_LIMIT_PRICE_INVALID");
   if (requestedSize <= 0n || limitPrice <= 0n || limitPrice >= PRICE_SCALE) {
     throw new Error("ORDER_IMMUTABLE_ECONOMICS_INVALID");
@@ -98,10 +105,13 @@ export function validateLiveOrderFills(input: LiveFillValidationInput): LiveFill
     filledNotional += notional;
     totalFee += fee;
   }
-  if (filledSize > requestedSize) {
+  if (!cashBuy && filledSize > requestedSize) {
     throw new Error(input.side === "BUY" ? "BUY_FILL_EXCEEDS_APPROVED_SIZE" : "SELL_FILL_EXCEEDS_APPROVED_SIZE");
   }
   if (input.side === "BUY") {
+    if (requestedNotional !== null && (requestedNotional <= 0n || filledNotional > requestedNotional)) {
+      throw new Error("BUY_FILL_EXCEEDS_SIGNED_NOTIONAL");
+    }
     if (input.buyBudgetMicros === null) throw new Error("BUY_RISK_BUDGET_MISSING");
     const budget = unsigned(input.buyBudgetMicros, "BUY_RISK_BUDGET_INVALID");
     if (filledNotional + totalFee > budget) throw new Error("BUY_FILL_EXCEEDS_RISK_BUDGET");
@@ -114,10 +124,10 @@ export function validateLiveOrderFills(input: LiveFillValidationInput): LiveFill
     const reported = unsigned(input.reportedFilledSizeMicros, "ORDER_REPORTED_FILL_SIZE_INVALID");
     if (reported !== filledSize) throw new Error("ORDER_EXTERNAL_FILL_TOTAL_MISMATCH");
   }
-  if (input.status === "FILLED" && filledSize !== requestedSize) {
+  if (input.status === "FILLED" && (cashBuy ? filledSize <= 0n : filledSize !== requestedSize)) {
     throw new Error("ORDER_FILLED_STATUS_SIZE_MISMATCH");
   }
-  if (input.status === "PARTIALLY_FILLED" && (filledSize <= 0n || filledSize >= requestedSize)) {
+  if (input.status === "PARTIALLY_FILLED" && (filledSize <= 0n || (!cashBuy && filledSize >= requestedSize))) {
     throw new Error("ORDER_PARTIAL_STATUS_SIZE_MISMATCH");
   }
   if (["CREATED", "SUBMITTED", "ACKNOWLEDGED"].includes(input.status) && filledSize !== 0n) {

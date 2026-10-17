@@ -21,6 +21,7 @@ import { evaluateBuyFollowPolicy } from "../execution/buy-follow-policy.js";
 import {
   fullExitThresholdForTargetSell,
   parseEffectiveTargetSellRatio,
+  remainingTargetSellSize,
 } from "../execution/target-sell-policy.js";
 import { liveBuyMinimumLiftEligibility } from "./live-buy-eligibility.js";
 
@@ -632,9 +633,16 @@ export class LiveSignalConsumer {
     ).all(accountId, signal.assetId, signal.conditionId) as unknown as Array<{ current_size_micros: string }>;
     const total = rows.reduce((sum, row) => sum + BigInt(row.current_size_micros), 0n);
     if (total <= 0n) return null;
-    const requested = (total * ratio.numerator) / ratio.denominator;
-    if (requested <= 0n) return null;
-    return requested < total ? requested : total;
+    const pendingRows = this.database.prepare(
+      `SELECT r.delta_size_micros FROM live_asset_reservation_ledger r
+       JOIN live_executions e ON e.live_execution_id=r.live_execution_id
+       WHERE e.live_account_id=? AND e.asset_id=? AND e.condition_id=?`,
+    ).all(accountId, signal.assetId, signal.conditionId) as Array<{ delta_size_micros: string }>;
+    const pending = pendingRows.reduce((sum, row) => sum + BigInt(row.delta_size_micros), 0n);
+    const requested = remainingTargetSellSize({
+      currentSizeMicros: total, pendingExitSizeMicros: pending, ratio,
+    });
+    return requested > 0n ? requested : null;
   }
 
   private hasWaitingBuyTargetExitAdjustment(

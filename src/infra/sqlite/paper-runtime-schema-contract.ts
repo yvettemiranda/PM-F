@@ -29,9 +29,12 @@ export const PAPER_RUNTIME_MIGRATION_VERSIONS = [
   "2.29.0",
   "2.30.0",
   "2.31.0",
+  "2.33.0",
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_TABLES = [
+  "observe_event_order_evidence",
+  "observe_ordering_blocks",
   "negative_risk_conversion_evidence",
   "split_projection_evidence",
   "observe_projection_snapshots",
@@ -46,6 +49,8 @@ export const PAPER_RUNTIME_REQUIRED_TABLES = [
 ] as const;
 
 export const PAPER_RUNTIME_REQUIRED_COLUMNS = Object.freeze({
+  observe_event_order_evidence: ["chain_order_json", "evidence_hash"],
+  observe_ordering_blocks: ["target_id", "reason", "detail_json"],
   capital_estimates: ["capital_sizing_ratio_json", "capital_sizing_ratio_hash"],
   observe_checkpoints: ["projection_snapshot_hash"],
   observe_runs: ["campaign_id", "campaign_session_id"],
@@ -85,6 +90,10 @@ export const PAPER_RUNTIME_REQUIRED_COLUMNS = Object.freeze({
 } satisfies Record<string, readonly string[]>);
 
 export const PAPER_RUNTIME_REQUIRED_TRIGGERS = [
+  "observe_event_order_no_update",
+  "observe_event_order_no_delete",
+  "observe_ordering_blocks_no_update",
+  "observe_ordering_blocks_no_delete",
   "audit_log_no_delete",
   "audit_log_no_update",
   "observe_checkpoints_projection_snapshot_required",

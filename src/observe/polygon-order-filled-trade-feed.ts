@@ -336,6 +336,7 @@ export class PolygonOrderFilledTradeFeed {
     ));
     const grouped = new Map<string, {
       first: DecodedTargetFill;
+      lastLogIndex: string;
       collateralMicros: bigint;
       sizeMicros: bigint;
     }>();
@@ -345,6 +346,7 @@ export class PolygonOrderFilledTradeFeed {
       if (!prior) {
         grouped.set(key, {
           first: item,
+          lastLogIndex: item.log.logIndex,
           collateralMicros: item.collateralMicros,
           sizeMicros: item.sizeMicros,
         });
@@ -361,6 +363,7 @@ export class PolygonOrderFilledTradeFeed {
       }
       prior.collateralMicros += item.collateralMicros;
       prior.sizeMicros += item.sizeMicros;
+      prior.lastLogIndex = item.log.logIndex;
     }
     const blockNumbers = [...new Set(decoded.map((item) => quantityHex(quantity(item.log.blockNumber, "LOG_BLOCK_NUMBER"))))];
     const blockCaptures = await Promise.all(blockNumbers.map((blockNumber) => this.provider.polygonBlock(blockNumber, signal)));
@@ -401,6 +404,13 @@ export class PolygonOrderFilledTradeFeed {
         proxyWallet: walletAddress,
         transactionHash: item.log.transactionHash,
         orderHash: item.orderHash,
+        chainOrder: {
+          blockNumber: item.log.blockNumber,
+          blockHash: item.log.blockHash,
+          transactionIndex: item.log.transactionIndex,
+          logIndex: item.log.logIndex,
+          lastLogIndex: group.lastLogIndex,
+        },
         conditionId: market.condition_id.toLowerCase(),
         asset: item.asset,
         side: item.side,
